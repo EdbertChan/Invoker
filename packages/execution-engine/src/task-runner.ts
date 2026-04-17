@@ -140,6 +140,7 @@ export class TaskRunner {
 
   /** In-flight executions keyed by attemptId (with taskId retained for external kill resolution). */
   private activeExecutions = new Map<string, ActiveExecutionEntry>();
+  private launchingAttemptIds = new Set<string>();
 
   /** Serializes async onComplete handlers so orchestrator mutations never overlap. */
   private completionChain: Promise<void> = Promise.resolve();
@@ -286,6 +287,13 @@ export class TaskRunner {
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
     );
     const attemptId = this.resolveAttemptIdForStart(task);
+    if (this.launchingAttemptIds.has(attemptId) || this.activeExecutions.has(attemptId)) {
+      traceExecution(
+        `[TaskRunner] executeTask skipping duplicate launch for task=${task.id} attempt=${attemptId}`,
+      );
+      return;
+    }
+    this.launchingAttemptIds.add(attemptId);
     try {
       await this.executeTaskInner(task, attemptId);
     } catch (err) {
@@ -329,6 +337,8 @@ export class TaskRunner {
       };
       this.callbacks.onComplete?.(task.id, response);
       this.orchestrator.handleWorkerResponse(response);
+    } finally {
+      this.launchingAttemptIds.delete(attemptId);
     }
   }
 
