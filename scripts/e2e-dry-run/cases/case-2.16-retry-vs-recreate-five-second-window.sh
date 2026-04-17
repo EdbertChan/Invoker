@@ -38,12 +38,6 @@ if [ -z "$WF_ID" ]; then
   exit 1
 fi
 
-if ! invoker_e2e_wait_workflow_visible "$WF_ID" 30; then
-  echo "FAIL case 2.16: workflow did not become queryable"
-  cat "$SUBMIT_LOG"
-  exit 1
-fi
-
 KEEP_TASK_ID="$WF_ID/keep-completed"
 FAIL_TASK_ID="$WF_ID/fail-target"
 

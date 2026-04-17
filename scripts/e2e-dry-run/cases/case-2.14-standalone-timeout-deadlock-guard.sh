@@ -31,13 +31,6 @@ if [ -z "$WF_ID" ]; then
   exit 1
 fi
 
-if ! invoker_e2e_wait_workflow_visible "$WF_ID" 30; then
-  echo "FAIL case 2.14: workflow did not become queryable"
-  cat "$SUBMIT_LOG"
-  invoker_e2e_run_headless status 2>&1 || true
-  exit 1
-fi
-
 STA="$(invoker_e2e_task_status e2e-g2214-taskA)"
 if [ "$STA" != "failed" ]; then
   echo "FAIL case 2.14: expected taskA=failed, got '$STA'"

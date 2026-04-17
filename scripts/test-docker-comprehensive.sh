@@ -79,6 +79,9 @@ build_fixture_image() {
   fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/invoker-docker-comprehensive-image.XXXXXX")"
   dockerfile="$fixture_dir/Dockerfile"
   current_branch="$(git rev-parse --abbrev-ref HEAD)"
+  if [[ -z "$current_branch" || "$current_branch" = "HEAD" ]]; then
+    current_branch="ci-docker-fixture"
+  fi
   cat > "$dockerfile" <<'DOCKERFILE'
 FROM invoker-agent:latest
 
