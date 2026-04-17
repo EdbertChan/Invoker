@@ -92,6 +92,7 @@ import {
   wireHeadlessApproveHook,
 } from './headless.js';
 import {
+  approveTask as sharedApproveTask,
   rebaseAndRetry,
   recreateWorkflow as sharedRecreateWorkflow,
   recreateTask as sharedRecreateTask,
@@ -419,18 +420,11 @@ async function wireSlackBot(deps: SlackBotDeps): Promise<any> {
     deps.logFn('trace', 'info', `slackBot: command received — type=${command.type}`);
     switch (command.type) {
       case 'approve': {
-        const env = makeEnvelope('approve', 'surface', 'task', { taskId: command.taskId as string });
-        const approveResult = await commandService.approve(env);
-        if (!approveResult.ok) throw new Error(approveResult.error.message);
-        const approveStarted = approveResult.data;
-        const pfm = approveStarted.filter(t => t.status === 'running' && t.config.isMergeNode && t.id === command.taskId);
-        for (const task of pfm) {
-          deps.executor.publishAfterFix(task).catch(err => {
-            logger.error(`approve: publishAfterFix failed for "${task.id}": ${err}`, { module: 'slack' });
-          });
-        }
-        const runnable = approveStarted.filter(t => t.status === 'running' && !(t.config.isMergeNode && t.id === command.taskId));
-        if (runnable.length > 0) await deps.executor.executeTasks(runnable);
+        const taskId = command.taskId as string;
+        const workflowId = orchestrator.getTask(taskId)?.config.workflowId;
+        await runWorkflowMutation(workflowId, 'normal', 'surface:approve-task', [taskId], async () => {
+          await performSharedApproveTask(taskId, 'surface');
+        });
         break;
       }
       case 'reject': {
@@ -1209,14 +1203,10 @@ if (isHeadless) {
 
   function wireApproveHook(): void {
     orchestrator.setBeforeApproveHook(async (task) => {
-      if (task.config.isMergeNode && task.config.workflowId) {
+      if (task.config.isMergeNode && task.config.workflowId && task.execution.pendingFixError === undefined) {
         const workflow = persistence.loadWorkflow(task.config.workflowId);
         if (workflow?.mergeMode === "external_review") return; // external review is the merge mechanism
         await requireTaskExecutor().approveMerge(task.config.workflowId);
-        return;
-      }
-      if (!task.config.isMergeNode && task.execution.pendingFixError !== undefined) {
-        await requireTaskExecutor().publishApprovedFix(task);
       }
     });
   }
@@ -1560,6 +1550,28 @@ if (isHeadless) {
     }
   }
 
+  async function performSharedApproveTask(
+    taskId: string,
+    source: 'ui' | 'surface' | 'api',
+    scope: 'task' | 'workflow' = 'task',
+  ): Promise<{ started: TaskState[] }> {
+    const envelope = makeEnvelope('approve', source, scope, { taskId });
+    return sharedApproveTask(taskId, {
+      orchestrator,
+      taskExecutor: requireTaskExecutor(),
+      approve: async (approvedTaskId) => {
+        const result = await commandService.approve({ ...envelope, payload: { taskId: approvedTaskId } });
+        if (!result.ok) throw new Error(result.error.message);
+        return result.data;
+      },
+      resumeAfterFixApproval: async (approvedTaskId) => {
+        const result = await commandService.resumeTaskAfterFixApproval({ ...envelope, payload: { taskId: approvedTaskId } });
+        if (!result.ok) throw new Error(result.error.message);
+        return result.data;
+      },
+    });
+  }
+
   function registerGuiMutationHandler<TResult = unknown>(
     channel: string,
     handler: (...args: unknown[]) => Promise<TResult>,
@@ -1872,6 +1884,12 @@ if (isHeadless) {
         executorRegistry,
         taskExecutor: requireTaskExecutor(),
         autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
+        approveTaskAction: async (taskId: string) => {
+          const workflowId = orchestrator.getTask(taskId)?.config.workflowId;
+          await runWorkflowMutation(workflowId, 'normal', 'api:approve-task', [taskId], async () => {
+            await performSharedApproveTask(taskId, 'api');
+          });
+        },
         killRunningTask,
         cancelTask: performCancelTask,
         cancelWorkflow: performCancelWorkflow,
@@ -2076,6 +2094,12 @@ if (isHeadless) {
     if (ownerMode) {
       workflowMutationDispatcher.set('headless.exec', async (payloadArg: unknown) => {
         return executeHeadlessExec(payloadArg as HeadlessExecMutationPayload);
+      });
+      workflowMutationDispatcher.set('api:approve-task', async (taskIdArg: unknown) => {
+        await performSharedApproveTask(String(taskIdArg), 'api');
+      });
+      workflowMutationDispatcher.set('surface:approve-task', async (taskIdArg: unknown) => {
+        await performSharedApproveTask(String(taskIdArg), 'surface');
       });
       messageBus.onRequest('headless.owner-ping', async () => ({
         ok: true,
@@ -2466,27 +2490,17 @@ if (isHeadless) {
       if (!result.ok) throw new Error(result.error.message);
     });
 
-    registerGuiMutationHandler('invoker:approve', async (taskIdArg: unknown) => {
+    registerWorkflowScopedGuiMutationHandler(
+      'invoker:approve',
+      (taskIdArg: unknown) => workflowIdForTaskArg(taskIdArg),
+      'normal',
+      async (taskIdArg: unknown) => {
       const taskId = String(taskIdArg);
       logger.info(`approve: "${taskId}"`, { module: 'ipc' });
-      const envelope = makeEnvelope('approve', 'ui', 'task', { taskId });
-      const result = await commandService.approve(envelope);
-      if (!result.ok) throw new Error(result.error.message);
-      const started = result.data;
+      const { started } = await performSharedApproveTask(taskId, 'ui');
       logger.info(`approve: commandService returned ${started.length} started tasks: [${started.map(t => `${t.id}(${t.status})`).join(', ')}]`, { module: 'ipc' });
-
-      const postFixMerge = started.filter(t => t.status === 'running' && t.config.isMergeNode && t.id === taskId);
-      for (const task of postFixMerge) {
-        logger.info(`approve: post-fix PR prep for merge gate "${task.id}"`, { module: 'ipc' });
-        requireTaskExecutor().publishAfterFix(task).catch(err => {
-          logger.error(`approve: publishAfterFix failed for "${task.id}": ${err}`, { module: 'ipc' });
-        });
-      }
-
-      const runnable = started.filter(t => t.status === 'running' && !(t.config.isMergeNode && t.id === taskId));
-      logger.info(`approve: ${runnable.length} runnable after filter: [${runnable.map(t => t.id).join(', ')}]`, { module: 'ipc' });
-      if (runnable.length > 0) await requireTaskExecutor().executeTasks(runnable);
-    });
+      },
+    );
 
     registerGuiMutationHandler('invoker:reject', async (taskIdArg: unknown, reasonArg?: unknown) => {
       const taskId = String(taskIdArg);
@@ -2801,29 +2815,23 @@ if (isHeadless) {
       }
     });
 
-    registerGuiMutationHandler('invoker:approve-merge', async (workflowIdArg: unknown) => {
+    registerWorkflowScopedGuiMutationHandler(
+      'invoker:approve-merge',
+      (workflowIdArg: unknown) => String(workflowIdArg),
+      'normal',
+      async (workflowIdArg: unknown) => {
       const workflowId = String(workflowIdArg);
       logger.info(`approve-merge: "${workflowId}"`, { module: 'ipc' });
       try {
         const mergeTask = orchestrator.getMergeNode(workflowId);
         if (!mergeTask) throw new Error(`No merge node for workflow ${workflowId}`);
-        const envelope = makeEnvelope('approve', 'ui', 'workflow', { taskId: mergeTask.id });
-        const result = await commandService.approve(envelope);
-        if (!result.ok) throw new Error(result.error.message);
-        const started = result.data;
-        const postFixMerge = started.filter(t => t.status === 'running' && t.config.isMergeNode && t.id === mergeTask.id);
-        for (const task of postFixMerge) {
-          requireTaskExecutor().publishAfterFix(task).catch(err => {
-            logger.error(`approve-merge: publishAfterFix failed for "${task.id}": ${err}`, { module: 'ipc' });
-          });
-        }
-        const runnable = started.filter(t => t.status === 'running' && !(t.config.isMergeNode && t.id === mergeTask.id));
-        if (runnable.length > 0) await requireTaskExecutor().executeTasks(runnable);
+        await performSharedApproveTask(mergeTask.id, 'ui', 'workflow');
       } catch (err) {
         logger.error(`approve-merge failed: ${err}`, { module: 'ipc' });
         throw err;
       }
-    });
+      },
+    );
 
     registerGuiMutationHandler('invoker:check-pr-statuses', async () => {
       logger.info('check-pr-statuses', { module: 'ipc' });
