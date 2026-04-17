@@ -1534,6 +1534,8 @@ if (isHeadless) {
           : { channel: 'headless.exec', request: { args: ['fix', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-command':
         return { channel: 'headless.exec', request: { args: ['set', 'command', String(arg0), String(arg1)] } };
+      case 'invoker:edit-task-prompt':
+        return { channel: 'headless.exec', request: { args: ['set', 'prompt', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-type':
         return { channel: 'headless.exec', request: { args: ['set', 'executor', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-agent':
@@ -2886,6 +2888,22 @@ if (isHeadless) {
         void runnable;
       } catch (err) {
         logger.error(`edit-task-command failed: ${err}`, { module: 'ipc' });
+        throw err;
+      }
+    });
+
+    registerGuiMutationHandler('invoker:edit-task-prompt', async (taskIdArg: unknown, newPromptArg: unknown) => {
+      const taskId = String(taskIdArg);
+      const newPrompt = String(newPromptArg);
+      logger.info(`edit-task-prompt: "${taskId}"`, { module: 'ipc' });
+      try {
+        const envelope = makeEnvelope('edit-task-prompt', 'ui', 'task', { taskId, newPrompt });
+        const result = await commandService.editTaskPrompt(envelope);
+        if (!result.ok) throw new Error(result.error.message);
+        const runnable = result.data.filter(t => t.status === 'running');
+        void runnable;
+      } catch (err) {
+        logger.error(`edit-task-prompt failed: ${err}`, { module: 'ipc' });
         throw err;
       }
     });
