@@ -14,6 +14,7 @@ import {
   TEST_PLAN,
   loadPlan,
   injectTaskStates,
+  startPlan,
   captureScreenshot,
   assertPageScreenshot,
   E2E_REPO_URL,
@@ -33,6 +34,21 @@ const DAG_DETERMINISM_PLAN = {
     { id: 'task-c', description: 'Task C (depends on A)', command: 'echo c', dependencies: ['task-a'] },
     { id: 'task-d', description: 'Task D (depends on A, B)', command: 'echo d', dependencies: ['task-a', 'task-b'] },
     { id: 'task-e', description: 'Task E (depends on C, D)', command: 'echo e', dependencies: ['task-c', 'task-d'] },
+  ],
+};
+
+/** Prompt-based Claude task plan for verifying prompt edit UI state. */
+const PROMPT_EDIT_PLAN = {
+  name: 'Prompt edit visual proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'prompt-task',
+      description: 'Prompt-based Claude task',
+      prompt: 'Implement feature X',
+      dependencies: [] as string[],
+    },
   ],
 };
 
@@ -584,5 +600,33 @@ test.describe('Visual proof capture', () => {
 
     // Capture second screenshot in edit mode
     await captureScreenshot(page, 'redesign-gate-policy-ui-edit-mode');
+  });
+
+  test('edit prompt double-click shows prompt editor', async ({ page }) => {
+    await loadPlan(page, PROMPT_EDIT_PLAN as unknown as typeof TEST_PLAN);
+    await startPlan(page);
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').first().waitFor({ state: 'visible', timeout: 10000 });
+
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').click();
+    await expect(page.getByRole('heading', { name: 'Prompt-based Claude task' })).toBeVisible();
+
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-task',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: new Date(Date.now() - 5000), completedAt: new Date() },
+        },
+      },
+    ]);
+
+    const promptDisplay = page.locator('[data-testid="command-display"]');
+    await expect(promptDisplay).toBeVisible({ timeout: 5000 });
+    await promptDisplay.dblclick();
+
+    const editTextarea = page.locator('[data-testid="edit-prompt-input"]');
+    await expect(editTextarea).toBeVisible({ timeout: 2000 });
+
+    await captureScreenshot(page, 'edit-prompt-double-click');
   });
 });
