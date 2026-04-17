@@ -33,6 +33,10 @@ The orchestrator is **`scripts/run-all-tests.sh`**, invoked as **`pnpm run test:
 | `INVOKER_TEST_ALL_JOBS=2` | Allow explicitly tagged parallel-safe suites to overlap |
 | `INVOKER_WORKSPACE_TEST_CONCURRENCY=4` | Override local workspace test concurrency |
 | `INVOKER_PLAYWRIGHT_WORKERS=2` | Override `packages/app` Playwright workers |
+| `INVOKER_PLAYWRIGHT_SHARD=1/4` | Run the Playwright suite wrapper as a specific shard |
+| `INVOKER_PLAYWRIGHT_SHARD_INDEX=1` + `INVOKER_PLAYWRIGHT_SHARD_TOTAL=4` | Alternate shard syntax for CI matrices |
+| `INVOKER_PLAYWRIGHT_RUN_LABEL=ci-linux` | Prefix isolated Playwright artifact and bare-repo paths |
+| `INVOKER_PLAYWRIGHT_ARGS='--grep \"visual proof\"'` | Forward simple extra args through the Playwright suite wrapper |
 
 ## Resume and availability
 
