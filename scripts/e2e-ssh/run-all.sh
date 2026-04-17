@@ -16,10 +16,6 @@ fi
 
 invoker_e2e_ensure_app_built
 
-# Kill stale Electron processes from previous runs.
-pkill -f "electron.*packages/app/dist/main.js.*--headless" 2>/dev/null || true
-sleep 0.2
-
 shopt -s nullglob
 cases=()
 if [ "$#" -gt 0 ]; then
@@ -49,9 +45,6 @@ for c in "${cases[@]}"; do
   else
     echo "FAILED: $c"
     failed=$((failed + 1))
-    # Kill any leaked Electron processes from the failed case.
-    pkill -f "electron.*packages/app/dist/main.js.*--headless" 2>/dev/null || true
-    sleep 0.2
   fi
 done
 
