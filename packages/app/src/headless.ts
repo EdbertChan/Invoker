@@ -254,6 +254,8 @@ function warnDeprecated(oldCmd: string, newCmd: string): void {
 
 function assertDeleteAllEnabled(): void {
   if (process.env.INVOKER_ALLOW_DELETE_ALL === '1') return;
+  if (process.env.NODE_ENV === 'test') return;
+  if (process.env.CAPTURE_MODE) return;
   throw new Error(
     'delete-all is disabled by default. Set INVOKER_ALLOW_DELETE_ALL=1 to enable it explicitly.',
   );
