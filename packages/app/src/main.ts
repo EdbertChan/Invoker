@@ -320,6 +320,8 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     taskRepository,
     maxConcurrency: invokerConfig.maxConcurrency,
     defaultAutoFixRetries: invokerConfig.autoFixRetries,
+    heavyweightCommandRouting: invokerConfig.heavyweightCommandRouting,
+    availableRemoteTargetIds: Object.keys(invokerConfig.remoteTargets ?? {}),
     executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
     deferRunningUntilLaunch: true,
     taskDispatcher: dispatchStartedTasks,
@@ -1211,6 +1213,10 @@ if (isHeadless) {
         const workflow = persistence.loadWorkflow(task.config.workflowId);
         if (workflow?.mergeMode === "external_review") return; // external review is the merge mechanism
         await requireTaskExecutor().approveMerge(task.config.workflowId);
+        return;
+      }
+      if (!task.config.isMergeNode && task.execution.pendingFixError !== undefined) {
+        await requireTaskExecutor().publishApprovedFix(task);
       }
     });
   }
@@ -2305,6 +2311,8 @@ if (isHeadless) {
         taskRepository: new SqliteTaskRepository(persistence),
         maxConcurrency: invokerConfig.maxConcurrency,
         defaultAutoFixRetries: invokerConfig.autoFixRetries,
+        heavyweightCommandRouting: invokerConfig.heavyweightCommandRouting,
+        availableRemoteTargetIds: Object.keys(invokerConfig.remoteTargets ?? {}),
         executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
         deferRunningUntilLaunch: true,
         taskDispatcher: dispatchStartedTasks,
