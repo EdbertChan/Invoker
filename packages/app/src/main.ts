@@ -90,6 +90,7 @@ import {
   resolveAgentSession,
   createHeadlessExecutor,
   wireHeadlessApproveHook,
+  type HeadlessDeps,
 } from './headless.js';
 import {
   rebaseAndRetry,
@@ -543,7 +544,7 @@ if (isHeadless) {
         executionAgentRegistry: agentRegistry,
       });
 
-      const headlessDeps = {
+      const headlessDeps: HeadlessDeps = {
         logger,
         orchestrator, persistence, executorRegistry, messageBus,
         repoRoot, invokerConfig, initServices, wireSlackBot,
@@ -563,7 +564,6 @@ if (isHeadless) {
         waitForApproval,
         noTrack,
         executionAgentRegistry: agentRegistry,
-        isStandaloneOwnerIdle: undefined,
       };
 
       const createStandaloneTaskExecutor = (): TaskRunner => {
