@@ -22,7 +22,7 @@ import { TaskScheduler } from './scheduler.js';
 import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, ExternalDependency } from '@invoker/workflow-graph';
 import type { ExecutorType } from '@invoker/workflow-graph';
 import { createTaskState, createAttempt } from '@invoker/workflow-graph';
-import type { WorkResponse } from '@invoker/contracts';
+import type { WorkResponse, Logger } from '@invoker/contracts';
 import { normalizeExecutorType } from '@invoker/workflow-graph';
 
 const MERGE_TRACE_LOG = resolve(homedir(), '.invoker', 'merge-trace.log');
@@ -47,6 +47,13 @@ import type { TaskRepository } from './task-repository.js';
 // ── Channel Constants ───────────────────────────────────────
 
 const TASK_DELTA_CHANNEL = 'task.delta';
+const noopLogger: Logger = {
+  debug() {},
+  info() {},
+  warn() {},
+  error() {},
+  child() { return noopLogger; },
+};
 let workflowCounter = 0;
 const FIX_FAILURE_PREFIX_RE = /^\[Fix with (?:Claude|Agent) failed\] [^\n]*\n\n/;
 const ATTEMPT_LEASE_MS = 5 * 60 * 1000;
@@ -384,6 +391,8 @@ export interface OrchestratorConfig {
    * scheduler dequeue time).
    */
   deferRunningUntilLaunch?: boolean;
+  /** Optional structured logger; defaults to a no-op logger for backward compatibility. */
+  logger?: Logger;
 }
 
 // ── Orchestrator ────────────────────────────────────────────
@@ -402,6 +411,7 @@ export class Orchestrator {
   private readonly executorRoutingRules: ExecutorRoutingRule[];
   private readonly defaultAutoFixRetries: number;
   private readonly deferRunningUntilLaunch: boolean;
+  private readonly logger: Logger;
 
   private activeWorkflowIds = new Set<string>();
   private deferredTaskIds = new Set<string>();
@@ -416,6 +426,7 @@ export class Orchestrator {
     this.executorRoutingRules = config.executorRoutingRules ?? [];
     this.defaultAutoFixRetries = Math.min(Math.max(0, Math.floor(config.defaultAutoFixRetries ?? 0)), 10);
     this.deferRunningUntilLaunch = config.deferRunningUntilLaunch ?? false;
+    this.logger = config.logger ?? noopLogger;
 
     this.stateMachine = new TaskStateMachine(new ActionGraph());
     this.responseHandler = new ResponseHandler();
@@ -475,7 +486,7 @@ export class Orchestrator {
     if (process.env.NODE_ENV !== 'test' && TRACE_PERSIST_SYNC) {
       const ex = updated.execution;
       const execKeys = changes.execution ? Object.keys(changes.execution).join(',') : '';
-      console.log(
+      this.logger.info(
         `[persist-sync] taskId=${id} resolvedStatus=${updated.status} ` +
           `isFixingWithAI=${ex.isFixingWithAI === true ? '1' : '0'} exitCode=${ex.exitCode ?? 'null'} ` +
           `errorLen=${ex.error?.length ?? 0} pendingFix=${ex.pendingFixError ? '1' : '0'} ` +
@@ -978,7 +989,7 @@ export class Orchestrator {
     const readyTasks = this.stateMachine
       .getReadyTasks()
       .filter((task) => this.getExternalDependencyBlocker(task) === undefined);
-    console.log(
+    this.logger.info(
       `[orchestrator] startExecution: ready=${readyTasks.length} active=${activeAttempts} maxConcurrency=${this.maxConcurrency} ` +
         `readyIds=[${readyTasks.map((task) => task.id).join(', ')}]`,
     );
@@ -1009,7 +1020,7 @@ export class Orchestrator {
         const activeAttemptId = earlyTask.execution.selectedAttemptId;
         if (response.attemptId) {
           if (!activeAttemptId || response.attemptId !== activeAttemptId) {
-            console.warn(
+            this.logger.warn(
               `[worker-response] STALE_ATTEMPT_REJECTED taskId=${earlyTask.id} ` +
                 `responseAttemptId=${response.attemptId} activeAttemptId=${activeAttemptId ?? 'none'} ` +
                 `workerResponseStatus=${response.status}`,
@@ -1023,7 +1034,7 @@ export class Orchestrator {
           response.executionGeneration !== undefined &&
           response.executionGeneration !== activeGeneration
         ) {
-          console.warn(
+          this.logger.warn(
             `[worker-response] STALE_GENERATION_REJECTED taskId=${earlyTask.id} ` +
               `responseGeneration=${response.executionGeneration} activeGeneration=${activeGeneration} ` +
               `workerResponseStatus=${response.status}`,
@@ -1034,7 +1045,7 @@ export class Orchestrator {
       if (earlyTask) {
         const executableStatuses = new Set(['running', 'fixing_with_ai']);
         if (!executableStatuses.has(earlyTask.status)) {
-          console.warn(
+          this.logger.warn(
             `[orchestrator] handleWorkerResponse: ignoring "${response.status}" for non-executable ` +
               `task "${response.actionId}" (status=${earlyTask.status})`,
           );
@@ -1049,14 +1060,14 @@ export class Orchestrator {
       const task = this.stateGetTask(response.actionId);
 
       if (!task) {
-        console.warn(
+        this.logger.warn(
           `[worker-response] PROTOCOL_FAILURE_UNKNOWN_TASK actionId=${response.actionId} parseError=${parseErr}`,
         );
         return [];
       }
 
       const canonicalTaskId = task.id;
-      console.warn(
+      this.logger.warn(
         `[worker-response] PROTOCOL_FAILURE taskId=${canonicalTaskId} parseError=${parseErr}`,
       );
       return this.finalizeFailedTask(
@@ -1074,13 +1085,13 @@ export class Orchestrator {
     const taskId = parsed.taskId;
     const task = this.stateGetTask(taskId);
     if (!task) {
-      console.warn(`[worker-response] task not in graph taskId=${taskId} (stale response?)`);
+      this.logger.warn(`[worker-response] task not in graph taskId=${taskId} (stale response?)`);
       return [];
     }
 
     const canonicalTaskId = task.id;
     if (process.env.NODE_ENV !== 'test' && TRACE_WORKER_RESPONSE) {
-      console.log(
+      this.logger.info(
         `[worker-response] write path parsedType=${parsed.type} taskId=${canonicalTaskId} ` +
           `graphStatusBefore=${task.status} workerResponseStatus=${response.status} ` +
           `executionGeneration=${response.executionGeneration}`,
@@ -1164,7 +1175,7 @@ export class Orchestrator {
         taskId: id,
         workspacePath: changes.execution.workspacePath ?? null,
       });
-      console.log(
+      this.logger.info(
         `[merge-gate-workspace] setTask${status === 'review_ready' ? 'ReviewReady' : 'AwaitingApproval'} mergeNode=${id} ` +
           `execution.workspacePath=${changes.execution.workspacePath ?? 'NULL'}`,
       );
@@ -1208,9 +1219,9 @@ export class Orchestrator {
     if (task.status !== 'running' && task.status !== 'fixing_with_ai') {
       throw new Error(`Task ${tid} is not running or fixing with AI (status: ${task.status})`);
     }
-    console.log(`[setFixAwaitingApproval] taskId=${tid} agentSessionId=${task.execution.agentSessionId}`);
+    this.logger.info(`[setFixAwaitingApproval] taskId=${tid} agentSessionId=${task.execution.agentSessionId}`);
     if (task.config.isMergeNode) {
-      console.log(
+      this.logger.info(
         `[merge-gate-workspace] setFixAwaitingApproval mergeNode=${tid} ` +
           `workspacePath unchanged by this call; current=${task.execution.workspacePath ?? 'none'}`,
       );
@@ -1230,7 +1241,7 @@ export class Orchestrator {
         lastAgentName: task.execution.lastAgentName ?? task.execution.agentName,
       },
     };
-    console.log(`[setFixAwaitingApproval] delta.changes.execution=`, JSON.stringify(changes.execution));
+    this.logger.info(`[setFixAwaitingApproval] delta.changes.execution=${JSON.stringify(changes.execution)}`, { taskId: tid });
     this.writeAndSync(tid, changes);
     this.updateSelectedAttempt(tid, {
       status: 'needs_input',
@@ -1263,7 +1274,7 @@ export class Orchestrator {
         status: task?.status ?? 'NOT_FOUND',
         pendingFixError: task?.execution.pendingFixError !== undefined,
       });
-      console.log(
+      this.logger.info(
         `[orchestrator.approve] skipped taskId=${taskId} ` +
           (!task ? '(task not found)' : `(status=${task.status}, expected awaiting_approval|review_ready)`),
       );
@@ -1276,7 +1287,7 @@ export class Orchestrator {
       task.config.isMergeNode &&
       task.execution.pendingFixError !== undefined
     ) {
-      console.log(
+      this.logger.info(
         `[merge-gate-workspace] approve(post-fix) mergeNode=${taskId} ` +
           `before writeAndSync execution.workspacePath=${task.execution.workspacePath ?? 'none'}`,
       );
@@ -1299,7 +1310,7 @@ export class Orchestrator {
       this.persistence.logEvent?.(taskId, 'task.running', fixClearChanges);
       this.messageBus.publish(TASK_DELTA_CHANNEL, fixDelta);
       const updated = this.stateGetTask(taskId)!;
-      console.log(
+      this.logger.info(
         `[merge-gate-workspace] approve(post-fix) mergeNode=${taskId} ` +
           `after writeAndSync execution.workspacePath=${updated.execution.workspacePath ?? 'none'} ` +
           '(pendingFix cleared; path should be unchanged)',
@@ -1438,7 +1449,7 @@ export class Orchestrator {
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(reconId);
-    console.log(`[orchestrator] selectExperiment "${reconId}": ${readyTaskIds.length} newly ready: [${readyTaskIds.join(', ')}]`);
+    this.logger.info(`[orchestrator] selectExperiment "${reconId}": ${readyTaskIds.length} newly ready: [${readyTaskIds.join(', ')}]`);
     const started = this.autoStartReadyTasks(readyTaskIds);
     this.checkWorkflowCompletion();
     return started;
@@ -1486,7 +1497,7 @@ export class Orchestrator {
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(reconId);
-    console.log(`[orchestrator] selectExperiments "${reconId}": ${readyTaskIds.length} newly ready: [${readyTaskIds.join(', ')}]`);
+    this.logger.info(`[orchestrator] selectExperiments "${reconId}": ${readyTaskIds.length} newly ready: [${readyTaskIds.join(', ')}]`);
     const started = this.autoStartReadyTasks(readyTaskIds);
     this.checkWorkflowCompletion();
     return started;
@@ -1503,9 +1514,9 @@ export class Orchestrator {
     const id = task.id;
 
     const prevStatus = task.status;
-    console.log(`[orchestrator] restartTask "${id}" (was ${prevStatus})`);
+    this.logger.info(`[orchestrator] restartTask "${id}" (was ${prevStatus})`);
     if (task.config.isMergeNode) {
-      console.log(
+      this.logger.info(
         `[merge-gate-workspace] restartTask mergeNode=${id} ` +
           `before reset workspacePath=${task.execution.workspacePath ?? 'none'} ` +
           '(restartTask does not clear workspacePath)',
@@ -1533,7 +1544,7 @@ export class Orchestrator {
       },
     };
     const t0 = this.stateGetTask(id)!;
-    console.log(
+    this.logger.info(
       `[agent-session-trace] restartTask: before writeAndSync task="${id}" agentSessionId=${t0.execution.agentSessionId ?? 'null'} ` +
         '(reset clears agentSessionId/containerId; branch/workspacePath unchanged)',
     );
@@ -1541,11 +1552,11 @@ export class Orchestrator {
       forceResetIds: new Set([id]),
     });
     const afterRt = this.stateGetTask(id)!;
-    console.log(
+    this.logger.info(
       `[agent-session-trace] restartTask: after writeAndSync task="${id}" agentSessionId=${afterRt.execution.agentSessionId ?? 'null'}`,
     );
     if (afterRt.config.isMergeNode) {
-      console.log(
+      this.logger.info(
         `[merge-gate-workspace] restartTask mergeNode=${id} ` +
           `after reset workspacePath=${afterRt.execution.workspacePath ?? 'none'}`,
       );
@@ -1555,14 +1566,14 @@ export class Orchestrator {
       });
     }
     if (affectedIds.length > 1) {
-      console.log(
+      this.logger.info(
         `[orchestrator] restartTask "${id}": invalidated ${affectedIds.length - 1} downstream task(s)`,
       );
     }
 
     const readyTasks = this.stateMachine.getReadyTasks();
     const isReady = readyTasks.some((t) => t.id === id);
-    console.log(`[orchestrator] restartTask "${id}": ready=${isReady}`);
+    this.logger.info(`[orchestrator] restartTask "${id}": ready=${isReady}`);
     if (isReady) {
       const started = this.autoStartReadyTasks([id], Orchestrator.EXPEDITED_PRIORITY);
       if (started.some((t) => t.id === id)) return started;
@@ -1634,11 +1645,11 @@ export class Orchestrator {
     const { affectedIds } = this.resetSubgraphToPending(retryRootIds, resetChanges);
     const afterResetMs = Date.now();
 
-    console.log(
+    this.logger.info(
       `[orchestrator] retryWorkflow invalidation: workflow=${workflowId} ` +
       `roots=[${retryRootIds.join(', ')}] affected=${affectedIds.length}`,
     );
-    console.log(
+    this.logger.info(
       `[orchestrator] retryWorkflow: reset ${affectedIds.length}/${allTasks.length} tasks for ${workflowId} ` +
         `(roots=${retryRootIds.length}, preserved completed outside invalidated subgraphs)`,
     );
@@ -1653,7 +1664,7 @@ export class Orchestrator {
       });
     const started = this.autoStartReadyTasks(readyIds, Orchestrator.EXPEDITED_PRIORITY);
     const retryEndMs = Date.now();
-    console.log(
+    this.logger.info(
       `[orchestrator] retryWorkflow timing workflow=${workflowId} ` +
         `refreshMs=${afterRefreshMs - retryStartMs} resetMs=${afterResetMs - afterRefreshMs} ` +
         `enqueueDrainMs=${retryEndMs - afterResetMs} totalMs=${retryEndMs - retryStartMs} started=${started.length}`,
@@ -1700,7 +1711,7 @@ export class Orchestrator {
       },
     };
 
-    console.log(
+    this.logger.info(
       `[orchestrator] recreateTask: resetting ${toResetIds.length} task(s) rooted at ${rootId}`,
     );
 
@@ -1759,15 +1770,15 @@ export class Orchestrator {
       },
     };
 
-    console.log(`[orchestrator] recreateWorkflow: resetting ${allTasks.length} tasks for workflow ${workflowId}`);
-    console.log(
+    this.logger.info(`[orchestrator] recreateWorkflow: resetting ${allTasks.length} tasks for workflow ${workflowId}`);
+    this.logger.info(
       '[agent-session-trace] recreateWorkflow: resetChanges.execution clears agentSessionId/containerId (DB NULL before next run)',
     );
     for (const task of allTasks) {
       const prevSess = task.execution.agentSessionId ?? null;
       const prevCt = task.execution.containerId ?? null;
       if (task.config.isMergeNode) {
-        console.log(
+        this.logger.info(
           `[merge-gate-workspace] recreateWorkflow mergeNode=${task.id} ` +
             `will clear workspace_path (was ${task.execution.workspacePath ?? 'NULL'})`,
         );
@@ -1776,15 +1787,15 @@ export class Orchestrator {
           workspacePathBefore: task.execution.workspacePath ?? null,
         });
       }
-      console.log(`[orchestrator]   reset "${task.id}" (was ${task.status}, branch=${task.execution.branch ?? 'none'}, commit=${task.execution.commit?.slice(0, 7) ?? 'none'})`);
-      console.log(
+      this.logger.info(`[orchestrator]   reset "${task.id}" (was ${task.status}, branch=${task.execution.branch ?? 'none'}, commit=${task.execution.commit?.slice(0, 7) ?? 'none'})`);
+      this.logger.info(
         `[agent-session-trace] recreateWorkflow: before writeAndSync task="${task.id}" agentSessionId=${prevSess ?? 'null'} containerId=${prevCt ?? 'null'}`,
       );
       const changesWithGeneration = this.withBumpedExecutionGeneration(task, resetChanges);
       const after = this.writeAndSync(task.id, changesWithGeneration);
       const priorAttemptId = task.execution.selectedAttemptId;
       this.replaceSelectedAttempt(task);
-      console.log(
+      this.logger.info(
         `[agent-session-trace] recreateWorkflow: after writeAndSync task="${task.id}" agentSessionId=${after.execution.agentSessionId ?? 'null'} containerId=${after.execution.containerId ?? 'null'}`,
       );
       const delta: TaskDelta = { type: 'updated', taskId: task.id, changes: changesWithGeneration };
@@ -2669,7 +2680,7 @@ export class Orchestrator {
     this.checkExperimentCompletion(taskId);
 
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(taskId);
-    console.log(`[orchestrator] handleCompleted "${taskId}": ${readyTaskIds.length} newly ready: [${readyTaskIds.join(', ')}]`);
+    this.logger.info(`[orchestrator] handleCompleted "${taskId}": ${readyTaskIds.length} newly ready: [${readyTaskIds.join(', ')}]`);
     const started = this.autoStartReadyTasks(readyTaskIds);
     started.push(...this.autoStartUnblockedTasks());
     started.push(...this.autoStartExternallyUnblockedReadyTasks());
@@ -2742,7 +2753,7 @@ export class Orchestrator {
     this.checkExperimentCompletion(taskId);
 
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(taskId);
-    console.log(
+    this.logger.info(
       `[orchestrator] finalizeFailedTask "${taskId}" (${eventName}): ${readyTaskIds.length} newly ready: [${readyTaskIds.join(', ')}]`,
     );
     const started = this.autoStartReadyTasks(readyTaskIds);
@@ -2808,7 +2819,7 @@ export class Orchestrator {
     const parentTask = this.stateGetTask(taskId);
     const wfId = parentTask?.config.workflowId;
     if (!wfId) {
-      console.warn(`[orchestrator] handleSpawnExperiments: task "${taskId}" has no workflowId; skipping`);
+      this.logger.warn(`[orchestrator] handleSpawnExperiments: task "${taskId}" has no workflowId; skipping`);
       return [];
     }
     const scopeLocal = (local: string) => scopePlanTaskId(wfId, local);
@@ -2942,7 +2953,7 @@ export class Orchestrator {
 
       // Unblock: if a blocked task's deps are all complete, it's genuinely ready
       if (task.status === 'blocked') {
-        console.log(`[orchestrator] autoStartReadyTasks: unblocking "${taskId}" (was blocked, deps now satisfied)`);
+        this.logger.info(`[orchestrator] autoStartReadyTasks: unblocking "${taskId}" (was blocked, deps now satisfied)`);
         this.writeAndSync(taskId, { status: 'pending' });
       }
 
@@ -3092,15 +3103,15 @@ export class Orchestrator {
     const started: TaskState[] = [];
     const activeAttempts = this.countActivePersistedAttempts();
     let availableSlots = Math.max(0, this.maxConcurrency - activeAttempts);
-    console.log(
+    this.logger.info(
       `[orchestrator] drainScheduler: begin active=${activeAttempts} maxConcurrency=${this.maxConcurrency} availableSlots=${availableSlots}`,
     );
     let job = availableSlots > 0 ? this.scheduler.takeNext() : null;
     while (job && availableSlots > 0) {
       const task = this.stateGetTask(job.taskId);
-      console.log(`[orchestrator] drainScheduler: dequeued "${job.taskId}" actual status=${task?.status ?? 'NOT_FOUND'}`);
+      this.logger.info(`[orchestrator] drainScheduler: dequeued "${job.taskId}" actual status=${task?.status ?? 'NOT_FOUND'}`);
       if (!task || task.status !== 'pending') {
-        console.log(`[orchestrator] drainScheduler: SKIPPING "${job.taskId}" — not pending`);
+        this.logger.info(`[orchestrator] drainScheduler: SKIPPING "${job.taskId}" — not pending`);
         job = this.scheduler.takeNext();
         continue;
       }
@@ -3141,7 +3152,7 @@ export class Orchestrator {
         changes,
       });
       started.push(updated);
-      console.log(
+      this.logger.info(
         `[orchestrator] drainScheduler: started "${job.taskId}" attempt=${attemptId} phase=launching generation=${changes.execution?.generation ?? 'unknown'}`,
       );
 
@@ -3194,7 +3205,7 @@ export class Orchestrator {
       try {
         this.taskDispatcher?.(started);
       } catch (err) {
-        console.error('[orchestrator] taskDispatcher threw:', err);
+        this.logger.error('[orchestrator] taskDispatcher threw', { error: err });
       }
     }
     return started;
@@ -3210,14 +3221,14 @@ export class Orchestrator {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) {
-      console.log(`[orchestrator] markTaskRunningAfterLaunch: REJECT task="${taskId}" attempt=${attemptId} reason=not_found`);
+      this.logger.info(`[orchestrator] markTaskRunningAfterLaunch: REJECT task="${taskId}" attempt=${attemptId} reason=not_found`);
       this.clearQueuedSchedulerEntries(taskId, attemptId);
       return false;
     }
 
     const selectedAttemptId = task.execution.selectedAttemptId;
     if (selectedAttemptId && selectedAttemptId !== attemptId) {
-      console.log(
+      this.logger.info(
         `[orchestrator] markTaskRunningAfterLaunch: REJECT task="${taskId}" attempt=${attemptId} reason=attempt_mismatch selected=${selectedAttemptId}`,
       );
       this.clearQueuedSchedulerEntries(taskId, attemptId);
@@ -3225,7 +3236,7 @@ export class Orchestrator {
     }
 
     if (task.status !== 'running' && task.status !== 'pending' && task.status !== 'fixing_with_ai') {
-      console.log(
+      this.logger.info(
         `[orchestrator] markTaskRunningAfterLaunch: REJECT task="${taskId}" attempt=${attemptId} reason=invalid_status status=${task.status}`,
       );
       this.clearQueuedSchedulerEntries(taskId, attemptId);
@@ -3258,7 +3269,7 @@ export class Orchestrator {
         taskId,
         changes,
       });
-      console.log(
+      this.logger.info(
         `[orchestrator] markTaskRunningAfterLaunch: EXECUTING task="${taskId}" attempt=${attemptId} previousStatus=${task.status}`,
       );
     }
@@ -3292,7 +3303,7 @@ export class Orchestrator {
       // best effort — do not fail launch-state transition due to attempt sync
     }
 
-    console.log(`[orchestrator] markTaskRunningAfterLaunch: OK task="${taskId}" attempt=${attemptId}`);
+    this.logger.info(`[orchestrator] markTaskRunningAfterLaunch: OK task="${taskId}" attempt=${attemptId}`);
     return true;
   }
 }
