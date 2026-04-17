@@ -17,6 +17,7 @@ import {
   spawnDetachedStandaloneOwner,
   tryAcquireOwnerBootstrapLock,
 } from './headless-owner-bootstrap.js';
+import { loadConfig } from './config.js';
 
 const RED = '\x1b[31m';
 const RESET = '\x1b[0m';
@@ -141,6 +142,10 @@ export async function runHeadlessClientCommand(
   argv: string[],
   deps: HeadlessClientDeps,
 ): Promise<number> {
+  // Validate config before any delegation path so malformed JSON fails fast
+  // even for commands that do not boot the full Electron owner process.
+  loadConfig();
+
   const { args, waitForApproval, noTrack } = parseArgs(argv);
   const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1';
   const internalOwnerServe = args[0] === 'owner-serve';
