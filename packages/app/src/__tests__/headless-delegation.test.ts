@@ -416,6 +416,59 @@ describe('headless delegation enforcement', () => {
         expect(elapsed).toBeLessThan(1000);
       });
 
+      it('headless set mutations dispatch runnable tasks before waiting for completion', async () => {
+        let taskStatus: 'running' | 'completed' = 'running';
+        mockDeps.persistence.listWorkflows = vi.fn(() => [{
+          id: 'wf-1',
+          name: 'test-workflow',
+          generation: 0,
+          status: 'running' as const,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }]);
+        mockDeps.persistence.loadTasks = vi.fn(() => [{
+          id: 'wf-1/task-1',
+          status: 'failed',
+          config: { workflowId: 'wf-1' },
+          execution: {},
+        } as any]);
+        mockDeps.orchestrator.getAllTasks = vi.fn(() => [{
+          id: 'wf-1/task-1',
+          status: taskStatus,
+          config: { workflowId: 'wf-1' },
+          execution: {},
+        } as any]);
+
+        const runnableTask = {
+          id: 'wf-1/task-1',
+          status: 'running',
+          config: { workflowId: 'wf-1' },
+          execution: {},
+        } as any;
+        mockDeps.commandService.editTaskCommand = vi.fn(async () => ({ ok: true as const, data: [runnableTask] }));
+        mockDeps.commandService.editTaskType = vi.fn(async () => ({ ok: true as const, data: [runnableTask] }));
+        mockDeps.commandService.editTaskAgent = vi.fn(async () => ({ ok: true as const, data: [runnableTask] }));
+
+        const executeTasksSpy = vi
+          .spyOn(TaskRunner.prototype, 'executeTasks')
+          .mockImplementation(async () => {
+            taskStatus = 'completed';
+          });
+
+        await runHeadless(['set', 'command', 'wf-1/task-1', 'echo ok'], mockDeps);
+        taskStatus = 'running';
+        await runHeadless(['set', 'executor', 'wf-1/task-1', 'shell'], mockDeps);
+        taskStatus = 'running';
+        await runHeadless(['set', 'agent', 'wf-1/task-1', 'codex'], mockDeps);
+
+        expect(executeTasksSpy).toHaveBeenCalledTimes(3);
+        expect(mockDeps.commandService.editTaskCommand).toHaveBeenCalled();
+        expect(mockDeps.commandService.editTaskType).toHaveBeenCalled();
+        expect(mockDeps.commandService.editTaskAgent).toHaveBeenCalled();
+
+        executeTasksSpy.mockRestore();
+      });
+
       it('headless retry with deps.noTrack=true can defer runnable execution to the caller', async () => {
         const deferRunnableTasks = vi.fn();
         const preemptWorkflowExecution = vi.fn(async () => {});
