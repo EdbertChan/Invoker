@@ -247,6 +247,31 @@ invoker_e2e_submit_plan() {
   done
 }
 
+# Submit a plan and capture stdout/stderr to a log file while preserving the
+# original exit status. Useful for tests that need a durable workflow ID rather
+# than "first workflow in the DB" races.
+# Usage: invoker_e2e_submit_plan_capture <plan-yaml-path> <log-file> [extra args...]
+invoker_e2e_submit_plan_capture() {
+  local plan_path="$1"
+  local log_file="$2"
+  shift 2
+  invoker_e2e_submit_plan "$plan_path" "$@" 2>&1 | tee "$log_file"
+}
+
+# Extract the last workflow ID mentioned in a captured CLI log.
+# Usage: invoker_e2e_extract_workflow_id_from_log <log-file>
+invoker_e2e_extract_workflow_id_from_log() {
+  local log_file="$1"
+  python3 - <<'PY' "$log_file"
+import re
+import sys
+
+text = open(sys.argv[1], encoding='utf-8', errors='ignore').read()
+matches = re.findall(r'wf-\d+-\d+', text)
+print(matches[-1] if matches else '')
+PY
+}
+
 # Query a single task's status via headless CLI (no sqlite3 dependency).
 # Pipes through tail -1 to strip Electron [init] noise from stdout.
 # Usage: ST=$(invoker_e2e_task_status <taskId>)
@@ -303,5 +328,22 @@ invoker_e2e_wait_settled() {
     sleep 2
   done
   echo "TIMEOUT: task $task_id still not settled after ${max_attempts} attempts" >&2
+  return 1
+}
+
+# Poll until a workflow is visible via the headless query interface.
+# Usage: invoker_e2e_wait_workflow_visible <workflowId> [maxSeconds]
+invoker_e2e_wait_workflow_visible() {
+  local workflow_id="$1"
+  local max_secs="${2:-60}"
+  local i=0
+  while [ "$i" -lt "$max_secs" ]; do
+    if invoker_e2e_run_headless query workflows --output label 2>/dev/null | rg -qx "$workflow_id"; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "TIMEOUT: workflow $workflow_id not visible after ${max_secs}s" >&2
   return 1
 }

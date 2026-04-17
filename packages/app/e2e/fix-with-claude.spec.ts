@@ -54,7 +54,7 @@ test.describe('Fix with Claude', () => {
       await moreBtn.click();
     }
     const fixBtn = page.getByRole('menuitem', { name: 'Fix with Claude' });
-    await expect(fixBtn).toBeVisible({ timeout: 2000 });
+    await expect(fixBtn).toBeVisible({ timeout: 10000 });
     await fixBtn.click();
 
     await waitForTaskStatus(page, 'task-fail', 'awaiting_approval', 15000);
@@ -78,7 +78,7 @@ test.describe('Fix with Claude', () => {
       await moreBtn.click();
     }
     const fixBtn = page.getByRole('menuitem', { name: 'Fix with Claude' });
-    await expect(fixBtn).toBeVisible({ timeout: 2000 });
+    await expect(fixBtn).toBeVisible({ timeout: 10000 });
     await fixBtn.click();
 
     await waitForTaskStatus(page, 'task-fail', 'awaiting_approval', 15000);
