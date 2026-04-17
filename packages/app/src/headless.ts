@@ -1321,12 +1321,13 @@ async function headlessEdit(taskId: string, newCommand: string, deps: HeadlessDe
 
   const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
-  void result.data;
+  const runnable = result.data.filter(t => t.status === 'running');
   if (deps.noTrack) {
     process.stdout.write('[headless] --no-track enabled: set command accepted; exiting without tracking.\n');
     autoFix.unsubscribe();
     return;
   }
+  if (runnable.length > 0) await taskExecutor.executeTasks(runnable);
   await waitForCompletion(deps.orchestrator, restored.workflowId, undefined, autoFix.isBusy);
   autoFix.unsubscribe();
 }
@@ -1343,12 +1344,13 @@ async function headlessEditExecutor(taskId: string, executorType: string, deps: 
 
   const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
-  void result.data;
+  const runnable = result.data.filter(t => t.status === 'running');
   if (deps.noTrack) {
     process.stdout.write('[headless] --no-track enabled: set executor accepted; exiting without tracking.\n');
     autoFix.unsubscribe();
     return;
   }
+  if (runnable.length > 0) await taskExecutor.executeTasks(runnable);
   await waitForCompletion(deps.orchestrator, restored.workflowId, undefined, autoFix.isBusy);
   autoFix.unsubscribe();
 }
@@ -1365,12 +1367,13 @@ async function headlessEditAgent(taskId: string, agentName: string, deps: Headle
 
   const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
-  void result.data;
+  const runnable = result.data.filter(t => t.status === 'running');
   if (deps.noTrack) {
     process.stdout.write('[headless] --no-track enabled: set agent accepted; exiting without tracking.\n');
     autoFix.unsubscribe();
     return;
   }
+  if (runnable.length > 0) await taskExecutor.executeTasks(runnable);
   await waitForCompletion(deps.orchestrator, restored.workflowId, undefined, autoFix.isBusy);
   autoFix.unsubscribe();
 }
