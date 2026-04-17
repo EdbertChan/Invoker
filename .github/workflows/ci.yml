@@ -44,14 +44,13 @@ jobs:
         run: |
           pnpm --filter @invoker/ui build
           pnpm --filter @invoker/app build
+          tar -czf app-build-dist.tgz packages/ui/dist packages/app/dist
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: app-build-dist
-          path: |
-            packages/ui/dist
-            packages/app/dist
+          path: app-build-dist.tgz
           if-no-files-found: error
 
   quality-checks:
@@ -132,7 +131,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-build-dist
-          path: .
+          path: /tmp/invoker-build-artifacts
+
+      - name: Extract build artifacts
+        run: tar -xzf /tmp/invoker-build-artifacts/app-build-dist.tgz -C .
 
       - name: Configure git identity and HTTPS auth
         run: |
@@ -140,6 +142,8 @@ jobs:
           git config --global user.email "ci@invoker.dev"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+          git update-ref refs/heads/main refs/remotes/origin/master || true
+          git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
 
       - name: Install Playwright system dependencies
         run: pnpm --filter @invoker/app exec playwright install --with-deps
@@ -186,7 +190,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-build-dist
-          path: .
+          path: /tmp/invoker-build-artifacts
+
+      - name: Extract build artifacts
+        run: tar -xzf /tmp/invoker-build-artifacts/app-build-dist.tgz -C .
 
       - name: Configure git identity and HTTPS auth
         run: |
@@ -194,6 +201,8 @@ jobs:
           git config --global user.email "ci@invoker.dev"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+          git update-ref refs/heads/main refs/remotes/origin/master || true
+          git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
 
       - name: Install Playwright system dependencies
         run: pnpm --filter @invoker/app exec playwright install --with-deps
@@ -240,7 +249,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-build-dist
-          path: .
+          path: /tmp/invoker-build-artifacts
+
+      - name: Extract build artifacts
+        run: tar -xzf /tmp/invoker-build-artifacts/app-build-dist.tgz -C .
+
+      - name: Configure git identity for E2E repos
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@invoker.dev"
 
       - name: Install Playwright system dependencies
         run: pnpm --filter @invoker/app exec playwright install --with-deps
@@ -300,7 +317,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-build-dist
-          path: .
+          path: /tmp/invoker-build-artifacts
+
+      - name: Extract build artifacts
+        run: tar -xzf /tmp/invoker-build-artifacts/app-build-dist.tgz -C .
 
       - name: Configure git identity and HTTPS auth
         run: |
@@ -308,6 +328,8 @@ jobs:
           git config --global user.email "ci@invoker.dev"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+          git update-ref refs/heads/main refs/remotes/origin/master || true
+          git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
 
       - name: Install Playwright system dependencies
         run: pnpm --filter @invoker/app exec playwright install --with-deps
@@ -359,7 +381,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-build-dist
-          path: .
+          path: /tmp/invoker-build-artifacts
+
+      - name: Extract build artifacts
+        run: tar -xzf /tmp/invoker-build-artifacts/app-build-dist.tgz -C .
 
       - name: Run optional suite
         run: ${{ matrix.command }}
@@ -392,7 +417,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-build-dist
-          path: .
+          path: /tmp/invoker-build-artifacts
+
+      - name: Extract build artifacts
+        run: tar -xzf /tmp/invoker-build-artifacts/app-build-dist.tgz -C .
 
       - name: Configure git identity and HTTPS auth
         run: |
@@ -400,9 +428,11 @@ jobs:
           git config --global user.email "ci@invoker.dev"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+          git update-ref refs/heads/main refs/remotes/origin/master || true
+          git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
 
       - name: Build invoker-agent Docker image
-        run: docker build -t invoker-agent:latest .
+        run: docker build -t invoker-agent:latest scripts/fixtures/hello-world-agent
 
       - name: Run Docker comprehensive suite
         run: bash scripts/test-suites/dangerous/10-docker-comprehensive.sh

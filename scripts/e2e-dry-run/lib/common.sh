@@ -18,6 +18,28 @@ INVOKER_E2E_TIMEOUT="${INVOKER_E2E_TIMEOUT:-300}"
 # Cap Node.js V8 heap to prevent runaway memory (512MB per Electron process).
 export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=512"
 
+invoker_e2e_ensure_branch_aliases() {
+  (
+    cd "$INVOKER_E2E_REPO_ROOT"
+    local head_sha=""
+    head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$head_sha" ] || return 0
+
+    if git show-ref --verify --quiet refs/heads/master && ! git show-ref --verify --quiet refs/heads/main; then
+      git update-ref refs/heads/main "$head_sha" >/dev/null 2>&1 || true
+    fi
+    if git show-ref --verify --quiet refs/heads/main && ! git show-ref --verify --quiet refs/heads/master; then
+      git update-ref refs/heads/master "$head_sha" >/dev/null 2>&1 || true
+    fi
+    if git show-ref --verify --quiet refs/remotes/origin/master && ! git show-ref --verify --quiet refs/remotes/origin/main; then
+      git update-ref refs/remotes/origin/main refs/remotes/origin/master >/dev/null 2>&1 || true
+    fi
+    if git show-ref --verify --quiet refs/remotes/origin/main && ! git show-ref --verify --quiet refs/remotes/origin/master; then
+      git update-ref refs/remotes/origin/master refs/remotes/origin/main >/dev/null 2>&1 || true
+    fi
+  )
+}
+
 invoker_e2e_init() {
   # Preserve caller PATH so cleanup can fully restore shell state.
   if [ -z "${INVOKER_E2E_ORIGINAL_PATH:-}" ]; then
@@ -91,6 +113,7 @@ invoker_e2e_cleanup() {
 }
 
 invoker_e2e_ensure_app_built() {
+  invoker_e2e_ensure_branch_aliases
   local app_dist="$INVOKER_E2E_REPO_ROOT/packages/app/dist/main.js"
   local ui_dist="$INVOKER_E2E_REPO_ROOT/packages/ui/dist/index.html"
   local build_lock_dir="$INVOKER_E2E_REPO_ROOT/.git/invoker-e2e-build.lock"
