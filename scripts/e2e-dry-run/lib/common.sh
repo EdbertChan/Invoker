@@ -52,10 +52,31 @@ invoker_e2e_init() {
 }
 
 invoker_e2e_cleanup() {
-  # Kill any stale Electron processes spawned by this test's DB dir.
-  # Match on the INVOKER_DB_DIR env to avoid killing unrelated processes.
-  if [ -n "${INVOKER_DB_DIR:-}" ]; then
-    pkill -f "electron.*--headless" 2>/dev/null || true
+  # Kill only the headless processes that belong to this test run.
+  # Scope by this case's INVOKER_DB_DIR/INVOKER_API_PORT so one case's EXIT trap
+  # cannot SIGTERM another concurrently-running case.
+  if [ -n "${INVOKER_DB_DIR:-}" ] || [ -n "${INVOKER_API_PORT:-}" ]; then
+    local pid environ_blob cmdline
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      [ -r "/proc/$pid/environ" ] || continue
+      [ -r "/proc/$pid/cmdline" ] || continue
+      environ_blob="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null || true)"
+      cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+      case "$cmdline" in
+        *"--headless"*)
+          ;;
+        *)
+          continue
+          ;;
+      esac
+      if [ -n "${INVOKER_DB_DIR:-}" ] && ! printf '%s\n' "$environ_blob" | grep -Fqx "INVOKER_DB_DIR=$INVOKER_DB_DIR"; then
+        if [ -n "${INVOKER_API_PORT:-}" ] && ! printf '%s\n' "$environ_blob" | grep -Fqx "INVOKER_API_PORT=$INVOKER_API_PORT"; then
+          continue
+        fi
+      fi
+      kill "$pid" 2>/dev/null || true
+    done < <(pgrep -f '(/electron|packages/app/dist/main.js|headless-client.js|run.sh --headless)' 2>/dev/null || true)
   fi
   # Clean up worktrees created during the test.
   git -C "$INVOKER_E2E_REPO_ROOT" worktree prune 2>/dev/null || true
