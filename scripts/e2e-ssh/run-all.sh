@@ -21,7 +21,19 @@ pkill -f "electron.*packages/app/dist/main.js.*--headless" 2>/dev/null || true
 sleep 0.2
 
 shopt -s nullglob
-cases=( "$ROOT/scripts/e2e-ssh/cases/"*.sh )
+cases=()
+if [ "$#" -gt 0 ]; then
+  for pattern in "$@"; do
+    matches=( "$ROOT/scripts/e2e-ssh/cases"/$pattern )
+    if [ "${#matches[@]}" -eq 0 ]; then
+      echo "No case scripts matched pattern: $pattern"
+      exit 1
+    fi
+    cases+=( "${matches[@]}" )
+  done
+else
+  cases=( "$ROOT/scripts/e2e-ssh/cases/"*.sh )
+fi
 if [ "${#cases[@]}" -eq 0 ]; then
   echo "No case scripts in scripts/e2e-ssh/cases/"
   exit 1
