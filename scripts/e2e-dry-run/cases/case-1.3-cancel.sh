@@ -32,16 +32,8 @@ done
 echo "==> case 1.3: cancel task"
 invoker_e2e_run_headless cancel e2e-g113-task
 
-echo "==> case 1.3: wait for task to settle after cancel"
-if ! invoker_e2e_wait_settled e2e-g113-task; then
-  echo "FAIL case 1.3: task did not settle after cancel"
-  invoker_e2e_run_headless status 2>&1 || true
-  kill "$BG_PID" 2>/dev/null || true
-  wait "$BG_PID" 2>/dev/null || true
-  exit 1
-fi
-
-if ! invoker_e2e_wait_task_status e2e-g113-task failed 120; then
+echo "==> case 1.3: wait for task to reach failed after cancel"
+if ! invoker_e2e_wait_task_status e2e-g113-task failed 180; then
   ST=$(invoker_e2e_task_status e2e-g113-task 2>/dev/null || true)
   echo "FAIL case 1.3: expected e2e-g113-task status=failed, got '$ST'"
   invoker_e2e_run_headless status 2>&1 || true

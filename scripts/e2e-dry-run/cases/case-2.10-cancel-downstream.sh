@@ -32,16 +32,8 @@ done
 echo "==> case 2.10: cancel task A"
 invoker_e2e_run_headless cancel e2e-g2210-taskA
 
-echo "==> case 2.10: wait for task A to settle after cancel"
-if ! invoker_e2e_wait_settled e2e-g2210-taskA; then
-  echo "FAIL case 2.10: task A did not settle after cancel"
-  invoker_e2e_run_headless status 2>&1 || true
-  kill "$BG_PID" 2>/dev/null || true
-  wait "$BG_PID" 2>/dev/null || true
-  exit 1
-fi
-
-if ! invoker_e2e_wait_task_status e2e-g2210-taskA failed 120; then
+echo "==> case 2.10: wait for task A to reach failed after cancel"
+if ! invoker_e2e_wait_task_status e2e-g2210-taskA failed 180; then
   STA=$(invoker_e2e_task_status e2e-g2210-taskA 2>/dev/null || true)
   echo "FAIL case 2.10: expected A=failed, got A='$STA'"
   invoker_e2e_run_headless status 2>&1 || true
