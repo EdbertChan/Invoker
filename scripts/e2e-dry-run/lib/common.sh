@@ -91,8 +91,18 @@ invoker_e2e_cleanup() {
 }
 
 invoker_e2e_ensure_app_built() {
-  echo "==> e2e-dry-run: building @invoker/app"
-  (cd "$INVOKER_E2E_REPO_ROOT" && pnpm --filter @invoker/app build)
+  local app_dist="$INVOKER_E2E_REPO_ROOT/packages/app/dist/main.js"
+  local ui_dist="$INVOKER_E2E_REPO_ROOT/packages/ui/dist/index.html"
+  if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && [ -f "$app_dist" ] && [ -f "$ui_dist" ]; then
+    echo "==> e2e: reusing existing app/ui build artifacts"
+    return 0
+  fi
+  echo "==> e2e: building @invoker/ui and @invoker/app"
+  (
+    cd "$INVOKER_E2E_REPO_ROOT" && \
+    pnpm --filter @invoker/ui build && \
+    pnpm --filter @invoker/app build
+  )
 }
 
 # Wall-clock cap: GNU timeout (Linux CI) or gtimeout (Homebrew coreutils). macOS has no timeout(1) by default.
