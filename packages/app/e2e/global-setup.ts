@@ -1,18 +1,19 @@
 /**
  * Playwright global setup: create a local bare repo for E2E tests.
  *
- * All E2E plans use file:///tmp/invoker-e2e-repo.git as their repoUrl
- * so WorktreeExecutor can clone without a network.
+ * By default, all E2E plans use file:///tmp/invoker-e2e-repo.git as their repoUrl
+ * so WorktreeExecutor can clone without a network. Sharded CI can override the
+ * bare-repo path via INVOKER_E2E_BARE_REPO to avoid cross-shard interference.
  */
 import { execSync } from 'child_process';
 import { existsSync, rmSync } from 'fs';
 
-export const E2E_BARE_REPO = '/tmp/invoker-e2e-repo.git';
+export const E2E_BARE_REPO = process.env.INVOKER_E2E_BARE_REPO ?? '/tmp/invoker-e2e-repo.git';
 
 export default function globalSetup(): void {
   if (existsSync(E2E_BARE_REPO)) rmSync(E2E_BARE_REPO, { recursive: true });
 
-  const tmpClone = '/tmp/invoker-e2e-repo-setup';
+  const tmpClone = `${E2E_BARE_REPO}.setup`;
   if (existsSync(tmpClone)) rmSync(tmpClone, { recursive: true });
 
   execSync(`git init --bare "${E2E_BARE_REPO}"`);
