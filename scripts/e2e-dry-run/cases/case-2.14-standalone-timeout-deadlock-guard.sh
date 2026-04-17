@@ -54,8 +54,8 @@ if [ "$CODE" -ne 0 ]; then
   exit 1
 fi
 
-if ! rg -q 'Processing workflow:' "$OUT_FILE"; then
-  echo "FAIL case 2.14: expected at least one workflow to be processed"
+if ! grep -Fq "Processing workflow: $WF_ID" "$OUT_FILE"; then
+  echo "FAIL case 2.14: expected workflow $WF_ID to be processed"
   sed -n '1,160p' "$OUT_FILE" || true
   exit 1
 fi

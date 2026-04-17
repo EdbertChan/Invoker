@@ -51,27 +51,40 @@ trap cleanup EXIT
 
 patch_plan_repo_url() {
   PATCHED_PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/invoker-docker-plan.XXXXXX.yaml")"
+  local current_branch
+  current_branch="$(git branch --show-current 2>/dev/null || true)"
+  if [[ -z "$current_branch" || "$current_branch" = "HEAD" ]]; then
+    current_branch="master"
+  fi
   python3 -c "
 import pathlib, sys
 repo_root = pathlib.Path(sys.argv[1]).resolve()
 src = pathlib.Path(sys.argv[2])
 dest = pathlib.Path(sys.argv[3])
 fixture_image = sys.argv[4]
+base_branch = sys.argv[5]
 text = src.read_text(encoding='utf-8')
 lines = []
 replaced = False
+base_replaced = False
 for line in text.splitlines():
     if line.lstrip().startswith('repoUrl:'):
         lines.append('repoUrl: ' + repo_root.as_uri())
         replaced = True
+    elif line.lstrip().startswith('baseBranch:'):
+        lines.append('baseBranch: ' + base_branch)
+        base_replaced = True
     else:
         lines.append(line.replace('invoker-agent:latest', fixture_image))
 if not replaced:
     insert_at = 1 if lines and lines[0].startswith('name:') else 0
     lines.insert(insert_at, 'repoUrl: ' + repo_root.as_uri())
+if not base_replaced:
+    insert_at = 2 if len(lines) > 1 and lines[0].startswith('name:') and lines[1].startswith('repoUrl:') else (1 if lines and lines[0].startswith('name:') else 0)
+    lines.insert(insert_at, 'baseBranch: ' + base_branch)
 body = '\\n'.join(lines) + ('\\n' if text.endswith('\\n') else '')
 dest.write_text(body, encoding='utf-8')
-" "$REPO_ROOT" "$PLAN_FILE" "$PATCHED_PLAN_FILE" "$FIXTURE_IMAGE_TAG"
+" "$REPO_ROOT" "$PLAN_FILE" "$PATCHED_PLAN_FILE" "$FIXTURE_IMAGE_TAG" "$current_branch"
 }
 
 build_fixture_image() {
