@@ -111,7 +111,6 @@ export interface OrchestratorPersistence {
     repoUrl?: string;
     onFinish?: string;
     baseBranch?: string;
-    parentRemote?: string;
     featureBranch?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
   }): void;
@@ -126,7 +125,6 @@ export interface OrchestratorPersistence {
     createdAt: string;
     updatedAt: string;
     baseBranch?: string;
-    parentRemote?: string;
     onFinish?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
     generation?: number;
@@ -143,7 +141,7 @@ export interface OrchestratorPersistence {
     attemptPatch: Partial<Pick<Attempt, 'status' | 'exitCode' | 'error' | 'completedAt'>>
   ): void;
   /** Load a workflow by ID (needed for SSH validation in editTaskType). */
-  loadWorkflow?(workflowId: string): { repoUrl?: string; baseBranch?: string; parentRemote?: string } | undefined;
+  loadWorkflow?(workflowId: string): { repoUrl?: string; baseBranch?: string } | undefined;
   /** Delete a single workflow and its tasks from the DB. */
   deleteWorkflow?(workflowId: string): void;
   /** Delete all workflows and tasks from the DB. */
@@ -162,7 +160,6 @@ export interface PlanDefinition {
   visualProof?: boolean;
   onFinish?: 'none' | 'merge' | 'pull_request';
   baseBranch?: string;
-  parentRemote?: string;
   featureBranch?: string;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
   reviewProvider?: string;
@@ -1054,7 +1051,6 @@ export class Orchestrator {
       repoUrl: plan.repoUrl,
       onFinish: plan.onFinish,
       baseBranch: plan.baseBranch,
-      parentRemote: plan.parentRemote,
       featureBranch: plan.featureBranch,
       mergeMode: plan.mergeMode,
       createdAt: new Date().toISOString(),
