@@ -958,8 +958,12 @@ export class TaskRunner {
   }
 
   /** @internal */ async createMergeWorktree(ref: string, label: string, repoUrl?: string, parentRemote = 'upstream'): Promise<string> {
-    const clonePath = resolve(homedir(), '.invoker', 'merge-clones', `${label}-${Date.now()}`);
-    mkdirSync(resolve(homedir(), '.invoker', 'merge-clones'), { recursive: true });
+    const invokerHomeRoot = process.env.INVOKER_DB_DIR
+      ? resolve(process.env.INVOKER_DB_DIR)
+      : resolve(homedir(), '.invoker');
+    const mergeCloneRoot = resolve(invokerHomeRoot, 'merge-clones');
+    const clonePath = resolve(mergeCloneRoot, `${label}-${Date.now()}`);
+    mkdirSync(mergeCloneRoot, { recursive: true });
 
     // Determine clone source: prefer pool mirror (has latest remote refs), fall back to host repo
     let cloneSource: string = this.cwd;

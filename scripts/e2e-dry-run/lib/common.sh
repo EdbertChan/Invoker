@@ -93,9 +93,37 @@ invoker_e2e_cleanup() {
 invoker_e2e_ensure_app_built() {
   local app_dist="$INVOKER_E2E_REPO_ROOT/packages/app/dist/main.js"
   local ui_dist="$INVOKER_E2E_REPO_ROOT/packages/ui/dist/index.html"
+  local build_lock_dir="$INVOKER_E2E_REPO_ROOT/.git/invoker-e2e-build.lock"
+  local wait_secs=0
   if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && [ -f "$app_dist" ] && [ -f "$ui_dist" ]; then
     echo "==> e2e: reusing existing app/ui build artifacts"
     return 0
+  fi
+  if mkdir "$build_lock_dir" 2>/dev/null; then
+    trap 'rmdir "$build_lock_dir" 2>/dev/null || true' RETURN
+  else
+    echo "==> e2e: waiting for shared app/ui build lock"
+    while [ -d "$build_lock_dir" ]; do
+      if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && [ -f "$app_dist" ] && [ -f "$ui_dist" ]; then
+        echo "==> e2e: shared build completed by another shard"
+        return 0
+      fi
+      sleep 1
+      wait_secs=$((wait_secs + 1))
+      if [ "$wait_secs" -ge 300 ]; then
+        echo "ERROR: timed out waiting for shared app/ui build lock" >&2
+        return 1
+      fi
+    done
+    if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && [ -f "$app_dist" ] && [ -f "$ui_dist" ]; then
+      echo "==> e2e: shared build completed by another shard"
+      return 0
+    fi
+    if ! mkdir "$build_lock_dir" 2>/dev/null; then
+      echo "ERROR: unable to acquire shared app/ui build lock" >&2
+      return 1
+    fi
+    trap 'rmdir "$build_lock_dir" 2>/dev/null || true' RETURN
   fi
   echo "==> e2e: building @invoker/ui and @invoker/app"
   (
