@@ -49,7 +49,7 @@ import type { TaskRepository } from './task-repository.js';
 const TASK_DELTA_CHANNEL = 'task.delta';
 let workflowCounter = 0;
 const FIX_FAILURE_PREFIX_RE = /^\[Fix with (?:Claude|Agent) failed\] [^\n]*\n\n/;
-const ATTEMPT_LEASE_MS = 5 * 60 * 1000;
+const ATTEMPT_LEASE_MS = 20 * 60 * 1000;
 const TRACE_PERSIST_SYNC = process.env.INVOKER_TRACE_PERSIST_SYNC === '1';
 const TRACE_WORKER_RESPONSE = process.env.INVOKER_TRACE_WORKER_RESPONSE === '1';
 
