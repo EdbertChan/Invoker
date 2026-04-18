@@ -76,4 +76,5 @@ async function main() {
   prompt();
 }
 
+// eslint-disable-next-line no-process-exit
 main().catch((err) => { console.error(err); process.exit(1); });

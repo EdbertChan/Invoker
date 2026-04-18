@@ -829,9 +829,11 @@ if (isHeadless) {
       if (writerLock) writerLock.release();
       if (messageBus) messageBus.disconnect();
     }
+    // eslint-disable-next-line no-process-exit
     process.exit(exitCode);
   }).catch((err) => {
     process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+    // eslint-disable-next-line no-process-exit
     process.exit(1);
   });
 } else {
