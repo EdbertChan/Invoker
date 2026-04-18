@@ -1,0 +1,46 @@
+# Edge case: UI change plan missing the visualProof flag
+# Expected error: missing_visual_proof_flag (field: visualProof)
+#
+# When any task modifies packages/ui/, the plan must set visualProof: true so the
+# verify-then-build playbook can add an E2E capture task and a before/after screenshot
+# comparison. A plan that touches packages/ui/ without visualProof: true is rejected
+# because the resulting PR would ship UI changes with no visual evidence for review.
+
+name: "Fix tooltip positioning on hover"
+description: |
+  The shared Tooltip component in packages/ui/ flips to the wrong side when the
+  trigger element is within 40px of the viewport edge, so the tooltip renders
+  clipped or partially off-screen on smaller windows.
+
+  Root cause: the placement resolver in Tooltip.tsx only checks the preferred
+  side and never falls back to the opposite side when there is not enough space.
+  The fix measures the available space on both sides and flips to the side with
+  more clearance before committing the final placement.
+
+  Blast radius: only the Tooltip component's internal placement logic changes.
+  No public props are added or removed, and no consumers of the component need
+  to update their call sites. Existing unit tests must continue to pass.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: fix/tooltip-viewport-positioning
+
+tasks:
+  - id: fix-tooltip-placement-resolver
+    description: "Update Tooltip placement resolver to flip on viewport edges"
+    prompt: |
+      In packages/ui/src/components/Tooltip.tsx, fix the placement resolver so
+      the tooltip must flip to the opposite side when the preferred side has
+      less than 40px of clearance from the viewport edge. Ensure the resolver
+      measures getBoundingClientRect on the trigger, compares available space
+      against window.innerWidth and window.innerHeight, and commits the side
+      with more clearance. Verify the component still reads the `side` prop as
+      the preferred hint and that no public props change. The fix must preserve
+      existing keyboard focus behavior and must not introduce any new timers.
+    dependencies: []
+
+  - id: run-ui-unit-tests-after-fix
+    description: "Run UI package unit tests to confirm tooltip fix"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [fix-tooltip-placement-resolver]
