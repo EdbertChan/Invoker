@@ -1902,6 +1902,7 @@ export class Orchestrator {
       status: 'running',
       startedAt,
       lastHeartbeatAt: startedAt,
+      leaseExpiresAt: nextLeaseExpiry(startedAt),
       branch: task.execution.branch,
       commit: task.execution.commit,
       workspacePath: task.execution.workspacePath,

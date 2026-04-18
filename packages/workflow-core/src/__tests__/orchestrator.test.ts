@@ -5699,6 +5699,18 @@ describe('Orchestrator', () => {
       expect(fixDeltas).toHaveLength(1);
     });
 
+    it('assigns a lease expiry to the new fixing_with_ai attempt', () => {
+      const before = Date.now();
+      orchestrator.beginConflictResolution('t2');
+      const after = Date.now();
+
+      const fixAttemptId = orchestrator.getTask('t2')!.execution.selectedAttemptId!;
+      const fixAttempt = persistence.loadAttempt(fixAttemptId)!;
+      expect(fixAttempt.leaseExpiresAt).toBeInstanceOf(Date);
+      expect(fixAttempt.leaseExpiresAt!.getTime()).toBeGreaterThan(before);
+      expect(fixAttempt.leaseExpiresAt!.getTime()).toBeGreaterThan(after);
+    });
+
     it('resets startedAt and lastHeartbeatAt timestamps', () => {
       const before = Date.now();
       orchestrator.beginConflictResolution('t2');

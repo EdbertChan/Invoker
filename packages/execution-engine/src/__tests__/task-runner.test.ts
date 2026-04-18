@@ -4790,6 +4790,50 @@ describe('TaskRunner', () => {
       await executor.fixWithAgent('fix-task', 'error output');
       expect(gitCalls.find(c => c[0] === 'checkout')).toBeUndefined();
     });
+
+    it('renews selected attempt heartbeat and lease while fixWithAgent is still running', async () => {
+      vi.useFakeTimers();
+      try {
+        const tasks = new Map<string, TaskState>();
+        tasks.set('fix-task', makeTask({
+          id: 'fix-task',
+          status: 'failed',
+          config: { command: 'npm test' },
+          execution: {
+            branch: 'invoker/fix-task',
+            workspacePath: '/tmp',
+            selectedAttemptId: 'attempt-1',
+          },
+        }));
+        const orchestrator = { getTask: (id: string) => tasks.get(id) };
+        const updateAttempt = vi.fn();
+        const executor = new TaskRunner({
+          orchestrator: orchestrator as any,
+          persistence: { appendTaskOutput: vi.fn(), updateTask: vi.fn(), updateAttempt } as any,
+          executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+          cwd: '/tmp',
+        });
+        (executor as any).spawnAgentFix = () => new Promise<{ stdout: string; sessionId: string }>((resolve) => {
+          setTimeout(() => resolve({ stdout: 'Fixed it', sessionId: 'sess-lease-1' }), 60_000);
+        });
+
+        const pending = executor.fixWithAgent('fix-task', 'error output');
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(updateAttempt).toHaveBeenCalledWith(
+          'attempt-1',
+          expect.objectContaining({
+            lastHeartbeatAt: expect.any(Date),
+            leaseExpiresAt: expect.any(Date),
+          }),
+        );
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('publishApprovedFix', () => {

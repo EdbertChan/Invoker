@@ -74,6 +74,10 @@ function getExecutorStartTimeoutMs(): number {
   return parsed;
 }
 
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return typeof value === 'object' && value !== null && 'then' in value;
+}
+
 // ── Callbacks ─────────────────────────────────────────────
 
 export interface TaskRunnerCallbacks {
@@ -1262,7 +1266,7 @@ export class TaskRunner {
    * After resolution, the task is restarted so it can proceed normally.
    */
   async resolveConflict(taskId: string, savedError?: string, agentName?: string): Promise<void> {
-    return resolveConflictImpl(this, taskId, savedError, agentName);
+    return this.withFixAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName));
   }
 
   /**
@@ -1270,7 +1274,34 @@ export class TaskRunner {
    * The agent's output is captured and appended to the task's output stream for auditing.
    */
   async fixWithAgent(taskId: string, taskOutput: string, agentName?: string, savedError?: string): Promise<void> {
-    return fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError);
+    return this.withFixAttemptHeartbeat(taskId, () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError));
+  }
+
+  private async withFixAttemptHeartbeat<T>(taskId: string, work: () => Promise<T>): Promise<T> {
+    const attemptId = this.orchestrator.getTask(taskId)?.execution.selectedAttemptId;
+    if (!attemptId) {
+      return work();
+    }
+
+    const heartbeat = () => {
+      const now = new Date();
+      this.persistence.updateAttempt?.(attemptId, {
+        lastHeartbeatAt: now,
+        leaseExpiresAt: nextLeaseExpiry(now),
+      } as any);
+      this.callbacks.onHeartbeat?.(taskId);
+    };
+
+    const heartbeatTimer = setInterval(heartbeat, PRE_START_HEARTBEAT_INTERVAL_MS);
+    try {
+      const result = work();
+      if (isPromiseLike(result)) {
+        return await result;
+      }
+      return result;
+    } finally {
+      clearInterval(heartbeatTimer);
+    }
   }
 
   resumeMergeGatePolling(): void {
