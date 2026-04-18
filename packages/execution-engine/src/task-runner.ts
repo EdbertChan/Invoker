@@ -1351,9 +1351,7 @@ export class TaskRunner {
             execution: { reviewStatus: status.statusText },
           });
           if (status.approved) {
-            console.log(`[merge-gate] PR ${task.execution.reviewId} approved (refresh), completing merge gate`);
-            this.stopPrPolling(task.id);
-            await this.orchestrator.approve(task.id);
+            await this.handleApprovedPrStatus(task.id, task.execution.reviewId, 'refresh');
           } else if (status.rejected) {
             console.log(`[merge-gate] PR ${task.execution.reviewId} rejected (refresh): ${status.statusText}`);
             this.stopPrPolling(task.id);
@@ -1381,9 +1379,7 @@ export class TaskRunner {
         });
 
         if (status.approved) {
-          console.log(`[merge-gate] PR ${reviewId} approved, completing merge gate`);
-          this.stopPrPolling(taskId);
-          await this.orchestrator.approve(taskId);
+          await this.handleApprovedPrStatus(taskId, reviewId, 'poll');
         } else if (status.rejected) {
           console.log(`[merge-gate] PR ${reviewId} rejected: ${status.statusText}`);
           this.stopPrPolling(taskId);
@@ -1403,6 +1399,25 @@ export class TaskRunner {
       clearInterval(interval);
       this.activePrPollers.delete(taskId);
     }
+  }
+
+  private async handleApprovedPrStatus(
+    taskId: string,
+    reviewId: string,
+    source: 'refresh' | 'poll' | 'manual check',
+  ): Promise<void> {
+    const task = this.orchestrator.getTask(taskId);
+    if (!task) return;
+
+    this.stopPrPolling(taskId);
+
+    if (task.status === 'review_ready') {
+      console.log(`[merge-gate] PR ${reviewId} approved (${source}), leaving merge gate review_ready`);
+      return;
+    }
+
+    console.log(`[merge-gate] PR ${reviewId} approved (${source}), completing merge gate`);
+    await this.orchestrator.approve(taskId);
   }
 
   async checkPrApprovalNow(taskId: string): Promise<void> {
@@ -1425,9 +1440,7 @@ export class TaskRunner {
       });
 
       if (status.approved) {
-        console.log(`[merge-gate] PR ${reviewId} approved (manual check), completing merge gate`);
-        this.stopPrPolling(taskId);
-        await this.orchestrator.approve(taskId);
+        await this.handleApprovedPrStatus(taskId, reviewId, 'manual check');
       } else if (status.rejected) {
         console.log(`[merge-gate] PR ${reviewId} rejected (manual check): ${status.statusText}`);
         this.stopPrPolling(taskId);

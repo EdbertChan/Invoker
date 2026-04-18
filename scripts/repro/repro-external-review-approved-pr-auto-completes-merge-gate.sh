@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Repro/proof: an external_review merge gate can move from review_ready
-# to completed when PR approval polling reports approved=true.
+# Repro/proof: an approved external_review PR should leave a merge gate in
+# review_ready rather than auto-completing it.
 #
 # This wrapper does two things:
 # 1. prints the real event sequence for __merge__wf-1775936853916-12 from the
 #    current ~/.invoker/invoker.db when available
-# 2. runs the focused TaskRunner repro test proving approval polling calls
-#    orchestrator.approve(taskId) for a review_ready merge gate
+# 2. runs the focused TaskRunner regression proving approval polling does not
+#    call orchestrator.approve(taskId) for a review_ready merge gate
 #
 # Usage:
 #   bash scripts/repro/repro-external-review-approved-pr-auto-completes-merge-gate.sh
@@ -31,16 +31,16 @@ limit 6;
   echo
 fi
 
-echo "==> repro: approved external_review PR auto-completes review_ready gate"
+echo "==> repro: approved external_review PR stays review_ready"
 pnpm --filter @invoker/execution-engine exec vitest run \
   src/__tests__/task-runner.test.ts \
-  --testNamePattern "approved external_review PR auto-completes a review_ready merge gate"
+  --testNamePattern "approved external_review PR leaves a review_ready merge gate in review_ready"
 
 echo
 echo "repro result:"
-echo "- the live DB shows ${TASK_ID} emitted task.review_ready and later task.completed"
-echo "- TaskRunner.checkPrApprovalNow treats approved=true as completion"
-echo "- it stops PR polling and calls orchestrator.approve(taskId)"
+echo "- the historical live DB shows ${TASK_ID} emitted task.review_ready and later task.completed"
+echo "- the regression now proves approved=true only updates review status and stops polling"
+echo "- it no longer calls orchestrator.approve(taskId) for a review_ready gate"
 echo
-echo "This proves the completed transition is current code behavior, not just"
-echo "a one-off DB anomaly."
+echo "This guards the intended behavior so approved external review does not"
+echo "silently promote the merge gate to completed."
