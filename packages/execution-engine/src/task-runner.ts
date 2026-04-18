@@ -151,6 +151,12 @@ export class TaskRunner {
   /** Serializes async onComplete handlers so orchestrator mutations never overlap. */
   private completionChain: Promise<void> = Promise.resolve();
 
+  private async runSerializedCompletion(work: () => Promise<void>): Promise<void> {
+    const prev = this.completionChain;
+    this.completionChain = prev.then(work, work);
+    await this.completionChain;
+  }
+
   /** Config default branch (e.g. master) for workflows without baseBranch. */
   getDefaultBranchHint(): string | undefined {
     return this.defaultBranch;
@@ -617,10 +623,11 @@ export class TaskRunner {
             await this.cleanupPerTaskDockerExecutor(task);
           }
         };
-
-        const prev = this.completionChain;
-        this.completionChain = prev.then(work, work);
-        await this.completionChain;
+        if (task.config.isMergeNode) {
+          await work();
+        } else {
+          await this.runSerializedCompletion(work);
+        }
         resolvePromise();
       });
     });
