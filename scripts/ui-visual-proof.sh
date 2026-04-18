@@ -247,13 +247,21 @@ if [[ $# -gt 0 ]] && [[ ! "$1" =~ ^-- ]]; then
   shift
 fi
 
+LABEL=""
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --spec)       SPEC="$2"; shift 2 ;;
+    --label)      LABEL="$2"; shift 2 ;;
     --help|-h)    usage ;;
     *)            echo "Unknown option: $1" >&2; usage ;;
   esac
 done
+
+# --label <before|after> is shorthand for the capture-before / capture-after subcommands
+if [[ -n "$LABEL" ]] && [[ -z "$SUBCOMMAND" ]]; then
+  SUBCOMMAND="capture-${LABEL}"
+fi
 
 # Dispatch to subcommand
 case "$SUBCOMMAND" in
