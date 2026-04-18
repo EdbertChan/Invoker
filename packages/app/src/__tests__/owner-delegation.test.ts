@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -36,6 +36,14 @@ describe('headless→owner delegation', () => {
 
     it('uses the default short timeout for non-maintenance commands', () => {
       expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(15_000);
+    });
+
+    it('uses extended timeout for restart at workflow scope', () => {
+      expect(delegationTimeoutMs(['restart', 'wf-123'])).toBe(900_000);
+    });
+
+    it('uses the default short timeout for restart at task scope', () => {
+      expect(delegationTimeoutMs(['restart', 'wf-123/task-1'])).toBe(15_000);
     });
   });
 
@@ -281,6 +289,92 @@ describe('headless→owner delegation', () => {
 
       const delegated = await tryDelegateResume('wf-existing', messageBus, false, true);
       expect(delegated).toBe(true);
+    });
+  });
+
+  /**
+   * End-to-end enforcement of the command-shape timeout policy, driven by
+   * fake timers so assertions don't depend on real wall-clock elapsed time.
+   *
+   * For each command we register a handler that never resolves and then
+   * advance the fake clock to the boundary dictated by the policy:
+   *   - Extended (900s) commands must still be pending at the 15s mark and
+   *     resolve to `false` exactly after 900s.
+   *   - Short (15s) commands must resolve to `false` exactly at the 15s mark.
+   */
+  describe('deterministic timeout enforcement via fake timers', () => {
+    beforeAll(async () => {
+      // Pre-warm the dynamic import cached inside tryDelegate so the first
+      // fake-timer run doesn't stall waiting on real ESM module I/O.
+      await import('../formatter.js');
+    });
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function startHangingDelegation(args: string[]): Promise<{
+      promise: Promise<boolean>;
+      wasResolved: () => boolean;
+    }> {
+      messageBus.onRequest('headless.exec', () => new Promise(() => {}));
+      let resolved = false;
+      const promise = tryDelegateExec(args, messageBus, undefined, true).then((value) => {
+        resolved = true;
+        return value;
+      });
+      // Flush microtasks (including the dynamic-import continuation inside
+      // tryDelegate) so the policy-selected setTimeout is scheduled under
+      // fake timers before the test advances the clock.
+      await vi.advanceTimersByTimeAsync(0);
+      return { promise, wasResolved: () => resolved };
+    }
+
+    it('rebase delegation enforces the extended (900s) timeout', async () => {
+      const { promise, wasResolved } = await startHangingDelegation(['rebase', 'wf-1/task-1']);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(wasResolved()).toBe(false);
+      await vi.advanceTimersByTimeAsync(900_000 - 15_000);
+      await expect(promise).resolves.toBe(false);
+    });
+
+    it('rebase-and-retry delegation enforces the extended (900s) timeout', async () => {
+      const { promise, wasResolved } = await startHangingDelegation([
+        'rebase-and-retry',
+        'wf-1/task-1',
+      ]);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(wasResolved()).toBe(false);
+      await vi.advanceTimersByTimeAsync(900_000 - 15_000);
+      await expect(promise).resolves.toBe(false);
+    });
+
+    it('restart wf-* delegation enforces the extended (900s) timeout', async () => {
+      const { promise, wasResolved } = await startHangingDelegation(['restart', 'wf-1']);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(wasResolved()).toBe(false);
+      await vi.advanceTimersByTimeAsync(900_000 - 15_000);
+      await expect(promise).resolves.toBe(false);
+    });
+
+    it('restart wf-*/task-* delegation does NOT use the extended timeout', async () => {
+      const { promise, wasResolved } = await startHangingDelegation(['restart', 'wf-1/task-1']);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(wasResolved()).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(promise).resolves.toBe(false);
+    });
+
+    it('approve delegation does NOT use the extended timeout', async () => {
+      const { promise, wasResolved } = await startHangingDelegation(['approve', 'wf-1/task-1']);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(wasResolved()).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(promise).resolves.toBe(false);
     });
   });
 });
