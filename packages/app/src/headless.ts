@@ -39,7 +39,7 @@ import {
   finalizeAppliedFix,
 } from './workflow-actions.js';
 import { openExternalTerminalForTask } from './open-terminal-for-task.js';
-import { executeGlobalTopup } from './global-topup.js';
+import { executeGlobalTopup, finalizeMutationWithGlobalTopup } from './global-topup.js';
 import {
   delegationTimeoutMs,
   tryDelegateExec,
@@ -128,9 +128,9 @@ function buildHeadlessApiCancelHooks(
 function buildHeadlessApproveAction(
   deps: Pick<HeadlessDeps, 'orchestrator' | 'commandService'>,
   taskExecutor: TaskRunner,
-): (taskId: string) => Promise<void> {
+): (taskId: string) => Promise<{ started: TaskState[] }> {
   return async (taskId: string) => {
-    await approveTask(taskId, {
+    const result = await approveTask(taskId, {
       orchestrator: deps.orchestrator,
       taskExecutor,
       approve: async (approvedTaskId) => {
@@ -146,6 +146,7 @@ function buildHeadlessApproveAction(
         return result.data;
       },
     });
+    return { started: result.started };
   };
 }
 
@@ -923,7 +924,14 @@ async function headlessApprove(taskId: string, deps: HeadlessDeps): Promise<void
   const te = createHeadlessExecutor(deps);
   wireHeadlessApproveHook(deps, te);
   const approveTaskAction = buildHeadlessApproveAction(deps, te);
-  await approveTaskAction(taskId);
+  const { started } = await approveTaskAction(taskId);
+  await finalizeMutationWithGlobalTopup({
+    orchestrator: deps.orchestrator,
+    taskExecutor: te,
+    logger: deps.logger,
+    context: 'headless.approve',
+    started,
+  });
   process.stdout.write(`Approved task: ${taskId}\n`);
 }
 
@@ -1029,6 +1037,13 @@ async function headlessFix(taskId: string, deps: HeadlessDeps, agentArg?: string
       taskExecutor: te,
       autoApproveAIFixes: deps.invokerConfig.autoApproveAIFixes,
     });
+    await finalizeMutationWithGlobalTopup({
+      orchestrator: deps.orchestrator,
+      taskExecutor: te,
+      logger: deps.logger,
+      context: 'headless.fix-with-agent',
+      started: result.started,
+    });
     process.stdout.write(
       result.autoApproved
         ? `Fix applied and auto-approved for task: ${taskId} (${agent}).\n`
@@ -1038,6 +1053,12 @@ async function headlessFix(taskId: string, deps: HeadlessDeps, agentArg?: string
     const msg = err instanceof Error ? err.message : String(err);
     deps.persistence.appendTaskOutput(taskId, `\n[Fix with AI] Failed: ${msg}`);
     deps.orchestrator.revertConflictResolution(taskId, savedError, msg);
+    await finalizeMutationWithGlobalTopup({
+      orchestrator: deps.orchestrator,
+      taskExecutor: te,
+      logger: deps.logger,
+      context: 'headless.fix-with-agent.failure',
+    });
     throw err;
   } finally {
     autoFix.unsubscribe();
@@ -1051,17 +1072,35 @@ async function headlessResolveConflict(taskId: string, deps: HeadlessDeps, agent
   const te = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, te);
   const agent = (agentArg ?? 'claude').toLowerCase();
-  await resolveConflictAction(taskId, {
-    ...deps,
-    taskExecutor: te,
-    autoApproveAIFixes: deps.invokerConfig.autoApproveAIFixes,
-  }, agent);
-  process.stdout.write(
-    deps.invokerConfig.autoApproveAIFixes
-      ? `Conflict resolved and auto-approved for task: ${taskId} (${agent}).\n`
-      : `Conflict resolved for task: ${taskId} (${agent}). Use 'approve ${taskId}' or 'reject ${taskId}' to finalize.\n`,
-  );
-  autoFix.unsubscribe();
+  try {
+    const result = await resolveConflictAction(taskId, {
+      ...deps,
+      taskExecutor: te,
+      autoApproveAIFixes: deps.invokerConfig.autoApproveAIFixes,
+    }, agent);
+    await finalizeMutationWithGlobalTopup({
+      orchestrator: deps.orchestrator,
+      taskExecutor: te,
+      logger: deps.logger,
+      context: 'headless.resolve-conflict',
+      started: result.started,
+    });
+    process.stdout.write(
+      deps.invokerConfig.autoApproveAIFixes
+        ? `Conflict resolved and auto-approved for task: ${taskId} (${agent}).\n`
+        : `Conflict resolved for task: ${taskId} (${agent}). Use 'approve ${taskId}' or 'reject ${taskId}' to finalize.\n`,
+    );
+  } catch (err) {
+    await finalizeMutationWithGlobalTopup({
+      orchestrator: deps.orchestrator,
+      taskExecutor: te,
+      logger: deps.logger,
+      context: 'headless.resolve-conflict.failure',
+    });
+    throw err;
+  } finally {
+    autoFix.unsubscribe();
+  }
 }
 
 async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promise<void> {
@@ -1530,6 +1569,13 @@ async function headlessCancel(taskId: string, deps: HeadlessDeps): Promise<void>
   const envelope = makeEnvelope('cancel-task', 'headless', 'task', { taskId });
   const cmdResult = await deps.commandService.cancelTask(envelope);
   if (!cmdResult.ok) throw new Error(cmdResult.error.message);
+  const te = createHeadlessExecutor(deps);
+  await finalizeMutationWithGlobalTopup({
+    orchestrator: deps.orchestrator,
+    taskExecutor: te,
+    logger: deps.logger,
+    context: 'headless.cancel-task',
+  });
   process.stdout.write(`Cancelled ${cmdResult.data.cancelled.length} task(s): [${cmdResult.data.cancelled.join(', ')}]\n`);
   if (cmdResult.data.runningCancelled.length > 0) {
     process.stdout.write(`Killed running: [${cmdResult.data.runningCancelled.join(', ')}]\n`);
@@ -1565,6 +1611,13 @@ async function headlessCancelWorkflow(workflowId: string, deps: HeadlessDeps): P
   }
 
   const result = await preemptWorkflowExecution(workflowId, deps);
+  const te = createHeadlessExecutor(deps);
+  await finalizeMutationWithGlobalTopup({
+    orchestrator: deps.orchestrator,
+    taskExecutor: te,
+    logger: deps.logger,
+    context: 'headless.cancel-workflow',
+  });
   process.stdout.write(`Cancelled ${result.cancelled.length} task(s) in workflow "${workflowId}": [${result.cancelled.join(', ')}]\n`);
   if (result.runningCancelled.length > 0) {
     process.stdout.write(`Killed running: [${result.runningCancelled.join(', ')}]\n`);
