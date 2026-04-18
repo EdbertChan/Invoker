@@ -1031,6 +1031,52 @@ export async function buildMergeSummaryImpl(
     lines.push('');
   }
 
+  const commandTasks = workflowTasks.filter((t) => Boolean(t.config.command));
+  if (commandTasks.length > 0) {
+    lines.push('## Test Plan');
+    lines.push('');
+    for (const t of commandTasks) {
+      const passed = t.status === 'completed';
+      const checkbox = passed ? '- [x]' : '- [ ]';
+      const exitCode = t.execution.exitCode ?? (passed ? 0 : 1);
+      const statusText = passed ? 'passed' : `failed (exit ${exitCode})`;
+      lines.push(`${checkbox} \`${t.config.command}\` — ${statusText}`);
+    }
+    lines.push('');
+  }
+
+  lines.push('## Revert Plan');
+  lines.push('');
+  lines.push('- **Safe to revert?** yes');
+  lines.push('- **Revert command:** `git revert <merge-sha>`');
+  lines.push('- **Post-revert steps:** none');
+  lines.push('- **What breaks if reverted:** changes from this workflow will be undone');
+  lines.push('- **Data migration?** no');
+  lines.push('');
+
+  const descriptionHasMermaid = Boolean(description && /```mermaid/.test(description));
+  if (descriptionHasMermaid || workflowTasks.length >= 3) {
+    lines.push('## Architecture');
+    lines.push('');
+    if (descriptionHasMermaid) {
+      lines.push('Architecture diagram included in the Summary section above.');
+    } else {
+      const sanitize = (id: string) => id.replace(/[^a-zA-Z0-9_]/g, '_');
+      lines.push('```mermaid');
+      lines.push('graph TD');
+      for (const t of workflowTasks) {
+        lines.push(`  ${sanitize(t.id)}`);
+      }
+      for (const t of workflowTasks) {
+        for (const dep of t.dependencies) {
+          lines.push(`  ${sanitize(dep)} --> ${sanitize(t.id)}`);
+        }
+      }
+      lines.push('```');
+    }
+    lines.push('');
+  }
+
   if (claudeResolved.length > 0) {
     lines.push('## Conflict Resolutions');
     for (const t of claudeResolved) {
