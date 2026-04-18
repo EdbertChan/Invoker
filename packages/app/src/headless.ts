@@ -516,12 +516,15 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
 async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
   const subCommand = args[0];
   if (!subCommand) {
-    throw new Error('Missing set sub-command. Usage: --headless set <command|executor|agent|merge-mode|gate-policy>');
+    throw new Error('Missing set sub-command. Usage: --headless set <command|prompt|executor|agent|merge-mode|gate-policy>');
   }
 
   switch (subCommand) {
     case 'command':
       await headlessEdit(args[1], args.slice(2).join(' '), deps);
+      break;
+    case 'prompt':
+      await headlessEditPrompt(args[1], args.slice(2).join(' '), deps);
       break;
     case 'executor':
       await headlessEditExecutor(args[1], args[2], deps);
@@ -536,7 +539,7 @@ async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
       await headlessSetGatePolicy(args.slice(1), deps);
       break;
     default:
-      throw new Error(`Unknown set sub-command: "${subCommand}". Use: command, executor, agent, merge-mode, gate-policy`);
+      throw new Error(`Unknown set sub-command: "${subCommand}". Use: command, prompt, executor, agent, merge-mode, gate-policy`);
   }
 }
 
@@ -681,6 +684,10 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
     case 'edit':
       warnDeprecated('edit', 'set command');
       await headlessSet(['command', ...args.slice(1)], deps);
+      break;
+    case 'edit-prompt':
+      warnDeprecated('edit-prompt', 'set prompt');
+      await headlessSet(['prompt', ...args.slice(1)], deps);
       break;
     case 'edit-executor':
     case 'edit-type':
@@ -1396,6 +1403,28 @@ async function headlessEdit(taskId: string, newCommand: string, deps: HeadlessDe
     return;
   }
   if (runnable.length === 0) {
+    autoFix.unsubscribe();
+    return;
+  }
+  await waitForCompletion(deps.orchestrator, restored.workflowId, undefined, autoFix.isBusy);
+  autoFix.unsubscribe();
+}
+
+async function headlessEditPrompt(taskId: string, newPrompt: string, deps: HeadlessDeps): Promise<void> {
+  if (!taskId || !newPrompt) throw new Error('Missing arguments. Usage: --headless set prompt <taskId> <newPrompt>');
+  const restored = restoreWorkflowForTask(taskId, deps);
+  taskId = restored.resolvedTaskId;
+
+  const envelope = makeEnvelope('edit-task-prompt', 'headless', 'task', { taskId, newPrompt });
+  const result = await deps.commandService.editTaskPrompt(envelope);
+  if (!result.ok) throw new Error(result.error.message);
+  process.stdout.write(`Edited task "${taskId}" prompt\n`);
+
+  const taskExecutor = createHeadlessExecutor(deps);
+  const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
+  void result.data;
+  if (deps.noTrack) {
+    process.stdout.write('[headless] --no-track enabled: set prompt accepted; exiting without tracking.\n');
     autoFix.unsubscribe();
     return;
   }
