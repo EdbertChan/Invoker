@@ -47,26 +47,27 @@ This table lists every mutating command path and how the owner-boundary contract
 | `invoker:delete-workflow` | main.ts:867 | N/A (owner) | `orchestrator.deleteWorkflow()` → persistence | |
 | `invoker:delete-all-workflows` | main.ts:856 | N/A (owner) | `orchestrator.deleteAllWorkflows()` → persistence | |
 | **Headless Commands** (delegate when GUI present, standalone otherwise) |
-| `run` | headless.ts:565 | **Yes** (line 356) | `tryDelegateRun()` → IPC `headless.run` (owner handles) OR standalone opens writable via `initServices({ readOnly: false })` | Delegation timeout = 5s (run/resume are short-poll submissions) |
-| `resume` | headless.ts:620 | **Yes** (line 361) | `tryDelegateResume()` → IPC `headless.resume` OR standalone writable | |
-| `restart` | headless.ts:707 | **Yes** (line 365) | `tryDelegateExec()` → IPC `headless.exec` OR standalone writable | |
-| `recreate` | headless.ts:769 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `recreate-task` | headless.ts:788 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `rebase` | headless.ts:754 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `approve` | headless.ts:666 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `reject` | headless.ts:681 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `input` | headless.ts:688 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `select` | headless.ts:695 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `fix` | headless.ts:722 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `resolve-conflict` | headless.ts:742 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `cancel` | headless.ts:967 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `cancel-workflow` | headless.ts:978 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `delete` | headless.ts:1005 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `delete-all` | headless.ts:434 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `set command` | headless.ts:829 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `set executor` | headless.ts:841 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `set agent` | headless.ts:853 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `set merge-mode` | headless.ts:1011 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
+| `run` | headless.ts:565 | **Yes** (line 356) | `tryDelegateRun()` → IPC `headless.run` (owner handles) OR standalone opens writable via `initServices({ readOnly: false })` | Fixed 5s delegation timeout (handshake only; owner continues work asynchronously) |
+| `resume` | headless.ts:620 | **Yes** (line 361) | `tryDelegateResume()` → IPC `headless.resume` OR standalone writable | Fixed 5s delegation timeout (handshake only) |
+| `restart` | headless.ts:707 | **Yes** (line 365) | `tryDelegateExec()` → IPC `headless.exec` OR standalone writable | 900s when target is a workflow id (`wf-*`); 15s when target is a task id (`wf-*/task-*`) |
+| `recreate` | headless.ts:769 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running: 900s (command-shape match) |
+| `recreate-task` | headless.ts:788 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 15s (task-scoped; command not on long-running list) |
+| `rebase` / `rebase-and-retry` | headless.ts:754 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running: 900s (command-shape match) |
+| `retry` / `retry-task` | headless.ts (retry family) | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running: 900s (command-shape match) |
+| `approve` | headless.ts:666 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 15s delegation timeout (short-running exec) |
+| `reject` | headless.ts:681 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 15s delegation timeout (short-running exec) |
+| `input` | headless.ts:688 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 15s delegation timeout (short-running exec) |
+| `select` | headless.ts:695 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 900s when target is a workflow id; 15s for task-scoped targets |
+| `fix` | headless.ts:722 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running: 900s (command-shape match) |
+| `resolve-conflict` | headless.ts:742 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running: 900s (command-shape match) |
+| `cancel` | headless.ts:967 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 15s (task-scoped cancel) |
+| `cancel-workflow` | headless.ts:978 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 900s (workflow-id target matches `/^wf-[^/]+$/`) |
+| `delete` | headless.ts:1005 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 900s when target is a workflow id; 15s otherwise |
+| `delete-all` | headless.ts:434 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | 15s delegation timeout (no workflow target) |
+| `set command` | headless.ts:829 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running (`set` family): 900s |
+| `set executor` | headless.ts:841 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running (`set` family): 900s |
+| `set agent` | headless.ts:853 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running (`set` family): 900s |
+| `set merge-mode` | headless.ts:1011 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | Long-running (`set` family): 900s |
 | **Headless Read-Only Commands** (never delegate, always read-only) |
 | `query workflows` | headless.ts:193 | No | Opens DB with `readOnly: true` (main.ts:386) | Safe: no writes |
 | `query tasks` | headless.ts:206 | No | Opens DB with `readOnly: true` | Safe: no writes |
