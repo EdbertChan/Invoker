@@ -449,6 +449,19 @@ export function App() {
     [invoker],
   );
 
+  // ── Edit task prompt ───────────────────────────────────────
+  const handleEditPrompt = useCallback(
+    async (taskId: string, newPrompt: string) => {
+      if (!invoker) return;
+      try {
+        await invoker.editTaskPrompt(taskId, newPrompt);
+      } catch (err) {
+        console.error('Failed to edit task prompt:', err);
+      }
+    },
+    [invoker],
+  );
+
   // ── Edit task executor type ───────────────────────────────
   const handleEditType = useCallback(
     async (taskId: string, executorType: string, remoteTargetId?: string) => {
@@ -580,6 +593,7 @@ export function App() {
               }}
               onSelectExperiment={openExperimentModal}
               onEditCommand={handleEditCommand}
+              onEditPrompt={handleEditPrompt}
               onEditType={handleEditType}
               onEditAgent={handleEditAgent}
               onSetExternalGatePolicies={handleSetExternalGatePolicies}
