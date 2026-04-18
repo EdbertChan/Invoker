@@ -39,7 +39,7 @@ import {
   finalizeAppliedFix,
 } from './workflow-actions.js';
 import { openExternalTerminalForTask } from './open-terminal-for-task.js';
-import { executeGlobalTopup, finalizeMutationWithGlobalTopup } from './global-topup.js';
+import { dispatchTasksIfNeeded, executeGlobalTopup, finalizeMutationWithGlobalTopup } from './global-topup.js';
 import {
   delegationTimeoutMs,
   tryDelegateExec,
@@ -899,7 +899,13 @@ async function headlessResume(
 
   orchestrator.syncFromDb(workflowId);
   const allStarted = relaunchOrphansAndStartReady(orchestrator, deps.logger, 'headless', workflowId);
-  await taskExecutor.executeTasks(allStarted);
+  await dispatchTasksIfNeeded({
+    orchestrator,
+    taskExecutor,
+    tasks: allStarted,
+    logger: deps.logger,
+    context: 'headless.resume',
+  });
 
   if (noTrack) {
     process.stdout.write('[headless] --no-track enabled: resume accepted; exiting without tracking.\n');
@@ -1301,7 +1307,13 @@ async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDeps): Pr
     } else {
       const te = createHeadlessExecutor(deps);
       const launch = setTimeout(() => {
-        void te.executeTasks(dispatchable).catch((err) => {
+        void dispatchTasksIfNeeded({
+          orchestrator: deps.orchestrator,
+          taskExecutor: te,
+          tasks: dispatchable,
+          logger: deps.logger,
+          context: 'headless.retry-workflow.no-track',
+        }).catch((err) => {
           deps.logger.error(
             `background no-track workflow retry failed for ${workflowId}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
             { module: 'headless' },

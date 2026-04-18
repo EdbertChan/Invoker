@@ -6580,7 +6580,7 @@ describe('TaskRunner', () => {
       for (let i = 0; i < 10; i++) await Promise.resolve();
     }
 
-    it('serializes concurrent onComplete handlers for merge-node tasks', async () => {
+    it('allows concurrent onComplete handlers for merge-node tasks', async () => {
       const log: string[] = [];
       const deferred1 = createDeferred();
       const deferred2 = createDeferred();
@@ -6643,15 +6643,15 @@ describe('TaskRunner', () => {
       });
 
       await flush();
-      expect(log).toEqual(['enter-1']);
+      expect(log).toEqual(['enter-1', 'enter-2']);
 
       deferred1.resolve(undefined as any);
       await flush();
-      expect(log).toEqual(['enter-1', 'exit-1', 'enter-2']);
+      expect(log).toEqual(['enter-1', 'enter-2', 'exit-1']);
 
       deferred2.resolve(undefined as any);
       await Promise.all([done1, done2]);
-      expect(log).toEqual(['enter-1', 'exit-1', 'enter-2', 'exit-2']);
+      expect(log).toEqual(['enter-1', 'enter-2', 'exit-1', 'exit-2']);
     });
 
     it('a blocked first merge completion does not prevent a second merge completion from entering merge execution', async () => {
