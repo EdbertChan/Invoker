@@ -24,6 +24,16 @@ import {
   createSshRemoteScriptError,
 } from './ssh-git-exec.js';
 
+const DEFAULT_SSH_REMOTE_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
+
+function getSshRemoteCaptureTimeoutMs(): number {
+  const raw = process.env.INVOKER_SSH_REMOTE_CAPTURE_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_SSH_REMOTE_CAPTURE_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SSH_REMOTE_CAPTURE_TIMEOUT_MS;
+  return parsed;
+}
+
 export interface SshExecutorConfig {
   host: string;
   user: string;
@@ -118,14 +128,44 @@ export class SshExecutor extends BaseExecutor<SshEntry> {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: cleanElectronEnv(),
       });
+      const timeoutMs = getSshRemoteCaptureTimeoutMs();
+      const phaseLabel = phase ?? 'remote script';
+      let settled = false;
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.kill('SIGTERM');
+        killTimer = setTimeout(() => {
+          if (!child.killed) {
+            child.kill('SIGKILL');
+          }
+        }, SIGKILL_TIMEOUT_MS);
+        reject(new Error(`SSH ${phaseLabel} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
       child.stdin.write(script);
       child.stdin.end();
       let out = '';
       let err = '';
       child.stdout?.on('data', (c: Buffer) => { out += c.toString(); });
       child.stderr?.on('data', (c: Buffer) => { err += c.toString(); });
-      child.on('error', reject);
+      const cleanup = () => {
+        clearTimeout(timeoutTimer);
+        if (killTimer) clearTimeout(killTimer);
+      };
+      child.on('error', (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
       child.on('close', (code) => {
+        if (settled) {
+          cleanup();
+          return;
+        }
+        settled = true;
+        cleanup();
         if (code === 0) resolve(out);
         else {
           reject(createSshRemoteScriptError(code, out, err, phase));
@@ -456,7 +496,7 @@ echo ${payloadB64} | base64 -d | bash -se
     });
 
     try {
-      const stdout = await this.execRemoteCapture(recordScript);
+      const stdout = await this.execRemoteCapture(recordScript, 'record and push task result');
       return parseRecordAndPushOutput(stdout, 0, '');
     } catch (err: any) {
       const exitCode = err.exitCode ?? 1;

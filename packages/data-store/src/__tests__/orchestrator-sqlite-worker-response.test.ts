@@ -167,6 +167,41 @@ describe('Orchestrator + SQLite worker response persistence', () => {
     expect(row.execution.error).toContain('attempt failed first');
   });
 
+  it('loadTasks reconciles a stale running task row from an expired selected attempt lease', () => {
+    adapter.saveTask(wf.id, baseTask('task-expired-attempt'));
+    const leaseExpiresAt = new Date(Date.now() - 60_000);
+    const lastHeartbeatAt = new Date(Date.now() - 120_000);
+    adapter.saveAttempt({
+      id: 'task-expired-attempt-a1',
+      nodeId: 'task-expired-attempt',
+      attemptNumber: 0,
+      queuePriority: 0,
+      status: 'running',
+      upstreamAttemptIds: [],
+      createdAt: new Date(),
+      startedAt: new Date(Date.now() - 300_000),
+      lastHeartbeatAt,
+      leaseExpiresAt,
+      branch: 'experiment/task-expired-attempt',
+      workspacePath: '/tmp/expired-workspace',
+    });
+    adapter.updateTask('task-expired-attempt', {
+      status: 'running',
+      execution: {
+        selectedAttemptId: 'task-expired-attempt-a1',
+        startedAt: new Date(Date.now() - 300_000),
+      },
+    });
+
+    const row = adapter.loadTasks(wf.id).find((t) => t.id === 'task-expired-attempt')!;
+    expect(row.status).toBe('failed');
+    expect(row.execution.exitCode).toBe(1);
+    expect(row.execution.error).toContain('Execution lease expired before completion');
+    expect(row.execution.error).toContain(leaseExpiresAt.toISOString());
+    expect(row.execution.lastHeartbeatAt?.toISOString()).toBe(lastHeartbeatAt.toISOString());
+    expect(row.execution.workspacePath).toBe('/tmp/expired-workspace');
+  });
+
   it('beginConflictResolution persists fixing_with_ai and clears error/exit/completed', () => {
     adapter.saveTask(wf.id, baseTask('task-fix'));
     orchestrator.syncFromDb(wf.id);

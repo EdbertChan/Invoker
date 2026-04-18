@@ -33,6 +33,16 @@ function createMockProcess(): ChildProcess & EventEmitter {
   return proc;
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // ---------------------------------------------------------------------------
 // Module-level spawn mock
 //
@@ -648,6 +658,39 @@ describe('SshExecutor entry lifecycle', () => {
     expect(err.stdout).toBe('COMMIT_HASH=abc123def456\n');
   });
 
+  it('times out execRemoteCapture and terminates the ssh child', async () => {
+    vi.useFakeTimers();
+    const previousTimeout = process.env.INVOKER_SSH_REMOTE_CAPTURE_TIMEOUT_MS;
+    process.env.INVOKER_SSH_REMOTE_CAPTURE_TIMEOUT_MS = '100';
+
+    try {
+      const ssh2 = new SshExecutor({
+        host: 'localhost',
+        user: 'testuser',
+        sshKeyPath: '/dev/null',
+      }) as any;
+
+      const pending = ssh2.runBash('echo waiting', '/tmp').catch((e: any) => e);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      const proc = spawnedProcesses[spawnedProcesses.length - 1];
+      expect(proc).toBeDefined();
+      expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+
+      const err = await pending;
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toContain('SSH remote script timed out after 100ms');
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.INVOKER_SSH_REMOTE_CAPTURE_TIMEOUT_MS;
+      } else {
+        process.env.INVOKER_SSH_REMOTE_CAPTURE_TIMEOUT_MS = previousTimeout;
+      }
+      vi.useRealTimers();
+    }
+  });
+
   it('managed mode with remoteInvokerHome="~/.invoker" uses base64-decode + tilde-normalize (Bug #1 variant)', async () => {
     const ssh2 = new SshExecutor({
       host: 'localhost',
@@ -788,5 +831,85 @@ describe('SshExecutor entry lifecycle', () => {
     expect(spec.command).toBe('ssh');
     expect(spec.args).toBeTruthy();
     expect(spec.args!.length).toBeGreaterThan(0);
+  });
+
+  it('keeps the task running after process exit until remote record/push finishes', async () => {
+    const finalize = createDeferred<{ commitHash?: string; error?: string }>();
+    const remoteFinalizeSpy = vi
+      .spyOn(ssh as any, 'remoteGitRecordAndPush')
+      .mockImplementation(() => finalize.promise);
+
+    const request = makeRequest({
+      inputs: {
+        command: 'echo hello',
+        repoUrl: 'git@github.com:test/repo.git',
+      },
+    });
+
+    const handle = await ssh.start(request);
+    let completedResponse: any;
+    ssh.onComplete(handle, (response) => {
+      completedResponse = response;
+    });
+
+    const sshProcess = spawnedProcesses[spawnedProcesses.length - 1];
+    sshProcess.emit('close', 0, null);
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(remoteFinalizeSpy).toHaveBeenCalledTimes(1);
+    expect(completedResponse).toBeUndefined();
+    expect((ssh as any).entries.get(handle.executionId)).toBeDefined();
+
+    finalize.resolve({ commitHash: 'abc123def456' });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(completedResponse).toMatchObject({
+      status: 'completed',
+      outputs: expect.objectContaining({
+        exitCode: 0,
+        commitHash: 'abc123def456',
+      }),
+    });
+  });
+
+  it('fails the task instead of hanging when remote record/push times out', async () => {
+    vi.useFakeTimers();
+    const finalize = createDeferred<{ commitHash?: string; error?: string }>();
+    vi.spyOn(ssh as any, 'remoteGitRecordAndPush').mockImplementation(() => finalize.promise);
+
+    try {
+      const request = makeRequest({
+        inputs: {
+          command: 'echo hello',
+          repoUrl: 'git@github.com:test/repo.git',
+        },
+      });
+
+      const handle = await ssh.start(request);
+      let completedResponse: any;
+      ssh.onComplete(handle, (response) => {
+        completedResponse = response;
+      });
+
+      const sshProcess = spawnedProcesses[spawnedProcesses.length - 1];
+      sshProcess.emit('close', 0, null);
+
+      await vi.advanceTimersByTimeAsync(20);
+      expect(completedResponse).toBeUndefined();
+
+      finalize.resolve({ error: 'SSH record and push task result timed out after 600000ms' });
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(completedResponse).toMatchObject({
+        status: 'failed',
+        outputs: expect.objectContaining({
+          exitCode: 1,
+          error: 'SSH record and push task result timed out after 600000ms',
+        }),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

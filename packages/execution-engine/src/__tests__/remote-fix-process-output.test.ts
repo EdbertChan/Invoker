@@ -39,6 +39,23 @@ function mockSpawnChildWithStderr(stdoutData: string, stderrData: string, exitCo
   return child;
 }
 
+function mockSpawnChildNeverCloses() {
+  const { EventEmitter } = require('events');
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const child = new EventEmitter();
+  child.killed = false;
+  (child as any).stdout = stdout;
+  (child as any).stderr = stderr;
+  (child as any).stdin = { write: vi.fn(), end: vi.fn() };
+  (child as any).kill = vi.fn((signal?: string) => {
+    child.killed = true;
+    child.emit('killed', signal);
+    return true;
+  });
+  return child;
+}
+
 describe('spawnRemoteAgentFixImpl processOutput', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -173,5 +190,38 @@ describe('spawnRemoteAgentFixImpl processOutput', () => {
     // Should still resolve with a UUID session ID
     expect(result.stdout).toBe('output');
     expect(result.sessionId).toBeDefined();
+  });
+
+  it('times out remote agent fix when the ssh child never closes', async () => {
+    vi.useFakeTimers();
+    const previousTimeout = process.env.INVOKER_REMOTE_AGENT_FIX_TIMEOUT_MS;
+    process.env.INVOKER_REMOTE_AGENT_FIX_TIMEOUT_MS = '100';
+
+    try {
+      const { spawn } = await import('node:child_process');
+      const child = mockSpawnChildNeverCloses();
+      vi.mocked(spawn).mockReturnValueOnce(child as any);
+
+      const pending = spawnRemoteAgentFixImpl(
+        'fix the bug',
+        '/home/user/worktree',
+        { host: '1.2.3.4', user: 'invoker', sshKeyPath: '/tmp/key' },
+      ).catch((e) => e as Error);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect((child as any).kill).toHaveBeenCalledWith('SIGTERM');
+      const err = await pending;
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toContain('Remote agent fix timed out after 100ms');
+      expect(err.message).toContain('phase=remote_agent_fix');
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.INVOKER_REMOTE_AGENT_FIX_TIMEOUT_MS;
+      } else {
+        process.env.INVOKER_REMOTE_AGENT_FIX_TIMEOUT_MS = previousTimeout;
+      }
+      vi.useRealTimers();
+    }
   });
 });

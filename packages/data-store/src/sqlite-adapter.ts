@@ -1683,6 +1683,40 @@ export class SQLiteAdapter implements PersistenceAdapter {
     const attempt = this.loadAttempt(attemptId);
     if (!attempt) return task;
 
+    const attemptLeaseExpired =
+      (attempt.status === 'claimed' || attempt.status === 'running')
+      && attempt.leaseExpiresAt instanceof Date
+      && attempt.leaseExpiresAt.getTime() < Date.now();
+    const taskLooksInFlight =
+      task.status === 'running'
+      || task.status === 'fixing_with_ai';
+    if (attemptLeaseExpired && taskLooksInFlight) {
+      const leaseExpiredAt = attempt.leaseExpiresAt!.toISOString();
+      const lastHeartbeatAt = attempt.lastHeartbeatAt?.toISOString();
+      const parts = [
+        `Execution lease expired before completion at ${leaseExpiredAt}.`,
+      ];
+      if (lastHeartbeatAt) {
+        parts.push(`Last heartbeat was ${lastHeartbeatAt}.`);
+      }
+      return {
+        ...task,
+        status: 'failed',
+        execution: {
+          ...task.execution,
+          exitCode: attempt.exitCode ?? task.execution.exitCode ?? 1,
+          error: attempt.error ?? task.execution.error ?? parts.join(' '),
+          completedAt: attempt.completedAt ?? task.execution.completedAt ?? attempt.leaseExpiresAt,
+          lastHeartbeatAt: attempt.lastHeartbeatAt ?? task.execution.lastHeartbeatAt,
+          branch: attempt.branch ?? task.execution.branch,
+          commit: attempt.commit ?? task.execution.commit,
+          workspacePath: attempt.workspacePath ?? task.execution.workspacePath,
+          agentSessionId: attempt.agentSessionId ?? task.execution.agentSessionId,
+          containerId: attempt.containerId ?? task.execution.containerId,
+        },
+      };
+    }
+
     if (attempt.status === 'failed') {
       return {
         ...task,

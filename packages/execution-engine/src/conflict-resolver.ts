@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 
 import type { Orchestrator } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import { cleanElectronEnv } from './process-utils.js';
+import { cleanElectronEnv, SIGKILL_TIMEOUT_MS } from './process-utils.js';
 import type { ExecutionAgent } from './agent.js';
 import type { SessionDriver } from './session-driver.js';
 import type { AgentRegistry } from './agent-registry.js';
@@ -47,6 +47,7 @@ export interface ConflictResolverHost {
 }
 
 const DEFAULT_MAX_INLINE_PROMPT_BYTES = 64 * 1024;
+const DEFAULT_REMOTE_AGENT_FIX_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_INLINE_PROMPT_BYTES = (() => {
   const raw = process.env.INVOKER_MAX_INLINE_AGENT_PROMPT_BYTES;
   if (!raw) return DEFAULT_MAX_INLINE_PROMPT_BYTES;
@@ -54,6 +55,13 @@ const MAX_INLINE_PROMPT_BYTES = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_INLINE_PROMPT_BYTES;
 })();
 const DEBUG_IO_TAIL_CHARS = 2000;
+
+function getRemoteAgentFixTimeoutMs(): number {
+  const raw = process.env.INVOKER_REMOTE_AGENT_FIX_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_REMOTE_AGENT_FIX_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_REMOTE_AGENT_FIX_TIMEOUT_MS;
+}
 
 function tailText(value: unknown, maxChars: number = DEBUG_IO_TAIL_CHARS): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -565,6 +573,20 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
       stdio: ['pipe', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
     });
+    const timeoutMs = getRemoteAgentFixTimeoutMs();
+    let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      killTimer = setTimeout(() => {
+        if (!child.killed) {
+          child.kill('SIGKILL');
+        }
+      }, SIGKILL_TIMEOUT_MS);
+      reject(new Error(`Remote agent fix timed out after ${timeoutMs}ms (phase=remote_agent_fix)`));
+    }, timeoutMs);
     child.stdin?.write(script);
     child.stdin?.end();
 
@@ -572,7 +594,17 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
     let stderr = '';
     child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
     child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    const cleanup = () => {
+      clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+    };
     child.on('close', (code) => {
+      if (settled) {
+        cleanup();
+        return;
+      }
+      settled = true;
+      cleanup();
       // Replace local UUID with real backend session/thread ID for resume
       const driver = agentRegistry?.getSessionDriver(agentName ?? 'claude');
       const realId = driver?.extractSessionId?.(stdout);
@@ -583,7 +615,12 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
       if (code === 0) resolve({ stdout, sessionId: effectiveSessionId });
       else reject(createSshRemoteScriptError(code, stdout, stderr, 'remote_agent_fix'));
     });
-    child.on('error', (err) => reject(err));
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    });
   });
 }
 
@@ -671,6 +708,21 @@ function execRemoteSsh(target: RemoteTargetConfig, script: string, phase?: strin
       stdio: ['pipe', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
     });
+    const timeoutMs = getRemoteAgentFixTimeoutMs();
+    const phaseLabel = phase ?? 'remote_conflict_fix';
+    let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      killTimer = setTimeout(() => {
+        if (!child.killed) {
+          child.kill('SIGKILL');
+        }
+      }, SIGKILL_TIMEOUT_MS);
+      reject(new Error(`Remote SSH ${phaseLabel} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
     child.stdin?.write(script);
     child.stdin?.end();
 
@@ -678,10 +730,25 @@ function execRemoteSsh(target: RemoteTargetConfig, script: string, phase?: strin
     let stderr = '';
     child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
     child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    const cleanup = () => {
+      clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+    };
     child.on('close', (code) => {
+      if (settled) {
+        cleanup();
+        return;
+      }
+      settled = true;
+      cleanup();
       if (code === 0) resolve(stdout);
       else reject(createSshRemoteScriptError(code, stdout, stderr, phase));
     });
-    child.on('error', (err) => reject(err));
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    });
   });
 }
