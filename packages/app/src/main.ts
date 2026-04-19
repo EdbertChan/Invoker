@@ -2251,7 +2251,9 @@ if (isHeadless) {
         }
       }
 
-      applyDelta(d, lastKnownTaskStates, orchestrator);
+      applyDelta(d, lastKnownTaskStates, orchestrator, (taskId) => {
+        logger.debug(`delta-merge: seeded unknown task ${taskId} from orchestrator (out-of-order updated delta)`, { module: 'ui' });
+      });
     });
 
     uiPerfLogInterval = setInterval(() => {
