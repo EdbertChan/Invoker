@@ -1043,8 +1043,12 @@ export class TaskRunner {
   }
 
   /** @internal */ async createMergeWorktree(ref: string, label: string, repoUrl?: string): Promise<string> {
-    const clonePath = resolve(homedir(), '.invoker', 'merge-clones', `${label}-${Date.now()}`);
-    mkdirSync(resolve(homedir(), '.invoker', 'merge-clones'), { recursive: true });
+    const mergeCloneRoot = resolve(homedir(), '.invoker', 'merge-clones');
+    const safeLabel = label.replace(/[^a-zA-Z0-9._-]/g, '-') || 'merge';
+    mkdirSync(mergeCloneRoot, { recursive: true });
+    // Use an atomically unique directory so same-label callers cannot collide in
+    // the same millisecond.
+    const clonePath = mkdtempSync(resolve(mergeCloneRoot, `${safeLabel}-`));
 
     // Determine clone source: prefer pool mirror (has latest remote refs), fall back to host repo
     let cloneSource: string = this.cwd;
