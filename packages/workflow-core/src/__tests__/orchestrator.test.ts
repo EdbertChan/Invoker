@@ -4,7 +4,17 @@ import { rid, sid } from './scoped-test-helpers.js';
 import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
-import type { WorkResponse } from '@invoker/contracts';
+import type { WorkResponse, Logger } from '@invoker/contracts';
+
+// Logger fixture that routes structured log output to console so existing
+// `vi.spyOn(console, …)` assertions continue to observe orchestrator logs.
+const consoleLogger: Logger = {
+  debug: (msg, fields) => (fields ? console.debug(msg, fields) : console.debug(msg)),
+  info: (msg, fields) => (fields ? console.log(msg, fields) : console.log(msg)),
+  warn: (msg, fields) => (fields ? console.warn(msg, fields) : console.warn(msg)),
+  error: (msg, fields) => (fields ? console.error(msg, fields) : console.error(msg)),
+  child: () => consoleLogger,
+};
 
 // ── In-Memory Persistence Mock ──────────────────────────────
 
@@ -197,6 +207,7 @@ describe('Orchestrator', () => {
       persistence,
       messageBus: bus,
       maxConcurrency: 3,
+      logger: consoleLogger,
     });
   });
 
