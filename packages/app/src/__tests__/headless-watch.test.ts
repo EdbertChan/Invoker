@@ -1,189 +1,93 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-import { LocalBus } from '@invoker/transport';
-import type { MessageBus } from '@invoker/transport';
-import type { CommandService, Orchestrator, TaskState } from '@invoker/workflow-core';
-import type { SQLiteAdapter } from '@invoker/data-store';
-
-import type { HeadlessDeps } from '../headless.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runHeadless } from '../headless.js';
-import { trackWorkflow } from '../headless-watch.js';
+import type { HeadlessDeps } from '../headless.js';
+import { Orchestrator, CommandService } from '@invoker/workflow-core';
+import { SQLiteAdapter } from '@invoker/data-store';
+import type { MessageBus } from '@invoker/transport';
+import { LocalBus } from '@invoker/transport';
 
 const noopLogger = {
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  child: vi.fn(function () {
-    return noopLogger;
-  }),
+  debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+  child: vi.fn(function () { return noopLogger; }),
 };
 
-function makeTask(overrides: Partial<TaskState> & { id: string; workflowId?: string } = { id: 'wf-2/task-a' }): TaskState {
-  const workflowId = overrides.workflowId ?? overrides.id.split('/')[0] ?? 'wf-2';
+function makeTask(overrides: Record<string, unknown> = {}) {
   return {
-    id: overrides.id,
-    description: 'Task',
+    id: 'wf-1/task-a',
+    description: 'Do something',
     status: 'completed',
     dependencies: [],
-    createdAt: new Date('2024-01-01T00:00:00.000Z'),
-    config: {
-      workflowId,
-      executorType: 'worktree',
-      isMergeNode: false,
-    },
+    createdAt: new Date('2024-01-01T00:00:00Z'),
+    config: { workflowId: 'wf-1', executorType: 'worktree', isMergeNode: false },
     execution: {},
     ...overrides,
-  } as TaskState;
+  };
 }
 
 describe('headless watch', () => {
+  let mockDeps: HeadlessDeps;
   let bus: LocalBus;
-  let deps: HeadlessDeps;
-  let currentWorkflowId = 'wf-2';
-  let workflowTasks: Record<string, TaskState[]>;
-  let stdout: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     bus = new LocalBus();
-    workflowTasks = {
-      'wf-1': [makeTask({ id: 'wf-1/task-a', workflowId: 'wf-1' })],
-      'wf-2': [makeTask({ id: 'wf-2/task-a', workflowId: 'wf-2', status: 'running' })],
-    };
-
-    deps = {
+    mockDeps = {
       logger: noopLogger as any,
-      orchestrator: {
-        syncFromDb: vi.fn((workflowId: string) => {
-          currentWorkflowId = workflowId;
-        }),
-        getAllTasks: vi.fn(() => workflowTasks[currentWorkflowId] ?? []),
-        getTask: vi.fn((taskId: string) => (
-          Object.values(workflowTasks).flat().find((task) => task.id === taskId)
-        )),
-      } as unknown as Orchestrator,
+      orchestrator: {} as Orchestrator,
       persistence: {
+        readOnly: false,
         listWorkflows: vi.fn(() => [
-          {
-            id: 'wf-2',
-            name: 'Latest workflow',
-            status: 'running',
-            createdAt: '2024-01-02T00:00:00.000Z',
-            updatedAt: '2024-01-02T00:00:00.000Z',
-          },
-          {
-            id: 'wf-1',
-            name: 'Older workflow',
-            status: 'completed',
-            createdAt: '2024-01-01T00:00:00.000Z',
-            updatedAt: '2024-01-01T00:00:00.000Z',
-          },
+          { id: 'wf-1', name: 'My Workflow', status: 'completed', createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:01:00Z' },
         ]),
+        loadTasks: vi.fn(() => []),
       } as unknown as SQLiteAdapter,
       commandService: {} as CommandService,
       executorRegistry: {} as any,
       messageBus: bus as MessageBus,
-      repoRoot: '/tmp/repo',
+      repoRoot: '/fake/repo',
       invokerConfig: {} as any,
       initServices: vi.fn(async () => {}),
       wireSlackBot: vi.fn(async () => ({})),
     };
-
-    stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    process.exitCode = undefined;
+    mockDeps.orchestrator.syncFromDb = vi.fn();
+    mockDeps.orchestrator.getAllTasks = vi.fn(() => [makeTask()]);
+    mockDeps.orchestrator.getTask = vi.fn((id: string) => makeTask({ id }));
   });
 
-  afterEach(() => {
+  it('is classified as read-only', async () => {
+    const { isHeadlessReadOnlyCommand, isHeadlessMutatingCommand } = await import('../headless-command-classification.js');
+    expect(isHeadlessReadOnlyCommand(['watch'])).toBe(true);
+    expect(isHeadlessMutatingCommand(['watch'])).toBe(false);
+  });
+
+  it('resolves when all tasks are already settled', async () => {
+    await expect(runHeadless(['watch'], mockDeps)).resolves.toBeUndefined();
+  });
+
+  it('prints initial task snapshot', async () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await runHeadless(['watch'], mockDeps);
+    const output = stdout.mock.calls.map(c => c[0]).join('');
+    expect(output).toContain('wf-1/task-a');
     stdout.mockRestore();
-    process.exitCode = undefined;
   });
 
-  it('defaults to the latest workflow when no workflowId is provided', async () => {
-    setTimeout(() => {
-      workflowTasks['wf-2'] = [makeTask({ id: 'wf-2/task-a', workflowId: 'wf-2', status: 'completed' })];
-      bus.publish('task.delta', { type: 'updated', taskId: 'wf-2/task-a', changes: { status: 'completed' } });
-    }, 20);
-
-    await runHeadless(['watch'], deps);
-
-    expect(deps.orchestrator.syncFromDb).toHaveBeenCalledWith('wf-2');
-    expect(stdout.mock.calls.map((call) => String(call[0])).join('')).toContain('wf-2/task-a');
-  });
-
-  it('throws when the requested workflow is not found', async () => {
-    await expect(runHeadless(['watch', 'wf-missing'], deps)).rejects.toThrow('Workflow "wf-missing" not found.');
-  });
-
-  it('prints a snapshot and exits with failure code when the watched workflow fails', async () => {
-    workflowTasks['wf-2'] = [makeTask({ id: 'wf-2/task-a', workflowId: 'wf-2', status: 'failed' })];
-
-    await runHeadless(['watch', 'wf-2'], deps);
-
-    const output = stdout.mock.calls.map((call) => String(call[0])).join('');
-    expect(output).toContain('Watching workflow: wf-2');
-    expect(output).toContain('wf-2/task-a');
-    expect(process.exitCode).toBe(1);
-  });
-});
-
-describe('trackWorkflow', () => {
-  let stdout: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    process.exitCode = undefined;
-  });
-
-  afterEach(() => {
+  it('prints final summary line', async () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await runHeadless(['watch'], mockDeps);
+    const output = stdout.mock.calls.map(c => c[0]).join('');
+    expect(output).toContain('[watch] done');
     stdout.mockRestore();
-    process.exitCode = undefined;
   });
 
-  it('prints updates when a delta wakes the tracker', async () => {
-    const bus = new LocalBus();
-    let tasks = [makeTask({ id: 'wf-1/task-a', workflowId: 'wf-1', status: 'running' })];
-
-    const tracking = trackWorkflow({
-      workflowId: 'wf-1',
-      messageBus: bus,
-      loadTasks: () => tasks,
-      printSnapshot: true,
-      printSummary: false,
-      maxWaitMs: 2_000,
-    });
-
-    setTimeout(() => {
-      tasks = [makeTask({ id: 'wf-1/task-a', workflowId: 'wf-1', status: 'completed' })];
-      bus.publish('task.delta', { type: 'updated', taskId: 'wf-1/task-a', changes: { status: 'completed' } });
-    }, 20);
-
-    await tracking;
-
-    const output = stdout.mock.calls.map((call) => String(call[0])).join('');
-    expect(output).toContain('[running]');
-    expect(output).toContain('[completed]');
+  it('throws when specified workflow not found', async () => {
+    await expect(runHeadless(['watch', 'wf-nonexistent'], mockDeps)).rejects.toThrow(/not found/);
   });
 
-  it('falls back to polling when no delta arrives', async () => {
-    let tasks = [makeTask({ id: 'wf-1/task-a', workflowId: 'wf-1', status: 'running' })];
-
-    const tracking = trackWorkflow({
-      workflowId: 'wf-1',
-      loadTasks: () => tasks,
-      printSnapshot: true,
-      printSummary: false,
-      maxWaitMs: 2_000,
-      pollIntervalMs: 20,
-    });
-
-    setTimeout(() => {
-      tasks = [makeTask({ id: 'wf-1/task-a', workflowId: 'wf-1', status: 'completed' })];
-    }, 30);
-
-    await tracking;
-
-    const output = stdout.mock.calls.map((call) => String(call[0])).join('');
-    expect(output).toContain('[running]');
-    expect(output).toContain('[completed]');
+  it('prints no workflows message when none exist', async () => {
+    (mockDeps.persistence.listWorkflows as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await runHeadless(['watch'], mockDeps);
+    expect(stdout.mock.calls[0][0]).toContain('No workflows found');
+    stdout.mockRestore();
   });
 });

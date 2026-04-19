@@ -808,11 +808,11 @@ async function trackHeadlessWorkflow(
     syncFromDb?: boolean;
     setExitCodeOnFailure?: boolean;
   } = {},
-): Promise<void> {
+): Promise<Awaited<ReturnType<typeof trackWorkflow>>> {
   if (options.waitForApproval) {
     process.stdout.write('[headless] Waiting for PR approval (--wait-for-approval)...\n');
   }
-  await trackWorkflow({
+  return await trackWorkflow({
     workflowId,
     messageBus: deps.messageBus,
     waitForApproval: options.waitForApproval,
@@ -845,7 +845,7 @@ async function headlessWatch(workflowId: string | undefined, deps: HeadlessDeps)
   }
 
   process.stdout.write(`${BOLD}Watching workflow: ${workflow.id}${RESET}\n\n`);
-  await trackHeadlessWorkflow(workflow.id, deps, {
+  const result = await trackHeadlessWorkflow(workflow.id, deps, {
     printSnapshot: true,
     printSummary: true,
     printTaskOutput: false,
@@ -853,6 +853,7 @@ async function headlessWatch(workflowId: string | undefined, deps: HeadlessDeps)
     syncFromDb: true,
     setExitCodeOnFailure: true,
   });
+  process.stdout.write(`\n[watch] done — ${result.status.completed} completed, ${result.status.failed} failed\n`);
 }
 
 // ── Headless Commands ────────────────────────────────────────
