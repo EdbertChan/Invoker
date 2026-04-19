@@ -31,6 +31,7 @@ import { backupPlan } from './plan-backup.js';
 import { startApiServer, type ApiServerDeps } from './api-server.js';
 import {
   approveTask,
+  editTaskCommand as sharedEditTaskCommand,
   rebaseAndRetry,
   resolveConflictAction,
   recreateWorkflow as sharedRecreateWorkflow,
@@ -1403,14 +1404,15 @@ async function headlessEdit(taskId: string, newCommand: string, deps: HeadlessDe
   const restored = restoreWorkflowForTask(taskId, deps);
   taskId = restored.resolvedTaskId;
 
-  const envelope = makeEnvelope('edit-task-command', 'headless', 'task', { taskId, newCommand });
-  const result = await deps.commandService.editTaskCommand(envelope);
-  if (!result.ok) throw new Error(result.error.message);
+  const taskExecutor = createHeadlessExecutor(deps);
+  const result = await sharedEditTaskCommand(taskId, newCommand, {
+    orchestrator: deps.orchestrator,
+    taskExecutor,
+  });
   process.stdout.write(`Edited task "${taskId}" command → "${newCommand}"\n`);
 
-  const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
-  void result.data;
+  void result;
   if (deps.noTrack) {
     process.stdout.write('[headless] --no-track enabled: set command accepted; exiting without tracking.\n');
     autoFix.unsubscribe();
