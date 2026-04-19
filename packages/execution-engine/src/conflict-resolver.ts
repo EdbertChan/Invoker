@@ -18,6 +18,7 @@ import type { ExecutionAgent } from './agent.js';
 import type { SessionDriver } from './session-driver.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { createSshRemoteScriptError } from './ssh-git-exec.js';
+import { normalizeCommandForFixPrompt } from './command-normalization.js';
 
 // ── Host interface ───────────────────────────────────────
 
@@ -330,7 +331,11 @@ fi
  * Build the agent fix prompt based on task type.
  */
 export function buildFixPrompt(
-  task: { description: string; config: { command?: string; isMergeNode?: boolean; prompt?: string }; execution: { error?: string } },
+  task: {
+    description: string;
+    config: { command?: string; executorType?: string; isMergeNode?: boolean; prompt?: string };
+    execution: { error?: string };
+  },
   taskOutput: string,
 ): string {
   const errorLines = taskOutput.split('\n').slice(-200).join('\n');
@@ -350,11 +355,12 @@ export function buildFixPrompt(
   }
 
   if (task.config.command) {
+    const promptCommand = normalizeCommandForFixPrompt(task.config.command, task.config.executorType);
     return [
       `A build/test command failed. Fix the code so the command succeeds.`,
       ``,
       `Task: ${task.description}`,
-      `Command: ${task.config.command}`,
+      `Command: ${promptCommand}`,
       ``,
       `Error output (last 200 lines):`,
       errorLines,

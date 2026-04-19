@@ -23,6 +23,8 @@ import {
   parseRecordAndPushOutput,
   createSshRemoteScriptError,
 } from './ssh-git-exec.js';
+import { stripAbsoluteCdPrefix } from './command-normalization.js';
+export { stripAbsoluteCdPrefix } from './command-normalization.js';
 
 export interface SshExecutorConfig {
   host: string;
@@ -208,6 +210,11 @@ export class SshExecutor extends BaseExecutor<SshEntry> {
             `Add a top-level "repoUrl" to your plan YAML (e.g. repoUrl: git@github.com:user/repo.git).`,
           );
         }
+        // Strip absolute cd prefixes from command payloads — managed mode already
+        // handles the working directory via its own `cd "$WT"`.  Absolute paths
+        // (e.g. `cd /home/user/repo && pnpm check:all`) refer to the original host
+        // and won't exist inside the managed worktree.
+        payload = stripAbsoluteCdPrefix(payload);
         return await this.startManagedWorkspace(request, handle, repoUrl, payload, agentSessionId);
       } else {
         return await this.startBYOWorkspace(request, handle, payload, agentSessionId);
