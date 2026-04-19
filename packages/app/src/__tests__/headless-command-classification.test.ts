@@ -8,6 +8,7 @@ describe('headless-command-classification', () => {
     expect(isHeadlessReadOnlyCommand(['list'])).toBe(true);
     expect(isHeadlessReadOnlyCommand(['session'])).toBe(true);
     expect(isHeadlessReadOnlyCommand(['open-terminal'])).toBe(true);
+    expect(isHeadlessReadOnlyCommand(['watch'])).toBe(true);
     expect(isHeadlessReadOnlyCommand(['run'])).toBe(false);
   });
 
@@ -16,6 +17,7 @@ describe('headless-command-classification', () => {
     expect(isHeadlessMutatingCommand(['query'])).toBe(false);
     expect(isHeadlessMutatingCommand(['open-terminal'])).toBe(false);
     expect(isHeadlessMutatingCommand(['slack'])).toBe(false);
+    expect(isHeadlessMutatingCommand(['watch'])).toBe(false);
 
     expect(isHeadlessMutatingCommand(['run'])).toBe(true);
     expect(isHeadlessMutatingCommand(['migrate-compat'])).toBe(true);
