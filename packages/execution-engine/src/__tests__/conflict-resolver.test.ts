@@ -40,6 +40,37 @@ describe('buildFixPrompt', () => {
     expect(prompt).not.toContain('merge operation');
   });
 
+  it('normalizes stale absolute cd prefixes for ssh command prompts', () => {
+    const task = {
+      description: 'Run full checks',
+      config: {
+        command: 'cd /home/edbert-chan/Invoker-Personal/Invoker && pnpm check:all',
+        executorType: 'ssh',
+      },
+      execution: { error: 'Command failed' },
+    };
+
+    const prompt = buildFixPrompt(task, 'bash: cd: no such file or directory');
+
+    expect(prompt).toContain('Command: pnpm check:all');
+    expect(prompt).not.toContain('/home/edbert-chan/Invoker-Personal/Invoker');
+  });
+
+  it('preserves absolute cd prefixes for non-ssh command prompts', () => {
+    const task = {
+      description: 'Run local checks',
+      config: {
+        command: 'cd /tmp/project && pnpm check:all',
+        executorType: 'worktree',
+      },
+      execution: { error: 'Command failed' },
+    };
+
+    const prompt = buildFixPrompt(task, 'bash: cd: no such file or directory');
+
+    expect(prompt).toContain('Command: cd /tmp/project && pnpm check:all');
+  });
+
   it('generates merge-focused prompt for merge gate nodes', () => {
     const task = {
       description: 'Merge gate for workflow',

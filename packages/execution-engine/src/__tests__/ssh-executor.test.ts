@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
-import { SshExecutor } from '../ssh-executor.js';
+import { SshExecutor, stripAbsoluteCdPrefix } from '../ssh-executor.js';
 import type { WorkRequest } from '@invoker/contracts';
 import type { PersistedTaskMeta } from '../executor.js';
 import { createSshRemoteScriptError } from '../ssh-git-exec.js';
@@ -788,5 +788,42 @@ describe('SshExecutor entry lifecycle', () => {
     expect(spec.command).toBe('ssh');
     expect(spec.args).toBeTruthy();
     expect(spec.args!.length).toBeGreaterThan(0);
+  });
+});
+
+describe('stripAbsoluteCdPrefix', () => {
+  it('strips absolute cd prefix with &&', () => {
+    expect(stripAbsoluteCdPrefix('cd /home/edbert-chan/Invoker-Personal/Invoker && pnpm check:all'))
+      .toBe('pnpm check:all');
+  });
+
+  it('strips absolute cd prefix with ;', () => {
+    expect(stripAbsoluteCdPrefix('cd /home/user/repo ; pnpm test'))
+      .toBe('pnpm test');
+  });
+
+  it('strips single-quoted absolute cd prefix', () => {
+    expect(stripAbsoluteCdPrefix("cd '/home/user/my repo' && pnpm build"))
+      .toBe('pnpm build');
+  });
+
+  it('strips double-quoted absolute cd prefix', () => {
+    expect(stripAbsoluteCdPrefix('cd "/home/user/my repo" && pnpm build'))
+      .toBe('pnpm build');
+  });
+
+  it('preserves relative cd prefix', () => {
+    expect(stripAbsoluteCdPrefix('cd packages/app && pnpm test'))
+      .toBe('cd packages/app && pnpm test');
+  });
+
+  it('preserves command without cd prefix', () => {
+    expect(stripAbsoluteCdPrefix('pnpm check:all'))
+      .toBe('pnpm check:all');
+  });
+
+  it('preserves bare cd with no continuation', () => {
+    expect(stripAbsoluteCdPrefix('cd /home/user/repo'))
+      .toBe('cd /home/user/repo');
   });
 });
