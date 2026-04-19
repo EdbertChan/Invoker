@@ -1077,6 +1077,7 @@ if (isHeadless) {
           reason: dispatchDecision.reason,
           status: dispatchDecision.status,
           autoFixAttempts: dispatchDecision.autoFixAttempts,
+          dispositionReason: dispatchDecision.dispositionReason,
         });
         return [];
       }
@@ -1130,6 +1131,7 @@ if (isHeadless) {
         reason: enqueueDecision.reason,
         status: enqueueDecision.status,
         existingIntentIds: enqueueDecision.existingIntentIds,
+        dispositionReason: enqueueDecision.dispositionReason,
       });
       return;
     }
