@@ -27,6 +27,10 @@ import {
 } from './ssh-git-exec.js';
 
 const DEFAULT_SSH_REMOTE_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
+const SSH_BRANCH_OWNER_CONFLICT_PATTERNS = [
+  /is already used by worktree at '([^']+)'/i,
+  /cannot force update the branch [\s\S]*?used by worktree at '([^']+)'/i,
+];
 
 function getSshRemoteCaptureTimeoutMs(): number {
   const raw = process.env.INVOKER_SSH_REMOTE_CAPTURE_TIMEOUT_MS?.trim();
@@ -98,6 +102,56 @@ export class SshExecutor extends BaseExecutor<SshEntry> {
     this.managedWorkspaces = config.managedWorkspaces ?? false;
     this.remoteInvokerHome = config.remoteInvokerHome ?? '~/.invoker';
     this.provisionCommand = config.provisionCommand ?? DEFAULT_WORKTREE_PROVISION_COMMAND;
+  }
+
+  private extractManagedOwnerPathFromSetupError(
+    err: unknown,
+    managedPrefix: string,
+  ): string | undefined {
+    const text = err instanceof Error ? err.message : String(err);
+    for (const pattern of SSH_BRANCH_OWNER_CONFLICT_PATTERNS) {
+      const match = text.match(pattern);
+      const ownerPath = match?.[1]?.trim();
+      if (!ownerPath) continue;
+      const normalizedOwnerPath = normalize(ownerPath);
+      if (
+        normalizedOwnerPath === managedPrefix ||
+        normalizedOwnerPath.startsWith(`${managedPrefix}/`)
+      ) {
+        return normalizedOwnerPath;
+      }
+    }
+    return undefined;
+  }
+
+  private async setupTaskBranchWithStaleOwnerFallback(
+    remoteClone: string,
+    request: WorkRequest,
+    handle: ExecutorHandle,
+    opts: {
+      branchName: string;
+      base: string;
+      worktreeDir: string;
+    },
+    managedPrefix: string,
+    canonicalRemoteWt: string,
+  ): Promise<void> {
+    try {
+      await this.setupTaskBranch(remoteClone, request, handle, opts);
+      return;
+    } catch (err) {
+      const ownerPath = this.extractManagedOwnerPathFromSetupError(err, managedPrefix);
+      if (!ownerPath) {
+        throw err;
+      }
+
+      const cleanupScript = buildWorktreeCleanupScript({
+        remoteClone,
+        worktreePaths: [canonicalRemoteWt, ownerPath],
+      });
+      await this.execRemoteCapture(cleanupScript, 'cleanup_worktree');
+      await this.setupTaskBranch(remoteClone, request, handle, opts);
+    }
   }
 
 
@@ -491,11 +545,11 @@ git -C "$WT" merge-base --is-ancestor "$BASE" HEAD
       await this.mergeRequestUpstreamBranches(request, remoteWt, resolvedBaseRef);
     } else {
       try {
-        await this.setupTaskBranch(remoteClone, request, handle, {
+        await this.setupTaskBranchWithStaleOwnerFallback(remoteClone, request, handle, {
           branchName: experimentBranch,
           base: resolvedBaseRef,
           worktreeDir: remoteWt,
-        });
+        }, managedPrefix, canonicalRemoteWt);
       } catch (err) {
         const wrapped = err instanceof Error ? err : new Error(String(err));
         if (!(wrapped as any).phase) (wrapped as any).phase = 'setup_branch';
