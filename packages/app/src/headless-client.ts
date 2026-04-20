@@ -61,6 +61,7 @@ const POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS = 90_000;
 const POST_BOOTSTRAP_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 8_000;
+const POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS = 3;
 
 async function delegateMutation(
   args: string[],
@@ -268,29 +269,35 @@ export async function runHeadlessClientCommand(
   if (deps.refreshMessageBus) {
     messageBus = await deps.refreshMessageBus();
   }
-  try {
-    await deps.ensureStandaloneOwner(messageBus);
-  } catch (err) {
-    if (!(err instanceof Error) || !err.message.includes('Timed out waiting for a shared mutation owner')) {
-      throw err;
+  for (let attempt = 0; attempt < POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS; attempt += 1) {
+    try {
+      await deps.ensureStandaloneOwner(messageBus);
+    } catch (err) {
+      if (!(err instanceof Error) || !err.message.includes('Timed out waiting for a shared mutation owner')) {
+        throw err;
+      }
+      if (!deps.refreshMessageBus) {
+        throw err;
+      }
+      messageBus = await deps.refreshMessageBus();
+      await deps.ensureStandaloneOwner(messageBus);
+    }
+    if (deps.refreshMessageBus) {
+      messageBus = await deps.refreshMessageBus();
+    }
+    if (await delegateAfterBootstrap(
+      args,
+      deps,
+      messageBus,
+      waitForApproval,
+      noTrack,
+    )) {
+      return resolvedExitCode();
     }
     if (!deps.refreshMessageBus) {
-      throw err;
+      break;
     }
     messageBus = await deps.refreshMessageBus();
-    await deps.ensureStandaloneOwner(messageBus);
-  }
-  if (deps.refreshMessageBus) {
-    messageBus = await deps.refreshMessageBus();
-  }
-  if (await delegateAfterBootstrap(
-    args,
-    deps,
-    messageBus,
-    waitForApproval,
-    noTrack,
-  )) {
-    return resolvedExitCode();
   }
   process.stderr.write(
     `${RED}Error:${RESET} Mutation command "${args[0] ?? ''}" could not reach a shared owner after bootstrap.\n`,
