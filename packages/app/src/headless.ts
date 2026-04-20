@@ -927,7 +927,8 @@ async function headlessResume(
 
 async function headlessApprove(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing taskId.');
-  const restored = restoreWorkflowForTask(taskId, deps);
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'approve');
+  if (!restored) return;
   taskId = restored.resolvedTaskId;
   const te = createHeadlessExecutor(deps);
   wireHeadlessApproveHook(deps, te);
@@ -960,7 +961,9 @@ async function headlessApprove(taskId: string, deps: HeadlessDeps): Promise<void
 
 async function headlessReject(taskId: string, deps: Pick<HeadlessDeps, 'commandService' | 'orchestrator' | 'persistence'>, reason?: string): Promise<void> {
   if (!taskId) throw new Error('Missing taskId.');
-  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'reject');
+  if (!restored) return;
+  taskId = restored.resolvedTaskId;
   const envelope = makeEnvelope('reject', 'headless', 'task', { taskId, reason });
   const result = await deps.commandService.reject(envelope);
   if (!result.ok) throw new Error(result.error.message);
@@ -969,7 +972,9 @@ async function headlessReject(taskId: string, deps: Pick<HeadlessDeps, 'commandS
 
 async function headlessInput(taskId: string, text: string, deps: Pick<HeadlessDeps, 'commandService' | 'orchestrator' | 'persistence'>): Promise<void> {
   if (!taskId || !text) throw new Error('Missing arguments. Usage: --headless input <taskId> <text>');
-  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'input');
+  if (!restored) return;
+  taskId = restored.resolvedTaskId;
   const envelope = makeEnvelope('provide-input', 'headless', 'task', { taskId, input: text });
   const result = await deps.commandService.provideInput(envelope);
   if (!result.ok) throw new Error(result.error.message);
@@ -978,7 +983,9 @@ async function headlessInput(taskId: string, text: string, deps: Pick<HeadlessDe
 
 async function headlessSelect(taskId: string, experimentId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId || !experimentId) throw new Error('Missing arguments. Usage: --headless select <taskId> <expId>');
-  const { workflowId, resolvedTaskId } = restoreWorkflowForTask(taskId, deps);
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'select');
+  if (!restored) return;
+  const { workflowId, resolvedTaskId } = restored;
   const envelope = makeEnvelope('select-experiment', 'headless', 'task', { taskId: resolvedTaskId, experimentId });
   const result = await deps.commandService.selectExperiment(envelope);
   if (!result.ok) throw new Error(result.error.message);
@@ -994,7 +1001,9 @@ async function headlessSelect(taskId: string, experimentId: string, deps: Headle
 
 async function headlessRestart(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing arguments. Usage: --headless retry-task <taskId>');
-  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'retry-task');
+  if (!restored) return;
+  taskId = restored.resolvedTaskId;
   await preemptTaskSubgraph(taskId, deps);
 
   const envelope = makeEnvelope('restart-task', 'headless', 'task', { taskId });
@@ -1023,7 +1032,9 @@ async function headlessRestart(taskId: string, deps: HeadlessDeps): Promise<void
 
 async function headlessFix(taskId: string, deps: HeadlessDeps, agentArg?: string): Promise<void> {
   if (!taskId) throw new Error('Missing taskId. Usage: --headless fix <taskId> [claude|codex]');
-  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'fix');
+  if (!restored) return;
+  taskId = restored.resolvedTaskId;
 
   const te = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, te);
@@ -1077,7 +1088,9 @@ async function headlessFix(taskId: string, deps: HeadlessDeps, agentArg?: string
 
 async function headlessResolveConflict(taskId: string, deps: HeadlessDeps, agentArg?: string): Promise<void> {
   if (!taskId) throw new Error('Missing taskId. Usage: --headless resolve-conflict <taskId> [claude|codex]');
-  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'resolve-conflict');
+  if (!restored) return;
+  taskId = restored.resolvedTaskId;
 
   const te = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, te);
@@ -1097,7 +1110,9 @@ async function headlessResolveConflict(taskId: string, deps: HeadlessDeps, agent
 
 async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing arguments. Usage: --headless rebase-and-retry <taskId>');
-  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'rebase');
+  if (!restored) return;
+  taskId = restored.resolvedTaskId;
   const workflowId = deps.orchestrator.getTask(taskId)?.config.workflowId;
   if (!workflowId) throw new Error(`Task "${taskId}" has no workflow`);
   await preemptWorkflowBeforeMutation(workflowId, {
@@ -1181,7 +1196,9 @@ async function headlessRecreateTask(taskId: string, deps: HeadlessDeps): Promise
   if (!taskId) {
     throw new Error('Missing arguments. Usage: --headless recreate-task <taskId>');
   }
-  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'recreate-task');
+  if (!restored) return;
+  taskId = restored.resolvedTaskId;
   await preemptTaskSubgraph(taskId, deps);
 
   const started = sharedRecreateTask(taskId, { persistence: deps.persistence, orchestrator: deps.orchestrator });
@@ -1364,7 +1381,8 @@ async function preemptWorkflowExecution(workflowId: string, deps: HeadlessDeps):
 
 async function headlessEdit(taskId: string, newCommand: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId || !newCommand) throw new Error('Missing arguments. Usage: --headless edit <taskId> <newCommand>');
-  const restored = restoreWorkflowForTask(taskId, deps);
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'set command');
+  if (!restored) return;
   taskId = restored.resolvedTaskId;
   const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
@@ -1393,7 +1411,8 @@ async function headlessEdit(taskId: string, newCommand: string, deps: HeadlessDe
 
 async function headlessEditExecutor(taskId: string, executorType: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId || !executorType) throw new Error('Missing arguments. Usage: --headless edit-executor <taskId> <executorType>');
-  const restored = restoreWorkflowForTask(taskId, deps);
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'set executor');
+  if (!restored) return;
   taskId = restored.resolvedTaskId;
   const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
@@ -1422,7 +1441,8 @@ async function headlessEditExecutor(taskId: string, executorType: string, deps: 
 
 async function headlessEditAgent(taskId: string, agentName: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId || !agentName) throw new Error('Missing arguments. Usage: --headless edit-agent <taskId> <claude|codex>');
-  const restored = restoreWorkflowForTask(taskId, deps);
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'set agent');
+  if (!restored) return;
   taskId = restored.resolvedTaskId;
   const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
@@ -1553,7 +1573,9 @@ async function headlessSession(taskId: string | undefined, deps: Pick<HeadlessDe
 
 async function headlessCancel(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing taskId. Usage: --headless cancel <taskId>');
-  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'cancel');
+  if (!restored) return;
+  taskId = restored.resolvedTaskId;
 
   if (deps.cancelTask) {
     const result = await deps.cancelTask(taskId);
@@ -1699,7 +1721,9 @@ async function headlessSetGatePolicy(args: string[], deps: HeadlessDeps): Promis
       'Missing arguments. Usage: --headless set gate-policy <taskId> <workflowId> [depTaskId] <completed|review_ready>',
     );
   }
-  const taskId = restoreWorkflowForTask(taskIdRaw, deps).resolvedTaskId;
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskIdRaw, deps, 'set gate-policy');
+  if (!restored) return;
+  const taskId = restored.resolvedTaskId;
   const hasDepTaskId = arg4 !== undefined;
   const depTaskId = hasDepTaskId ? arg3 : '__merge__';
   const gatePolicy = (hasDepTaskId ? arg4 : arg3) as 'completed' | 'review_ready';
@@ -1774,6 +1798,17 @@ function restoreWorkflowForTask(
   taskId: string,
   deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence'>,
 ): { workflowId: string; resolvedTaskId: string } {
+  const restored = tryRestoreWorkflowForTask(taskId, deps);
+  if (restored) {
+    return restored;
+  }
+  throw new Error(`Task "${taskId}" not found in any workflow`);
+}
+
+function tryRestoreWorkflowForTask(
+  taskId: string,
+  deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence'>,
+): { workflowId: string; resolvedTaskId: string } | null {
   const { orchestrator, persistence } = deps;
   const workflows = persistence.listWorkflows();
   for (const wf of workflows) {
@@ -1784,6 +1819,22 @@ function restoreWorkflowForTask(
       orchestrator.syncFromDb(wf.id);
       return { workflowId: wf.id, resolvedTaskId: match.id };
     }
+  }
+  return null;
+}
+
+function restoreWorkflowForTaskUnlessDeleteAllWon(
+  taskId: string,
+  deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence'>,
+  commandLabel: string,
+): { workflowId: string; resolvedTaskId: string } | null {
+  const restored = tryRestoreWorkflowForTask(taskId, deps);
+  if (restored) {
+    return restored;
+  }
+  if (deps.persistence.listWorkflows().length === 0) {
+    process.stdout.write(`[headless] ${commandLabel} skipped: task "${taskId}" was removed by delete-all.\n`);
+    return null;
   }
   throw new Error(`Task "${taskId}" not found in any workflow`);
 }
