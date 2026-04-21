@@ -1459,7 +1459,9 @@ describe('SQLiteAdapter', () => {
     it('persists file-backed writes before close so restart recovery can read them', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-durable-'));
       const dbPath = join(dir, 'invoker.db');
+      const previousFlushDebounceMs = process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS;
       try {
+        process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS = '0';
         const writer = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
         writer.saveWorkflow(testWorkflow);
         writer.saveTask(testWorkflow.id, makeTask('t-durable-before-close'));
@@ -1470,6 +1472,11 @@ describe('SQLiteAdapter', () => {
         reader.close();
         writer.close();
       } finally {
+        if (previousFlushDebounceMs === undefined) {
+          delete process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS;
+        } else {
+          process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS = previousFlushDebounceMs;
+        }
         rmSync(dir, { recursive: true, force: true });
       }
     });
@@ -2091,6 +2098,50 @@ describe('SQLiteAdapter', () => {
       expect(adapter.loadTasks('wf-2')).toEqual([]);
       expect(adapter.getEvents('t1')).toEqual([]);
       expect(adapter.getTaskOutput('t1')).toBe('');
+    });
+  });
+
+  describe('deleteWorkflow transactional atomicity', () => {
+    it('rolls back all deletes if one fails mid-transaction', () => {
+      adapter.saveWorkflow({
+        ...testWorkflow,
+        id: 'wf-1',
+        name: 'First',
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+      });
+      adapter.saveWorkflow({
+        ...testWorkflow,
+        id: 'wf-2',
+        name: 'Second',
+        createdAt: '2024-01-02T00:00:00Z',
+        updatedAt: '2024-01-02T00:00:00Z',
+      });
+      adapter.saveTask('wf-1', makeTask('t1'));
+      adapter.saveTask('wf-2', makeTask('t2'));
+      adapter.logEvent('t1', 'started');
+      adapter.appendTaskOutput('t1', 'output');
+
+      const origRun = (adapter as any).db.run.bind((adapter as any).db);
+
+      (adapter as any).db.run = function(sql: string, ...args: any[]) {
+        if (sql === 'DELETE FROM tasks WHERE workflow_id = ?' && args[0]?.[0] === 'wf-1') {
+          throw new Error('simulated disk failure');
+        }
+        return origRun(sql, ...args);
+      };
+
+      expect(() => adapter.deleteWorkflow('wf-1')).toThrow('simulated disk failure');
+
+      (adapter as any).db.run = origRun;
+
+      expect(adapter.loadWorkflow('wf-1')).toBeDefined();
+      expect(adapter.loadTasks('wf-1')).toHaveLength(1);
+      expect(adapter.getEvents('t1')).toHaveLength(1);
+      expect(adapter.getTaskOutput('t1')).toBe('output');
+
+      expect(adapter.loadWorkflow('wf-2')).toBeDefined();
+      expect(adapter.loadTasks('wf-2')).toHaveLength(1);
     });
   });
 

@@ -185,38 +185,49 @@ describe('owner boundary enforcement', () => {
     });
 
     it('reproduces last-write-wins when two writable adapters bypass owner boundary', async () => {
+      const previousFlushDebounceMs = process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS;
       // This is the historical failure mode that justified lock/CAS work:
       // two writable sql.js handles each hold independent in-memory state and
       // whichever write reaches disk last can overwrite the other process' state.
-      const writerA = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
-      const writerB = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+      try {
+        process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS = '0';
 
-      writerA.saveWorkflow({
-        id: 'wf-a',
-        name: 'Workflow A',
-        status: 'running',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-      writerB.saveWorkflow({
-        id: 'wf-b',
-        name: 'Workflow B',
-        status: 'running',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
+        const writerA = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        const writerB = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
 
-      // Immediate file-backed flushes make the second write visible immediately.
-      // The point of the regression is that bypassing the owner boundary still
-      // produces non-serializable last-write-wins behavior.
-      writerB.close();
-      writerA.close();
+        writerA.saveWorkflow({
+          id: 'wf-a',
+          name: 'Workflow A',
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        writerB.saveWorkflow({
+          id: 'wf-b',
+          name: 'Workflow B',
+          status: 'running',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
 
-      const reader = await SQLiteAdapter.create(dbPath, { readOnly: true });
-      const workflows = reader.listWorkflows();
-      reader.close();
+        // Immediate file-backed flushes make the second write visible immediately.
+        // The point of the regression is that bypassing the owner boundary still
+        // produces non-serializable last-write-wins behavior.
+        writerB.close();
+        writerA.close();
 
-      expect(workflows.map((w) => w.id).sort()).toEqual(['wf-b']);
+        const reader = await SQLiteAdapter.create(dbPath, { readOnly: true });
+        const workflows = reader.listWorkflows();
+        reader.close();
+
+        expect(workflows.map((w) => w.id).sort()).toEqual(['wf-b']);
+      } finally {
+        if (previousFlushDebounceMs === undefined) {
+          delete process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS;
+        } else {
+          process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS = previousFlushDebounceMs;
+        }
+      }
     });
   });
 
