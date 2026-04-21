@@ -77,6 +77,19 @@ Omit or use `TBD` under `Files:` when scope is unknown; revise tasks as the plan
 
 ---
 
+## 7. Policy matrix / architecture document
+
+When the source is a policy or architecture document with a decision table, the planning flow must preserve row-level coverage instead of only extracting file paths and symbol names.
+
+**Pattern**:
+- Extract `coverageItems` for decision rows, exception rules, lifecycle commands, and invariants.
+- Author one or more workflows that collectively cover every required item.
+- Fail the planning pipeline if the source is classified as `policy_matrix` but coverage extraction is empty or the generated verify scaffold collapses to `verify-noop`.
+
+**Reference fixture**: `fixtures/policy/task-invalidation-chart.md`
+
+---
+
 ## Summary
 
 **Positive patterns**:

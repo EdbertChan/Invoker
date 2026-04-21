@@ -21,6 +21,8 @@ Minimal controller skill. Keep policy short here; use deterministic scripts and 
 
 Grep-only checks are Phase 1a only; behavioral claims require executed Phase 1b evidence.
 
+**Policy-matrix documents:** When the source is an architecture or policy document with a decision table, exception rules, or cross-cutting invariants, you must preserve row-level coverage before authoring workflows. Do not stop at files/functions/packages; every required policy row must map to a workflow step or an explicit waiver.
+
 **Delegated task hints (best effort):** When authoring tasks, consider adding `Files:`, `Change types:`, and `Acceptance criteria:` blocks in each task `description` to help handoff to another agent—lists reflect what you know **at planning time** and can be updated (`TBD`, follow-on tasks) as scope grows. **Not** required for `skill-doctor` to pass. See `references/task-patterns.md` § *Delegated execution hints*.
 
 **Bugfix repro:** For bug/regression plans, a shared `bash scripts/repro-<slug>.sh` (or the same `command:` before and after) is **strongly recommended**; **`skill-doctor` does not require it.** If the fix invalidates the original repro, use another explicit verification task. See `references/task-patterns.md` § *Bugfix repro*.
@@ -49,6 +51,7 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 - `--help` — show usage information
 
 This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
+For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`.
 
 ### Fallback commands (for debugging individual checks)
 

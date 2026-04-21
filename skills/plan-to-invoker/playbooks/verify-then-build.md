@@ -4,6 +4,8 @@
 
 Plan references specific files, functions, or assumes tests pass.
 
+Also use this playbook when the source is an architecture or policy document with a decision table, exception rules, or cross-cutting invariants that must be preserved in workflow decomposition.
+
 ## When to skip
 
 - User says "just submit" or "skip verification"
@@ -22,7 +24,8 @@ Fast checks: paths exist, `rg`/`grep` for patterns, read source. **Not sufficien
 bash skills/plan-to-invoker/scripts/extract-assumptions.sh <plan-file>
 ```
 
-Output: JSON to stdout with `{files, functions, tests, packages, patterns}`
+Output: JSON to stdout with `{files, functions, tests, packages, patterns}`.
+For policy-matrix sources, extraction must also produce `{sourceKind, sourceFile, coverageItems}` so decision rows, exception rules, lifecycle commands, and invariants are represented explicitly.
 
 #### 2. Generate or hand-write static verification tasks
 
@@ -33,6 +36,7 @@ bash skills/plan-to-invoker/scripts/generate-verify-plan.sh "<plan-name>" < assu
 ```
 
 Hand-written YAML is fine. Tasks are `command` with `test -f`, `rg`, etc. Plan: `onFinish: none`, `mergeMode: manual`.
+For policy-matrix sources, the generated verify scaffold must not degrade to `verify-noop`; it should include coverage verification tasks derived from `coverageItems`.
 
 ### Phase 1b — Runtime verification (three lanes)
 

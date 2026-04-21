@@ -203,6 +203,14 @@ if [[ "$SKIP_ASSUMPTIONS" == "false" && -f "$ASSUMPTIONS_FILE" ]]; then
     bash -c "cat '$ASSUMPTIONS_FILE' | bash '$SCRIPT_DIR/generate-verify-plan.sh' '$PLAN_NAME' > '$VERIFY_PLAN_FILE' && cat '$VERIFY_PLAN_FILE'"
 fi
 
+# Check 2a: policy coverage must not degrade to empty coverage or verify-noop
+if [[ "$SKIP_ASSUMPTIONS" == "false" && -f "$ASSUMPTIONS_FILE" ]]; then
+  run_check \
+    "check-policy-coverage" \
+    "Validate policy-matrix coverage extraction and verify-plan projection" \
+    bash "$SCRIPT_DIR/check-policy-coverage.sh" "$ASSUMPTIONS_FILE" "$VERIFY_PLAN_FILE"
+fi
+
 # Check 3: YAML plan validation (if not skipped)
 if [[ "$SKIP_VALIDATION" == "false" ]]; then
   run_check \
