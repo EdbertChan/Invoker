@@ -45,21 +45,12 @@ export function delegationTimeoutMs(args: string[]): number {
   const isWorkflowId = /^wf-[^/]+$/.test(target);
 
   if (
-    command === 'rebase' ||
-    command === 'rebase-and-retry' ||
-    command === 'recreate' ||
-    command === 'retry' ||
-    command === 'retry-task' ||
-    command === 'set' ||
-    command === 'fix' ||
-    command === 'resolve-conflict'
+    isWorkflowId &&
+    (command === 'rebase' || command === 'rebase-and-retry' || command === 'restart')
   ) {
-    return 900_000;
+    return 60_000;
   }
-  if (isWorkflowId) {
-    return 900_000;
-  }
-  return 15_000;
+  return 5_000;
 }
 
 export async function tryDelegateExec(
