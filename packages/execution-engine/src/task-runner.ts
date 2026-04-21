@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 import { scopePlanTaskId } from '@invoker/workflow-core';
 import type { Orchestrator, TaskState, ExperimentVariant, ExecutorType } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import type { WorkRequest, WorkResponse, ActionType } from '@invoker/contracts';
+import type { WorkRequest, WorkResponse, ActionType, Logger } from '@invoker/contracts';
 import type { Executor, ExecutorHandle } from './executor.js';
 import { BaseExecutor } from './base-executor.js';
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
@@ -74,6 +74,14 @@ function getExecutorStartTimeoutMs(): number {
   return parsed;
 }
 
+const NO_OP_LOGGER: Logger = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  child: () => NO_OP_LOGGER,
+};
+
 // ── Callbacks ─────────────────────────────────────────────
 
 export interface TaskRunnerCallbacks {
@@ -120,6 +128,8 @@ export interface TaskRunnerConfig {
   };
   /** Shared execution agents (Claude, Codex). Passed into lazily constructed executors. */
   executionAgentRegistry?: AgentRegistry;
+  /** Structured logger. Defaults to a no-op logger when omitted. */
+  logger?: Logger;
 }
 
 // ── TaskRunner ──────────────────────────────────────────
@@ -138,6 +148,7 @@ export class TaskRunner {
   private getRemoteTargets: () => Record<string, { host: string; user: string; sshKeyPath: string; port?: number; managedWorkspaces?: boolean; remoteInvokerHome?: string; provisionCommand?: string }>;
   private dockerConfig: { imageName?: string; secretsFile?: string };
   private executionAgentRegistry?: AgentRegistry;
+  private logger: Logger;
   /** Cache for SSH executors, keyed by remoteTargetId. One instance per target for correct git locking. */
   private sshExecutorCache = new Map<string, SshExecutor>();
 
@@ -182,7 +193,10 @@ export class TaskRunner {
     try {
       return await executor.getRepoPool().ensureClone(trimmed);
     } catch (err) {
-      console.warn(`[merge] ensureRepoMirrorPath failed for ${trimmed}: ${err}`);
+      this.logger.warn('[merge] ensureRepoMirrorPath failed', {
+        repoUrl: trimmed,
+        error: err instanceof Error ? err.message : String(err),
+      });
       return undefined;
     }
   }
@@ -208,6 +222,7 @@ export class TaskRunner {
     this.getRemoteTargets = config.remoteTargetsProvider ?? (() => ({}));
     this.dockerConfig = config.dockerConfig ?? {};
     this.executionAgentRegistry = config.executionAgentRegistry;
+    this.logger = config.logger ?? NO_OP_LOGGER;
   }
 
   /**
@@ -306,7 +321,10 @@ export class TaskRunner {
         return;
       }
 
-      console.error(`[TaskRunner] executeTask failed for task=${task.id}:`, err);
+      this.logger.error('[TaskRunner] executeTask failed', {
+        taskId: task.id,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      });
       const launchFailedAt = new Date();
       try {
         const latest = this.orchestrator.getTask(task.id);
@@ -510,13 +528,17 @@ export class TaskRunner {
     const launchAccepted =
       this.orchestrator.markTaskRunningAfterLaunch?.(task.id, attemptId) ?? true;
     if (!launchAccepted) {
-      console.warn(
-        `[TaskRunner] launch rejected as stale/non-executable for task=${task.id} attemptId=${attemptId}; killing spawned process`,
+      this.logger.warn(
+        '[TaskRunner] launch rejected as stale/non-executable; killing spawned process',
+        { taskId: task.id, attemptId },
       );
       try {
         await executor.kill(handle);
       } catch (killErr) {
-        console.warn(`[TaskRunner] failed to kill rejected launch for task=${task.id}: ${killErr}`);
+        this.logger.warn('[TaskRunner] failed to kill rejected launch', {
+          taskId: task.id,
+          error: killErr instanceof Error ? killErr.message : String(killErr),
+        });
       }
       await this.cleanupPerTaskDockerExecutor(task);
       return;
@@ -611,7 +633,10 @@ export class TaskRunner {
               this.executeTasks(newlyStarted);
             }
           } catch (err) {
-            console.error(`[TaskRunner] onComplete handler failed for task=${task.id}:`, err);
+            this.logger.error('[TaskRunner] onComplete handler failed', {
+              taskId: task.id,
+              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+            });
             const errResponse: WorkResponse = {
               requestId: response.requestId,
               actionId: task.id,
@@ -906,7 +931,7 @@ export class TaskRunner {
           child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
           child.stderr?.on('data', (d: Buffer) => {
             stderr += d.toString();
-            console.log(`[visual-proof] ${d.toString().trimEnd()}`);
+            this.logger.info(`[visual-proof] ${d.toString().trimEnd()}`);
           });
           child.on('error', (err) => reject(err));
           child.on('close', (code) => {
@@ -970,7 +995,9 @@ export class TaskRunner {
 
       return lines.join('\n');
     } catch (err) {
-      console.warn(`[visual-proof] Capture failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn('[visual-proof] Capture failed (non-blocking)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
       return undefined;
     }
   }
@@ -1066,7 +1093,9 @@ export class TaskRunner {
         cloneSource = mirrorPath;
         originUrl = repoUrl;
       } else {
-        console.warn(`[createMergeWorktree] Pool mirror unavailable for ${repoUrl}, falling back to host repo`);
+        this.logger.warn('[createMergeWorktree] Pool mirror unavailable, falling back to host repo', {
+          repoUrl,
+        });
       }
     }
 
@@ -1161,7 +1190,10 @@ export class TaskRunner {
     try {
       rmSync(dir, { recursive: true, force: true });
     } catch (err) {
-      console.warn(`[TaskRunner] removeMergeWorktree failed (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn('[TaskRunner] removeMergeWorktree failed (best-effort)', {
+        dir,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -1335,7 +1367,10 @@ export class TaskRunner {
         task.execution.reviewId &&
         !this.activePrPollers.has(task.id)
       ) {
-        console.log(`[merge-gate] Resuming PR polling for ${task.id} (PR ${task.execution.reviewId})`);
+        this.logger.info('[merge-gate] Resuming PR polling', {
+          taskId: task.id,
+          reviewId: task.execution.reviewId,
+        });
         this.startPrPolling(task.id, task.execution.reviewId, task.config.workflowId!);
       }
     }
@@ -1358,15 +1393,25 @@ export class TaskRunner {
             execution: { reviewStatus: status.statusText },
           });
           if (status.approved) {
-            console.log(`[merge-gate] PR ${task.execution.reviewId} approved (refresh), completing merge gate`);
+            this.logger.info('[merge-gate] PR approved (refresh), completing merge gate', {
+              taskId: task.id,
+              reviewId: task.execution.reviewId,
+            });
             this.stopPrPolling(task.id);
             await this.orchestrator.approve(task.id);
           } else if (status.rejected) {
-            console.log(`[merge-gate] PR ${task.execution.reviewId} rejected (refresh): ${status.statusText}`);
+            this.logger.info('[merge-gate] PR rejected (refresh)', {
+              taskId: task.id,
+              reviewId: task.execution.reviewId,
+              statusText: status.statusText,
+            });
             this.stopPrPolling(task.id);
           }
         } catch (err) {
-          console.error(`[merge-gate] PR status check error for ${task.id}:`, err);
+          this.logger.error('[merge-gate] PR status check error', {
+            taskId: task.id,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          });
         }
       }
     }
@@ -1388,16 +1433,26 @@ export class TaskRunner {
         });
 
         if (status.approved) {
-          console.log(`[merge-gate] PR ${reviewId} approved, completing merge gate`);
+          this.logger.info('[merge-gate] PR approved, completing merge gate', {
+            taskId,
+            reviewId,
+          });
           this.stopPrPolling(taskId);
           await this.orchestrator.approve(taskId);
         } else if (status.rejected) {
-          console.log(`[merge-gate] PR ${reviewId} rejected: ${status.statusText}`);
+          this.logger.info('[merge-gate] PR rejected', {
+            taskId,
+            reviewId,
+            statusText: status.statusText,
+          });
           this.stopPrPolling(taskId);
           // Leave in review_ready/awaiting_approval — user can retry
         }
       } catch (err) {
-        console.error(`[merge-gate] PR poll error for ${taskId}:`, err);
+        this.logger.error('[merge-gate] PR poll error', {
+          taskId,
+          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        });
         // Continue polling on transient errors
       }
     }, pollIntervalMs);
@@ -1432,15 +1487,25 @@ export class TaskRunner {
       });
 
       if (status.approved) {
-        console.log(`[merge-gate] PR ${reviewId} approved (manual check), completing merge gate`);
+        this.logger.info('[merge-gate] PR approved (manual check), completing merge gate', {
+          taskId,
+          reviewId,
+        });
         this.stopPrPolling(taskId);
         await this.orchestrator.approve(taskId);
       } else if (status.rejected) {
-        console.log(`[merge-gate] PR ${reviewId} rejected (manual check): ${status.statusText}`);
+        this.logger.info('[merge-gate] PR rejected (manual check)', {
+          taskId,
+          reviewId,
+          statusText: status.statusText,
+        });
         this.stopPrPolling(taskId);
       }
     } catch (err) {
-      console.error(`[merge-gate] Manual PR check error for ${taskId}:`, err);
+      this.logger.error('[merge-gate] Manual PR check error', {
+        taskId,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      });
     }
   }
 
@@ -1491,7 +1556,10 @@ export class TaskRunner {
     try {
       await dockerExec.destroyAll();
     } catch (err) {
-      console.warn(`[TaskRunner] cleanupPerTaskDockerExecutor destroyAll failed for ${dockerKey}: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn('[TaskRunner] cleanupPerTaskDockerExecutor destroyAll failed', {
+        dockerKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     this.executorRegistry.deregister(dockerKey);
   }
@@ -1674,11 +1742,11 @@ export class TaskRunner {
           // Push rebased branch from clone to origin (GitHub)
           await this.execGitIn(['push', '--force', 'origin', `${branch}:refs/heads/${branch}`], worktreeDir);
           rebasedBranches.push(branch);
-          console.log(`[rebase] Successfully rebased ${branch} onto ${baseBranch}`);
+          this.logger.info('[rebase] Successfully rebased', { branch, baseBranch });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           errors.push(`${branch}: ${msg}`);
-          console.error(`[rebase] Failed to rebase ${branch}: ${msg}`);
+          this.logger.error('[rebase] Failed to rebase', { branch, baseBranch, error: msg });
           try { await this.execGitIn(['rebase', '--abort'], worktreeDir); } catch { /* no rebase in progress */ }
         }
       }
