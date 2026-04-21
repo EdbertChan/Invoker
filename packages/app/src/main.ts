@@ -1183,6 +1183,11 @@ if (isHeadless) {
     }
   });
 
+  async function clearTaskRunnerSshExecutorCache(): Promise<void> {
+    if (!taskExecutor) return;
+    await taskExecutor.clearSshExecutorCache();
+  }
+
   function rebuildTaskRunner(): void {
     taskExecutor = new TaskRunner({
       orchestrator,
@@ -2394,6 +2399,7 @@ if (isHeadless) {
           logger.error(`clear: failed to cancel workflow "${workflow.id}": ${err}`, { module: 'ipc' });
         }
       }
+      await clearTaskRunnerSshExecutorCache();
       await Promise.all(executorRegistry.getAll().map(f => f.destroyAll().catch(() => undefined)));
 
       orchestrator = new Orchestrator({
@@ -3167,6 +3173,7 @@ if (isHeadless) {
         clearInterval(hourlyBackupInterval);
         hourlyBackupInterval = null;
       }
+      await clearTaskRunnerSshExecutorCache().catch(() => {});
       if (executorRegistry) {
         await Promise.all(executorRegistry.getAll().map(f => f.destroyAll()));
       }

@@ -731,8 +731,9 @@ export class TaskRunner {
         }
 
         // Drop any stale entries for this targetId so we don't accumulate dead caches.
-        for (const key of this.sshExecutorCache.keys()) {
+        for (const [key, executor] of this.sshExecutorCache.entries()) {
           if (key.startsWith(`${targetId}|`)) {
+            void executor.destroyAll().catch(() => {});
             this.sshExecutorCache.delete(key);
           }
         }
