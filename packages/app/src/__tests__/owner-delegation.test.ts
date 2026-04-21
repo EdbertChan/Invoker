@@ -18,24 +18,24 @@ describe('headless→owner delegation', () => {
   });
 
   describe('delegation timeout policy', () => {
-    it('uses extended timeout for rebase', () => {
-      expect(delegationTimeoutMs(['rebase', 'wf-1/task-1'])).toBe(900_000);
+    it('uses command-aware timeout for workflow-scoped rebase', () => {
+      expect(delegationTimeoutMs(['rebase', 'wf-1'])).toBe(60_000);
     });
 
-    it('uses extended timeout for rebase-and-retry', () => {
-      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1/task-1'])).toBe(900_000);
+    it('uses command-aware timeout for workflow-scoped rebase-and-retry', () => {
+      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1'])).toBe(60_000);
     });
 
-    it('uses extended timeout for retry at workflow scope', () => {
-      expect(delegationTimeoutMs(['retry', 'wf-123'])).toBe(900_000);
+    it('uses command-aware timeout for workflow-scoped restart', () => {
+      expect(delegationTimeoutMs(['restart', 'wf-123'])).toBe(60_000);
     });
 
-    it('treats task-scoped retry as long-running maintenance too', () => {
-      expect(delegationTimeoutMs(['retry-task', 'wf-123/task-1'])).toBe(900_000);
+    it('uses the default timeout for task-scoped rebase', () => {
+      expect(delegationTimeoutMs(['rebase', 'wf-123/task-1'])).toBe(5_000);
     });
 
-    it('uses the default short timeout for non-maintenance commands', () => {
-      expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(15_000);
+    it('uses the default timeout for other commands', () => {
+      expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(5_000);
     });
   });
 
