@@ -15,13 +15,20 @@ import type { Workflow } from '../adapter.js';
 describe('owner boundary enforcement', () => {
   let tmpDir: string;
   let dbPath: string;
+  const originalFlushDebounceMs = process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS;
 
   beforeEach(() => {
+    process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS = '0';
     tmpDir = mkdtempSync(join(tmpdir(), 'owner-boundary-test-'));
     dbPath = join(tmpDir, 'test.db');
   });
 
   afterEach(() => {
+    if (originalFlushDebounceMs === undefined) {
+      delete process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS;
+    } else {
+      process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS = originalFlushDebounceMs;
+    }
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
