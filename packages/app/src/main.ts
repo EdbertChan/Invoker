@@ -33,6 +33,12 @@ import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'node:path';
 import { mkdirSync } from 'node:fs';
 
+declare const __BUILD_SHA__: string;
+declare const __BUILD_VERSION__: string;
+
+const buildSha = typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev';
+const buildVersion = typeof __BUILD_VERSION__ !== 'undefined' ? __BUILD_VERSION__ : 'dev';
+
 const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
 
 // Prevent desktop-wide freezes on Linux (Chromium GPU + X11/Wayland compositors).
@@ -293,6 +299,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   });
   // Upgrade root logger with DB persistence now that SQLiteAdapter is ready.
   logger = new FileAndDbLogger({ module: 'main' }, { persistence });
+  logger.info(`Invoker ${buildVersion} (${buildSha})`, { module: 'startup' });
   if (!readOnly && !hourlyBackupInterval) {
     const hourlyMs = Number(process.env.INVOKER_HOURLY_BACKUP_MS ?? 60 * 60 * 1000);
     if (Number.isFinite(hourlyMs) && hourlyMs > 0) {
