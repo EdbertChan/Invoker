@@ -7,7 +7,7 @@
  * update is not silently dropped.
  */
 import { describe, it, expect } from 'vitest';
-import { applyDelta, type TaskLookup } from '../delta-merge.js';
+import { applyDelta, type DeltaMergeLogger, type TaskLookup } from '../delta-merge.js';
 import type { TaskState, TaskDelta } from '@invoker/workflow-core';
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -27,6 +27,16 @@ function makeTask(id: string, overrides: Partial<TaskState> = {}): TaskState {
 
 function makeLookup(tasks: TaskState[]): TaskLookup {
   return { getAllTasks: () => tasks };
+}
+
+function makeLogger() {
+  const calls: Array<{ message: string; context?: Record<string, unknown> }> = [];
+  const logger: DeltaMergeLogger = {
+    debug: (message, context) => {
+      calls.push({ message, context });
+    },
+  };
+  return { logger, calls };
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -72,6 +82,7 @@ describe('applyDelta', () => {
       const stateMap = new Map<string, string>();
       const knownTask = makeTask('t1', { status: 'running' });
       const lookup = makeLookup([knownTask]);
+      const { logger, calls } = makeLogger();
 
       // Simulate receiving an `updated` delta for t1 without a prior `created`.
       const delta: TaskDelta = {
@@ -80,7 +91,7 @@ describe('applyDelta', () => {
         changes: { status: 'completed', execution: { exitCode: 0 } },
       };
 
-      applyDelta(delta, stateMap, lookup);
+      applyDelta(delta, stateMap, lookup, logger);
 
       // The task must be populated, not dropped.
       expect(stateMap.has('t1')).toBe(true);
@@ -88,6 +99,14 @@ describe('applyDelta', () => {
       expect(stored.id).toBe('t1');
       expect(stored.status).toBe('completed');
       expect(stored.execution.exitCode).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        message: 'task-delta update fallback to orchestrator for "t1"',
+        context: {
+          module: 'delta-merge',
+          taskId: 't1',
+        },
+      });
     });
 
     it('applies a second updated delta on top of the first', () => {
@@ -135,6 +154,7 @@ describe('applyDelta', () => {
     it('drops the update when task is not in orchestrator either', () => {
       const stateMap = new Map<string, string>();
       const lookup = makeLookup([]); // empty orchestrator
+      const { logger, calls } = makeLogger();
 
       const delta: TaskDelta = {
         type: 'updated',
@@ -142,9 +162,27 @@ describe('applyDelta', () => {
         changes: { status: 'completed' },
       };
 
-      applyDelta(delta, stateMap, lookup);
+      applyDelta(delta, stateMap, lookup, logger);
 
       expect(stateMap.has('ghost')).toBe(false);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('does not log when an existing snapshot is already present', () => {
+      const stateMap = new Map<string, string>();
+      stateMap.set('t1', JSON.stringify(makeTask('t1')));
+      const lookup = makeLookup([makeTask('t1', { status: 'running' })]);
+      const { logger, calls } = makeLogger();
+
+      const delta: TaskDelta = {
+        type: 'updated',
+        taskId: 't1',
+        changes: { status: 'completed' },
+      };
+
+      applyDelta(delta, stateMap, lookup, logger);
+
+      expect(calls).toHaveLength(0);
     });
   });
 
