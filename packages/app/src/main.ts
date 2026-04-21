@@ -2274,7 +2274,7 @@ if (isHeadless) {
         }
       }
 
-      applyDelta(d, lastKnownTaskStates, orchestrator);
+      applyDelta(d, lastKnownTaskStates, orchestrator, logger);
     });
 
     uiPerfLogInterval = setInterval(() => {
