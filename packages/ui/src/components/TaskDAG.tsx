@@ -270,16 +270,18 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, onTaskClick, onTaskDou
   // Merge task-derived nodes with React Flow's internal dimension/selection state.
   // Without this, each task-delta re-render creates new node objects that discard
   // previously measured dimensions, forcing React Flow to re-measure.
-  const [rfNodes, setRfNodes] = useState<Node[]>([]);
+  const [syncedRfNodes, setSyncedRfNodes] = useState<Node[]>([]);
 
   useEffect(() => {
-    setRfNodes(nodes);
+    setSyncedRfNodes(nodes);
   }, [nodes]);
+
+  const rfNodes = syncedRfNodes.length === nodes.length ? syncedRfNodes : nodes;
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     const filtered = changes.filter(c => c.type === 'dimensions' || c.type === 'select');
     if (filtered.length > 0) {
-      setRfNodes(prev => applyNodeChanges(filtered, prev));
+      setSyncedRfNodes(prev => applyNodeChanges(filtered, prev));
     }
   }, []);
 
