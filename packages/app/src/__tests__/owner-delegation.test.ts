@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -17,25 +17,72 @@ describe('headless→owner delegation', () => {
     messageBus = new LocalBus();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   describe('delegation timeout policy', () => {
-    it('uses extended timeout for rebase', () => {
-      expect(delegationTimeoutMs(['rebase', 'wf-1/task-1'])).toBe(900_000);
+    async function expectDelegationTimeout(
+      args: string[],
+      expectedTimeoutMs: number,
+      stableBeforeTimeoutMs = 1,
+    ): Promise<void> {
+      vi.useFakeTimers();
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+
+      const delegation = tryDelegateExec(args, messageBus);
+      const settled = vi.fn<(value: boolean) => void>();
+      delegation.then((value) => settled(value));
+
+      if (expectedTimeoutMs > stableBeforeTimeoutMs) {
+        await vi.advanceTimersByTimeAsync(expectedTimeoutMs - stableBeforeTimeoutMs);
+        expect(settled).not.toHaveBeenCalled();
+      }
+
+      await vi.advanceTimersByTimeAsync(stableBeforeTimeoutMs);
+      await expect(delegation).resolves.toBe(false);
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith(false);
+    }
+
+    it('uses command-aware timeout for workflow-scoped rebase', () => {
+      expect(delegationTimeoutMs(['rebase', 'wf-1'])).toBe(60_000);
     });
 
-    it('uses extended timeout for rebase-and-retry', () => {
-      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1/task-1'])).toBe(900_000);
+    it('uses command-aware timeout for workflow-scoped rebase-and-retry', () => {
+      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1'])).toBe(60_000);
     });
 
-    it('uses extended timeout for retry at workflow scope', () => {
-      expect(delegationTimeoutMs(['retry', 'wf-123'])).toBe(900_000);
+    it('uses command-aware timeout for workflow-scoped restart', () => {
+      expect(delegationTimeoutMs(['restart', 'wf-123'])).toBe(60_000);
     });
 
-    it('treats task-scoped retry as long-running maintenance too', () => {
-      expect(delegationTimeoutMs(['retry-task', 'wf-123/task-1'])).toBe(900_000);
+    it('uses the default timeout for task-scoped rebase', () => {
+      expect(delegationTimeoutMs(['rebase', 'wf-123/task-1'])).toBe(5_000);
     });
 
-    it('uses the default short timeout for non-maintenance commands', () => {
-      expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(15_000);
+    it('uses the default timeout for other commands', () => {
+      expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(5_000);
+    });
+
+    it('rebase uses the extended timeout policy during delegated exec requests', async () => {
+      await expectDelegationTimeout(['rebase', 'wf-1'], 60_000);
+    });
+
+    it('rebase-and-retry uses the extended timeout policy during delegated exec requests', async () => {
+      await expectDelegationTimeout(['rebase-and-retry', 'wf-1'], 60_000);
+    });
+
+    it('restart wf-* uses the extended timeout policy during delegated exec requests', async () => {
+      await expectDelegationTimeout(['restart', 'wf-123'], 60_000);
+    });
+
+    it('restart wf-*/task-* does not use the extended timeout policy', async () => {
+      await expectDelegationTimeout(['restart', 'wf-123/task-1'], 5_000);
+    });
+
+    it('approve does not use the extended timeout policy', async () => {
+      await expectDelegationTimeout(['approve', 'wf-123/task-1'], 5_000);
     });
   });
 
