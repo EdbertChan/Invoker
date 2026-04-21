@@ -1456,6 +1456,20 @@ describe('SQLiteAdapter', () => {
   });
 
   describe('read-only / flush safety', () => {
+    const originalFlushDebounceMs = process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS;
+
+    beforeEach(() => {
+      process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS = '0';
+    });
+
+    afterEach(() => {
+      if (originalFlushDebounceMs === undefined) {
+        delete process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS;
+        return;
+      }
+      process.env.INVOKER_SQLITE_FLUSH_DEBOUNCE_MS = originalFlushDebounceMs;
+    });
+
     it('persists file-backed writes before close so restart recovery can read them', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-durable-'));
       const dbPath = join(dir, 'invoker.db');
