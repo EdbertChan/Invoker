@@ -6,8 +6,8 @@
  * The fix fetches the task from the orchestrator fallback so the
  * update is not silently dropped.
  */
-import { describe, it, expect } from 'vitest';
-import { applyDelta, type TaskLookup } from '../delta-merge.js';
+import { describe, it, expect, vi } from 'vitest';
+import { applyDelta, type DeltaMergeLogger, type TaskLookup } from '../delta-merge.js';
 import type { TaskState, TaskDelta } from '@invoker/workflow-core';
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -27,6 +27,12 @@ function makeTask(id: string, overrides: Partial<TaskState> = {}): TaskState {
 
 function makeLookup(tasks: TaskState[]): TaskLookup {
   return { getAllTasks: () => tasks };
+}
+
+function makeLogger(): DeltaMergeLogger {
+  return {
+    debug: vi.fn(),
+  };
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -72,6 +78,7 @@ describe('applyDelta', () => {
       const stateMap = new Map<string, string>();
       const knownTask = makeTask('t1', { status: 'running' });
       const lookup = makeLookup([knownTask]);
+      const logger = makeLogger();
 
       // Simulate receiving an `updated` delta for t1 without a prior `created`.
       const delta: TaskDelta = {
@@ -80,7 +87,7 @@ describe('applyDelta', () => {
         changes: { status: 'completed', execution: { exitCode: 0 } },
       };
 
-      applyDelta(delta, stateMap, lookup);
+      applyDelta(delta, stateMap, lookup, logger);
 
       // The task must be populated, not dropped.
       expect(stateMap.has('t1')).toBe(true);
@@ -88,12 +95,14 @@ describe('applyDelta', () => {
       expect(stored.id).toBe('t1');
       expect(stored.status).toBe('completed');
       expect(stored.execution.exitCode).toBe(0);
+      expect(logger.debug).toHaveBeenCalledTimes(1);
     });
 
     it('applies a second updated delta on top of the first', () => {
       const stateMap = new Map<string, string>();
       const knownTask = makeTask('t1', { status: 'running' });
       const lookup = makeLookup([knownTask]);
+      const logger = makeLogger();
 
       // First update: seeds from orchestrator.
       const delta1: TaskDelta = {
@@ -101,7 +110,7 @@ describe('applyDelta', () => {
         taskId: 't1',
         changes: { status: 'completed', execution: { exitCode: 0 } },
       };
-      applyDelta(delta1, stateMap, lookup);
+      applyDelta(delta1, stateMap, lookup, logger);
 
       // Second update: merges on top of the first.
       const delta2: TaskDelta = {
@@ -109,12 +118,13 @@ describe('applyDelta', () => {
         taskId: 't1',
         changes: { execution: { error: 'test failure' } },
       };
-      applyDelta(delta2, stateMap, lookup);
+      applyDelta(delta2, stateMap, lookup, logger);
 
       const stored = JSON.parse(stateMap.get('t1')!);
       expect(stored.status).toBe('completed');
       expect(stored.execution.exitCode).toBe(0);
       expect(stored.execution.error).toBe('test failure');
+      expect(logger.debug).toHaveBeenCalledTimes(1);
     });
 
     it('drops the update when task is unknown and no fallback available', () => {

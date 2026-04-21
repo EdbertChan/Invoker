@@ -11,6 +11,10 @@ export interface TaskLookup {
   getAllTasks(): TaskState[];
 }
 
+export interface DeltaMergeLogger {
+  debug(message: string, meta?: Record<string, unknown>): void;
+}
+
 /**
  * Apply a single TaskDelta to the lastKnownTaskStates map.
  *
@@ -22,6 +26,7 @@ export function applyDelta(
   delta: TaskDelta,
   stateMap: Map<string, string>,
   taskLookup?: TaskLookup,
+  logger?: DeltaMergeLogger,
 ): void {
   if (delta.type === 'created') {
     stateMap.set(delta.task.id, JSON.stringify(delta.task));
@@ -30,6 +35,10 @@ export function applyDelta(
     if (!existing && taskLookup) {
       const task = taskLookup.getAllTasks().find(t => t.id === delta.taskId);
       if (task) {
+        logger?.debug(`TASK_DELTA updated fallback seeded from orchestrator for task="${delta.taskId}"`, {
+          module: 'ui',
+          taskId: delta.taskId,
+        });
         existing = JSON.stringify(task);
         stateMap.set(delta.taskId, existing);
       }
