@@ -157,6 +157,7 @@ export class CommandService {
     return this.executeCommand<TaskState[]>(
       'EDIT_TASK_PROMPT_FAILED',
       () => this.orchestrator.editTaskPrompt(envelope.payload.taskId, envelope.payload.newPrompt),
+      this.workflowIdForTask(envelope.payload.taskId),
     );
   }
 
