@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -15,6 +15,10 @@ describe('headless→owner delegation', () => {
 
   beforeEach(() => {
     messageBus = new LocalBus();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('delegation timeout policy', () => {
@@ -36,6 +40,111 @@ describe('headless→owner delegation', () => {
 
     it('uses the default timeout for non-matching commands', () => {
       expect(delegationTimeoutMs(['approve', 'wf-123'])).toBe(5_000);
+    });
+
+    describe('tryDelegateExec runtime behavior', () => {
+      function registerHangingOwnerHandler() {
+        messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+      }
+
+      function trackPromiseSettlement<T>(promise: Promise<T>) {
+        const state: { settled: boolean; value?: T; error?: unknown } = { settled: false };
+        promise.then(
+          (value) => {
+            state.settled = true;
+            state.value = value;
+          },
+          (error) => {
+            state.settled = true;
+            state.error = error;
+          },
+        );
+        return state;
+      }
+
+      it('keeps rebase workflow delegation pending until the extended timeout elapses', async () => {
+        vi.useFakeTimers();
+        registerHangingOwnerHandler();
+
+        const delegated = tryDelegateExec(['rebase', 'wf-123'], messageBus);
+        const settlement = trackPromiseSettlement(delegated);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(settlement.settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(54_999);
+        expect(settlement.settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(delegated).resolves.toBe(false);
+        expect(settlement).toMatchObject({ settled: true, value: false });
+      });
+
+      it('keeps rebase-and-retry workflow delegation pending until the extended timeout elapses', async () => {
+        vi.useFakeTimers();
+        registerHangingOwnerHandler();
+
+        const delegated = tryDelegateExec(['rebase-and-retry', 'wf-123'], messageBus);
+        const settlement = trackPromiseSettlement(delegated);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(settlement.settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(54_999);
+        expect(settlement.settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(delegated).resolves.toBe(false);
+        expect(settlement).toMatchObject({ settled: true, value: false });
+      });
+
+      it('keeps restart workflow delegation pending until the extended timeout elapses', async () => {
+        vi.useFakeTimers();
+        registerHangingOwnerHandler();
+
+        const delegated = tryDelegateExec(['restart', 'wf-123'], messageBus);
+        const settlement = trackPromiseSettlement(delegated);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(settlement.settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(54_999);
+        expect(settlement.settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(delegated).resolves.toBe(false);
+        expect(settlement).toMatchObject({ settled: true, value: false });
+      });
+
+      it('times out restart task delegation at the default timeout', async () => {
+        vi.useFakeTimers();
+        registerHangingOwnerHandler();
+
+        const delegated = tryDelegateExec(['restart', 'wf-123/task-1'], messageBus);
+        const settlement = trackPromiseSettlement(delegated);
+
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(settlement.settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(delegated).resolves.toBe(false);
+        expect(settlement).toMatchObject({ settled: true, value: false });
+      });
+
+      it('times out approve delegation at the default timeout', async () => {
+        vi.useFakeTimers();
+        registerHangingOwnerHandler();
+
+        const delegated = tryDelegateExec(['approve', 'wf-123'], messageBus);
+        const settlement = trackPromiseSettlement(delegated);
+
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(settlement.settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(delegated).resolves.toBe(false);
+        expect(settlement).toMatchObject({ settled: true, value: false });
+      });
     });
   });
 
