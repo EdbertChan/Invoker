@@ -5,10 +5,10 @@
  * capabilities) as its first parameter, avoiding circular imports.
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs';
-import { normalize, resolve } from 'node:path';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join, normalize, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type { Orchestrator, TaskState, TaskStateChanges } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
@@ -21,6 +21,7 @@ import { normalizeBranchForGithubCli } from './github-branch-ref.js';
 // ── Trace logging ────────────────────────────────────────
 
 export const MERGE_TRACE_LOG = resolve(homedir(), '.invoker', 'merge-trace.log');
+const MODULE_DIR = typeof __dirname !== 'undefined' ? __dirname : dirname(fileURLToPath(import.meta.url));
 
 export function mergeTrace(tag: string, data: Record<string, unknown>): void {
   try {
@@ -946,6 +947,185 @@ export async function publishAfterFixImpl(
   }
 }
 
+function sanitizeMermaidId(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
+function escapeMermaidLabel(text: string): string {
+  return text
+    .replace(/"/g, '#quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function renderTemplate(templatePath: string, substitutions: Record<string, string>): string {
+  let result = readFileSync(templatePath, 'utf-8');
+  for (const [key, value] of Object.entries(substitutions)) {
+    result = result.replaceAll(`%${key}%`, value);
+  }
+  return result.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function buildTaskBreakdownSection(workflowTasks: TaskState[]): string {
+  const lines: string[] = [];
+  lines.push('<details>');
+  lines.push('<summary>Task breakdown</summary>');
+  lines.push('');
+  lines.push('| Task | Description | Status |');
+  lines.push('|------|-------------|--------|');
+  for (const t of workflowTasks) {
+    let statusDisplay: string = t.status;
+    if (t.status === 'completed' && t.config.command) {
+      statusDisplay = 'completed (passed)';
+    } else if (t.status === 'failed' && t.config.command) {
+      statusDisplay = 'failed (failed)';
+    }
+    lines.push(`| ${t.id} | ${t.description} | ${statusDisplay} |`);
+  }
+  lines.push('');
+  lines.push('</details>');
+  return lines.join('\n');
+}
+
+async function buildFileChangesSection(
+  completed: TaskState[],
+  workflow: { repoUrl?: string } | undefined,
+  host: MergeRunnerHost,
+): Promise<string> {
+  if (completed.length === 0) {
+    return '';
+  }
+
+  const mirrorCwd = workflow?.repoUrl && host.ensureRepoMirrorPath
+    ? await host.ensureRepoMirrorPath(workflow.repoUrl)
+    : undefined;
+
+  const lines: string[] = [];
+  lines.push('<details>');
+  lines.push('<summary>File changes per task</summary>');
+  lines.push('');
+  for (const t of completed) {
+    if (t.execution.branch) {
+      lines.push(`### ${t.id} — ${t.description}`);
+      try {
+        const stat = await host.gitDiffStat(t.execution.branch, mirrorCwd ?? undefined);
+        if (stat) {
+          lines.push(stat);
+        }
+      } catch {
+        // Silently skip if git diff fails
+      }
+      lines.push('');
+    }
+  }
+  lines.push('</details>');
+  return lines.join('\n');
+}
+
+function buildConflictSection(claudeResolved: TaskState[]): string {
+  if (claudeResolved.length === 0) {
+    return '';
+  }
+
+  const lines = ['## Conflict Resolutions'];
+  for (const t of claudeResolved) {
+    lines.push(`- **${t.id}**: Resolved with Claude — ${t.description}`);
+  }
+  return lines.join('\n');
+}
+
+function buildFailedSection(failed: TaskState[]): string {
+  if (failed.length === 0) {
+    return '';
+  }
+
+  const lines = ['## Failed Tasks'];
+  for (const t of failed) {
+    lines.push(`- **${t.id}**: ${t.description} — ${t.execution.error ?? 'unknown error'}`);
+  }
+  return lines.join('\n');
+}
+
+function buildSkippedSection(skipped: TaskState[]): string {
+  if (skipped.length === 0) {
+    return '';
+  }
+
+  const lines = ['## Skipped Tasks'];
+  for (const t of skipped) {
+    lines.push(`- **${t.id}**: ${t.description}`);
+  }
+  return lines.join('\n');
+}
+
+function buildTestPlanSection(workflowTasks: TaskState[]): string {
+  const testTasks = workflowTasks.filter((t) => t.config.command);
+  if (testTasks.length === 0) {
+    return '';
+  }
+
+  const lines = ['## Test Plan', ''];
+  for (const t of testTasks) {
+    if (t.status === 'completed') {
+      lines.push(`- [x] \`${t.config.command}\` — passed`);
+    } else if (t.status === 'failed') {
+      lines.push(`- [ ] \`${t.config.command}\` — failed (exit ${t.execution.exitCode ?? 'unknown'})`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function buildArchitectureSection(description: string | undefined, workflowTasks: TaskState[]): string {
+  if (description?.includes('```mermaid')) {
+    return '## Architecture\n\n*Architecture diagrams are included in the Summary section above.*';
+  }
+
+  if (workflowTasks.length < 3) {
+    return '';
+  }
+
+  const taskIds = new Set(workflowTasks.map((t) => t.id));
+  const lines = [
+    '## Architecture',
+    '',
+    '<details>',
+    '<summary>Task dependency graph</summary>',
+    '',
+    '```mermaid',
+    'graph TD',
+  ];
+
+  for (const t of workflowTasks) {
+    const icon = t.status === 'completed' ? '✓' : t.status === 'failed' ? '✗' : '○';
+    const truncatedDescription = t.description.length > 50
+      ? `${t.description.slice(0, 47)}...`
+      : t.description;
+    const label = escapeMermaidLabel(truncatedDescription);
+    lines.push(`  ${sanitizeMermaidId(t.id)}["${icon} ${label}"]`);
+  }
+
+  for (const t of workflowTasks) {
+    for (const dep of t.dependencies) {
+      if (taskIds.has(dep)) {
+        lines.push(`  ${sanitizeMermaidId(dep)} --> ${sanitizeMermaidId(t.id)}`);
+      }
+    }
+  }
+
+  for (const t of workflowTasks) {
+    if (t.status === 'completed') {
+      lines.push(`  style ${sanitizeMermaidId(t.id)} fill:#c8e6c9`);
+    } else if (t.status === 'failed') {
+      lines.push(`  style ${sanitizeMermaidId(t.id)} fill:#ffcdd2`);
+    }
+  }
+
+  lines.push('```');
+  lines.push('');
+  lines.push('</details>');
+  return lines.join('\n');
+}
+
 export async function buildMergeSummaryImpl(
   host: MergeRunnerHost,
   workflowId: string,
@@ -968,97 +1148,19 @@ export async function buildMergeSummaryImpl(
   const workflowName = workflow?.name ?? 'Workflow';
   const description = workflow?.description;
 
-  const lines: string[] = [];
-
-  lines.push('## Summary');
-
-  // Add description if present
-  if (description && description.trim()) {
-    lines.push(description);
-    lines.push('');
-    lines.push('---');
-  }
-
-  lines.push(
-    `${workflowName} — ${completed.length} tasks completed, ${failed.length} failed, ${skipped.length} skipped`,
-  );
-  lines.push('');
-
-  // Task breakdown table
-  lines.push('<details>');
-  lines.push('<summary>Task breakdown</summary>');
-  lines.push('');
-  lines.push('| Task | Description | Status |');
-  lines.push('|------|-------------|--------|');
-  for (const t of workflowTasks) {
-    let statusDisplay: string = t.status;
-    if (t.status === 'completed' && t.config.command) {
-      statusDisplay = 'completed (passed)';
-    } else if (t.status === 'failed' && t.config.command) {
-      statusDisplay = 'failed (failed)';
-    }
-    lines.push(`| ${t.id} | ${t.description} | ${statusDisplay} |`);
-  }
-  lines.push('');
-  lines.push('</details>');
-  lines.push('');
-
-  // File changes per task
-  if (completed.length > 0) {
-    // Resolve pool mirror path so gitDiffStat runs against the correct repo
-    const mirrorCwd = workflow?.repoUrl && host.ensureRepoMirrorPath
-      ? await host.ensureRepoMirrorPath(workflow.repoUrl)
-      : undefined;
-
-    lines.push('<details>');
-    lines.push('<summary>File changes per task</summary>');
-    lines.push('');
-    for (const t of completed) {
-      if (t.execution.branch) {
-        lines.push(`### ${t.id} — ${t.description}`);
-        try {
-          const stat = await host.gitDiffStat(t.execution.branch, mirrorCwd ?? undefined);
-          if (stat) {
-            lines.push(stat);
-          }
-        } catch {
-          // Silently skip if git diff fails
-        }
-        lines.push('');
-      }
-    }
-    lines.push('</details>');
-    lines.push('');
-  }
-
-  if (claudeResolved.length > 0) {
-    lines.push('## Conflict Resolutions');
-    for (const t of claudeResolved) {
-      lines.push(`- **${t.id}**: Resolved with Claude — ${t.description}`);
-    }
-    lines.push('');
-  }
-
-  if (failed.length > 0) {
-    lines.push('## Failed Tasks');
-    for (const t of failed) {
-      lines.push(
-        `- **${t.id}**: ${t.description} — ${t.execution.error ?? 'unknown error'}`,
-      );
-    }
-    lines.push('');
-  }
-
-  if (skipped.length > 0) {
-    lines.push('## Skipped Tasks');
-    for (const t of skipped) {
-      lines.push(`- **${t.id}**: ${t.description}`);
-    }
-    lines.push('');
-  }
-
   const MAX_BODY_LENGTH = 60_000;
-  let result = lines.join('\n');
+  const templatePath = join(MODULE_DIR, '..', '..', '..', 'templates', 'pr-body.md');
+  let result = renderTemplate(templatePath, {
+    SUMMARY_DESCRIPTION: description?.trim() ? `${description.trim()}\n\n---\n` : '',
+    SUMMARY_STATS: `${workflowName} — ${completed.length} tasks completed, ${failed.length} failed, ${skipped.length} skipped`,
+    TASK_BREAKDOWN: buildTaskBreakdownSection(workflowTasks),
+    FILE_CHANGES: await buildFileChangesSection(completed, workflow, host),
+    TEST_PLAN: buildTestPlanSection(workflowTasks),
+    ARCHITECTURE: buildArchitectureSection(description, workflowTasks),
+    CONFLICT_RESOLUTIONS: buildConflictSection(claudeResolved),
+    FAILED_TASKS: buildFailedSection(failed),
+    SKIPPED_TASKS: buildSkippedSection(skipped),
+  });
   if (result.length > MAX_BODY_LENGTH) {
     result = result.slice(0, MAX_BODY_LENGTH) + '\n\n---\n*(Summary truncated — exceeded GitHub PR body limit)*';
   }
