@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -38,8 +38,75 @@ describe('headless→owner delegation', () => {
       expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(5_000);
     });
 
+    it('uses the default short timeout for task-scoped restart', () => {
+      expect(delegationTimeoutMs(['restart', 'wf-123/task-1'])).toBe(5_000);
+    });
+
     it('uses the default short timeout for workflow-scoped commands outside the allowlist', () => {
       expect(delegationTimeoutMs(['resume', 'wf-123'])).toBe(5_000);
+    });
+  });
+
+  describe('deterministic timeout enforcement via fake timers', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      // Handler that never resolves — forces the race to be decided by the timeout.
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // Track whether a promise has settled without awaiting it (which would block
+    // the test under fake timers). The .then callback runs once microtasks drain.
+    function trackSettlement<T>(p: Promise<T>): { settled: () => boolean; value: Promise<T> } {
+      let done = false;
+      const value = p.then(
+        (v) => {
+          done = true;
+          return v;
+        },
+        (e) => {
+          done = true;
+          throw e;
+        },
+      );
+      return { settled: () => done, value };
+    }
+
+    async function expectTimeoutBoundary(args: string[], boundaryMs: number): Promise<void> {
+      const tracker = trackSettlement(tryDelegateExec(args, messageBus));
+
+      // One millisecond before the boundary the promise must still be pending.
+      await vi.advanceTimersByTimeAsync(boundaryMs - 1);
+      expect(tracker.settled()).toBe(false);
+
+      // Crossing the boundary must resolve the delegation promise to `false`
+      // (timed out → fall back to standalone).
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(tracker.value).resolves.toBe(false);
+      expect(tracker.settled()).toBe(true);
+    }
+
+    it('rebase uses the extended 60s timeout', async () => {
+      await expectTimeoutBoundary(['rebase', 'wf-1'], 60_000);
+    });
+
+    it('rebase-and-retry uses the extended 60s timeout', async () => {
+      await expectTimeoutBoundary(['rebase-and-retry', 'wf-1'], 60_000);
+    });
+
+    it('restart wf-* uses the extended 60s timeout', async () => {
+      await expectTimeoutBoundary(['restart', 'wf-123'], 60_000);
+    });
+
+    it('restart wf-*/task-* falls back to the short 5s timeout', async () => {
+      await expectTimeoutBoundary(['restart', 'wf-123/task-1'], 5_000);
+    });
+
+    it('approve falls back to the short 5s timeout', async () => {
+      await expectTimeoutBoundary(['approve', 'wf-123/task-1'], 5_000);
     });
   });
 
