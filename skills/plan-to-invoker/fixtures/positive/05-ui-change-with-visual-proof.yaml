@@ -1,69 +1,62 @@
 # UI Change Plan with Visual Proof
-# Description: Demonstrates the required pattern for UI change plans that modify packages/ui/.
-# When visualProof is true, the plan must include: (1) a prompt task that adds an E2E test case
-# to visual-proof.spec.ts using captureScreenshot, (2) a command task that builds and captures
-# after-state screenshots via ui-visual-proof.sh, and (3) at least one task referencing packages/ui/.
-#
-# This pattern ensures every UI change produces before/after screenshot comparisons for review.
-# The agent captures "before" screenshots on the base branch during Phase 1b-visual;
-# the "after" capture task in this plan produces the comparison set.
+# Description: Demonstrates the required pattern for UI change plans.
+# This fixture shows a valid UI workflow with `visualProof: true`, a plan-specific
+# screenshot test in `packages/app/e2e/visual-proof.spec.ts`, and an after-state
+# capture task that runs `scripts/ui-visual-proof.sh`.
 
 name: "Fix sidebar collapse animation"
 description: |
-  Fixes the sidebar collapse transition in packages/ui/src/Sidebar.tsx which currently
-  snaps to closed state instead of animating smoothly.
+  Fixes the sidebar collapse transition in packages/ui/src/Sidebar.tsx so the width
+  change animates smoothly instead of snapping between states.
 
-  Root cause: the CSS transition property is applied after the width change, causing
-  the browser to skip the animation. The fix reorders the style application so the
-  transition property is set before the width change.
+  The plan adds a plan-specific screenshot case in packages/app/e2e/visual-proof.spec.ts
+  and captures after-state visual proof for review in the pull request merge flow.
 
-  Blast radius: only affects Sidebar component rendering. No data flow or state
-  management changes. All existing sidebar unit tests must continue to pass.
+  Scope stays within the UI surface and its verification path. Existing UI tests and
+  the visual proof capture path must continue to work without changing the component API.
 visualProof: true
 onFinish: pull_request
 mergeMode: github
 repoUrl: git@github.com:example-org/acme-repo.git
 baseBranch: main
-featureBranch: fix/sidebar-collapse-animation
+featureBranch: fix-sidebar-collapse-animation
 
 tasks:
   - id: add-visual-proof-test
-    description: "Add E2E test case capturing sidebar collapse states for visual comparison"
+    description: "Add a visual proof E2E test case"
     prompt: |
-      In packages/app/e2e/visual-proof.spec.ts, add a new test case that must verify the
-      sidebar renders correctly in both expanded and collapsed states. The test must use
-      captureScreenshot from packages/app/e2e/fixtures/electron-app.ts to capture screenshots.
-      Steps: (1) Load the default layout using loadPlan() helper. (2) Call
-      captureScreenshot(page, 'sidebar-collapse-expanded') with sidebar open. (3) Click the
-      sidebar toggle button to collapse it. (4) Wait 500ms for animation. (5) Call
-      captureScreenshot(page, 'sidebar-collapse-collapsed') with sidebar closed. (6) Ensure
-      the sidebar element has the expected 'collapsed' CSS class after toggling.
+      In packages/app/e2e/visual-proof.spec.ts, add a sidebar-specific test that must
+      verify the expanded and collapsed UI states for the sidebar animation change.
+      The test must import and use captureScreenshot from
+      packages/app/e2e/fixtures/electron-app.ts, and it must create screenshots named
+      'sidebar-collapse-expanded' and 'sidebar-collapse-collapsed'. Ensure the test
+      loads the existing UI scenario, toggles the sidebar, waits for the transition to
+      settle, and verifies the expected collapsed class or width state before the second
+      screenshot is captured.
     dependencies: []
 
   - id: fix-sidebar-transition
-    description: "Reorder CSS transition application in packages/ui/ Sidebar component"
+    description: "Fix the sidebar transition behavior in UI"
     prompt: |
-      In packages/ui/src/Sidebar.tsx, fix the collapse animation. The Sidebar must animate
-      smoothly between expanded and collapsed states. Locate the toggleCollapse handler in
-      packages/ui/src/Sidebar.tsx and move the transition assignment (transition: 'width
-      200ms ease-in-out') so it is set on the container element before the width property
-      changes. Ensure the collapsed state applies width: 48px and expanded applies width:
-      240px. Verify the component still reads the isCollapsed prop from packages/ui/src/types.ts.
-      The transition property must be declared before the width change in the style object.
-      No changes to the component's public API or prop interface are expected.
+      In packages/ui/src/Sidebar.tsx, update the collapse styling so the width transition
+      must be applied before the width value changes. Ensure the component in
+      packages/ui/src/Sidebar.tsx still reads the collapse state contract from
+      packages/ui/src/types.ts, and verify the expected expanded width and collapsed width
+      remain unchanged after the refactor. No public API changes should be introduced, and
+      the final implementation must keep the animation logic local to packages/ui/.
     dependencies: []
 
   - id: run-sidebar-unit-tests
-    description: "Run UI package unit tests to verify sidebar fix"
+    description: "Run UI package unit tests for regression coverage"
     command: "cd packages/ui && pnpm test 2>&1"
     dependencies: [fix-sidebar-transition]
 
   - id: capture-visual-proof
-    description: "Build UI and app packages then capture after-state screenshots"
+    description: "Build app targets and capture after screenshots"
     command: "pnpm --filter @invoker/ui build && pnpm --filter @invoker/app build && bash scripts/ui-visual-proof.sh --label after"
     dependencies: [fix-sidebar-transition, add-visual-proof-test]
 
-  - id: verify-regression-suite
-    description: "Re-run UI unit tests as final regression gate"
+  - id: verify-sidebar-regression
+    description: "Re-run UI package tests after visual capture"
     command: "cd packages/ui && pnpm test 2>&1"
     dependencies: [run-sidebar-unit-tests, capture-visual-proof]
