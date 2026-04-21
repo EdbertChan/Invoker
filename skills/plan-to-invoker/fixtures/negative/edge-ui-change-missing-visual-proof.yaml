@@ -1,0 +1,36 @@
+# Edge case: UI change references packages/ui/ but omits visualProof
+# Expected error: missing_visual_proof_flag
+#
+# Plans that include UI change work under packages/ui/ must set visualProof: true
+# so the validator can enforce the required visual proof workflow.
+
+name: "UI change missing visual proof flag"
+description: |
+  This negative fixture models a pull request plan that clearly modifies UI component
+  code under packages/ui/ and includes verification work, but intentionally omits
+  visualProof: true so the validator should reject it.
+
+  The tasks are otherwise shaped like a realistic UI update: a prompt asks for a
+  component change in packages/ui/src/components/, and a command task runs package
+  tests. That combination should trigger the missing visual proof flag validation path.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: fix/button-density-spacing
+
+tasks:
+  - id: update-button-density-styles
+    description: "Update button component spacing for compact density mode"
+    prompt: |
+      In packages/ui/src/components/Button.tsx, adjust the compact density styling so the
+      component must preserve current behavior while reducing horizontal padding for the
+      compact variant. Ensure the implementation keeps existing prop names stable, verify
+      the spacing tokens remain consistent with nearby components in packages/ui/src/components/,
+      and ensure the final code path does not change default density rendering for other cases.
+    dependencies: []
+
+  - id: verify-ui-package-tests
+    description: "Run UI package tests after component spacing update"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [update-button-density-styles]
