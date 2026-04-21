@@ -4,7 +4,7 @@ import { rid, sid } from './scoped-test-helpers.js';
 import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
-import type { WorkResponse } from '@invoker/contracts';
+import type { Logger, WorkResponse } from '@invoker/contracts';
 
 // ── In-Memory Persistence Mock ──────────────────────────────
 
@@ -176,6 +176,28 @@ function makeResponse(overrides: Partial<WorkResponse>): WorkResponse {
   };
 }
 
+function createMockLogger(): Logger & {
+  debug: ReturnType<typeof vi.fn>;
+  info: ReturnType<typeof vi.fn>;
+  warn: ReturnType<typeof vi.fn>;
+  error: ReturnType<typeof vi.fn>;
+} {
+  const logger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: vi.fn(),
+  } as unknown as Logger & {
+    debug: ReturnType<typeof vi.fn>;
+    info: ReturnType<typeof vi.fn>;
+    warn: ReturnType<typeof vi.fn>;
+    error: ReturnType<typeof vi.fn>;
+  };
+  logger.child.mockImplementation(() => logger);
+  return logger;
+}
+
 // ── Tests ───────────────────────────────────────────────────
 
 describe('Orchestrator', () => {
@@ -183,11 +205,13 @@ describe('Orchestrator', () => {
   let persistence: InMemoryPersistence;
   let bus: InMemoryBus;
   let publishedDeltas: TaskDelta[];
+  let logger: ReturnType<typeof createMockLogger>;
 
   beforeEach(() => {
     persistence = new InMemoryPersistence();
     bus = new InMemoryBus();
     publishedDeltas = [];
+    logger = createMockLogger();
 
     bus.subscribe('task.delta', (delta) => {
       publishedDeltas.push(delta as TaskDelta);
@@ -196,6 +220,7 @@ describe('Orchestrator', () => {
     orchestrator = new Orchestrator({
       persistence,
       messageBus: bus,
+      logger,
       maxConcurrency: 3,
     });
   });
@@ -426,45 +451,42 @@ describe('Orchestrator', () => {
     });
 
     it('rejects a completion signal when attemptId is stale', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      try {
-        orchestrator.loadPlan({
-          name: 'reject-stale-attempt-signal',
-          onFinish: 'none',
-          tasks: [
-            { id: 'A', description: 'Root', command: 'echo A' },
-          ],
-        });
-        orchestrator.startExecution();
-        const taskId = orchestrator.getAllTasks().find((task) => task.id === 'A' || task.id.endsWith('/A'))?.id ?? 'A';
+      orchestrator.loadPlan({
+        name: 'reject-stale-attempt-signal',
+        onFinish: 'none',
+        tasks: [
+          { id: 'A', description: 'Root', command: 'echo A' },
+        ],
+      });
+      orchestrator.startExecution();
+      const taskId = orchestrator.getAllTasks().find((task) => task.id === 'A' || task.id.endsWith('/A'))?.id ?? 'A';
 
-        const oldAttemptId = orchestrator.getTask(taskId)?.execution.selectedAttemptId;
-        expect(oldAttemptId).toBeTruthy();
+      const oldAttemptId = orchestrator.getTask(taskId)?.execution.selectedAttemptId;
+      expect(oldAttemptId).toBeTruthy();
 
-        const workflowId = orchestrator.getWorkflowIds()[0]!;
-        orchestrator.recreateWorkflow(workflowId);
-        const currentAttemptId = orchestrator.getTask(taskId)?.execution.selectedAttemptId;
-        expect(currentAttemptId).toBeTruthy();
-        expect(currentAttemptId).not.toBe(oldAttemptId);
-        expect(orchestrator.getTask(taskId)?.status).toBe('running');
+      const workflowId = orchestrator.getWorkflowIds()[0]!;
+      orchestrator.recreateWorkflow(workflowId);
+      const currentAttemptId = orchestrator.getTask(taskId)?.execution.selectedAttemptId;
+      expect(currentAttemptId).toBeTruthy();
+      expect(currentAttemptId).not.toBe(oldAttemptId);
+      expect(orchestrator.getTask(taskId)?.status).toBe('running');
 
-        orchestrator.handleWorkerResponse(
-          makeResponse({
-            actionId: taskId,
-            attemptId: oldAttemptId,
-            status: 'completed',
-            outputs: { exitCode: 0 },
-          }),
-        );
+      logger.warn.mockClear();
+      orchestrator.handleWorkerResponse(
+        makeResponse({
+          actionId: taskId,
+          attemptId: oldAttemptId,
+          status: 'completed',
+          outputs: { exitCode: 0 },
+        }),
+      );
 
-        expect(orchestrator.getTask(taskId)?.status).toBe('running');
-        expect(orchestrator.getTask(taskId)?.execution.selectedAttemptId).toBe(currentAttemptId);
-        expect(warnSpy).toHaveBeenCalledWith(
-          expect.stringContaining(`STALE_ATTEMPT_REJECTED taskId=${taskId}`),
-        );
-      } finally {
-        warnSpy.mockRestore();
-      }
+      expect(orchestrator.getTask(taskId)?.status).toBe('running');
+      expect(orchestrator.getTask(taskId)?.execution.selectedAttemptId).toBe(currentAttemptId);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining(`STALE_ATTEMPT_REJECTED taskId=${taskId}`),
+        expect.objectContaining({ taskId }),
+      );
     });
 
     it('ignores a stale completed response after restartTask resets descendants', () => {
@@ -3302,16 +3324,13 @@ describe('Orchestrator', () => {
 
   describe('restart invalidation logging', () => {
     let warnSpy: ReturnType<typeof vi.spyOn>;
-    let logSpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
       warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     });
 
     afterEach(() => {
       warnSpy.mockRestore();
-      logSpy.mockRestore();
     });
 
     it('fan-in dependents stay pending when multiple roots fail', () => {
@@ -3422,13 +3441,13 @@ describe('Orchestrator', () => {
       });
       orchestrator.startExecution();
 
-      logSpy.mockClear();
+      logger.info.mockClear();
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: 'A', status: 'completed', outputs: { exitCode: 0 } }),
       );
 
       expect(
-        logSpy.mock.calls.some(
+        logger.info.mock.calls.some(
           (c) =>
             typeof c[0] === 'string' &&
             c[0].includes('handleCompleted') &&
@@ -3482,13 +3501,13 @@ describe('Orchestrator', () => {
         makeResponse({ actionId: 'B', executionGeneration: 1, status: 'completed', outputs: { exitCode: 0 } }),
       );
 
-      logSpy.mockClear();
+      logger.info.mockClear();
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: 'C', executionGeneration: 1, status: 'completed', outputs: { exitCode: 0 } }),
       );
 
       expect(
-        logSpy.mock.calls.some(
+        logger.info.mock.calls.some(
           (c) =>
             typeof c[0] === 'string' &&
             c[0].includes('handleCompleted') &&
@@ -3503,17 +3522,14 @@ describe('Orchestrator', () => {
   // ── handleCompleted unblocking ──────────────────────────
 
   describe('handleCompleted unblocking', () => {
-    let logSpy: ReturnType<typeof vi.spyOn>;
-    let warnSpy: ReturnType<typeof vi.spyOn>;
-
     beforeEach(() => {
-      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      logger.info.mockClear();
+      logger.warn.mockClear();
     });
 
     afterEach(() => {
-      logSpy.mockRestore();
-      warnSpy.mockRestore();
+      logger.info.mockReset();
+      logger.warn.mockReset();
     });
 
     it('handleCompleted starts pending dependents after A fails then completes', () => {
@@ -3534,7 +3550,7 @@ describe('Orchestrator', () => {
 
       // Restart A, then complete it → B starts
       orchestrator.restartTask('A');
-      logSpy.mockClear();
+      logger.info.mockClear();
       orchestrator.handleWorkerResponse(
         makeResponse({
           actionId: 'A',
@@ -3593,15 +3609,16 @@ describe('Orchestrator', () => {
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: 'A', status: 'failed', outputs: { exitCode: 1, error: 'fail' } }),
       );
-      warnSpy.mockClear();
+      logger.warn.mockClear();
 
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: 'A', status: 'completed', outputs: { exitCode: 0 } }),
       );
 
       expect(orchestrator.getTask('A')!.status).toBe('failed');
-      expect(warnSpy).toHaveBeenCalledWith(
+      expect(logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('ignoring "completed" for non-executable task "A" (status=failed)'),
+        expect.objectContaining({ taskId: 'A', taskStatus: 'failed' }),
       );
     });
 
@@ -3628,17 +3645,14 @@ describe('Orchestrator', () => {
   // ── Scheduler health ────────────────────────────────────
 
   describe('scheduler health', () => {
-    let logSpy: ReturnType<typeof vi.spyOn>;
-    let warnSpy: ReturnType<typeof vi.spyOn>;
-
     beforeEach(() => {
-      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      logger.info.mockClear();
+      logger.warn.mockClear();
     });
 
     afterEach(() => {
-      logSpy.mockRestore();
-      warnSpy.mockRestore();
+      logger.info.mockReset();
+      logger.warn.mockReset();
     });
 
     it('queue runningCount matches actual running tasks after handleWorkerResponse', () => {
@@ -3805,7 +3819,7 @@ describe('Orchestrator', () => {
 
       expect(started.length).toBeGreaterThan(0);
       expect(
-        logSpy.mock.calls.some(
+        logger.info.mock.calls.some(
           (c) =>
             typeof c[0] === 'string' &&
             c[0].includes('selectExperiments') &&
