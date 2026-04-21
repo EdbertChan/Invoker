@@ -246,6 +246,15 @@ const invokerConfig: InvokerConfig = (() => {
   }
 })();
 
+function getSafeInvokerConfig(config: InvokerConfig): Omit<InvokerConfig, 'r2'> {
+  const safeConfig = { ...config };
+  delete safeConfig.r2;
+  if (safeConfig.docker?.secretsFile) {
+    safeConfig.docker = { ...safeConfig.docker, secretsFile: '<redacted>' };
+  }
+  return safeConfig;
+}
+
 async function maybeDelayWorkflowResumeForTest(): Promise<void> {
   if (process.env.NODE_ENV !== 'test') return;
   const raw = process.env.INVOKER_TEST_RESUME_PENDING_DELAY_MS;
@@ -330,8 +339,13 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
 
   const startupSyncMode = options?.startupSyncMode ?? 'all';
   const initLog = isHeadless
-    ? (...args: unknown[]) => { process.stderr.write(args.join(' ') + '\n'); }
-    : (msg: string) => { logger.info(msg, { module: 'init' }); };
+    ? (msg: string, meta?: Record<string, unknown>) => {
+      process.stderr.write(meta ? `${msg} ${JSON.stringify(meta)}\n` : `${msg}\n`);
+    }
+    : (msg: string, meta?: Record<string, unknown>) => {
+      logger.info(msg, { module: 'init', ...meta });
+    };
+  initLog('Effective configuration', { config: getSafeInvokerConfig(invokerConfig) });
   const workflows = persistence.listWorkflows();
   if (startupSyncMode === 'all') {
     try {
@@ -2246,6 +2260,7 @@ if (isHeadless) {
     logger.info(`Database: ${dbPath}`, { module: 'init' });
     logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
     logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
+    logger.info('Effective configuration', { config: getSafeInvokerConfig(invokerConfig), module: 'startup' });
     recordStartupMark('startup.ready-for-window');
 
     // Forward deltas to renderer and keep snapshot cache in sync so
