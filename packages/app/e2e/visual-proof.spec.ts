@@ -13,6 +13,8 @@ import {
   expect,
   TEST_PLAN,
   loadPlan,
+  startPlan,
+  waitForTaskStarted,
   injectTaskStates,
   captureScreenshot,
   assertPageScreenshot,
@@ -47,6 +49,20 @@ const MERGE_GATE_TEXT_VISUAL_PLAN = {
       id: 'mg-visual-work',
       description: 'Sole task before merge gate',
       command: 'echo ok',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
+const PROMPT_EDIT_VISUAL_PLAN = {
+  name: 'Prompt edit visual proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'prompt-edit-task',
+      description: 'Prompt task for edit mode',
+      prompt: 'Implement feature X',
       dependencies: [] as string[],
     },
   ],
@@ -121,6 +137,36 @@ test.describe('Visual proof capture', () => {
     await expect(panel.locator('text=task-alpha')).toBeVisible();
     await captureScreenshot(page, 'task-panel');
     await assertPageScreenshot(page, 'task-panel');
+  });
+
+  test('prompt edit mode after double click', async ({ page }) => {
+    await loadPlan(page, PROMPT_EDIT_VISUAL_PLAN as unknown as typeof TEST_PLAN);
+    await startPlan(page);
+    await waitForTaskStarted(page, 'prompt-edit-task');
+
+    await page.locator('.react-flow__node[data-testid$="prompt-edit-task"]').click();
+    await expect(page.getByRole('heading', { name: 'Prompt task for edit mode' })).toBeVisible();
+
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-edit-task',
+        changes: {
+          status: 'completed',
+          execution: {
+            startedAt: new Date(Date.now() - 5000),
+            completedAt: new Date(),
+          },
+        },
+      },
+    ]);
+
+    const commandDisplay = page.getByTestId('command-display');
+    await expect(commandDisplay).toBeVisible();
+    await commandDisplay.dblclick();
+
+    await expect(page.getByTestId('edit-prompt-input')).toBeVisible();
+    await captureScreenshot(page, 'edit-prompt-double-click');
+    await assertPageScreenshot(page, 'edit-prompt-double-click');
   });
 
   test('dag before and after task selection', async ({ page }) => {
