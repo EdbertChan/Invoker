@@ -40,7 +40,9 @@ export function createMockInvoker(
   let deltaCallback: ((delta: TaskDelta) => void) | undefined;
   let workflowsCallback: ((workflows: unknown[]) => void) | undefined;
 
-  const api: InvokerAPI = {
+  const api: InvokerAPI & {
+    editTaskPrompt: (taskId: string, newPrompt: string) => Promise<void>;
+  } = {
     // Defer resolution one microtask so snapshot is read after synchronous setTasks()
     // in tests (useTasks fetchAll races mount vs setTasks; real IPC resolves later too).
     getTasks: vi.fn(
@@ -75,6 +77,7 @@ export function createMockInvoker(
     selectExperiment: vi.fn(async () => {}),
     restartTask: vi.fn(async () => {}),
     editTaskCommand: vi.fn(async () => {}),
+    editTaskPrompt: vi.fn(async () => {}),
     editTaskType: vi.fn(async () => {}),
     editTaskAgent: vi.fn(async () => {}),
     setTaskExternalGatePolicies: vi.fn(async () => {}),
