@@ -117,6 +117,12 @@ import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './work
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
 
+declare const __BUILD_SHA__: string;
+declare const __BUILD_VERSION__: string;
+
+const buildSha = typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev';
+const buildVersion = typeof __BUILD_VERSION__ !== 'undefined' ? __BUILD_VERSION__ : 'dev';
+
 // ── Detect headless mode ─────────────────────────────────────
 
 // Electron passes extra args after `--` or interleaves them.
@@ -293,6 +299,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   });
   // Upgrade root logger with DB persistence now that SQLiteAdapter is ready.
   logger = new FileAndDbLogger({ module: 'main' }, { persistence });
+  logger.info(`Invoker ${buildVersion} (${buildSha})`, { module: 'startup' });
   if (!readOnly && !hourlyBackupInterval) {
     const hourlyMs = Number(process.env.INVOKER_HOURLY_BACKUP_MS ?? 60 * 60 * 1000);
     if (Number.isFinite(hourlyMs) && hourlyMs > 0) {
