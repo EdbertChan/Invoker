@@ -2,20 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { TaskPanel } from '../components/TaskPanel.js';
 import type { TaskState } from '../types.js';
+import { makeUITask } from './helpers/mock-invoker.js';
 
-function makeTask(overrides: Partial<TaskState> & { command?: string; prompt?: string } = {}): TaskState {
-  const { command, prompt, ...rest } = overrides;
-  return {
-    id: 'test-task-1',
-    description: 'Test task',
-    status: 'pending',
-    dependencies: [],
-    createdAt: new Date(),
-    config: { command, prompt },
-    execution: {},
-    ...rest,
-  } as TaskState;
-}
+const makeTask = makeUITask;
 
 describe('TaskPanel double-click editing', () => {
   const mockOnEditCommand = vi.fn();
@@ -30,7 +19,7 @@ describe('TaskPanel double-click editing', () => {
 
   describe('Edit button removal', () => {
     it('does not render Edit button for editable command tasks', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -46,7 +35,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('does not render Edit button even when canEditCommand is true', () => {
-      const task = makeTask({ command: 'npm test', status: 'completed' });
+      const task = makeUITask({ command: 'npm test', status: 'completed' });
       render(
         <TaskPanel
           task={task}
@@ -65,7 +54,7 @@ describe('TaskPanel double-click editing', () => {
 
   describe('Double-click to edit', () => {
     it('enters edit mode when double-clicking command display with canEditCommand true', () => {
-      const task = makeTask({ command: 'echo hello', status: 'pending' });
+      const task = makeUITask({ command: 'echo hello', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -86,7 +75,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('does NOT enter edit mode when task is running', () => {
-      const task = makeTask({ command: 'echo running', status: 'running' });
+      const task = makeUITask({ command: 'echo running', status: 'running' });
       render(
         <TaskPanel
           task={task}
@@ -105,7 +94,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('does NOT enter edit mode when onEditCommand is not provided', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -124,7 +113,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('does NOT enter edit mode when task has no command', () => {
-      const task = makeTask({ command: undefined, status: 'pending' });
+      const task = makeUITask({ command: undefined, status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -140,8 +129,8 @@ describe('TaskPanel double-click editing', () => {
       expect(screen.queryByTestId('command-display')).not.toBeInTheDocument();
     });
 
-    it('does NOT enter edit mode on Claude tasks (prompt tasks)', () => {
-      const task = makeTask({ prompt: 'Write a test', status: 'pending' });
+    it('does NOT enter edit mode on Claude tasks when onEditPrompt is not provided', () => {
+      const task = makeUITask({ prompt: 'Write a test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -163,7 +152,7 @@ describe('TaskPanel double-click editing', () => {
 
   describe('Visual hints', () => {
     it('applies cursor-pointer style to editable command display', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -180,7 +169,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('applies cursor-text style to non-editable command display', () => {
-      const task = makeTask({ command: 'echo running', status: 'running' });
+      const task = makeUITask({ command: 'echo running', status: 'running' });
       render(
         <TaskPanel
           task={task}
@@ -198,7 +187,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('applies cursor-text style to Claude task display', () => {
-      const task = makeTask({ prompt: 'Test prompt', status: 'pending' });
+      const task = makeUITask({ prompt: 'Test prompt', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -216,7 +205,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('applies hover border effect to editable command display', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -236,7 +225,7 @@ describe('TaskPanel double-click editing', () => {
 
   describe('Edit mode functionality after double-click', () => {
     it('allows saving edited command after double-click trigger', () => {
-      const task = makeTask({ command: 'echo original', status: 'pending' });
+      const task = makeUITask({ command: 'echo original', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -260,11 +249,11 @@ describe('TaskPanel double-click editing', () => {
       const saveBtn = screen.getByTestId('save-command-btn');
       fireEvent.click(saveBtn);
 
-      expect(mockOnEditCommand).toHaveBeenCalledWith('test-task-1', 'echo modified');
+      expect(mockOnEditCommand).toHaveBeenCalledWith('task-1', 'echo modified');
     });
 
     it('allows canceling edit after double-click trigger', () => {
-      const task = makeTask({ command: 'echo original', status: 'pending' });
+      const task = makeUITask({ command: 'echo original', status: 'pending' });
       const { rerender } = render(
         <TaskPanel
           task={task}
@@ -307,7 +296,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('initializes edit input with current command value', () => {
-      const task = makeTask({ command: 'npm run build', status: 'completed' });
+      const task = makeUITask({ command: 'npm run build', status: 'completed' });
       render(
         <TaskPanel
           task={task}
@@ -326,9 +315,179 @@ describe('TaskPanel double-click editing', () => {
     });
   });
 
+  describe('Prompt editing', () => {
+    const mockOnEditPrompt = vi.fn();
+
+    beforeEach(() => {
+      mockOnEditPrompt.mockClear();
+    });
+
+    it('enters edit mode when double-clicking prompt text and onEditPrompt is provided', () => {
+      const task = makeUITask({ prompt: 'Write a test', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+
+      expect(screen.getByTestId('edit-prompt-input')).toBeInTheDocument();
+    });
+
+    it('shows current prompt value in the textarea after entering edit mode', () => {
+      const task = makeUITask({ prompt: 'Create a migration plan', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+
+      const input = screen.getByTestId('edit-prompt-input') as HTMLTextAreaElement;
+      expect(input.value).toBe('Create a migration plan');
+    });
+
+    it('calls onEditPrompt with task id and new value when saving', () => {
+      const task = makeUITask({ prompt: 'Original prompt', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+      fireEvent.change(screen.getByTestId('edit-prompt-input'), {
+        target: { value: 'Updated prompt' },
+      });
+      fireEvent.click(screen.getByTestId('save-prompt-btn'));
+
+      expect(mockOnEditPrompt).toHaveBeenCalledWith('task-1', 'Updated prompt');
+    });
+
+    it('restores original prompt text on cancel without calling onEditPrompt', () => {
+      const task = makeUITask({ prompt: 'Original prompt', status: 'pending' });
+      const { rerender } = render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+      fireEvent.change(screen.getByTestId('edit-prompt-input'), {
+        target: { value: 'Updated prompt' },
+      });
+      fireEvent.click(screen.getByTestId('cancel-prompt-edit-btn'));
+
+      expect(mockOnEditPrompt).not.toHaveBeenCalled();
+
+      rerender(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      expect(screen.getByTestId('command-display')).toHaveTextContent('Original prompt');
+    });
+
+    it('does not enter prompt edit mode when task status is running', () => {
+      const task = makeUITask({ prompt: 'Write a test', status: 'running' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+
+      expect(screen.queryByTestId('edit-prompt-input')).not.toBeInTheDocument();
+    });
+
+    it('does not enter prompt edit mode when onEditPrompt is not provided', () => {
+      const task = makeUITask({ prompt: 'Write a test', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+
+      expect(screen.queryByTestId('edit-prompt-input')).not.toBeInTheDocument();
+    });
+
+    it('applies cursor-pointer to editable prompt display', () => {
+      const task = makeUITask({ prompt: 'Write a test', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      expect(screen.getByTestId('command-display')).toHaveClass('cursor-pointer');
+    });
+
+    it('applies cursor-text to read-only prompt display when onEditPrompt is not provided', () => {
+      const task = makeUITask({ prompt: 'Write a test', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+        />,
+      );
+
+      const promptDisplay = screen.getByTestId('command-display');
+      expect(promptDisplay).toHaveClass('cursor-text');
+      expect(promptDisplay).not.toHaveClass('cursor-pointer');
+    });
+  });
+
   describe('Text selection compatibility', () => {
     it('allows single click on command display', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -348,7 +507,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('has select-text class for text selection support', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -367,7 +526,7 @@ describe('TaskPanel double-click editing', () => {
 
   describe('Edge cases and task states', () => {
     it('handles double-click on pending tasks', () => {
-      const task = makeTask({ command: 'echo pending', status: 'pending' });
+      const task = makeUITask({ command: 'echo pending', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -384,7 +543,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('handles double-click on completed tasks', () => {
-      const task = makeTask({ command: 'echo completed', status: 'completed' });
+      const task = makeUITask({ command: 'echo completed', status: 'completed' });
       render(
         <TaskPanel
           task={task}
@@ -401,7 +560,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('handles double-click on failed tasks', () => {
-      const task = makeTask({ command: 'echo failed', status: 'failed' });
+      const task = makeUITask({ command: 'echo failed', status: 'failed' });
       render(
         <TaskPanel
           task={task}
@@ -418,7 +577,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('blocks double-click on running tasks', () => {
-      const task = makeTask({ command: 'echo running', status: 'running' });
+      const task = makeUITask({ command: 'echo running', status: 'running' });
       render(
         <TaskPanel
           task={task}
@@ -435,7 +594,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('does not render command display for empty command string', () => {
-      const task = makeTask({ command: '', status: 'pending' });
+      const task = makeUITask({ command: '', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -454,7 +613,7 @@ describe('TaskPanel double-click editing', () => {
 
   describe('Command display element', () => {
     it('has data-testid="command-display" for testing', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -470,7 +629,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('renders command text inside command-display element', () => {
-      const task = makeTask({ command: 'pnpm test', status: 'pending' });
+      const task = makeUITask({ command: 'pnpm test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -487,7 +646,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('renders prompt text inside command-display element for Claude tasks', () => {
-      const task = makeTask({ prompt: 'Create a new feature', status: 'pending' });
+      const task = makeUITask({ prompt: 'Create a new feature', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -506,7 +665,7 @@ describe('TaskPanel double-click editing', () => {
 
   describe('canEditCommand logic', () => {
     it('canEditCommand is true when command exists, task not running, and onEditCommand provided', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -527,7 +686,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('canEditCommand is false when command is undefined', () => {
-      const task = makeTask({ command: undefined, status: 'pending' });
+      const task = makeUITask({ command: undefined, status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -543,7 +702,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('canEditCommand is false when status is running', () => {
-      const task = makeTask({ command: 'echo test', status: 'running' });
+      const task = makeUITask({ command: 'echo test', status: 'running' });
       render(
         <TaskPanel
           task={task}
@@ -561,7 +720,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('canEditCommand is false when onEditCommand is not provided', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -582,7 +741,7 @@ describe('TaskPanel double-click editing', () => {
   describe('Executor dropdown for merge nodes', () => {
     it('does not render executor dropdown when task is a merge node', () => {
       const task = {
-        ...makeTask({ command: 'echo test', status: 'pending' }),
+        ...makeUITask({ command: 'echo test', status: 'pending' }),
         config: { command: 'echo test', isMergeNode: true },
       } as TaskState;
       const mockOnEditType = vi.fn();
@@ -602,7 +761,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('renders executor dropdown for non-merge nodes when onEditType is provided', () => {
-      const task = makeTask({
+      const task = makeUITask({
         command: 'echo test',
         status: 'pending',
       });
@@ -623,7 +782,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('defaults executor select to worktree for prompt-only task when executorType unset (orchestrator default)', () => {
-      const task = makeTask({
+      const task = makeUITask({
         prompt: 'Write a test',
         status: 'pending',
       });
@@ -643,7 +802,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('defaults executor select to worktree for command task when executorType unset (orchestrator default)', () => {
-      const task = makeTask({
+      const task = makeUITask({
         command: 'echo test',
         status: 'pending',
       });
@@ -663,7 +822,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('renders SSH remote target options when remoteTargets are provided', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -687,7 +846,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('does not render SSH options when remoteTargets is empty', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
@@ -707,7 +866,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('selects SSH target when task has executorType=ssh and remoteTargetId', () => {
-      const task = makeTask({
+      const task = makeUITask({
         command: 'echo test',
         status: 'pending',
         config: { command: 'echo test', executorType: 'ssh', remoteTargetId: 'do-droplet' } as TaskState['config'],
@@ -729,7 +888,7 @@ describe('TaskPanel double-click editing', () => {
     });
 
     it('calls onEditType with ssh and remoteTargetId when SSH option selected', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       const mockOnEditType = vi.fn();
       render(
         <TaskPanel
@@ -746,11 +905,11 @@ describe('TaskPanel double-click editing', () => {
 
       const select = screen.getByTestId('executor-type-select');
       fireEvent.change(select, { target: { value: 'ssh:do-droplet' } });
-      expect(mockOnEditType).toHaveBeenCalledWith('test-task-1', 'ssh', 'do-droplet');
+      expect(mockOnEditType).toHaveBeenCalledWith('task-1', 'ssh', 'do-droplet');
     });
 
     it('calls onEditType without remoteTargetId when non-SSH option selected', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
+      const task = makeUITask({ command: 'echo test', status: 'pending' });
       const mockOnEditType = vi.fn();
       render(
         <TaskPanel
@@ -767,7 +926,7 @@ describe('TaskPanel double-click editing', () => {
 
       const select = screen.getByTestId('executor-type-select');
       fireEvent.change(select, { target: { value: 'docker' } });
-      expect(mockOnEditType).toHaveBeenCalledWith('test-task-1', 'docker');
+      expect(mockOnEditType).toHaveBeenCalledWith('task-1', 'docker');
     });
   });
 
@@ -949,7 +1108,7 @@ describe('TaskPanel double-click editing', () => {
 
       const select = screen.getByTestId('execution-agent-select');
       fireEvent.change(select, { target: { value: 'codex' } });
-      expect(mockOnEditAgent).toHaveBeenCalledWith('test-task-1', 'codex');
+      expect(mockOnEditAgent).toHaveBeenCalledWith('task-1', 'codex');
     });
 
     it('disables selector when task is running', () => {
@@ -1129,7 +1288,7 @@ describe('TaskPanel double-click editing', () => {
       expect(confirmSpy).toHaveBeenCalled();
       await waitFor(() =>
         expect(onSetExternalGatePolicies).toHaveBeenCalledWith(
-          'test-task-1',
+          'task-1',
           [{ workflowId: 'wf-1', taskId: '__merge__', gatePolicy: 'review_ready' }],
         ),
       );
