@@ -351,6 +351,14 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   } else {
     initLog('[init] Orchestrator startup sync deferred to GUI bootstrap');
   }
+  {
+    const safeConfig: Record<string, unknown> = { ...invokerConfig };
+    delete safeConfig.r2;
+    if (invokerConfig.docker?.secretsFile) {
+      safeConfig.docker = { ...invokerConfig.docker, secretsFile: '<redacted>' };
+    }
+    initLog(`[init] Effective configuration: ${JSON.stringify(safeConfig)}`);
+  }
 }
 
 // ── Load @invoker/surfaces at runtime ────────────────────────
@@ -2246,6 +2254,14 @@ if (isHeadless) {
     logger.info(`Database: ${dbPath}`, { module: 'init' });
     logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
     logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
+    {
+      const safeConfig: Record<string, unknown> = { ...invokerConfig };
+      delete safeConfig.r2;
+      if (invokerConfig.docker?.secretsFile) {
+        safeConfig.docker = { ...invokerConfig.docker, secretsFile: '<redacted>' };
+      }
+      logger.info('Effective configuration', { config: safeConfig, module: 'startup' });
+    }
     recordStartupMark('startup.ready-for-window');
 
     // Forward deltas to renderer and keep snapshot cache in sync so
