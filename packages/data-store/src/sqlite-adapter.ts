@@ -67,6 +67,7 @@ export interface WorkflowMutationLease {
 }
 
 export class SQLiteAdapter implements PersistenceAdapter {
+  private static liveWritableAdaptersByPath = new Map<string, Set<SQLiteAdapter>>();
   private db: SqlJsDatabase;
   private dbPath: string | null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -116,11 +117,17 @@ export class SQLiteAdapter implements PersistenceAdapter {
       );
     }
 
+    if (isFile) {
+      SQLiteAdapter.flushRegisteredWriters(dbPath);
+    }
+
     if (isFile && existsSync(dbPath)) {
       const buffer = readFileSync(dbPath);
       try {
         const db = new SQL.Database(buffer);
-        return new SQLiteAdapter(db, dbPath, options);
+        const adapter = new SQLiteAdapter(db, dbPath, options);
+        adapter.registerWritableHandle();
+        return adapter;
       } catch (err) {
         const backupPath = `${dbPath}.corrupt-${Date.now()}`;
         console.error(
@@ -132,7 +139,9 @@ export class SQLiteAdapter implements PersistenceAdapter {
     }
 
     const db = new SQL.Database();
-    return new SQLiteAdapter(db, isFile ? dbPath : null, options);
+    const adapter = new SQLiteAdapter(db, isFile ? dbPath : null, options);
+    adapter.registerWritableHandle();
+    return adapter;
   }
 
   // ── sql.js Helpers ───────────────────────────────────────
@@ -166,6 +175,39 @@ export class SQLiteAdapter implements PersistenceAdapter {
     if (this.readOnly) {
       throw new Error('SQLiteAdapter is read-only in this process');
     }
+  }
+
+  private static flushRegisteredWriters(dbPath: string): void {
+    const adapters = SQLiteAdapter.liveWritableAdaptersByPath.get(dbPath);
+    if (!adapters) return;
+    for (const adapter of adapters) {
+      adapter.flush();
+    }
+  }
+
+  private registerWritableHandle(): void {
+    if (!this.dbPath || this.readOnly) return;
+    let adapters = SQLiteAdapter.liveWritableAdaptersByPath.get(this.dbPath);
+    if (!adapters) {
+      adapters = new Set<SQLiteAdapter>();
+      SQLiteAdapter.liveWritableAdaptersByPath.set(this.dbPath, adapters);
+    }
+    adapters.add(this);
+  }
+
+  private unregisterWritableHandle(): void {
+    if (!this.dbPath || this.readOnly) return;
+    const adapters = SQLiteAdapter.liveWritableAdaptersByPath.get(this.dbPath);
+    if (!adapters) return;
+    adapters.delete(this);
+    if (adapters.size === 0) {
+      SQLiteAdapter.liveWritableAdaptersByPath.delete(this.dbPath);
+    }
+  }
+
+  private hasConcurrentWritableHandle(): boolean {
+    if (!this.dbPath || this.readOnly) return false;
+    return (SQLiteAdapter.liveWritableAdaptersByPath.get(this.dbPath)?.size ?? 0) > 1;
   }
 
   /** Run an INSERT/UPDATE/DELETE and schedule a flush. */
@@ -274,7 +316,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
   /** Debounced flush — coalesces rapid writes into a single I/O. */
   private scheduleFlush(): void {
     if (!this.dbPath) return;
-    if (this.flushDelayMs <= 0) {
+    if (this.flushDelayMs <= 0 || this.hasConcurrentWritableHandle()) {
       if (this.flushTimer) {
         clearTimeout(this.flushTimer);
         this.flushTimer = null;
@@ -1575,6 +1617,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       this.flushTimer = null;
     }
     this.flush();
+    this.unregisterWritableHandle();
     this.db.close();
   }
 
