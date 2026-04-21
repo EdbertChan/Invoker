@@ -6015,6 +6015,7 @@ describe('TaskRunner', () => {
     });
 
     it('clearSshExecutorCache removes all cached SSH executors', async () => {
+      const destroyAllSpy = vi.spyOn(SshExecutor.prototype, 'destroyAll').mockResolvedValue(undefined);
       const remoteTargets = {
         'remote-a': {
           host: 'dev.example.com',
@@ -6045,6 +6046,8 @@ describe('TaskRunner', () => {
       await executor.clearSshExecutorCache();
       const executor2 = executor.selectExecutor(task2);
 
+      expect(destroyAllSpy).toHaveBeenCalledTimes(1);
+      expect(destroyAllSpy).toHaveBeenCalledWith();
       // After clearing cache, a new executor instance should be created
       expect(executor1).not.toBe(executor2);
     });
