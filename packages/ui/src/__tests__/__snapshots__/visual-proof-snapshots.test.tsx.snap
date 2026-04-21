@@ -1068,7 +1068,7 @@ exports[`Visual proof snapshots > task-panel-agent-selector 1`] = `
                 </span>
               </div>
               <div
-                class="mt-2 rounded p-3 text-xs select-text bg-blue-900/20 border border-blue-800 cursor-text"
+                class="mt-2 rounded p-3 text-xs select-text bg-blue-900/20 border border-blue-800 cursor-pointer hover:border-blue-700 transition-colors"
                 data-testid="command-display"
               >
                 <p
