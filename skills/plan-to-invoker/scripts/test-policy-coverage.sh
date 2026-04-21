@@ -112,6 +112,18 @@ if bash "$CHECK_MANIFEST_SCRIPT" "$GOOD_MAP" "$bad_unused_manifest" "$SOURCE_DOC
   fail "expected unused stack manifest workflow labels to fail"
 fi
 
+bad_duplicate_order_manifest="$tmpdir/bad-duplicate-order.stack-manifest.json"
+jq '(.workflows[] | select(.label == "Step 18: Cancel-first invariant audit") | .order) = 17' "$GOOD_MANIFEST" > "$bad_duplicate_order_manifest"
+if bash "$CHECK_MANIFEST_SCRIPT" "$GOOD_MAP" "$bad_duplicate_order_manifest" "$SOURCE_DOC" >/dev/null 2>&1; then
+  fail "expected duplicate stack manifest order to fail"
+fi
+
+bad_gap_order_manifest="$tmpdir/bad-gap-order.stack-manifest.json"
+jq '(.workflows[] | select(.label == "Step 18: Cancel-first invariant audit") | .order) = 19' "$GOOD_MANIFEST" > "$bad_gap_order_manifest"
+if bash "$CHECK_MANIFEST_SCRIPT" "$GOOD_MAP" "$bad_gap_order_manifest" "$SOURCE_DOC" >/dev/null 2>&1; then
+  fail "expected non-contiguous stack manifest order to fail"
+fi
+
 doctor_missing_map="$tmpdir/doctor-missing-map.json"
 if bash "$DOCTOR_SCRIPT" --skip-atomicity --source-file "$SOURCE_DOC" "$POSITIVE_PLAN" > "$doctor_missing_map" 2>/dev/null; then
   fail "expected skill-doctor to require --coverage-map for policy-matrix source inputs"

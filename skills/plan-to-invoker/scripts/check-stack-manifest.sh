@@ -56,6 +56,9 @@ duplicate_labels="$tmpdir/duplicate_labels.txt"
 missing_plan_files="$tmpdir/missing_plan_files.txt"
 missing_plan_paths="$tmpdir/missing_plan_paths.txt"
 source_mismatches="$tmpdir/source_mismatches.txt"
+invalid_orders="$tmpdir/invalid_orders.txt"
+duplicate_orders="$tmpdir/duplicate_orders.txt"
+noncontiguous_orders="$tmpdir/noncontiguous_orders.txt"
 
 jq -r '.mappings[]?.workflowLabels[]? // empty' "$coverage_map_file" | sort -u > "$declared_labels"
 jq -r '.workflows[]?.label // empty' "$stack_manifest_file" | sort -u > "$manifest_labels"
@@ -72,6 +75,28 @@ jq -r '.workflows[]?.label // empty' "$stack_manifest_file" | sort | uniq -d > "
 jq -r '.workflows[]
   | select(((.planFile // "") | type) != "string" or (((.planFile // "") | gsub("^\\s+|\\s+$"; "")) | length) == 0)
   | (.label // "<unknown-label>")' "$stack_manifest_file" > "$missing_plan_files" || true
+
+jq -r '.workflows[]
+  | select((.order | type) != "number" or (.order | floor) != .order or .order < 1)
+  | (.label // "<unknown-label>")' "$stack_manifest_file" > "$invalid_orders" || true
+
+jq -r '.workflows[]?.order' "$stack_manifest_file" | sort -n | uniq -d > "$duplicate_orders" || true
+
+python3 - "$stack_manifest_file" > "$noncontiguous_orders" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+orders = sorted(
+    int(w["order"])
+    for w in data.get("workflows", [])
+    if isinstance(w.get("order"), int) and w["order"] >= 1
+)
+if not orders:
+    sys.exit(0)
+expected = list(range(orders[0], orders[0] + len(orders)))
+if orders != expected:
+    print(f"expected contiguous orders {expected}, got {orders}")
+PY
 
 jq -r '.workflows[]
   | select(((.planFile // "") | type) == "string" and (((.planFile // "") | gsub("^\\s+|\\s+$"; "")) | length) > 0)
@@ -114,6 +139,24 @@ fi
 if [[ -s "$missing_plan_files" ]]; then
   echo "stack manifest workflows must include a non-empty planFile:" >&2
   sed 's/^/  - /' "$missing_plan_files" >&2
+  exit 1
+fi
+
+if [[ -s "$invalid_orders" ]]; then
+  echo "stack manifest workflows must include a positive integer order:" >&2
+  sed 's/^/  - /' "$invalid_orders" >&2
+  exit 1
+fi
+
+if [[ -s "$duplicate_orders" ]]; then
+  echo "stack manifest workflow orders must be unique:" >&2
+  sed 's/^/  - /' "$duplicate_orders" >&2
+  exit 1
+fi
+
+if [[ -s "$noncontiguous_orders" ]]; then
+  echo "stack manifest workflow orders must be contiguous:" >&2
+  sed 's/^/  - /' "$noncontiguous_orders" >&2
   exit 1
 fi
 
