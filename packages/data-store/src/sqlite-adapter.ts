@@ -1288,20 +1288,20 @@ export class SQLiteAdapter implements PersistenceAdapter {
   }
 
   deleteConversationsOlderThan(cutoffIso: string): number {
-    this.ensureWritable();
-    // Delete messages first (FK constraint)
-    this.execRun(`
-      DELETE FROM conversation_messages WHERE thread_ts IN (
-        SELECT thread_ts FROM conversations WHERE updated_at < ?
-      )
-    `, [cutoffIso]);
-    this.execRun(
-      'DELETE FROM conversations WHERE updated_at < ?',
-      [cutoffIso],
-    );
-    const changes = this.db.getRowsModified();
-    this.dirty = true;
-    this.scheduleFlush();
+    let changes = 0;
+    this.runTransaction(() => {
+      // Delete messages first (FK constraint)
+      this.db.run(`
+        DELETE FROM conversation_messages WHERE thread_ts IN (
+          SELECT thread_ts FROM conversations WHERE updated_at < ?
+        )
+      `, [cutoffIso]);
+      this.db.run(
+        'DELETE FROM conversations WHERE updated_at < ?',
+        [cutoffIso],
+      );
+      changes = this.db.getRowsModified();
+    });
     return changes;
   }
 
