@@ -45,16 +45,35 @@ bash skills/plan-to-invoker/scripts/generate-coverage-map-template.sh assumption
 ```
 
 Fill in `workflowLabels` and `rationale` for every required `coverageKey`.
+Then record the real authored stack that those labels refer to:
+
+```bash
+cat > stack-manifest.json <<'EOF'
+{
+  "sourceFile": "<policy-doc.md>",
+  "workflows": [
+    {
+      "label": "Step 2: Command mutation path",
+      "planFile": "plans/task-invalidation-step-2-command-mutation.template.yaml",
+      "order": 2
+    }
+  ]
+}
+EOF
+```
+
+Every `workflowLabels[]` entry in `coverage-map.json` must exist in `stack-manifest.json`.
 Before submission, validate the implementation plan against the policy source:
 
 ```bash
 bash skills/plan-to-invoker/scripts/skill-doctor.sh \
   --source-file <policy-doc.md> \
   --coverage-map coverage-map.json \
+  --stack-manifest stack-manifest.json \
   <plan-file>
 ```
 
-For policy-matrix inputs, `skill-doctor` now fails if the coverage map is missing.
+For policy-matrix inputs, `skill-doctor` now fails if the coverage map or stack manifest is missing.
 
 ### Phase 1b — Runtime verification (three lanes)
 

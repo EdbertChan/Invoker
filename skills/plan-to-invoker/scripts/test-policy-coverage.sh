@@ -6,11 +6,14 @@ EXTRACT_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/extract-assumptions.sh
 GENERATE_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/generate-verify-plan.sh"
 CHECK_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/check-policy-coverage.sh"
 CHECK_MAP_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/check-coverage-map.sh"
+CHECK_MANIFEST_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/check-stack-manifest.sh"
 GENERATE_MAP_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/generate-coverage-map-template.sh"
 DOCTOR_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/skill-doctor.sh"
 SOURCE_DOC="$REPO_ROOT/skills/plan-to-invoker/fixtures/policy/task-invalidation-chart.md"
 GOOD_MAP="$REPO_ROOT/skills/plan-to-invoker/fixtures/policy/task-invalidation-chart.coverage-map.json"
 BAD_MAP="$REPO_ROOT/skills/plan-to-invoker/fixtures/policy/task-invalidation-chart.missing-coverage-map.json"
+GOOD_MANIFEST="$REPO_ROOT/skills/plan-to-invoker/fixtures/policy/task-invalidation-chart.stack-manifest.json"
+BAD_MANIFEST="$REPO_ROOT/skills/plan-to-invoker/fixtures/policy/task-invalidation-chart.bad-stack-manifest.json"
 POSITIVE_PLAN="$REPO_ROOT/skills/plan-to-invoker/fixtures/positive/01-minimal-verification.yaml"
 
 fail() {
@@ -52,8 +55,12 @@ bash "$CHECK_SCRIPT" "$assumptions" "$verify_plan" >/dev/null || fail "coverage 
 bash "$GENERATE_MAP_SCRIPT" "$assumptions" > "$map_template"
 jq -e '.mappings | length > 0' "$map_template" >/dev/null || fail "expected generated coverage map template"
 bash "$CHECK_MAP_SCRIPT" "$assumptions" "$GOOD_MAP" >/dev/null || fail "expected valid coverage map to pass"
+bash "$CHECK_MANIFEST_SCRIPT" "$GOOD_MAP" "$GOOD_MANIFEST" >/dev/null || fail "expected valid stack manifest to pass"
 if bash "$CHECK_MAP_SCRIPT" "$assumptions" "$BAD_MAP" >/dev/null 2>&1; then
   fail "expected incomplete coverage map to fail"
+fi
+if bash "$CHECK_MANIFEST_SCRIPT" "$GOOD_MAP" "$BAD_MANIFEST" >/dev/null 2>&1; then
+  fail "expected incomplete stack manifest to fail"
 fi
 
 bad_empty_labels="$tmpdir/bad-empty-labels.json"
@@ -80,8 +87,14 @@ if bash "$DOCTOR_SCRIPT" --skip-atomicity --source-file "$SOURCE_DOC" "$POSITIVE
 fi
 jq -e '.firstFailedStep == "check-coverage-map"' "$doctor_missing_map" >/dev/null || fail "expected missing coverage map to fail at check-coverage-map"
 
-bash "$DOCTOR_SCRIPT" --skip-atomicity --source-file "$SOURCE_DOC" --coverage-map "$GOOD_MAP" "$POSITIVE_PLAN" >/dev/null || {
+doctor_missing_manifest="$tmpdir/doctor-missing-manifest.json"
+if bash "$DOCTOR_SCRIPT" --skip-atomicity --source-file "$SOURCE_DOC" --coverage-map "$GOOD_MAP" "$POSITIVE_PLAN" > "$doctor_missing_manifest" 2>/dev/null; then
+  fail "expected skill-doctor to require --stack-manifest for policy-matrix source inputs"
+fi
+jq -e '.firstFailedStep == "check-stack-manifest"' "$doctor_missing_manifest" >/dev/null || fail "expected missing stack manifest to fail at check-stack-manifest"
+
+bash "$DOCTOR_SCRIPT" --skip-atomicity --source-file "$SOURCE_DOC" --coverage-map "$GOOD_MAP" --stack-manifest "$GOOD_MANIFEST" "$POSITIVE_PLAN" >/dev/null || {
   fail "expected skill-doctor to pass with source file and valid coverage map"
 }
 
-echo "OK: policy coverage extraction, projection, and traceability checks passed"
+echo "OK: policy coverage extraction, projection, traceability, and stack-manifest checks passed"
