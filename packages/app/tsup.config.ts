@@ -8,7 +8,6 @@ export default defineConfig({
   external: ['electron', 'sql.js', 'dockerode', '@invoker/surfaces', '@slack/bolt', 'dotenv'],
   noExternal: [
     '@invoker/workflow-core',
-    '@invoker/workflow-graph',
     '@invoker/contracts',
     '@invoker/data-store',
     '@invoker/transport',
