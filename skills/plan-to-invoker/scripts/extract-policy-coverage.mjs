@@ -12,6 +12,14 @@ function trimCell(value) {
   return value.trim().replace(/^`|`$/g, '');
 }
 
+function classifyDecisionRow(targetAction) {
+  const normalized = targetAction.trim().toLowerCase();
+  if (normalized === 'no invalidation' || normalized === 'continue or revert') {
+    return 'non_invalidating_exception';
+  }
+  return 'mutation_path';
+}
+
 function sectionLines(lines, heading) {
   const start = lines.findIndex((line) => line.trim() === heading);
   if (start === -1) return [];
@@ -67,14 +75,15 @@ function extractDecisionTableItems(lines) {
     if (cells.length < 6) continue;
     const [mutation, changesSpec, invalidateActive, targetAction, behaviorToday, why] = cells;
     if (!mutation || mutation === '---') continue;
+    const rowType = classifyDecisionRow(targetAction);
     items.push({
       coverageKey: `decision-${slugify(mutation)}`,
-      rowType: targetAction === 'no invalidation' ? 'non_invalidating_exception' : 'mutation_path',
+      rowType,
       verifyText: mutation,
       sourceText: line.trim(),
       section: 'Decision Table',
       mustCover: true,
-      suggestedTaskClass: targetAction === 'no invalidation' ? 'non_invalidating_exception' : 'mutation_path',
+      suggestedTaskClass: rowType,
       metadata: {
         changesExecutionSpec: changesSpec,
         invalidateActiveAttempt: invalidateActive,
@@ -101,6 +110,26 @@ function extractBulletItems(lines, heading, rowType, suggestedTaskClass) {
         section: heading.replace(/^## /, ''),
         mustCover: true,
         suggestedTaskClass,
+      };
+    });
+}
+
+function extractExecutionDefiningItems(lines) {
+  const section = sectionLines(lines, '## Execution-Defining Inputs');
+  const headerIndex = section.findIndex((line) => line.trim() === 'These are not execution-defining task inputs:');
+  const itemsSection = headerIndex === -1 ? section : section.slice(0, headerIndex);
+  return itemsSection
+    .filter((line) => line.trim().startsWith('- '))
+    .map((line) => {
+      const text = line.trim().slice(2).trim().replace(/^`|`$/g, '');
+      return {
+        coverageKey: `execution_defining_input-${slugify(text)}`,
+        rowType: 'execution_defining_input',
+        verifyText: text,
+        sourceText: text,
+        section: 'Execution-Defining Inputs',
+        mustCover: true,
+        suggestedTaskClass: 'mutation_path',
       };
     });
 }
@@ -169,7 +198,7 @@ function extractCoverage(inputPath, content) {
   const coverageItems = [
     ...extractDefinitionItems(lines),
     ...extractDecisionTableItems(lines),
-    ...extractBulletItems(lines, '## Execution-Defining Inputs', 'execution_defining_input', 'mutation_path'),
+    ...extractExecutionDefiningItems(lines),
     ...extractBulletItems(lines, '## Route Selection Rule', 'route_selection_rule', 'invariant'),
   ];
 

@@ -46,12 +46,14 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 - `--skip-assumptions` — skip assumption extraction and verify plan generation
 - `--skip-atomicity` — skip task atomicity linting
 - `--skip-validation` — skip YAML schema validation
+- `--source-file FILE` — run assumption and coverage checks against a separate source document
+- `--coverage-map FILE` — require row-to-workflow traceability for policy-matrix sources
 - `--warn-delegation` — pass advisory delegation-hint warnings from atomicity lint (no additional failures)
 - `--verbose` — show detailed output from each sub-check
 - `--help` — show usage information
 
 This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
-For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`.
+For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`. When validating a plan against a separate policy source, pass both `--source-file` and `--coverage-map`; policy-matrix inputs now fail without a coverage map.
 
 ### Fallback commands (for debugging individual checks)
 

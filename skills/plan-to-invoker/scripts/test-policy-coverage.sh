@@ -5,7 +5,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 EXTRACT_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/extract-assumptions.sh"
 GENERATE_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/generate-verify-plan.sh"
 CHECK_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/check-policy-coverage.sh"
+CHECK_MAP_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/check-coverage-map.sh"
+GENERATE_MAP_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/generate-coverage-map-template.sh"
+DOCTOR_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/skill-doctor.sh"
 SOURCE_DOC="$REPO_ROOT/skills/plan-to-invoker/fixtures/policy/task-invalidation-chart.md"
+GOOD_MAP="$REPO_ROOT/skills/plan-to-invoker/fixtures/policy/task-invalidation-chart.coverage-map.json"
+BAD_MAP="$REPO_ROOT/skills/plan-to-invoker/fixtures/policy/task-invalidation-chart.missing-coverage-map.json"
+POSITIVE_PLAN="$REPO_ROOT/skills/plan-to-invoker/fixtures/positive/01-minimal-verification.yaml"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -13,6 +19,7 @@ fail() {
 }
 
 [[ -f "$SOURCE_DOC" ]] || fail "missing source doc $SOURCE_DOC"
+[[ -f "$POSITIVE_PLAN" ]] || fail "missing positive plan $POSITIVE_PLAN"
 [[ -x "$(command -v jq)" ]] || fail "jq is required"
 
 tmpdir="$(mktemp -d)"
@@ -20,6 +27,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 assumptions="$tmpdir/assumptions.json"
 verify_plan="$tmpdir/verify.yaml"
+map_template="$tmpdir/coverage-map.json"
 
 bash "$EXTRACT_SCRIPT" "$SOURCE_DOC" > "$assumptions"
 
@@ -27,6 +35,7 @@ jq -e '.sourceKind == "policy_matrix"' "$assumptions" >/dev/null || fail "expect
 jq -e '.coverageItems | length > 0' "$assumptions" >/dev/null || fail "expected non-empty coverageItems"
 jq -e '.coverageItems[] | select(.coverageKey == "decision-change-external-gate-policy")' "$assumptions" >/dev/null || fail "missing external gate decision row"
 jq -e '.coverageItems[] | select(.coverageKey == "decision-approve-or-reject-fix")' "$assumptions" >/dev/null || fail "missing fix approve/reject decision row"
+jq -e '.coverageItems[] | select(.coverageKey == "decision-approve-or-reject-fix" and .rowType == "non_invalidating_exception")' "$assumptions" >/dev/null || fail "fix approve/reject should be classified as non-invalidating"
 jq -e '.coverageItems[] | select(.coverageKey == "hard-invariant-cancel-first")' "$assumptions" >/dev/null || fail "missing hard invariant coverage row"
 jq -e '.coverageItems[] | select(.coverageKey == "inconsistency-naming-inconsistency")' "$assumptions" >/dev/null || fail "missing naming inconsistency coverage row"
 
@@ -40,5 +49,39 @@ rg -q '^  - id: verify-coverage-decision-change-external-gate-policy$' "$verify_
 rg -q '^  - id: verify-coverage-hard-invariant-cancel-first$' "$verify_plan" || fail "missing hard invariant coverage verify task"
 
 bash "$CHECK_SCRIPT" "$assumptions" "$verify_plan" >/dev/null || fail "coverage check failed"
+bash "$GENERATE_MAP_SCRIPT" "$assumptions" > "$map_template"
+jq -e '.mappings | length > 0' "$map_template" >/dev/null || fail "expected generated coverage map template"
+bash "$CHECK_MAP_SCRIPT" "$assumptions" "$GOOD_MAP" >/dev/null || fail "expected valid coverage map to pass"
+if bash "$CHECK_MAP_SCRIPT" "$assumptions" "$BAD_MAP" >/dev/null 2>&1; then
+  fail "expected incomplete coverage map to fail"
+fi
 
-echo "OK: policy coverage extraction and projection checks passed"
+bad_empty_labels="$tmpdir/bad-empty-labels.json"
+jq '(.mappings[] | select(.coverageKey == "decision-change-external-gate-policy") | .workflowLabels) = []' "$GOOD_MAP" > "$bad_empty_labels"
+if bash "$CHECK_MAP_SCRIPT" "$assumptions" "$bad_empty_labels" >/dev/null 2>&1; then
+  fail "expected empty workflow labels to fail"
+fi
+
+bad_rowtype="$tmpdir/bad-rowtype.json"
+jq '(.mappings[] | select(.coverageKey == "decision-approve-or-reject-fix") | .rowType) = "mutation_path"' "$GOOD_MAP" > "$bad_rowtype"
+if bash "$CHECK_MAP_SCRIPT" "$assumptions" "$bad_rowtype" >/dev/null 2>&1; then
+  fail "expected rowType mismatch to fail"
+fi
+
+bad_rationale="$tmpdir/bad-rationale.json"
+jq '(.mappings[] | select(.coverageKey == "hard-invariant-cancel-first") | .rationale) = ""' "$GOOD_MAP" > "$bad_rationale"
+if bash "$CHECK_MAP_SCRIPT" "$assumptions" "$bad_rationale" >/dev/null 2>&1; then
+  fail "expected empty rationale to fail"
+fi
+
+doctor_missing_map="$tmpdir/doctor-missing-map.json"
+if bash "$DOCTOR_SCRIPT" --skip-atomicity --source-file "$SOURCE_DOC" "$POSITIVE_PLAN" > "$doctor_missing_map" 2>/dev/null; then
+  fail "expected skill-doctor to require --coverage-map for policy-matrix source inputs"
+fi
+jq -e '.firstFailedStep == "check-coverage-map"' "$doctor_missing_map" >/dev/null || fail "expected missing coverage map to fail at check-coverage-map"
+
+bash "$DOCTOR_SCRIPT" --skip-atomicity --source-file "$SOURCE_DOC" --coverage-map "$GOOD_MAP" "$POSITIVE_PLAN" >/dev/null || {
+  fail "expected skill-doctor to pass with source file and valid coverage map"
+}
+
+echo "OK: policy coverage extraction, projection, and traceability checks passed"

@@ -84,7 +84,8 @@ When the source is a policy or architecture document with a decision table, the 
 **Pattern**:
 - Extract `coverageItems` for decision rows, exception rules, lifecycle commands, and invariants.
 - Author one or more workflows that collectively cover every required item.
-- Fail the planning pipeline if the source is classified as `policy_matrix` but coverage extraction is empty or the generated verify scaffold collapses to `verify-noop`.
+- Generate a `coverage-map.json` file that assigns every required `coverageKey` to one or more workflow labels with rationale.
+- Fail the planning pipeline if the source is classified as `policy_matrix` but coverage extraction is empty, the generated verify scaffold collapses to `verify-noop`, or a coverage map is missing when validating against the source document.
 
 **Reference fixture**: `fixtures/policy/task-invalidation-chart.md`
 

@@ -38,6 +38,24 @@ bash skills/plan-to-invoker/scripts/generate-verify-plan.sh "<plan-name>" < assu
 Hand-written YAML is fine. Tasks are `command` with `test -f`, `rg`, etc. Plan: `onFinish: none`, `mergeMode: manual`.
 For policy-matrix sources, the generated verify scaffold must not degrade to `verify-noop`; it should include coverage verification tasks derived from `coverageItems`.
 
+#### 2a. Record row-to-workflow traceability for policy-matrix sources
+
+```bash
+bash skills/plan-to-invoker/scripts/generate-coverage-map-template.sh assumptions.json > coverage-map.json
+```
+
+Fill in `workflowLabels` and `rationale` for every required `coverageKey`.
+Before submission, validate the implementation plan against the policy source:
+
+```bash
+bash skills/plan-to-invoker/scripts/skill-doctor.sh \
+  --source-file <policy-doc.md> \
+  --coverage-map coverage-map.json \
+  <plan-file>
+```
+
+For policy-matrix inputs, `skill-doctor` now fails if the coverage map is missing.
+
 ### Phase 1b — Runtime verification (three lanes)
 
 **Required** when the investigation claims something about **executed** behavior (not just “this string appears in a file”). **Phase 1b has three parts; use all that apply.**
