@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 10: Fix-context mutation path"
+description: |
+  Align fix-context invalidation with `docs/architecture/task-invalidation-chart.md`
+  so fix prompt/context changes retry from reverted failed state instead of
+  relying on bespoke fix-session behavior.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-fix-context-policy
+    description: "Route fix prompt/context changes through the shared invalidation policy. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/headless.ts`, `packages/app/src/workflow-actions.ts`. Change types: modify fix-session invalidation behavior. Acceptance criteria: fix-context changes retry from reverted failed state, apply cancel-first behavior, and no longer depend on bespoke fix-session handling."
+    prompt: |
+      Update the fix-session mutation path in `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/headless.ts`, and `packages/app/src/workflow-actions.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must route fix prompt and fix context changes through the shared invalidation policy, must retry from reverted failed state rather than relying on bespoke fix-session handling, and must ensure active in-flight fix work is interrupted before authoritative state is reset. Acceptance criteria: fix-context changes use explicit retry semantics, cancel-first behavior applies to active fix sessions, and the path no longer relies on one-off special cases.
+    dependencies: []
+  - id: add-fix-context-tests
+    description: "Add regression tests for fix-context invalidation behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert retry-from-failed-state behavior and cancel-first ordering for fix-context changes."
+    prompt: |
+      Add regression coverage for fix-context invalidation using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify retry-from-reverted-failed-state semantics for fix prompt/context changes, must verify cancel-first ordering for active fix sessions, and must verify that the updated path no longer depends on bespoke fix-session behavior. Acceptance criteria: tests fail on the previous special-case handling, pass on the updated fix-context path, and assert invalidation class plus state-transition semantics explicitly.
+    dependencies:
+      - implement-fix-context-policy
+  - id: run-fix-context-tests
+    description: "Run the focused workflow-core regression suite for fix-context invalidation. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: the targeted fix-context Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts src/__tests__/state-topology-matrix.test.ts"
+    dependencies:
+      - add-fix-context-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the fix-context tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-fix-context-tests

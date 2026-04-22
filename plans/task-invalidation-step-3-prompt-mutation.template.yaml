@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 3: Prompt mutation path"
+description: |
+  Align prompt-edit invalidation with `docs/architecture/task-invalidation-chart.md`
+  so prompt mutations are recreate-class edits that cancel active work before
+  resetting authoritative lineage.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-prompt-mutation-policy
+    description: "Add a dedicated recreate-class invalidation path for prompt edits. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, `packages/app/src/api-server.ts`. Change types: modify prompt-mutation routing and entrypoints. Acceptance criteria: prompt edits cancel active work first, discard stale lineage, and no longer rely on missing or implicit policy."
+    prompt: |
+      Implement the prompt-mutation path described in `docs/architecture/task-invalidation-chart.md` across `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, and `packages/app/src/api-server.ts`. The implementation must give prompt edits an explicit recreate-class invalidation path, must ensure active in-flight work is interrupted before authoritative state is reset, and must not rely on absent or implicit command-style behavior. Acceptance criteria: prompt edits use explicit recreate semantics, integration entrypoints expose the behavior coherently, and stale lineage is discarded when the prompt changes the execution ABI.
+    dependencies: []
+  - id: add-prompt-mutation-tests
+    description: "Add regression tests for prompt-mutation invalidation behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert recreate-class routing, cancel-first ordering, and entrypoint coverage for prompt edits."
+    prompt: |
+      Add regression coverage for prompt-mutation invalidation using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify recreate-class routing for prompt edits, must verify cancel-first ordering for active prompt edits, and must verify that app/API entrypoints call the new policy path correctly. Acceptance criteria: tests fail on the previous missing-or-implicit behavior, pass on the updated prompt path, and assert invalidation class plus lineage semantics explicitly.
+    dependencies:
+      - implement-prompt-mutation-policy
+  - id: run-prompt-mutation-tests
+    description: "Run the focused workflow-core and app regression suite for prompt-mutation invalidation. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted prompt-mutation Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/api-server.test.ts"
+    dependencies:
+      - add-prompt-mutation-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the prompt-mutation tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-prompt-mutation-tests

@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 16: Fix approve and reject are non-invalidating"
+description: |
+  Lock in the `docs/architecture/task-invalidation-chart.md` rule that fix
+  approval and rejection are control-flow decisions over existing results, not
+  retry/recreate invalidation events.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-noninvalidating-fix-decisions
+    description: "Make fix approve/reject paths explicitly non-invalidating control flow. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, `packages/app/src/api-server.ts`. Change types: modify fix-approval routing. Acceptance criteria: approve continues and reject reverts without being classified as retry/recreate invalidation."
+    prompt: |
+      Update the fix approve/reject paths in `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, and `packages/app/src/api-server.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must treat fix approval and rejection as non-invalidating control flow over existing results, must keep approval as continue and rejection as revert semantics, and must ensure the invalidation-class scaffolding does not misclassify these paths as retry or recreate. Acceptance criteria: fix approve/reject remains explicit continue-or-revert behavior, active work is not spuriously canceled by approval decisions, and the surface stays coherent across runtime and entrypoints.
+    dependencies: []
+  - id: add-fix-decision-tests
+    description: "Add regression tests for non-invalidating fix approve/reject behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, `packages/app/src/__tests__/workflow-actions.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert continue/revert behavior and prove these paths do not invalidate lineage."
+    prompt: |
+      Add regression coverage for fix approve/reject behavior using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, `packages/app/src/__tests__/workflow-actions.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify continue behavior on approval, revert behavior on rejection, and must verify that neither path is treated as retry/recreate invalidation. Acceptance criteria: tests fail if fix approval or rejection invalidates lineage, pass on continue-or-revert behavior, and make the non-invalidating rule explicit.
+    dependencies:
+      - implement-noninvalidating-fix-decisions
+  - id: run-fix-decision-tests
+    description: "Run the focused workflow-core and app regression suite for fix approve/reject behavior. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted fix-decision Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/api-server.test.ts src/__tests__/workflow-actions.test.ts"
+    dependencies:
+      - add-fix-decision-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the fix-decision tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-fix-decision-tests

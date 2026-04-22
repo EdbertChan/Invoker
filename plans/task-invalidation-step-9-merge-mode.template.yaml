@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 9: Merge-mode mutation path"
+description: |
+  Align merge-mode invalidation with `docs/architecture/task-invalidation-chart.md`
+  so merge-policy changes retry the merge node consistently and cancel active
+  merge execution before resetting authoritative state.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-merge-mode-policy
+    description: "Make merge-mode changes follow an explicit invalidation path for merge execution. Files: `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, `packages/workflow-core/src/orchestrator.ts`. Change types: modify merge-mode invalidation behavior. Acceptance criteria: merge-mode changes retry the merge node consistently and apply cancel-first behavior when merge execution is active."
+    prompt: |
+      Update the merge-mode mutation path in `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, and `packages/workflow-core/src/orchestrator.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must route merge-mode changes through the shared invalidation policy, must retry the merge node consistently rather than only in selected terminal states, and must ensure active merge execution is interrupted before authoritative state is reset. Acceptance criteria: merge-mode changes use explicit retry semantics for merge execution, active merge work follows cancel-first behavior, and app-layer-only special casing is removed.
+    dependencies: []
+  - id: add-merge-mode-tests
+    description: "Add regression tests for merge-mode invalidation behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert explicit merge-node retry behavior and cancel-first ordering for merge-mode changes."
+    prompt: |
+      Add regression coverage for merge-mode invalidation using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify explicit merge-node retry semantics for merge-mode changes, must verify cancel-first behavior when merge execution is active, and must verify that the app/API surface routes through the updated policy correctly. Acceptance criteria: tests fail on prior app-layer-only behavior, pass on the updated merge-mode path, and assert invalidation class plus merge-node semantics explicitly.
+    dependencies:
+      - implement-merge-mode-policy
+  - id: run-merge-mode-tests
+    description: "Run the focused workflow-core and app regression suite for merge-mode invalidation. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted merge-mode Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/api-server.test.ts"
+    dependencies:
+      - add-merge-mode-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the merge-mode tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-merge-mode-tests

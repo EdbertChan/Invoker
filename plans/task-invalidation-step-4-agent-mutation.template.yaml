@@ -1,0 +1,35 @@
+name: "Task Invalidation Step 4: Agent mutation path"
+description: |
+  Align execution-agent invalidation with `docs/architecture/task-invalidation-chart.md`
+  so agent changes are recreate-class edits with cancel-first behavior.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-agent-mutation-policy
+    description: "Make execution-agent edits follow a recreate-class invalidation path. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, `packages/app/src/api-server.ts`. Change types: modify agent-mutation routing and entrypoints. Acceptance criteria: `editTaskAgent()` cancels active work first, discards stale lineage, and no longer behaves like generic restart semantics."
+    prompt: |
+      Update the execution-agent mutation path in `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, and `packages/app/src/api-server.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must make `editTaskAgent()` recreate-class, must ensure active in-flight work is interrupted before authoritative state is reset, and must discard stale lineage when agent choice changes execution behavior materially. Acceptance criteria: agent edits use explicit recreate semantics, entrypoints remain coherent, and active agent edits are not handled by blocked-or-bespoke behavior.
+    dependencies: []
+  - id: add-agent-mutation-tests
+    description: "Add regression tests for execution-agent invalidation behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert recreate-class routing, cancel-first ordering, and entrypoint coverage for agent edits."
+    prompt: |
+      Add regression coverage for execution-agent invalidation using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify recreate-class routing for `editTaskAgent()`, must verify cancel-first ordering for active agent edits, and must verify that app/API entrypoints call the updated policy correctly. Acceptance criteria: tests fail on the prior restart-style behavior, pass on the updated agent path, and assert invalidation class plus lineage semantics explicitly.
+    dependencies:
+      - implement-agent-mutation-policy
+  - id: run-agent-mutation-tests
+    description: "Run the focused workflow-core and app regression suite for execution-agent invalidation. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted agent-mutation Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/api-server.test.ts"
+    dependencies:
+      - add-agent-mutation-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the agent-mutation tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-agent-mutation-tests

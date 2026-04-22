@@ -1,0 +1,35 @@
+name: "Task Invalidation Step 5: Executor-type mutation path"
+description: |
+  Align executor-type invalidation with `docs/architecture/task-invalidation-chart.md`
+  so substrate-only changes are retry-class edits with cancel-first behavior.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-executor-type-policy
+    description: "Make substrate-only executor-type edits follow a retry-class invalidation path. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`. Change types: modify executor-type mutation routing. Acceptance criteria: executor-type edits cancel active work first, preserve valid lineage where appropriate, and no longer default to restart-style behavior."
+    prompt: |
+      Update the executor-type mutation path in `packages/workflow-core/src/orchestrator.ts` and `packages/app/src/workflow-actions.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must make substrate-only `editTaskType()` changes retry-class, must ensure active in-flight work is interrupted before authoritative state is reset, and must preserve valid lineage only where the execution substrate change does not invalidate it. Acceptance criteria: executor-type edits use explicit retry semantics, cancel-first behavior applies to active work, and restart-style ambiguity is removed from substrate-only changes.
+    dependencies: []
+  - id: add-executor-type-tests
+    description: "Add regression tests for executor-type invalidation behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert retry-class routing, cancel-first ordering, and valid-lineage preservation for substrate-only changes."
+    prompt: |
+      Add regression coverage for executor-type invalidation using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify retry-class routing for substrate-only `editTaskType()` changes, must verify cancel-first ordering for active edits, and must verify valid-lineage preservation where the policy allows it. Acceptance criteria: tests fail on the previous restart-style behavior, pass on the updated executor-type path, and assert invalidation class plus lineage semantics explicitly.
+    dependencies:
+      - implement-executor-type-policy
+  - id: run-executor-type-tests
+    description: "Run the focused workflow-core regression suite for executor-type invalidation. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: the targeted executor-type Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts src/__tests__/state-topology-matrix.test.ts"
+    dependencies:
+      - add-executor-type-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the executor-type tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-executor-type-tests

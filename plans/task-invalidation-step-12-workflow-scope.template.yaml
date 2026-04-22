@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 12: Workflow-scope paths"
+description: |
+  Align workflow-scoped invalidation with `docs/architecture/task-invalidation-chart.md`
+  so `retryWorkflow`, `recreateWorkflow`, and fresh-base `rebaseAndRetry()`
+  remain distinct and testable.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-workflow-scope-policy
+    description: "Make workflow-scoped invalidation semantics explicit and preserve fresh-base recreation as a stronger operation. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`. Change types: modify workflow-scope invalidation behavior. Acceptance criteria: `retryWorkflow`, `recreateWorkflow`, and `rebaseAndRetry()` remain distinct, cancel active work first, and are directly testable."
+    prompt: |
+      Update the workflow-scoped invalidation paths in `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, and `packages/app/src/headless.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must preserve a clean distinction between `retryWorkflow`, `recreateWorkflow`, and the stronger fresh-base behavior represented by `rebaseAndRetry()`, and it must ensure workflow-scoped active work follows the shared cancel-first invariant. Acceptance criteria: workflow-scope invalidation semantics are explicit in code, fresh-base recreation remains stronger than plain workflow recreation, and the workflow-level paths are directly testable.
+    dependencies: []
+  - id: add-workflow-scope-tests
+    description: "Add regression tests for workflow-scoped invalidation behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/headless-delegation.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests cover retryWorkflow vs recreateWorkflow vs rebaseAndRetry semantics and cancel-first workflow invalidation."
+    prompt: |
+      Add regression coverage for workflow-scoped invalidation using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/headless-delegation.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify the distinction between `retryWorkflow`, `recreateWorkflow`, and fresh-base `rebaseAndRetry()` behavior, must verify cancel-first ordering for active workflow invalidation, and must verify that headless/workflow entrypoints route through the updated policy correctly. Acceptance criteria: tests fail on previous workflow-scope ambiguity, pass on the updated workflow paths, and assert scope plus lineage semantics explicitly.
+    dependencies:
+      - implement-workflow-scope-policy
+  - id: run-workflow-scope-tests
+    description: "Run the focused workflow-core and app regression suite for workflow-scoped invalidation. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted workflow-scope Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/headless-delegation.test.ts"
+    dependencies:
+      - add-workflow-scope-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the workflow-scope tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-workflow-scope-tests

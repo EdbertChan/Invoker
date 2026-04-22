@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 7: Selected-experiment path"
+description: |
+  Align single experiment-selection invalidation with
+  `docs/architecture/task-invalidation-chart.md` so selecting a winning
+  experiment retries affected reconciliation and downstream execution correctly.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-selected-experiment-policy
+    description: "Route single experiment selection through the shared invalidation policy. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/response-handler.ts`, `packages/app/src/workflow-actions.ts`. Change types: modify experiment-selection routing. Acceptance criteria: selecting one winning experiment uses explicit retry-class invalidation for affected reconciliation and downstream work."
+    prompt: |
+      Update the single experiment-selection path in `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/response-handler.ts`, and `packages/app/src/workflow-actions.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must route single-winner experiment selection through the shared invalidation policy, must ensure affected reconciliation and downstream work retry coherently, and must apply cancel-first behavior when active work is affected. Acceptance criteria: single experiment selection uses explicit retry semantics, active downstream work is invalidated safely, and the path no longer behaves like an isolated special case.
+    dependencies: []
+  - id: add-selected-experiment-tests
+    description: "Add regression tests for single experiment-selection invalidation behavior. Files: `packages/workflow-core/src/__tests__/experiment-lifecycle.test.ts`, `packages/workflow-core/src/__tests__/orchestrator.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert retry-class routing and active invalidation behavior for single experiment selection."
+    prompt: |
+      Add regression coverage for single experiment-selection invalidation using `packages/workflow-core/src/__tests__/experiment-lifecycle.test.ts`, `packages/workflow-core/src/__tests__/orchestrator.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify explicit retry-class routing for selecting one winning experiment, must verify cancel-first behavior when active downstream work is affected, and must verify that reconciliation and downstream lineage update coherently. Acceptance criteria: tests fail on previous special-case behavior, pass on the updated experiment-selection path, and assert invalidation class plus downstream semantics explicitly.
+    dependencies:
+      - implement-selected-experiment-policy
+  - id: run-selected-experiment-tests
+    description: "Run the focused workflow-core regression suite for single experiment-selection invalidation. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: the targeted selected-experiment Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/experiment-lifecycle.test.ts src/__tests__/orchestrator.test.ts"
+    dependencies:
+      - add-selected-experiment-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the selected-experiment tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-selected-experiment-tests

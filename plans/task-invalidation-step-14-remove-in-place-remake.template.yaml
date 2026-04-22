@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 14: Remove in-place remake behavior"
+description: |
+  Remove in-place remake/topology replacement behavior so graph-shape changes no
+  longer mutate the active workflow and replacement flows stop masquerading as
+  ordinary invalidation.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: remove-in-place-replacement-surface
+    description: "Remove in-place remake/replacement behavior from topology mutation flows. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/graph-mutation.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, `packages/app/src/api-server.ts`. Change types: remove or stage away in-place replacement semantics. Acceptance criteria: topology-changing requests no longer use `replaceTask()`-style in-place mutation of the active workflow."
+    prompt: |
+      Remove the in-place remake/replacement behavior from topology mutation flows in `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/graph-mutation.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, and `packages/app/src/api-server.ts`. The implementation must stop topology-changing requests from using `replaceTask()`-style in-place mutation of the active workflow, must move the behavior onto explicit workflow-fork or replacement semantics, and must keep any compatibility staging explicit rather than silently preserving in-place remake behavior. Acceptance criteria: active workflows are no longer remade in place, the public surface does not encourage in-place topology mutation, and the resulting behavior matches the invalidation-chart policy boundary.
+    dependencies: []
+  - id: update-in-place-remake-tests
+    description: "Update regression tests to assert fork-or-replace semantics instead of in-place remake behavior. Files: `packages/workflow-core/src/__tests__/replace-task.test.ts`, `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, `packages/app/src/__tests__/bridge-orchestrator-executor.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests no longer encode in-place remake as the intended behavior for topology changes."
+    prompt: |
+      Update regression coverage around in-place remake removal using `packages/workflow-core/src/__tests__/replace-task.test.ts`, `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, `packages/app/src/__tests__/bridge-orchestrator-executor.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify that topology-changing requests no longer mutate the active workflow in place, must verify the replacement or workflow-fork behavior that now owns those changes, and must stop encoding in-place remake as the intended behavior. Acceptance criteria: tests fail on the old in-place replacement behavior, pass on the new fork-or-replace path, and make the removal of in-place remake obvious.
+    dependencies:
+      - remove-in-place-replacement-surface
+  - id: run-in-place-remake-removal-tests
+    description: "Run the focused workflow-core and app regression suite for in-place-remake removal. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted in-place-remake-removal Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/replace-task.test.ts src/__tests__/orchestrator.test.ts src/__tests__/state-topology-matrix.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/bridge-orchestrator-executor.test.ts"
+    dependencies:
+      - update-in-place-remake-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the in-place-remake-removal tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-in-place-remake-removal-tests

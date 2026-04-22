@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 11: Topology mutation path"
+description: |
+  Align topology mutation behavior with `docs/architecture/task-invalidation-chart.md`
+  so graph-shape changes fork from the relevant node/result instead of mutating
+  active workflows in place.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-topology-policy
+    description: "Stop topology-changing requests from mutating live workflows in place. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/graph-mutation.ts`, `packages/app/src/workflow-actions.ts`. Change types: modify topology-mutation behavior. Acceptance criteria: topology changes fork from the relevant node/result and no longer masquerade as ordinary task edits."
+    prompt: |
+      Update the topology-mutation path in `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/graph-mutation.ts`, and `packages/app/src/workflow-actions.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must audit `replaceTask()` and related graph-mutation entrypoints, must stop topology-changing requests from mutating a live workflow in place when the chart calls for a fork from the relevant node or result, and must keep any staged compatibility constraints explicit. Acceptance criteria: topology changes no longer behave like ordinary in-place task edits, the workflow-fork boundary is obvious in code, and affected active work follows the shared cancel-first invariant.
+    dependencies: []
+  - id: add-topology-tests
+    description: "Add regression tests for topology-fork behavior. Files: `packages/workflow-core/src/__tests__/replace-task.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, `packages/workflow-core/src/__tests__/orchestrator.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert topology forking rules and rejection of in-place live graph mutation."
+    prompt: |
+      Add regression coverage for topology mutation using `packages/workflow-core/src/__tests__/replace-task.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, `packages/workflow-core/src/__tests__/orchestrator.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify that topology-changing requests fork from the relevant node or result, must verify that live workflows are no longer mutated in place, and must verify cancel-first behavior when active work is in the affected scope. Acceptance criteria: tests fail on previous replace-in-place behavior, pass on the updated topology path, and assert fork-vs-in-place semantics explicitly.
+    dependencies:
+      - implement-topology-policy
+  - id: run-topology-tests
+    description: "Run the focused workflow-core regression suite for topology mutation behavior. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: the targeted topology Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/replace-task.test.ts src/__tests__/state-topology-matrix.test.ts src/__tests__/orchestrator.test.ts"
+    dependencies:
+      - add-topology-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the topology tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-topology-tests

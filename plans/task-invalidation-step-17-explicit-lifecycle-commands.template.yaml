@@ -1,0 +1,37 @@
+name: "Task Invalidation Step 17: Explicit lifecycle commands obey the matrix"
+description: |
+  Make the explicit lifecycle commands line up with
+  `docs/architecture/task-invalidation-chart.md` so `retryTask`,
+  `recreateTask`, `retryWorkflow`, `recreateWorkflow`, and fresh-base rebase
+  semantics map cleanly onto the intended task/workflow matrix.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: align-explicit-lifecycle-commands
+    description: "Align explicit task and workflow lifecycle commands with the retry/recreate matrix. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, `packages/app/src/api-server.ts`. Change types: modify explicit lifecycle command behavior and routing. Acceptance criteria: explicit lifecycle commands map cleanly onto task/workflow retry/recreate semantics and fresh-base behavior remains distinct."
+    prompt: |
+      Update the explicit lifecycle command paths in `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, and `packages/app/src/api-server.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must make the explicit task and workflow lifecycle commands map cleanly onto the retry/recreate matrix, must keep fresh-base `rebaseAndRetry()` stronger than plain `recreateWorkflow()`, and must ensure the command surface uses the invalidation-class scaffolding consistently. Acceptance criteria: explicit lifecycle commands obey the intended matrix, task-vs-workflow scope is obvious, and command routing no longer relies on ambiguous restart-era behavior.
+    dependencies: []
+  - id: add-lifecycle-command-tests
+    description: "Add regression tests for explicit lifecycle command semantics. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/command-service.test.ts`, `packages/app/src/__tests__/workflow-actions.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, `packages/app/src/__tests__/headless-delegation.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert the full task/workflow retry/recreate matrix and fresh-base distinction."
+    prompt: |
+      Add regression coverage for explicit lifecycle commands using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/command-service.test.ts`, `packages/app/src/__tests__/workflow-actions.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, `packages/app/src/__tests__/headless-delegation.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify task retry/recreate behavior, workflow retry/recreate behavior, and the stronger fresh-base semantics of `rebaseAndRetry()`. Acceptance criteria: tests fail if explicit lifecycle commands collapse the matrix or blur fresh-base behavior, pass on the intended matrix, and make task-vs-workflow scope obvious.
+    dependencies:
+      - align-explicit-lifecycle-commands
+  - id: run-lifecycle-command-tests
+    description: "Run the focused workflow-core and app regression suite for explicit lifecycle commands. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted lifecycle-command Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts src/__tests__/command-service.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/workflow-actions.test.ts src/__tests__/api-server.test.ts src/__tests__/headless-delegation.test.ts"
+    dependencies:
+      - add-lifecycle-command-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the lifecycle-command tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-lifecycle-command-tests

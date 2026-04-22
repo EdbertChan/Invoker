@@ -1,0 +1,10 @@
+name: "Hello world"
+onFinish: none
+mergeMode: manual
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker.git
+
+tasks:
+  - id: print-hello-world
+    description: "Run a command that prints hello world to stdout"
+    command: "echo 'hello world'"
+    dependencies: []

@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 13: Remove restart semantics"
+description: |
+  Remove `restart` as a first-class semantic from the task/workflow invalidation
+  surface so the runtime and public entrypoints speak in retry vs recreate terms
+  instead of preserving the old overloaded restart vocabulary.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: replace-restart-surface
+    description: "Replace restart semantics with explicit retry or recreate semantics across runtime and entrypoints. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, `packages/app/src/api-server.ts`. Change types: rename/remove restart-oriented behavior and routing. Acceptance criteria: public and internal surfaces no longer depend on `restartTask()` as the semantic center of invalidation."
+    prompt: |
+      Remove `restart` as a first-class semantic from the invalidation surface in `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, and `packages/app/src/api-server.ts`. The implementation must migrate task and workflow restart-oriented surfaces onto explicit retry or recreate semantics, must preserve behavior where compatibility still matters during the transition, and must ensure the ABI invalidation classes introduced earlier remain the authoritative runtime vocabulary. Acceptance criteria: runtime and entrypoint code no longer treat `restartTask()` as the semantic center of invalidation, and the remaining API names/paths are either migrated or clearly staged for removal with explicit compatibility handling.
+    dependencies: []
+  - id: update-restart-tests
+    description: "Update regression tests to assert retry/recreate semantics instead of restart semantics. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/command-service.test.ts`, `packages/app/src/__tests__/workflow-actions.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, `packages/app/src/__tests__/headless-delegation.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests describe retry/recreate behavior and no longer encode restart as the intended semantic abstraction."
+    prompt: |
+      Update regression coverage around `restart` removal using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/command-service.test.ts`, `packages/app/src/__tests__/workflow-actions.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, `packages/app/src/__tests__/headless-delegation.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify that retry/recreate semantics remain correct after the restart-oriented surface is removed or staged away, and they must stop encoding restart as the intended semantic abstraction. Acceptance criteria: tests fail on restart-centric behavior, pass on explicit retry/recreate behavior, and make the new vocabulary obvious.
+    dependencies:
+      - replace-restart-surface
+  - id: run-restart-removal-tests
+    description: "Run the focused workflow-core and app regression suite for restart-removal behavior. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted restart-removal Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts src/__tests__/command-service.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/workflow-actions.test.ts src/__tests__/api-server.test.ts src/__tests__/headless-delegation.test.ts"
+    dependencies:
+      - update-restart-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the restart-removal tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-restart-removal-tests

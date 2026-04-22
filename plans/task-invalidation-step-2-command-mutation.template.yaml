@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 2: Command mutation path"
+description: |
+  Align command-edit invalidation with `docs/architecture/task-invalidation-chart.md`
+  so command mutations are recreate-class edits that cancel active work before
+  resetting authoritative lineage.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-command-mutation-policy
+    description: "Make command edits follow the dedicated recreate-class invalidation path. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`. Change types: modify command-mutation routing. Acceptance criteria: `editTaskCommand()` cancels active work first, discards stale lineage, and no longer behaves like generic restart semantics."
+    prompt: |
+      Update the command-mutation path in `packages/workflow-core/src/orchestrator.ts` and `packages/app/src/workflow-actions.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must make `editTaskCommand()` a recreate-class mutation, must ensure active in-flight work is interrupted before authoritative state is reset, and must discard stale lineage instead of routing through ambiguous restart semantics. Acceptance criteria: command edits use explicit recreate semantics, active command edits are no longer handled by blocked-or-bespoke behavior, and the command path remains compatible with the existing public command surface.
+    dependencies: []
+  - id: add-command-mutation-tests
+    description: "Add regression tests for command-mutation invalidation behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert recreate-class routing, cancel-first ordering, and lineage reset for command edits."
+    prompt: |
+      Add regression coverage for the command-mutation path using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify that `editTaskCommand()` is recreate-class, must verify cancel-first ordering for active command edits, and must verify that stale lineage is discarded after the mutation. Acceptance criteria: tests fail on prior restart-style behavior, pass on the updated command path, and assert invalidation class plus lineage semantics explicitly.
+    dependencies:
+      - implement-command-mutation-policy
+  - id: run-command-mutation-tests
+    description: "Run the focused workflow-core regression suite for command-mutation invalidation. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: the targeted command-mutation Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts src/__tests__/state-topology-matrix.test.ts"
+    dependencies:
+      - add-command-mutation-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the command-mutation tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-command-mutation-tests

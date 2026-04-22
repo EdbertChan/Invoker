@@ -1,0 +1,35 @@
+name: "Task Invalidation Step 6: Remote-target mutation path"
+description: |
+  Align remote-target invalidation with `docs/architecture/task-invalidation-chart.md`
+  so host changes are recreate-class edits that discard stale workspace lineage.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-remote-target-policy
+    description: "Make remote-target changes follow a dedicated recreate-class invalidation path. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, `packages/app/src/api-server.ts`. Change types: modify remote-target routing and entrypoints. Acceptance criteria: remote-target edits cancel active work first, discard stale workspace lineage, and do not piggyback on generic executor-type restart semantics."
+    prompt: |
+      Update the remote-target mutation path in `packages/workflow-core/src/orchestrator.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/headless.ts`, and `packages/app/src/api-server.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must make remote-target changes recreate-class even when they are expressed through `editTaskType()`, must ensure active in-flight work is interrupted before authoritative state is reset, and must discard stale workspace lineage when the host changes. Acceptance criteria: remote-target edits use explicit recreate semantics, integration entrypoints expose the behavior coherently, and host changes no longer piggyback on generic restart-style routing.
+    dependencies: []
+  - id: add-remote-target-tests
+    description: "Add regression tests for remote-target invalidation behavior. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert recreate-class routing, cancel-first ordering, and stale-lineage discard for remote-target edits."
+    prompt: |
+      Add regression coverage for remote-target invalidation using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify recreate-class routing for remote-target changes, must verify cancel-first ordering for active remote-target edits, and must verify that stale workspace lineage is discarded. Acceptance criteria: tests fail on the previous executor-type piggyback behavior, pass on the updated remote-target path, and assert invalidation class plus lineage semantics explicitly.
+    dependencies:
+      - implement-remote-target-policy
+  - id: run-remote-target-tests
+    description: "Run the focused workflow-core and app regression suite for remote-target invalidation. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted remote-target Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/api-server.test.ts"
+    dependencies:
+      - add-remote-target-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the remote-target tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-remote-target-tests

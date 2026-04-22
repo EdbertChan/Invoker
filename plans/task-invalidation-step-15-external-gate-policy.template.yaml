@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 15: External gate policy is non-invalidating"
+description: |
+  Lock in the `docs/architecture/task-invalidation-chart.md` rule that
+  external gate policy changes are scheduling-only updates that unblock work
+  without invalidating execution lineage.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: implement-noninvalidating-gate-policy
+    description: "Make external gate policy updates explicitly non-invalidating. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, `packages/app/src/api-server.ts`. Change types: modify external-gate policy routing. Acceptance criteria: gate-policy changes unblock scheduling only, do not cancel active work, and do not reset execution lineage."
+    prompt: |
+      Update the external-gate policy path in `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, and `packages/app/src/api-server.ts` to match `docs/architecture/task-invalidation-chart.md`. The implementation must make external gate policy changes explicitly non-invalidating, must ensure they only affect scheduling and readiness, and must not cancel active work or reset execution lineage. Acceptance criteria: external gate policy changes are modeled as unblock-only control flow, the invalidation-class scaffolding does not misclassify them as retry/recreate, and entrypoints remain coherent.
+    dependencies: []
+  - id: add-gate-policy-tests
+    description: "Add regression tests for non-invalidating external gate policy changes. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert unblock-only behavior and prove no invalidation or lineage reset occurs."
+    prompt: |
+      Add regression coverage for external gate policy changes using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/app/src/__tests__/api-server.test.ts`, and any focused new test files needed to keep the cases readable. The tests must verify that gate policy changes only unblock scheduling, must verify that active work is not canceled, and must verify that execution lineage is not reset. Acceptance criteria: tests fail if gate policy changes trigger retry/recreate behavior, pass on unblock-only behavior, and make the non-invalidating rule explicit.
+    dependencies:
+      - implement-noninvalidating-gate-policy
+  - id: run-gate-policy-tests
+    description: "Run the focused workflow-core and app regression suite for external gate policy behavior. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted external-gate-policy Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/api-server.test.ts"
+    dependencies:
+      - add-gate-policy-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the gate-policy tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-gate-policy-tests

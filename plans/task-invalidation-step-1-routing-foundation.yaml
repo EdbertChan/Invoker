@@ -1,0 +1,43 @@
+name: "Task Invalidation Step 1: ABI invalidation scaffolding"
+description: |
+  Scaffold the new ABI invalidation classes from
+  `docs/architecture/task-invalidation-chart.md` so retry vs recreate behavior
+  is represented explicitly in the runtime before path-by-path refactors begin.
+
+  This first workflow is intentionally scaffolding, not a broad behavior
+  rewrite. It should introduce the internal invalidation-class surface,
+  preserve compatibility at the existing command surface, and lock in the
+  cancel-first invariant before later workflows migrate each mutation path
+  slowly from current behavior to the target policy.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+
+tasks:
+  - id: scaffold-abi-invalidation-classes
+    description: "Scaffold the new ABI invalidation classes and cancel-first runtime invariants. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`. Change types: modify orchestration and command-routing internals. Acceptance criteria: one named invalidation-class surface exists in code and active invalidation is not scattered across individual handlers."
+    prompt: |
+      Scaffold the ABI invalidation classes from `docs/architecture/task-invalidation-chart.md` in `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, and `packages/app/src/workflow-actions.ts`. The implementation must introduce one shared invalidation-class surface for task/workflow scope and retry/recreate semantics, must preserve compatibility at the existing public command surface, and must enforce the hard invariant that affected in-flight work is interrupted before authoritative state is reset and rescheduled. This workflow must not try to convert every mutation path yet; it should provide the scaffolding that later workflows migrate onto. Ensure `rebaseAndRetry()` remains semantically stronger than plain `recreateWorkflow()`. Acceptance criteria: runtime code has a named invalidation-class layer, cancel-first behavior is centralized, and the command surface still compiles against the new scaffolding.
+    dependencies: []
+
+  - id: add-abi-scaffolding-tests
+    description: "Add focused regression tests for the new ABI invalidation scaffolding and cancel-first invariant. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/command-service.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests assert invalidation-class decisions and cancel-first behavior at the new scaffolding layer."
+    prompt: |
+      Add focused regression coverage for the ABI invalidation scaffolding introduced from `docs/architecture/task-invalidation-chart.md` using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/command-service.test.ts`, and any new focused test files needed to keep the cases readable. The tests must verify that the new invalidation-class layer represents retry vs recreate explicitly, that cancel-first behavior occurs before authoritative resets, and that the existing command surface routes through the scaffolding correctly. Acceptance criteria: tests fail on the previous ad hoc routing behavior, pass on the new scaffolding, and assert invalidation class plus cancel ordering explicitly.
+    dependencies:
+      - scaffold-abi-invalidation-classes
+
+  - id: run-abi-scaffolding-tests
+    description: "Run the focused workflow-core regression suite for the ABI invalidation scaffolding. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: the targeted scaffolding Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts src/__tests__/command-service.test.ts"
+    dependencies:
+      - add-abi-scaffolding-tests
+
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the routing-foundation tests pass to catch broader orchestration regressions. Files: read-only execution of the workflow-core package tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-abi-scaffolding-tests

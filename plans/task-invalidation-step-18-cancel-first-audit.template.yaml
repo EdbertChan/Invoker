@@ -1,0 +1,36 @@
+name: "Task Invalidation Step 18: Cancel-first invariant audit"
+description: |
+  Audit and lock in the hard invariant from
+  `docs/architecture/task-invalidation-chart.md` that every invalidating path
+  cancels affected active work before authoritative reset and rescheduling.
+onFinish: pull_request
+mergeMode: external_review
+reviewProvider: github
+baseBranch: master
+repoUrl: https://github.com/EdbertChan/Invoker.git
+executorType: worktree
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+tasks:
+  - id: audit-cancel-first-invariant
+    description: "Audit invalidating paths and make cancel-first behavior uniform across task and workflow scopes. Files: `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, and helper files needed by the chosen implementation. Change types: tighten invariant enforcement. Acceptance criteria: every invalidating path cancels active work before authoritative reset and rescheduling."
+    prompt: |
+      Audit the invalidating paths in `packages/workflow-core/src/orchestrator.ts`, `packages/workflow-core/src/command-service.ts`, `packages/app/src/workflow-actions.ts`, and any helper files required by the chosen implementation to match `docs/architecture/task-invalidation-chart.md`. The implementation must make cancel-first behavior uniform across task and workflow scopes, must close any remaining path that resets authoritative state before affected active work is canceled, and must use the ABI invalidation scaffolding consistently. Acceptance criteria: every invalidating path cancels active work before reset and rescheduling, the invariant is directly testable, and any remaining exception is removed or made explicit and justified.
+    dependencies: []
+  - id: add-cancel-first-audit-tests
+    description: "Add regression tests that audit the cancel-first invariant across invalidation paths. Files: `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/command-service.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, `packages/app/src/__tests__/headless-delegation.test.ts`, and focused new test files if needed. Change types: modify/add tests only. Acceptance criteria: tests prove cancel-first ordering across the invalidating matrix instead of only on isolated paths."
+    prompt: |
+      Add regression coverage for the cancel-first invariant using `packages/workflow-core/src/__tests__/orchestrator.test.ts`, `packages/workflow-core/src/__tests__/command-service.test.ts`, `packages/workflow-core/src/__tests__/state-topology-matrix.test.ts`, `packages/app/src/__tests__/headless-delegation.test.ts`, and any focused new test files needed to keep the cases readable. The tests must audit cancel-first ordering across task-scope and workflow-scope invalidating paths, must verify that authoritative reset never happens before affected active work is canceled, and must make the invariant obvious rather than implicit. Acceptance criteria: tests fail if any audited path resets state before cancellation, pass when cancel-first ordering is uniform, and provide a cross-cutting proof of the invariant.
+    dependencies:
+      - audit-cancel-first-invariant
+  - id: run-cancel-first-audit-tests
+    description: "Run the focused workflow-core and app regression suite for the cancel-first invariant audit. Files: read-only execution of workflow-core and app tests. Change types: none. Acceptance criteria: the targeted cancel-first-audit Vitest files pass."
+    command: "cd packages/workflow-core && pnpm test -- src/__tests__/orchestrator.test.ts src/__tests__/command-service.test.ts src/__tests__/state-topology-matrix.test.ts && cd /Users/edbertchan/Documents/GitHub/Invoker/packages/app && pnpm test -- src/__tests__/headless-delegation.test.ts"
+    dependencies:
+      - add-cancel-first-audit-tests
+  - id: post-fix-regression
+    description: "Re-run the workflow-core package test suite after the cancel-first-audit tests pass. Files: read-only execution of workflow-core tests. Change types: none. Acceptance criteria: `cd packages/workflow-core && pnpm test` exits 0."
+    command: "cd packages/workflow-core && pnpm test"
+    dependencies:
+      - run-cancel-first-audit-tests
