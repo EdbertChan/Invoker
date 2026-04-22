@@ -901,6 +901,200 @@ describe('POST /api/workflows/:id/restart', () => {
 // surfaces expose an explicit `fork` verb. The api-server
 // returns both the source and forked workflow ids so callers
 // can follow the new workflow.
+// Step 17 (`docs/architecture/task-invalidation-roadmap.md`,
+// `docs/architecture/task-invalidation-chart.md` "Proposed API
+// Direction"): closes the canonical 2x2 matrix on the HTTP
+// surface by adding /retry and /rebase-and-retry workflow
+// endpoints. Plain /retry preserves per-task lineage; the
+// /restart legacy alias above already covers /recreate
+// (recreate-class semantics).
+describe('POST /api/workflows/:id/retry (Step 17)', () => {
+  it('routes to orchestrator.retryWorkflow (retry-class — preserves lineage)', async () => {
+    mocks.orchestrator.retryWorkflow = vi.fn(() => [makeTask()]);
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => []);
+    mocks.orchestrator.recreateWorkflowFromFreshBase = vi.fn(async () => []);
+
+    const res = await request(port, 'POST', '/api/workflows/wf-1/retry');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('retried');
+    expect(res.body.workflowId).toBe('wf-1');
+    expect(mocks.orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+    // Distinction guard — workflow retry must NOT touch the
+    // recreate-class primitives or refresh the upstream pool.
+    expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
+    // Workflow retry MUST NOT bump generation (only recreate /
+    // rebase-and-retry do; this is the chart's lineage rule).
+    expect(mocks.persistence.updateWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when retryWorkflow throws', async () => {
+    mocks.orchestrator.retryWorkflow = vi.fn(() => {
+      throw new Error('workflow missing not found');
+    });
+    const res = await request(port, 'POST', '/api/workflows/missing/retry');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('not found');
+  });
+});
+
+describe('POST /api/workflows/:id/rebase-and-retry (Step 17)', () => {
+  it('routes to orchestrator.recreateWorkflowFromFreshBase (strictly-stronger workflow recreate; refreshes upstream pool)', async () => {
+    mocks.orchestrator.retryWorkflow = vi.fn(() => []);
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => []);
+    mocks.orchestrator.recreateWorkflowFromFreshBase = vi.fn(
+      async (_wf: string, opts?: { refreshBase?: () => Promise<unknown> }) => {
+        await opts?.refreshBase?.();
+        return [makeTask()];
+      },
+    );
+    mocks.taskExecutor.preparePoolForRebaseRetry = vi.fn().mockResolvedValue(undefined);
+    mocks.persistence.loadWorkflow.mockReturnValue({
+      id: 'wf-1',
+      generation: 4,
+      repoUrl: 'https://example/repo.git',
+      baseBranch: 'main',
+    });
+
+    const res = await request(port, 'POST', '/api/workflows/wf-1/rebase-and-retry');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('rebase_and_retried');
+    expect(res.body.workflowId).toBe('wf-1');
+    // Generation MUST be bumped (the wrapper composes a gen
+    // bump on top of the orchestrator primitive).
+    expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { generation: 5 });
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
+      'wf-1',
+      expect.objectContaining({ refreshBase: expect.any(Function) }),
+    );
+    // The whole reason this verb is distinct from /recreate:
+    // refresh the upstream pool/base.
+    expect(mocks.taskExecutor.preparePoolForRebaseRetry).toHaveBeenCalledWith(
+      'wf-1',
+      'https://example/repo.git',
+      'main',
+    );
+    // Distinction guard — must NOT collapse to the retry / plain
+    // recreate primitives.
+    expect(mocks.orchestrator.retryWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the workflow is missing', async () => {
+    mocks.orchestrator.recreateWorkflowFromFreshBase = vi.fn(async () => []);
+    mocks.persistence.loadWorkflow.mockReturnValue(undefined);
+
+    const res = await request(port, 'POST', '/api/workflows/missing/rebase-and-retry');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('not found');
+  });
+});
+
+// Step 17 cross-route lock-in: pin the canonical 2x2 + 1 matrix
+// at the HTTP surface in a single test. Each cell asserts that
+// the explicit verb routes to its matching orchestrator
+// primitive — and ONLY that primitive (no legacy `restartTask`
+// path, no cross-collapse).
+describe('Step 17: HTTP surface canonical 5-route lifecycle matrix', () => {
+  beforeEach(() => {
+    // Per-test fresh stubs so the negative assertions for each
+    // cell can prove non-routing of the other primitives.
+    mocks.orchestrator.retryTask = vi.fn(() => [makeTask()]);
+    mocks.orchestrator.recreateTask = vi.fn(() => [makeTask()]);
+    mocks.orchestrator.retryWorkflow = vi.fn(() => [makeTask()]);
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
+    mocks.orchestrator.recreateWorkflowFromFreshBase = vi.fn(
+      async (_wf: string, opts?: { refreshBase?: () => Promise<unknown> }) => {
+        await opts?.refreshBase?.();
+        return [makeTask()];
+      },
+    );
+    mocks.orchestrator.restartTask = vi.fn(() => [makeTask()]);
+    mocks.taskExecutor.preparePoolForRebaseRetry = vi.fn().mockResolvedValue(undefined);
+    mocks.persistence.loadWorkflow.mockReturnValue({
+      id: 'wf-1',
+      generation: 0,
+      repoUrl: 'https://example/repo.git',
+      baseBranch: 'main',
+    });
+  });
+
+  it('POST /api/tasks/:id/retry → orchestrator.retryTask (only)', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/retry');
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('retried');
+    expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
+    expect(mocks.orchestrator.recreateTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.retryWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.restartTask).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/tasks/:id/recreate → orchestrator.recreateTask (only)', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('recreated');
+    expect(mocks.orchestrator.recreateTask).toHaveBeenCalledWith('task-1');
+    expect(mocks.orchestrator.retryTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.retryWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.restartTask).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/workflows/:id/retry → orchestrator.retryWorkflow (only; no gen bump)', async () => {
+    const res = await request(port, 'POST', '/api/workflows/wf-1/retry');
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('retried');
+    expect(mocks.orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.orchestrator.retryTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.restartTask).not.toHaveBeenCalled();
+    expect(mocks.persistence.updateWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/workflows/:id/recreate → orchestrator.recreateWorkflow (only; gen bump)', async () => {
+    const res = await request(port, 'POST', '/api/workflows/wf-1/recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('recreated');
+    expect(mocks.orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.orchestrator.retryTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.retryWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.restartTask).not.toHaveBeenCalled();
+    expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { generation: 1 });
+  });
+
+  it('POST /api/workflows/:id/rebase-and-retry → orchestrator.recreateWorkflowFromFreshBase (only; refreshes upstream + gen bump)', async () => {
+    const res = await request(port, 'POST', '/api/workflows/wf-1/rebase-and-retry');
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('rebase_and_retried');
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
+      'wf-1',
+      expect.objectContaining({ refreshBase: expect.any(Function) }),
+    );
+    expect(mocks.taskExecutor.preparePoolForRebaseRetry).toHaveBeenCalledWith(
+      'wf-1',
+      'https://example/repo.git',
+      'main',
+    );
+    expect(mocks.orchestrator.retryTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.retryWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.restartTask).not.toHaveBeenCalled();
+    expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { generation: 1 });
+  });
+});
+
 describe('POST /api/workflows/:id/fork (Step 14)', () => {
   it('forks the workflow via shared forkWorkflow and returns both ids', async () => {
     const res = await request(port, 'POST', '/api/workflows/wf-1/fork');

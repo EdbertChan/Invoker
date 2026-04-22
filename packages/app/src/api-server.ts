@@ -28,7 +28,9 @@
  *   POST   /api/tasks/:id/edit-type    body: { executorType, remoteTargetId? }
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
+ *   POST   /api/workflows/:id/retry        (Step 17: retry-class — completes the canonical 2x2 matrix)
  *   POST   /api/workflows/:id/recreate     (Step 13: recreate-class)
+ *   POST   /api/workflows/:id/rebase-and-retry (Step 17: strictly-stronger workflow recreate; refreshes upstream base before recreate)
  *   POST   /api/workflows/:id/restart      (DEPRECATED Step 13 — alias of /recreate; preserves historical behavior)
  *   POST   /api/workflows/:id/fork         (Step 14: topology fork — branched copy of the source workflow)
  *   POST   /api/workflows/:id/cancel
@@ -45,9 +47,11 @@ import {
   approveTask as sharedApproveTask,
   recreateWorkflow as sharedRecreateWorkflow,
   recreateTask as sharedRecreateTask,
+  recreateWorkflowFromFreshBase as sharedRecreateWorkflowFromFreshBase,
   forkWorkflow as sharedForkWorkflow,
   cancelWorkflow as sharedCancelWorkflow,
   retryTask as sharedRetryTask,
+  retryWorkflow as sharedRetryWorkflow,
   rejectTask as sharedRejectTask,
   provideInput as sharedProvideInput,
   editTaskCommand as sharedEditTaskCommand,
@@ -424,6 +428,88 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           });
         } catch (err) {
           json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+
+      // POST /api/workflows/:id/retry — Step 17
+      // (`docs/architecture/task-invalidation-roadmap.md` and the
+      // chart's "Proposed API Direction"): explicit workflow
+      // retry-class entrypoint that closes the canonical
+      // `{retry, recreate} × {task, workflow}` matrix at the HTTP
+      // surface. Routes through `sharedRetryWorkflow` →
+      // `Orchestrator.retryWorkflow`, which preserves per-task
+      // branch / workspacePath lineage and only clears volatile
+      // attempt state. Distinct from /recreate (which discards
+      // lineage and bumps generation) and from /rebase-and-retry
+      // (which additionally refreshes the upstream base).
+      const wfRetryMatch = path.match(/^\/api\/workflows\/([^/]+)\/retry$/);
+      if (method === 'POST' && wfRetryMatch) {
+        const workflowId = decodeURIComponent(wfRetryMatch[1]);
+        try {
+          const started = sharedRetryWorkflow(workflowId, { orchestrator });
+          const runnable = started.filter(t => t.status === 'running');
+          await taskExecutor.executeTasks(runnable);
+          await executeGlobalTopup({
+            orchestrator,
+            taskExecutor,
+            logger: apiLogger,
+            context: 'api.workflows.retry',
+            alreadyDispatched: runnable,
+          });
+          json(res, 200, {
+            ok: true,
+            workflowId,
+            action: 'retried',
+            tasksStarted: runnable.length,
+          });
+        } catch (err) {
+          json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+
+      // POST /api/workflows/:id/rebase-and-retry — Step 17 +
+      // Step 12 (`docs/architecture/task-invalidation-chart.md`,
+      // "Proposed API Direction"): the strictly-stronger workflow
+      // recreate that first refreshes the upstream base
+      // (via `taskExecutor.preparePoolForRebaseRetry`) and then
+      // performs a full workflow-scope recreate. Routes through
+      // the app-layer `sharedRecreateWorkflowFromFreshBase`
+      // wrapper which composes the gen bump + pool prep on top of
+      // `Orchestrator.recreateWorkflowFromFreshBase`. Distinct from
+      // /recreate (which preserves the workflow's currently-known
+      // upstream base; this one advances it) and from /retry
+      // (which preserves lineage entirely).
+      const wfRebaseAndRetryMatch = path.match(
+        /^\/api\/workflows\/([^/]+)\/rebase-and-retry$/,
+      );
+      if (method === 'POST' && wfRebaseAndRetryMatch) {
+        const workflowId = decodeURIComponent(wfRebaseAndRetryMatch[1]);
+        try {
+          const started = await sharedRecreateWorkflowFromFreshBase(
+            workflowId,
+            { orchestrator, persistence, taskExecutor, logger: apiLogger },
+          );
+          const runnable = started.filter(t => t.status === 'running');
+          await taskExecutor.executeTasks(runnable);
+          await executeGlobalTopup({
+            orchestrator,
+            taskExecutor,
+            logger: apiLogger,
+            context: 'api.workflows.rebase-and-retry',
+            alreadyDispatched: runnable,
+          });
+          json(res, 200, {
+            ok: true,
+            workflowId,
+            action: 'rebase_and_retried',
+            tasksStarted: runnable.length,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          const statusCode = message.includes('not found') ? 404 : 400;
+          json(res, statusCode, { error: message });
         }
         return;
       }
