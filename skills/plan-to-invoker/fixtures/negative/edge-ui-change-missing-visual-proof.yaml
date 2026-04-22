@@ -1,0 +1,36 @@
+# Edge case: UI change plan missing visualProof flag
+# Expected error: missing_visual_proof_flag
+#
+# The plan references packages/ui/ work in task prompts and commands but intentionally
+# does not set visualProof: true, so the validator should reject it as a UI-change plan
+# without the required visual proof flag.
+
+name: "UI change without visual proof flag"
+description: |
+  Updates a shared UI component under packages/ui/src/components/ to tighten layout
+  behavior and align rendering details before a pull request is opened against the
+  default branch. The implementation task is intentionally framed as a UI change.
+
+  The fixture is otherwise structured like a valid pull request plan so the validator
+  can isolate the missing visual proof requirement instead of failing on unrelated
+  schema or task-shape issues.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: fix/ui-change-without-visual-proof-flag
+
+tasks:
+  - id: inspect-ui-component-spacing
+    description: "Inspect shared UI component spacing requirements"
+    prompt: |
+      Update packages/ui/src/components/ButtonRow.tsx so the component must keep consistent
+      spacing across compact and default layouts, ensure the rendered structure remains stable
+      for downstream consumers, and verify the component still uses the existing prop contract
+      without introducing a breaking change or layout regression in adjacent elements.
+    dependencies: []
+
+  - id: run-ui-package-tests
+    description: "Run UI package tests for verification"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [inspect-ui-component-spacing]
