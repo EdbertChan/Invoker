@@ -26,7 +26,7 @@
  *      `applyInvalidation('task', 'retryTask', taskId, deps)`, the
  *      `cancelInFlight` dep is invoked BEFORE the `retryTask` dep.
  *      Today `retryTask` is wired (via `buildInvalidationDeps`) to
- *      `Orchestrator.restartTask` as a compatibility seam — Step 13
+ *      `Orchestrator.retryTask` as a compatibility seam — Step 13
  *      will rename the orchestrator primitive — and this file asserts
  *      ordering at the policy layer where the dep names already match
  *      the chart's `InvalidationAction` vocabulary. We assert via

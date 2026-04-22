@@ -294,7 +294,7 @@ describe('Orchestrator', () => {
 
       persistence.workflows.get(workflowId)!.status = 'failed';
 
-      const restarted = orchestrator.restartTask(taskId);
+      const restarted = orchestrator.retryTask(taskId);
 
       expect(restarted.some((task) => task.id === taskId && task.status === 'running')).toBe(true);
       expect(persistence.workflows.get(workflowId)?.status).toBe('running');
@@ -509,7 +509,7 @@ describe('Orchestrator', () => {
       }
     });
 
-    it('ignores a stale completed response after restartTask resets descendants', () => {
+    it('ignores a stale completed response after retryTask resets descendants', () => {
       const reproPersistence = new InMemoryPersistence();
       const reproBus = new InMemoryBus();
       const repro = new Orchestrator({
@@ -537,7 +537,7 @@ describe('Orchestrator', () => {
       repro.handleWorkerResponse(makeResponse({ actionId: midId, status: 'completed', outputs: { exitCode: 0 } }));
       expect(repro.getTask(lateId)?.status).toBe('running');
 
-      repro.restartTask(prepareId);
+      repro.retryTask(prepareId);
       expect(repro.getTask(prepareId)?.status).toBe('running');
       expect(repro.getTask(midId)?.status).toBe('pending');
       expect(repro.getTask(lateId)?.status).toBe('pending');
@@ -1610,7 +1610,7 @@ describe('Orchestrator', () => {
       orchestrator.deleteWorkflow(upstreamWfId);
       expect(orchestrator.getTask(downstreamTaskId)).toBeDefined();
 
-      const restarted = orchestrator.restartTask(downstreamTaskId);
+      const restarted = orchestrator.retryTask(downstreamTaskId);
       expect(restarted.map((t) => t.id)).toContain(downstreamTaskId);
       expect(orchestrator.getTask(downstreamTaskId)!.status).toBe('blocked');
       expect(orchestrator.getTask(downstreamTaskId)!.execution.blockedBy).toContain('missing prerequisite');
@@ -2197,7 +2197,7 @@ describe('Orchestrator', () => {
       expect(restored.execution.startedAt).toBe(startedAt);
     });
 
-    it('restartTask recovers a stuck running task after syncFromDb', () => {
+    it('retryTask recovers a stuck running task after syncFromDb', () => {
       const hydratePersistence = new InMemoryPersistence();
       const task: TaskState = {
         id: 't1',
@@ -2217,13 +2217,13 @@ describe('Orchestrator', () => {
       });
 
       hydrateOrchestrator.syncFromDb('wf-hydrate');
-      const started = hydrateOrchestrator.restartTask('t1');
+      const started = hydrateOrchestrator.retryTask('t1');
 
       expect(started).toHaveLength(1);
       expect(started[0].status).toBe('running');
     });
 
-    it('restartTask works on failed tasks after syncFromDb', () => {
+    it('retryTask works on failed tasks after syncFromDb', () => {
       const hydratePersistence = new InMemoryPersistence();
       const task: TaskState = {
         id: 't1',
@@ -2247,7 +2247,7 @@ describe('Orchestrator', () => {
       });
 
       hydrateOrchestrator.syncFromDb('wf-hydrate');
-      const started = hydrateOrchestrator.restartTask('t1');
+      const started = hydrateOrchestrator.retryTask('t1');
 
       expect(started).toHaveLength(1);
       expect(started[0].status).toBe('running');
@@ -2285,7 +2285,7 @@ describe('Orchestrator', () => {
       expect(hydrateOrchestrator.getTask('a1')!.status).toBe('completed');
 
       hydrateOrchestrator.syncFromDb('wf-b');
-      const started = hydrateOrchestrator.restartTask('b1');
+      const started = hydrateOrchestrator.retryTask('b1');
       expect(started).toHaveLength(1);
       expect(started[0].status).toBe('running');
     });
@@ -3204,9 +3204,9 @@ describe('Orchestrator', () => {
   // the lone substrate-only mutation in the chart, distinct from the
   // recreate-class command/prompt/executionAgent rows (Steps 2/3/4).
   // Today `retryTask` is wired (via `buildInvalidationDeps`) to
-  // `Orchestrator.restartTask` as a compatibility seam; Step 13 will
+  // `Orchestrator.retryTask` as a compatibility seam; Step 13 will
   // rename that primitive. Step 5 enforces cancel-first via cancelTask
-  // BEFORE the lineage-PRESERVING restartTask reset (the synchronous
+  // BEFORE the lineage-PRESERVING retryTask reset (the synchronous
   // orchestrator-internal equivalent of applyInvalidation's
   // cancelInFlight dep). Branch / workspacePath survive because the
   // chart treats them as workspace lineage that's still authoritative
@@ -3267,13 +3267,13 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(taskId)?.status).toBe('running');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       const started = orchestrator.editTaskType(taskId, 'worktree');
 
       // No throw. Cancel-first ordering: cancelTask MUST be invoked
-      // BEFORE restartTask (today's `retryTask` compatibility wire from
+      // BEFORE retryTask (today's `retryTask` compatibility wire from
       // `buildInvalidationDeps`). This is the chart's Hard Invariant
       // ("any affected in-flight work must be interrupted and canceled
       // first") expressed at the orchestrator-internal sync seam.
@@ -3299,7 +3299,7 @@ describe('Orchestrator', () => {
       recreateSpy.mockRestore();
     });
 
-    it('Step 5: editing an INACTIVE (failed) task skips cancel but still routes through restartTask (retry-class)', () => {
+    it('Step 5: editing an INACTIVE (failed) task skips cancel but still routes through retryTask (retry-class)', () => {
       orchestrator.loadPlan({
         name: 'edit-type-inactive-test',
         tasks: [{ id: 't1', description: 'Task 1', command: 'echo old', executorType: 'docker' }],
@@ -3312,11 +3312,11 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(taskId)?.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskType(taskId, 'worktree');
 
-      // Inactive → no cancel needed; restartTask still resets volatile
+      // Inactive → no cancel needed; retryTask still resets volatile
       // attempt state and bumps generation.
       expect(cancelSpy).not.toHaveBeenCalled();
       expect(restartSpy).toHaveBeenCalledWith(taskId);
@@ -3358,7 +3358,7 @@ describe('Orchestrator', () => {
       // ── Preserved (chart says substrate-only change keeps these) ──
       expect(task.execution.branch).toBe('experiment/preserved-branch');
       expect(task.execution.workspacePath).toBe('/tmp/preserved-workspace');
-      // ── Cleared (volatile attempt state per restartTask reset shape) ──
+      // ── Cleared (volatile attempt state per retryTask reset shape) ──
       expect(task.execution.agentSessionId).toBeUndefined();
       expect(task.execution.containerId).toBeUndefined();
       expect(task.execution.error).toBeUndefined();
@@ -3599,13 +3599,13 @@ describe('Orchestrator', () => {
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskType(taskId, 'ssh', 'remote_digital_ocean');
 
       // Active host change: cancel-first MUST precede recreateTask
       // (chart Hard Invariant — interrupt before authoritative reset),
-      // and the substrate-only retry-class path (restartTask) MUST NOT
+      // and the substrate-only retry-class path (retryTask) MUST NOT
       // be on the route.
       expect(cancelSpy).toHaveBeenCalledWith(taskId);
       expect(recreateSpy).toHaveBeenCalledWith(taskId);
@@ -4006,7 +4006,7 @@ describe('Orchestrator', () => {
       persistence.updateTask('t1', { status: 'completed', execution: { completedAt: new Date(), exitCode: 0 } });
 
       // The orchestrator sees the external change on next mutation
-      // (restartTask calls refreshFromDb internally)
+      // (retryTask calls refreshFromDb internally)
       // But we can verify via syncFromDb
       const wfId = Array.from(persistence.workflows.keys())[0];
       orchestrator.syncFromDb(wfId);
@@ -4283,7 +4283,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('A')!.status).toBe('completed');
       expect(orchestrator.getTask('B')!.status).toBe('completed');
 
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       expect(orchestrator.getTask('B')!.status).toBe('pending');
       expect(warnSpy).not.toHaveBeenCalled();
     });
@@ -4308,7 +4308,7 @@ describe('Orchestrator', () => {
       );
       expect(orchestrator.getTask('C')!.status).toBe('pending');
 
-      orchestrator.restartTask('B');
+      orchestrator.retryTask('B');
 
       // C still pending because A is still failed
       expect(orchestrator.getTask('C')!.status).toBe('pending');
@@ -4334,7 +4334,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('C')!.status).toBe('pending');
 
       // Restart A — C stays pending because B is still failed
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       expect(orchestrator.getTask('C')!.status).toBe('pending');
     });
 
@@ -4395,9 +4395,9 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('D')!.status).toBe('pending');
 
       // Phase 2: Restart all three roots
-      orchestrator.restartTask('A');
-      orchestrator.restartTask('B');
-      orchestrator.restartTask('C');
+      orchestrator.retryTask('A');
+      orchestrator.retryTask('B');
+      orchestrator.retryTask('C');
       expect(orchestrator.getTask('D')!.status).toBe('pending');
 
       // Phase 3: Complete A, B, C — D should become ready after the last one
@@ -4459,7 +4459,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('B')!.status).toBe('pending');
 
       // Restart A, then complete it → B starts
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       logSpy.mockClear();
       orchestrator.handleWorkerResponse(
         makeResponse({
@@ -4493,7 +4493,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('C')!.status).toBe('pending');
 
       // Restart A, then complete it → B starts; C still pending (B not completed yet)
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       orchestrator.handleWorkerResponse(
         makeResponse({
           actionId: 'A',
@@ -4649,7 +4649,7 @@ describe('Orchestrator', () => {
       expect(scheduler.runningCount).toBe(runningTasks.length);
     });
 
-    it('restartTask supersedes a leaked active attempt before re-running', () => {
+    it('retryTask supersedes a leaked active attempt before re-running', () => {
       orchestrator.loadPlan({
         name: 'leak-heal-test',
         tasks: [
@@ -4669,7 +4669,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(t1Scoped)!.status).toBe('completed');
       expect(persistence.loadAttempt(staleAttemptId)?.status).toBe('running');
 
-      const started = orchestrator.restartTask(t1Scoped);
+      const started = orchestrator.retryTask(t1Scoped);
 
       expect(started.some(task => task.id === t1Scoped)).toBe(true);
       expect(orchestrator.getTask(t1Scoped)!.status).toBe('running');
@@ -4741,9 +4741,9 @@ describe('Orchestrator', () => {
     });
   });
 
-  // ── restartTask edge cases ─────────────────────────────
+  // ── retryTask edge cases ─────────────────────────────
 
-  describe('restartTask edge cases', () => {
+  describe('retryTask edge cases', () => {
     let logSpy: ReturnType<typeof vi.spyOn>;
     let warnSpy: ReturnType<typeof vi.spyOn>;
 
@@ -4757,7 +4757,7 @@ describe('Orchestrator', () => {
       warnSpy.mockRestore();
     });
 
-    it('restartTask from pending status stays pending when deps not met', () => {
+    it('retryTask from pending status stays pending when deps not met', () => {
       orchestrator.loadPlan({
         name: 'pending-restart-test',
         tasks: [
@@ -4773,7 +4773,7 @@ describe('Orchestrator', () => {
       );
       expect(orchestrator.getTask('B')!.status).toBe('pending');
 
-      const result = orchestrator.restartTask('B');
+      const result = orchestrator.retryTask('B');
 
       // B stays pending because A is still failed
       expect(result).toHaveLength(1);
@@ -4781,7 +4781,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('B')!.status).toBe('pending');
     });
 
-    it('restartTask from needs_input status resets to pending', () => {
+    it('retryTask from needs_input status resets to pending', () => {
       orchestrator.loadPlan({
         name: 'needs-input-restart-test',
         tasks: [
@@ -4799,14 +4799,14 @@ describe('Orchestrator', () => {
       );
       expect(orchestrator.getTask('t1')!.status).toBe('needs_input');
 
-      const result = orchestrator.restartTask('t1');
+      const result = orchestrator.retryTask('t1');
 
       expect(result).toHaveLength(1);
       expect(result[0].status).toBe('running');
       expect(orchestrator.getTask('t1')!.status).toBe('running');
     });
 
-    it('restartTask on running task sets it to pending', () => {
+    it('retryTask on running task sets it to pending', () => {
       orchestrator.loadPlan({
         name: 'running-restart-test',
         tasks: [
@@ -4816,14 +4816,14 @@ describe('Orchestrator', () => {
       orchestrator.startExecution();
       expect(orchestrator.getTask('t1')!.status).toBe('running');
 
-      const result = orchestrator.restartTask('t1');
+      const result = orchestrator.retryTask('t1');
 
       expect(result).toHaveLength(1);
       expect(result[0].status).toBe('running');
       expect(orchestrator.getTask('t1')!.status).toBe('running');
     });
 
-    it('restartTask clears commit but preserves branch and workspacePath', () => {
+    it('retryTask clears commit but preserves branch and workspacePath', () => {
       const hydratePersistence = new InMemoryPersistence();
       const hydrateBus = new InMemoryBus();
 
@@ -4850,7 +4850,7 @@ describe('Orchestrator', () => {
       });
 
       testOrchestrator.syncFromDb('wf-branch-test');
-      testOrchestrator.restartTask('t1');
+      testOrchestrator.retryTask('t1');
 
       const task = testOrchestrator.getTask('t1')!;
       expect(task.execution.commit).toBeUndefined();
@@ -4878,7 +4878,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('C')!.status).toBe('pending');
 
       // Restart only A — C stays pending because B is still failed
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       expect(orchestrator.getTask('C')!.status).toBe('pending');
     });
 
@@ -4928,12 +4928,12 @@ describe('Orchestrator', () => {
 
       expect(orchestrator.getTask(rid(orchestrator, 0, 'pivot'))!.status).toBe('needs_input');
 
-      orchestrator.restartTask(sid(orchestrator, 0, 'pivot-exp-v1'));
+      orchestrator.retryTask(sid(orchestrator, 0, 'pivot-exp-v1'));
 
       expect(orchestrator.getTask(rid(orchestrator, 0, 'pivot'))!.status).toBe('pending');
     });
 
-    it('restartTask clears lastHeartbeatAt from previous run', () => {
+    it('retryTask clears lastHeartbeatAt from previous run', () => {
       const testPersistence = new InMemoryPersistence();
       const testBus = new InMemoryBus();
 
@@ -4961,7 +4961,7 @@ describe('Orchestrator', () => {
       });
 
       testOrchestrator.syncFromDb('heartbeat-test');
-      testOrchestrator.restartTask('t1');
+      testOrchestrator.retryTask('t1');
 
       const task = testOrchestrator.getTask('t1')!;
 
@@ -6151,8 +6151,8 @@ describe('Orchestrator', () => {
       const wfId = orchestrator.getWorkflowIds()[0];
       orchestrator.syncFromDb(wfId);
 
-      // restartTask should recover
-      const started = orchestrator.restartTask('t1');
+      // retryTask should recover
+      const started = orchestrator.retryTask('t1');
       const t1 = orchestrator.getTask('t1')!;
       expect(t1.status).toBe('running');
       expect(started.length).toBeGreaterThanOrEqual(1);
@@ -6211,7 +6211,7 @@ describe('Orchestrator', () => {
       expect(queueStatus.running[0]?.attemptId).toBe(selectedAttemptId);
     });
 
-    it('restartTask supersedes a claimed selected attempt before relaunching', () => {
+    it('retryTask supersedes a claimed selected attempt before relaunching', () => {
       orchestrator.loadPlan({
         name: 'restart-claimed-test',
         tasks: [
@@ -6225,7 +6225,7 @@ describe('Orchestrator', () => {
       expect(claimedAttemptId).toBeTruthy();
 
       orchestrator.refreshFromDb();
-      const restarted = orchestrator.restartTask(taskId);
+      const restarted = orchestrator.retryTask(taskId);
       const restartedTask = orchestrator.getTask(taskId);
       const latestAttemptId = restartedTask?.execution.selectedAttemptId;
 
@@ -6529,7 +6529,7 @@ describe('Orchestrator', () => {
       };
     }
 
-    it('Step 7: re-selecting with an ACTIVE downstream cancels first, then retry-class resets via restartTask', () => {
+    it('Step 7: re-selecting with an ACTIVE downstream cancels first, then retry-class resets via retryTask', () => {
       const { reconId, exp1Id, exp2Id, downstreamId } = setupReconciliationWithDownstream();
 
       // Initial selection unblocks downstream → downstream auto-starts.
@@ -6537,7 +6537,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(downstreamId)?.status).toBe('running');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       // Re-select: chart Hard Invariant — cancel-first MUST precede the
@@ -6560,7 +6560,7 @@ describe('Orchestrator', () => {
       recreateSpy.mockRestore();
     });
 
-    it('Step 7: re-selecting an INACTIVE (failed) downstream skips cancel but still routes through restartTask', () => {
+    it('Step 7: re-selecting an INACTIVE (failed) downstream skips cancel but still routes through retryTask', () => {
       const { reconId, exp1Id, exp2Id, downstreamId } = setupReconciliationWithDownstream();
 
       orchestrator.selectExperiment(reconId, exp1Id);
@@ -6573,7 +6573,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(downstreamId)?.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiment(reconId, exp2Id);
 
@@ -6588,7 +6588,7 @@ describe('Orchestrator', () => {
       const { reconId, exp1Id, downstreamId } = setupReconciliationWithDownstream();
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiment(reconId, exp1Id);
 
@@ -6701,7 +6701,7 @@ describe('Orchestrator', () => {
       };
     }
 
-    it('Step 8: re-selecting CHANGED merged set with an ACTIVE downstream cancels first, then retry-class resets via restartTask', () => {
+    it('Step 8: re-selecting CHANGED merged set with an ACTIVE downstream cancels first, then retry-class resets via retryTask', () => {
       const { reconId, exp1Id, exp2Id, exp3Id, directDownstream } =
         setupMergedReconciliationWithDownstream();
 
@@ -6719,7 +6719,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(dsId)?.status).toBe('running');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       // Re-select with a CHANGED merged set: chart Hard Invariant —
@@ -6752,7 +6752,7 @@ describe('Orchestrator', () => {
       recreateSpy.mockRestore();
     });
 
-    it('Step 8: re-selecting an INACTIVE (failed) downstream skips cancel but still routes through restartTask', () => {
+    it('Step 8: re-selecting an INACTIVE (failed) downstream skips cancel but still routes through retryTask', () => {
       const { reconId, exp1Id, exp2Id, exp3Id, directDownstream } =
         setupMergedReconciliationWithDownstream();
 
@@ -6772,7 +6772,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(dsId)?.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -6793,7 +6793,7 @@ describe('Orchestrator', () => {
         setupMergedReconciliationWithDownstream();
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -6867,7 +6867,7 @@ describe('Orchestrator', () => {
       );
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -6894,7 +6894,7 @@ describe('Orchestrator', () => {
       );
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       // Reverse order — `selectedExperiments` is a SET (merged
       // lineage), not an ordered tuple, so this must NOT be treated
@@ -6924,7 +6924,7 @@ describe('Orchestrator', () => {
   // proper orchestrator policy seam: `Orchestrator.editTaskMergeMode`
   // owns the cancel-first interruption, the workflow-level
   // `mergeMode` write, and the retry-class merge-node reset (via
-  // `restartTask`), in parity with Step 5/6 (`editTaskType`) and
+  // `retryTask`), in parity with Step 5/6 (`editTaskType`) and
   // Step 7/8 (`selectExperiment` / `selectExperiments`).
   //
   // The hard invariants pinned below are:
@@ -6934,7 +6934,7 @@ describe('Orchestrator', () => {
   //     retry-class reset, and the merge node's execution generation
   //     bumps by exactly one
   //   - INACTIVE merge nodes (e.g. `pending`) skip cancel but still
-  //     route through `restartTask` (state reset only, no spurious
+  //     route through `retryTask` (state reset only, no spurious
   //     `cancelTask` that would mark a `pending` merge node `failed`)
   //   - the route NEVER touches `recreateTask` (retry-class only,
   //     per the chart Decision Table)
@@ -6975,12 +6975,12 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('running');
     }
 
-    it('Step 9: routes through restartTask and (when ACTIVE) cancels first — recreateTask MUST NOT be on the route', () => {
+    it('Step 9: routes through retryTask and (when ACTIVE) cancels first — recreateTask MUST NOT be on the route', () => {
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
@@ -7009,7 +7009,7 @@ describe('Orchestrator', () => {
       const beforeUpdates = persistence.updateWorkflowCalls.get(workflowId) ?? 0;
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       const result = orchestrator.editTaskMergeMode(mergeId, 'manual');
 
@@ -7049,7 +7049,7 @@ describe('Orchestrator', () => {
       expect(wf?.mergeMode).toBe('external_review');
     });
 
-    it('Step 9: INACTIVE merge node (pending) skips cancel-first but still routes through restartTask', () => {
+    it('Step 9: INACTIVE merge node (pending) skips cancel-first but still routes through retryTask', () => {
       // Do NOT drive the merge node into a running state; with the
       // leaf still pending the merge node sits in `pending` (no
       // in-flight merge work). Cancel-first MUST be skipped because
@@ -7059,21 +7059,21 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('pending');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
 
       expect(cancelSpy).not.toHaveBeenCalled();
       expect(restartSpy).toHaveBeenCalledWith(mergeId);
       // Merge node remains `pending` after the retry-class reset
-      // (it is the natural target state of `restartTask`).
+      // (it is the natural target state of `retryTask`).
       expect(orchestrator.getTask(mergeId)?.status).toBe('pending');
 
       cancelSpy.mockRestore();
       restartSpy.mockRestore();
     });
 
-    it('Step 9: ACTIVE awaiting_approval (manual gate) merge node cancels first, then resets via restartTask', () => {
+    it('Step 9: ACTIVE awaiting_approval (manual gate) merge node cancels first, then resets via retryTask', () => {
       // The chart calls out `awaiting_approval` (the manual-gate
       // wait state) explicitly as an ACTIVE state for the merge
       // node — switching modes mid-review must interrupt the
@@ -7088,7 +7088,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('awaiting_approval');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
 
@@ -7129,18 +7129,18 @@ describe('Orchestrator', () => {
   // no-op detection, cancel-first interruption when the task is
   // actively running an AI fix (`fixing_with_ai`), the
   // `config.fixPrompt` / `config.fixContext` write, and the
-  // retry-class reset (via `restartTask`), in parity with Step 5/6
+  // retry-class reset (via `retryTask`), in parity with Step 5/6
   // (`editTaskType`), Step 7/8 (`selectExperiment` /
   // `selectExperiments`), and Step 9 (`editTaskMergeMode`).
   //
   // The hard invariants pinned below are:
   //   - same-content edits are no-ops (no cancel, no generation
-  //     bump, no `restartTask`)
+  //     bump, no `retryTask`)
   //   - active fix sessions (`fixing_with_ai`) cancel-first BEFORE
   //     the retry-class reset, and the task's execution generation
   //     bumps by exactly one
   //   - INACTIVE failed tasks skip cancel but still route through
-  //     `restartTask` (state reset only — `agentSessionId` cleared,
+  //     `retryTask` (state reset only — `agentSessionId` cleared,
   //     new fix prompt/context persisted)
   //   - the route NEVER touches `recreateTask` (retry-class only,
   //     per the chart Decision Table — fix prompt/context changes do
@@ -7179,12 +7179,12 @@ describe('Orchestrator', () => {
       publishedDeltas = [];
     }
 
-    it('Step 10: routes through restartTask and (when ACTIVE) cancels first — recreateTask MUST NOT be on the route', () => {
+    it('Step 10: routes through retryTask and (when ACTIVE) cancels first — recreateTask MUST NOT be on the route', () => {
       const { taskId } = setupFailedTask();
       driveTaskToFixingWithAi(taskId);
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.editTaskFixContext(taskId, { fixPrompt: 'try a different approach' });
@@ -7227,7 +7227,7 @@ describe('Orchestrator', () => {
       });
 
       const task = orchestrator.getTask(taskId)!;
-      // restartTask resets to `pending` and may auto-start to
+      // retryTask resets to `pending` and may auto-start to
       // `running` if the task is ready — both are valid
       // post-retry pre-execution states for the chart's "retry
       // from reverted failed state" baseline (the fix-loop attempt
@@ -7238,7 +7238,7 @@ describe('Orchestrator', () => {
       expect(task.config.fixContext).toBe('see notes/foo.md');
     });
 
-    it('Step 10: edit on INACTIVE failed task skips cancel but still routes through restartTask', () => {
+    it('Step 10: edit on INACTIVE failed task skips cancel but still routes through retryTask', () => {
       // Failed (not fixing_with_ai) is the inactive fix-loop state.
       // Cancel-first MUST be skipped because there is no in-flight
       // fix attempt to interrupt; the task is still settled in
@@ -7248,7 +7248,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(taskId)?.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskFixContext(taskId, { fixPrompt: 'fresh try' });
 
@@ -7275,7 +7275,7 @@ describe('Orchestrator', () => {
       publishedDeltas = [];
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       const result = orchestrator.editTaskFixContext(taskId, {
         fixPrompt: 'identical',
@@ -7388,7 +7388,7 @@ describe('Orchestrator', () => {
   // ── Missing state transitions ─────────────────────────────
 
   describe('missing state transitions', () => {
-    it('restartTask on stale task resets to pending', () => {
+    it('retryTask on stale task resets to pending', () => {
       orchestrator.loadPlan({
         name: 'stale-restart',
         tasks: [
@@ -7411,11 +7411,11 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('child')!.status).toBe('stale');
 
       // Restart the stale child — parent is completed, so child is ready and auto-starts
-      orchestrator.restartTask('child');
+      orchestrator.retryTask('child');
       expect(orchestrator.getTask('child')!.status).toBe('running');
     });
 
-    it('restartTask on awaiting_approval resets to pending and clears completedAt', () => {
+    it('retryTask on awaiting_approval resets to pending and clears completedAt', () => {
       orchestrator.loadPlan({
         name: 'approval-restart',
         tasks: [
@@ -7428,12 +7428,12 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('t1')!.status).toBe('awaiting_approval');
       expect(orchestrator.getTask('t1')!.execution.completedAt).toBeDefined();
 
-      orchestrator.restartTask('t1');
+      orchestrator.retryTask('t1');
       expect(orchestrator.getTask('t1')!.status).toBe('running');
       expect(orchestrator.getTask('t1')!.execution.completedAt).toBeUndefined();
     });
 
-    it('restartTask on completed reconciliation clears selectedExperiment and experimentResults', () => {
+    it('retryTask on completed reconciliation clears selectedExperiment and experimentResults', () => {
       orchestrator.loadPlan({
         name: 'recon-restart',
         tasks: [
@@ -7494,11 +7494,11 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(reconId)!.status).toBe('completed');
       expect(orchestrator.getTask(reconId)!.execution.selectedExperiment).toBe(exp1);
 
-      orchestrator.restartTask(reconId);
+      orchestrator.retryTask(reconId);
       const recon = orchestrator.getTask(reconId)!;
       expect(recon.status).toBe('running');
       expect(recon.execution.commit).toBeUndefined();
-      // Note: restartTask does NOT clear selectedExperiment or experimentResults.
+      // Note: retryTask does NOT clear selectedExperiment or experimentResults.
       // Only the reconciliation-reset path (when restarting an experiment dep)
       // clears experimentResults. This is current behavior, not necessarily ideal.
     });
@@ -7521,7 +7521,7 @@ describe('Orchestrator', () => {
       // B stays pending (no blocked status)
       expect(orchestrator.getTask('B')!.status).toBe('pending');
 
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: 'A', executionGeneration: 1, status: 'completed', outputs: { exitCode: 0 } }),
       );
@@ -7912,7 +7912,7 @@ describe('Orchestrator', () => {
     });
 
     it('revert with non-JSON error preserves plain string without mergeConflict', () => {
-      orchestrator.restartTask('t2');
+      orchestrator.retryTask('t2');
       orchestrator.handleWorkerResponse(
         makeResponse({
           actionId: 't2',
@@ -8007,10 +8007,10 @@ describe('Orchestrator', () => {
       expect(() => orchestrator.setFixAwaitingApproval('f2', 'error')).toThrow('not running or fixing with AI');
     });
 
-    it('restartTask clears the fix state', () => {
+    it('retryTask clears the fix state', () => {
       orchestrator.beginConflictResolution('f2');
       orchestrator.setFixAwaitingApproval('f2', 'error');
-      orchestrator.restartTask('f2');
+      orchestrator.retryTask('f2');
       const task = orchestrator.getTask('f2')!;
       expect(task.status === 'pending' || task.status === 'running').toBe(true);
       expect(task.execution.isFixingWithAI).toBeFalsy();
@@ -8561,7 +8561,7 @@ describe('Orchestrator', () => {
       expect(deferredEvent).toBeDefined();
     });
 
-    it('clears deferred set on restartTask', () => {
+    it('clears deferred set on retryTask', () => {
       orchestrator.loadPlan({
         name: 'defer-restart-test',
         tasks: [
@@ -8573,7 +8573,7 @@ describe('Orchestrator', () => {
 
       orchestrator.deferTask('task-a');
       // Restart task-a clears it from deferredTaskIds
-      orchestrator.restartTask('task-a');
+      orchestrator.retryTask('task-a');
 
       // Complete task-b — no deferred tasks should re-enqueue
       // (task-a was already restarted independently)
@@ -8581,7 +8581,7 @@ describe('Orchestrator', () => {
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: 'task-b', status: 'completed', outputs: { exitCode: 0 } }),
       );
-      // task-a status should not have changed from what restartTask set it to
+      // task-a status should not have changed from what retryTask set it to
       // (it was already running from restart, not re-enqueued from deferred)
       expect(orchestrator.getTask('task-a')!.status).toBe(beforeStatus);
     });

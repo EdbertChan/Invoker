@@ -594,7 +594,7 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       await headlessRetryWorkflow(args[1], deps);
       break;
     case 'retry-task':
-      await headlessRestart(args[1], deps);
+      await headlessRetryTask(args[1], deps);
       break;
     case 'recreate':
       await headlessRecreateWorkflow(args[1], deps);
@@ -1083,17 +1083,25 @@ async function headlessSelect(taskId: string, experimentId: string, deps: Headle
   autoFix.unsubscribe();
 }
 
-async function headlessRestart(taskId: string, deps: HeadlessDeps): Promise<void> {
+/**
+ * Retry a single task — Step 13 retry-class entrypoint. Routes
+ * through `commandService.retryTask` → `Orchestrator.retryTask`,
+ * preserving branch/workspacePath lineage. The headless command
+ * keeps its `retry-task` name (no rename needed); only the internal
+ * envelope name and command-service method are updated to the new
+ * vocabulary.
+ */
+async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing arguments. Usage: --headless retry-task <taskId>');
   const restored = restoreWorkflowForTask(taskId, deps);
   taskId = restored.resolvedTaskId;
   await preemptTaskSubgraph(taskId, deps);
 
-  const envelope = makeEnvelope('restart-task', 'headless', 'task', { taskId });
-  const result = await deps.commandService.restartTask(envelope);
+  const envelope = makeEnvelope('retry-task', 'headless', 'task', { taskId });
+  const result = await deps.commandService.retryTask(envelope);
   if (!result.ok) throw new Error(result.error.message);
   const runnable = result.data.filter(t => t.status === 'running');
-  process.stdout.write(`Restarted task "${taskId}" — ${runnable.length} task(s) to execute\n`);
+  process.stdout.write(`Retried task "${taskId}" — ${runnable.length} task(s) to execute\n`);
 
   const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
@@ -1101,7 +1109,7 @@ async function headlessRestart(taskId: string, deps: HeadlessDeps): Promise<void
     orchestrator: deps.orchestrator,
     taskExecutor,
     logger: deps.logger,
-    context: 'headless.restart-task',
+    context: 'headless.retry-task',
     started: result.data,
   });
   if (runnable.length + topup.length === 0) {
@@ -1632,9 +1640,9 @@ async function headlessEditPrompt(taskId: string, newPrompt: string, deps: Headl
  * recreate-class. Routes through `commandService.editTaskType` so the
  * orchestrator's cancel-first seam (`Orchestrator.editTaskType`) runs
  * under the workflow mutex; the single `withBumpedExecutionGeneration`
- * bump and the lineage-preserving reset live in `restartTask` (today's
- * `retryTask` compatibility wire — see `MUTATION_POLICIES.executorType`
- * and `buildInvalidationDeps`).
+ * bump and the lineage-preserving reset live in `retryTask` (the
+ * canonical retry-class verb after Step 13 — see
+ * `MUTATION_POLICIES.executorType` and `buildInvalidationDeps`).
  */
 async function headlessEditExecutor(taskId: string, executorType: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId || !executorType) throw new Error('Missing arguments. Usage: --headless edit-executor <taskId> <executorType>');
@@ -1944,9 +1952,9 @@ async function headlessDeleteWorkflow(workflowId: string, deps: Pick<HeadlessDep
  * cancel-first seam (`Orchestrator.editTaskMergeMode`) runs under
  * the workflow mutex; same-mode no-op detection,
  * `persistence.updateWorkflow({ mergeMode })`, and the single
- * `withBumpedExecutionGeneration` bump live in `restartTask` (today's
- * `retryTask` compatibility wire — see `MUTATION_POLICIES.mergeMode`
- * and `buildInvalidationDeps`).
+ * `withBumpedExecutionGeneration` bump live in `retryTask` (the
+ * canonical retry-class verb after Step 13 — see
+ * `MUTATION_POLICIES.mergeMode` and `buildInvalidationDeps`).
  *
  * The CLI argument is still a workflow id (matches the legacy
  * `set-merge-mode <workflowId> <mode>` surface and the
@@ -2016,8 +2024,8 @@ async function headlessSetMergeMode(
  * cancel-first seam (`Orchestrator.editTaskFixContext`) runs under
  * the workflow mutex; same-content no-op detection,
  * `config.fixPrompt` / `config.fixContext` persistence, and the
- * single `withBumpedExecutionGeneration` bump live in `restartTask`
- * (today's `retryTask` compatibility wire — see
+ * single `withBumpedExecutionGeneration` bump live in `retryTask`
+ * (the canonical retry-class verb after Step 13 — see
  * `MUTATION_POLICIES.fixContext` and `buildInvalidationDeps`).
  *
  * The CLI argument is a task id (matches the Step 2/3 `set command` /

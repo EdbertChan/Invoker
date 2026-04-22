@@ -1719,7 +1719,7 @@ export class Orchestrator {
         .filter((t) => t.dependencies.includes(reconId))
         .map((t) => t.id);
       for (const dsId of directDownstream) {
-        this.restartTask(dsId);
+        this.retryTask(dsId);
       }
     }
 
@@ -1912,7 +1912,7 @@ export class Orchestrator {
         .map((t) => t.id);
       for (const dsId of directDownstreamAfter) {
         if (this.stateGetTask(dsId)) {
-          this.restartTask(dsId);
+          this.retryTask(dsId);
         }
       }
     }
@@ -1925,24 +1925,42 @@ export class Orchestrator {
   }
 
   /**
-   * Restart a non-running task: reset it to pending, unblock dependents,
-   * and auto-start if its own dependencies are satisfied.
+   * Retry a task — **retry-class** invalidation per Step 13 of
+   * `docs/architecture/task-invalidation-roadmap.md` and the canonical
+   * 2x2 matrix in `docs/architecture/task-invalidation-chart.md`
+   * (`{retry, recreate} × {task, workflow}`).
+   *
+   * Reset the task to pending, clear volatile attempt state
+   * (`agentSessionId`, `containerId`, `error`, `exitCode`, timing
+   * fields, `commit`), and auto-start if its dependencies are
+   * satisfied. Branch and workspacePath lineage are preserved — that's
+   * what distinguishes retry-class from `recreateTask`'s
+   * lineage-discarding reset.
+   *
+   * Step 13 history: this method's body was previously named
+   * `restartTask`. The chart's "Naming inconsistency" / "Scope
+   * inconsistency" sections call out that the task-scoped counterpart
+   * to `retryWorkflow` should be `retryTask`, not `restartTask`. Step
+   * 13 closes that matrix gap by promoting `retryTask` to the canonical
+   * name and demoting `restartTask` to a deprecated compatibility shim
+   * that delegates to `recreateTask` (the conservative choice for any
+   * unmigrated external caller — see `restartTask` below).
    */
-  restartTask(taskId: string): TaskState[] {
+  retryTask(taskId: string): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
     const id = task.id;
 
     const prevStatus = task.status;
-    console.log(`[orchestrator] restartTask "${id}" (was ${prevStatus})`);
+    console.log(`[orchestrator] retryTask "${id}" (was ${prevStatus})`);
     if (task.config.isMergeNode) {
       console.log(
-        `[merge-gate-workspace] restartTask mergeNode=${id} ` +
+        `[merge-gate-workspace] retryTask mergeNode=${id} ` +
           `before reset workspacePath=${task.execution.workspacePath ?? 'none'} ` +
-          '(restartTask does not clear workspacePath)',
+          '(retryTask does not clear workspacePath)',
       );
-      mergeTrace('GATE_WS_RESTART_TASK_MERGE', {
+      mergeTrace('GATE_WS_RETRY_TASK_MERGE', {
         taskId: id,
         workspacePathBefore: task.execution.workspacePath ?? null,
       });
@@ -1966,7 +1984,7 @@ export class Orchestrator {
     };
     const t0 = this.stateGetTask(id)!;
     console.log(
-      `[agent-session-trace] restartTask: before writeAndSync task="${id}" agentSessionId=${t0.execution.agentSessionId ?? 'null'} ` +
+      `[agent-session-trace] retryTask: before writeAndSync task="${id}" agentSessionId=${t0.execution.agentSessionId ?? 'null'} ` +
         '(reset clears agentSessionId/containerId; branch/workspacePath unchanged)',
     );
     const { affectedIds } = this.resetSubgraphToPending([id], resetChanges, {
@@ -1974,27 +1992,27 @@ export class Orchestrator {
     });
     const afterRt = this.stateGetTask(id)!;
     console.log(
-      `[agent-session-trace] restartTask: after writeAndSync task="${id}" agentSessionId=${afterRt.execution.agentSessionId ?? 'null'}`,
+      `[agent-session-trace] retryTask: after writeAndSync task="${id}" agentSessionId=${afterRt.execution.agentSessionId ?? 'null'}`,
     );
     if (afterRt.config.isMergeNode) {
       console.log(
-        `[merge-gate-workspace] restartTask mergeNode=${id} ` +
+        `[merge-gate-workspace] retryTask mergeNode=${id} ` +
           `after reset workspacePath=${afterRt.execution.workspacePath ?? 'none'}`,
       );
-      mergeTrace('GATE_WS_RESTART_TASK_MERGE_AFTER', {
+      mergeTrace('GATE_WS_RETRY_TASK_MERGE_AFTER', {
         taskId: id,
         workspacePathAfter: afterRt.execution.workspacePath ?? null,
       });
     }
     if (affectedIds.length > 1) {
       console.log(
-        `[orchestrator] restartTask "${id}": invalidated ${affectedIds.length - 1} downstream task(s)`,
+        `[orchestrator] retryTask "${id}": invalidated ${affectedIds.length - 1} downstream task(s)`,
       );
     }
 
     const readyTasks = this.stateMachine.getReadyTasks();
     const isReady = readyTasks.some((t) => t.id === id);
-    console.log(`[orchestrator] restartTask "${id}": ready=${isReady}`);
+    console.log(`[orchestrator] retryTask "${id}": ready=${isReady}`);
     if (isReady) {
       const started = this.autoStartReadyTasks([id], Orchestrator.EXPEDITED_PRIORITY);
       if (started.some((t) => t.id === id)) return started;
@@ -2017,6 +2035,34 @@ export class Orchestrator {
     }
 
     return [this.stateGetTask(id)!];
+  }
+
+  /**
+   * @deprecated Step 13 (`docs/architecture/task-invalidation-roadmap.md`):
+   * `restartTask` was the overloaded "retry-or-recreate" verb the
+   * chart's "Naming inconsistency" section flagged as the source of
+   * the broken `{retry, recreate} × {task, workflow}` matrix. After
+   * Step 13 every in-tree caller routes through the explicit verb —
+   * `retryTask` (preserves branch/workspacePath lineage) or
+   * `recreateTask` (discards lineage). This shim exists only for
+   * external callers that may still target the old name. It
+   * delegates to `recreateTask` (the conservative choice — more
+   * invalidation rather than less) so unmigrated callers get the
+   * safer behavior; once external dependencies are removed the
+   * shim itself can be deleted.
+   *
+   * Use `retryTask(taskId)` if you want the lineage-preserving
+   * reset that this method historically performed; use
+   * `recreateTask(taskId)` if you want fresh branch/workspace
+   * lineage (which is what this shim now does).
+   */
+  restartTask(taskId: string): TaskState[] {
+    console.warn(
+      `[orchestrator] restartTask("${taskId}") is deprecated (Step 13). ` +
+        'Routing to recreateTask. Use retryTask() for lineage-preserving ' +
+        'reset or recreateTask() for fresh-lineage reset explicitly.',
+    );
+    return this.recreateTask(taskId);
   }
 
   /**
@@ -2581,9 +2627,11 @@ export class Orchestrator {
    *      `config.executorType` (and `config.remoteTargetId` for SSH —
    *      cleared otherwise) and emits a `task.updated` delta so the
    *      retried attempt picks up the new substrate.
-   *   3. **Retry-class reset.** Delegate to `restartTask`, which is the
-   *      current `retryTask` compatibility wire (Step 13 will rename it).
-   *      `restartTask` resets the root + transitive downstream subgraph
+   *   3. **Retry-class reset.** Delegate to `retryTask` — the
+   *      canonical task-scoped retry verb after Step 13's
+   *      vocabulary cleanup (`restartTask` is now a deprecated
+   *      shim → `recreateTask`; do NOT route through it).
+   *      `retryTask` resets the root + transitive downstream subgraph
    *      to `pending`, clears volatile attempt state
    *      (`agentSessionId` / `containerId` / `error` / `exitCode` /
    *      `startedAt` / `completedAt`), and bumps execution generation
@@ -2686,7 +2734,7 @@ export class Orchestrator {
 
     // Step 6 fork. Host change ⇒ recreate-class (discard workspace
     // lineage). Otherwise stay on Step 5's retry-class wire.
-    return hostChanged ? this.recreateTask(taskId) : this.restartTask(taskId);
+    return hostChanged ? this.recreateTask(taskId) : this.retryTask(taskId);
   }
 
   /**
@@ -2812,9 +2860,11 @@ export class Orchestrator {
    *   3. **Persist new mode.** `persistence.updateWorkflow` writes the
    *      new `mergeMode` so the retried merge attempt picks up the
    *      new policy when it next runs.
-   *   4. **Retry-class reset.** Delegate to `restartTask`, which is
-   *      the current `retryTask` compatibility wire (Step 13 will
-   *      rename it). `restartTask` resets the merge node to `pending`,
+   *   4. **Retry-class reset.** Delegate to `retryTask` — the
+   *      canonical task-scoped retry verb after Step 13's
+   *      vocabulary cleanup (`restartTask` is now a deprecated
+   *      shim → `recreateTask`; do NOT route through it).
+   *      `retryTask` resets the merge node to `pending`,
    *      clears volatile attempt state (`agentSessionId` /
    *      `containerId` / `error` / `exitCode` / `startedAt` /
    *      `completedAt`), and bumps execution generation exactly once
@@ -2887,17 +2937,18 @@ export class Orchestrator {
     }
 
     // Persist new mode on the workflow record so the retried merge
-    // attempt picks up the new policy when restartTask reschedules it.
+    // attempt picks up the new policy when retryTask reschedules it.
     this.persistence.updateWorkflow?.(workflowId, { mergeMode });
 
-    // Step 9 retry-class reset: restartTask is today's `retryTask`
-    // compatibility wire (`buildInvalidationDeps` →
-    // `orchestrator.restartTask`). It resets the merge node to
-    // `pending`, clears volatile attempt state, and bumps execution
-    // generation exactly once via `withBumpedExecutionGeneration`
-    // while preserving branch/workspacePath lineage — the chart's
-    // retry-class semantics for merge-mode mutations.
-    return this.restartTask(taskId);
+    // Step 9 retry-class reset (Step 13 vocabulary update): retryTask
+    // is the canonical task-scoped retry verb in the chart's
+    // `{retry, recreate} × {task, workflow}` matrix. It resets the
+    // merge node to `pending`, clears volatile attempt state, and
+    // bumps execution generation exactly once via
+    // `withBumpedExecutionGeneration` while preserving
+    // branch/workspacePath lineage — the chart's retry-class
+    // semantics for merge-mode mutations.
+    return this.retryTask(taskId);
   }
 
   /**
@@ -2957,8 +3008,8 @@ export class Orchestrator {
    *      `config.fixPrompt` / `config.fixContext` (only the keys
    *      present in the patch) and emits a `task.updated` delta so
    *      the retried fix attempt picks up the new prompt/context.
-   *   4. **Retry-class reset.** Delegate to `restartTask` (today's
-   *      `retryTask` compatibility wire — see
+   *   4. **Retry-class reset.** Delegate to `retryTask` — the
+   *      canonical task-scoped retry verb after Step 13 (see
    *      `MUTATION_POLICIES.fixContext` and `buildInvalidationDeps`).
    *      It resets the task to `pending`, clears volatile attempt
    *      state (`agentSessionId`, `containerId`, transient
@@ -3037,16 +3088,17 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', fixContextChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, fixContextDelta);
 
-    // Step 10 retry-class reset: restartTask is today's `retryTask`
-    // compatibility wire (`buildInvalidationDeps` →
-    // `orchestrator.restartTask`). It resets the task to `pending`,
-    // clears volatile attempt state (`agentSessionId`, `containerId`,
-    // transient `error`/`exitCode`/timing fields), and bumps
-    // execution generation exactly once via
+    // Step 10 retry-class reset (Step 13 vocabulary update):
+    // retryTask is the canonical task-scoped retry verb in the
+    // chart's `{retry, recreate} × {task, workflow}` matrix. It
+    // resets the task to `pending`, clears volatile attempt state
+    // (`agentSessionId`, `containerId`, transient
+    // `error`/`exitCode`/timing fields), and bumps execution
+    // generation exactly once via
     // `withBumpedExecutionGeneration` while preserving branch /
     // workspacePath lineage — the chart's "retry from reverted
     // failed state" baseline for fix-context mutations.
-    return this.restartTask(taskId);
+    return this.retryTask(taskId);
   }
 
   /**

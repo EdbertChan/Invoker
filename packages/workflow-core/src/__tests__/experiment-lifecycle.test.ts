@@ -910,7 +910,7 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(MUTATION_POLICIES.selectedExperiment.invalidatesExecutionSpec).toBe(true);
     });
 
-    it('Step 7: re-selecting with ACTIVE downstream cancels first, then routes through restartTask (retryTask wire)', () => {
+    it('Step 7: re-selecting with ACTIVE downstream cancels first, then routes through retryTask (retryTask wire)', () => {
       const { reconId, expV1Id, expV2Id, downstreamId } = runToReconNeedsInput();
 
       // Initial selection completes recon; downstream auto-starts.
@@ -920,17 +920,17 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(orchestrator.getTask(downstreamId)!.status).toBe('running');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       // Re-select to a different winner while downstream is active.
       orchestrator.selectExperiment(reconId, expV2Id);
 
       // Cancel-first ordering: cancelTask MUST be invoked BEFORE
-      // restartTask. This is the chart's Hard Invariant ("any affected
+      // retryTask. This is the chart's Hard Invariant ("any affected
       // in-flight work must be interrupted and canceled first") expressed
       // at the orchestrator-internal sync seam. retryTask is wired to
-      // restartTask via buildInvalidationDeps; recreateTask is NOT on
+      // retryTask via buildInvalidationDeps; recreateTask is NOT on
       // the route for selection (chart maps this row to retry-class).
       expect(cancelSpy).toHaveBeenCalledWith(downstreamId);
       expect(restartSpy).toHaveBeenCalledWith(downstreamId);
@@ -949,7 +949,7 @@ describe('Experiment Lifecycle (integration)', () => {
       recreateSpy.mockRestore();
     });
 
-    it('Step 7: re-selecting with INACTIVE downstream skips cancel but still resets via restartTask', () => {
+    it('Step 7: re-selecting with INACTIVE downstream skips cancel but still resets via retryTask', () => {
       const { reconId, expV1Id, expV2Id, downstreamId } = runToReconNeedsInput();
 
       // Initial selection unblocks downstream; fail it so it's no
@@ -961,11 +961,11 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(orchestrator.getTask(downstreamId)!.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiment(reconId, expV2Id);
 
-      // Inactive downstream → no cancel needed; restartTask still resets
+      // Inactive downstream → no cancel needed; retryTask still resets
       // the downstream subgraph so it reruns against the new winner.
       expect(cancelSpy).not.toHaveBeenCalled();
       expect(restartSpy).toHaveBeenCalledWith(downstreamId);
@@ -983,7 +983,7 @@ describe('Experiment Lifecycle (integration)', () => {
       // applies — there is no in-flight work to cancel and no
       // re-selection that would require a retry-class reset.
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiment(reconId, expV1Id);
 
@@ -1014,7 +1014,7 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(after).toBe(before + 1);
     });
 
-    it('Step 7: reconciliation task lineage is preserved across re-selection (matches restartTask reset shape on downstream)', () => {
+    it('Step 7: reconciliation task lineage is preserved across re-selection (matches retryTask reset shape on downstream)', () => {
       const { reconId, expV1Id, expV2Id, downstreamId } = runToReconNeedsInput();
 
       // Hydrate winner branches/commits so the recon picks up real
@@ -1028,7 +1028,7 @@ describe('Experiment Lifecycle (integration)', () => {
 
       orchestrator.selectExperiment(reconId, expV1Id);
       // Hydrate stale workspace lineage on downstream as if its prior
-      // attempt produced workspace artifacts. retryTask (restartTask
+      // attempt produced workspace artifacts. retryTask (retryTask
       // reset shape) preserves branch/workspacePath; only volatile
       // attempt state (agentSessionId/containerId/error/exitCode) is
       // cleared. That's what makes selection retry-class rather than
@@ -1077,7 +1077,7 @@ describe('Experiment Lifecycle (integration)', () => {
       orchestrator.handleWorkerResponse(completedResponse(downstreamId));
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       // Re-selecting the same winner should not invalidate downstream:
       // the recon's selectedExperiment is unchanged so no execution
@@ -1180,7 +1180,7 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(MUTATION_POLICIES.selectedExperimentSet.invalidatesExecutionSpec).toBe(true);
     });
 
-    it('Step 8: re-selecting CHANGED set with ACTIVE downstream cancels first, then routes through restartTask (retryTask wire)', () => {
+    it('Step 8: re-selecting CHANGED set with ACTIVE downstream cancels first, then routes through retryTask (retryTask wire)', () => {
       const { reconId, expV1Id, expV2Id, expV3Id } = runToReconNeedsInput3();
 
       // Initial multi-select completes recon and unblocks downstream;
@@ -1201,7 +1201,7 @@ describe('Experiment Lifecycle (integration)', () => {
       ]);
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       // Re-select to a different merged set while downstream is
@@ -1214,10 +1214,10 @@ describe('Experiment Lifecycle (integration)', () => {
       );
 
       // Cancel-first ordering: cancelTask MUST be invoked BEFORE
-      // restartTask. This is the chart's Hard Invariant ("any
+      // retryTask. This is the chart's Hard Invariant ("any
       // affected in-flight work must be interrupted and canceled
       // first") expressed at the orchestrator-internal sync seam for
-      // merged-set selection. retryTask is wired to restartTask via
+      // merged-set selection. retryTask is wired to retryTask via
       // buildInvalidationDeps; recreateTask is NOT on the route for
       // merged-set selection (chart maps this row to retry-class).
       expect(cancelSpy).toHaveBeenCalledWith(dsId);
@@ -1239,7 +1239,7 @@ describe('Experiment Lifecycle (integration)', () => {
       recreateSpy.mockRestore();
     });
 
-    it('Step 8: re-selecting CHANGED set with INACTIVE downstream skips cancel but still resets via restartTask', () => {
+    it('Step 8: re-selecting CHANGED set with INACTIVE downstream skips cancel but still resets via retryTask', () => {
       const { reconId, expV1Id, expV2Id, expV3Id } = runToReconNeedsInput3();
 
       orchestrator.selectExperiments(
@@ -1256,7 +1256,7 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(orchestrator.getTask(dsId)!.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -1281,7 +1281,7 @@ describe('Experiment Lifecycle (integration)', () => {
       // applies — there is no in-flight work to cancel and no
       // re-selection that would require a retry-class reset.
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -1352,7 +1352,7 @@ describe('Experiment Lifecycle (integration)', () => {
       orchestrator.handleWorkerResponse(completedResponse(dsId));
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       // Re-selecting the exact same merged set should not invalidate
       // downstream: the recon's `selectedExperiments` is unchanged so
@@ -1383,7 +1383,7 @@ describe('Experiment Lifecycle (integration)', () => {
       );
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const restartSpy = vi.spyOn(orchestrator, 'retryTask');
 
       // Reverse order should still be the SAME set per the chart's
       // "merged experiment lineage" semantics — `selectedExperiments`

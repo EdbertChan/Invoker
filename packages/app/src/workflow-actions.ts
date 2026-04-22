@@ -120,11 +120,40 @@ export function provideInput(
   deps.orchestrator.provideInput(taskId, text);
 }
 
+/**
+ * Retry a task — **retry-class** invalidation per Step 13's canonical
+ * `{retry, recreate} × {task, workflow}` matrix. Preserves
+ * branch/workspacePath lineage; only volatile attempt state is
+ * cleared. Thin sync delegate to `Orchestrator.retryTask` (the
+ * substantive cancel-first / lineage-preserving reset /
+ * generation-bump routing lives there).
+ */
+export function retryTask(
+  taskId: string,
+  deps: Pick<ActionDeps, 'orchestrator'>,
+): TaskState[] {
+  return deps.orchestrator.retryTask(taskId);
+}
+
+/**
+ * @deprecated Step 13 (`docs/architecture/task-invalidation-roadmap.md`):
+ * `restartTask` was the overloaded "retry-or-recreate" verb the
+ * chart's "Naming inconsistency" section flagged. Use the explicit
+ * verb instead — `retryTask` (preserves branch/workspacePath
+ * lineage) or `recreateTask` (discards lineage). This shim
+ * delegates to `recreateTask` (the conservative choice — more
+ * invalidation rather than less) so any unmigrated external caller
+ * gets the safer behavior.
+ */
 export function restartTask(
   taskId: string,
   deps: Pick<ActionDeps, 'orchestrator'>,
 ): TaskState[] {
-  return deps.orchestrator.restartTask(taskId);
+  console.warn(
+    `[workflow-actions] restartTask("${taskId}") is deprecated (Step 13). ` +
+      'Routing to recreateTask. Use retryTask/recreateTask explicitly.',
+  );
+  return deps.orchestrator.recreateTask(taskId);
 }
 
 export function retryWorkflow(
@@ -302,8 +331,11 @@ export function buildCancelInFlight(deps: BuildCancelInFlightDeps): CancelInFlig
  * Build the `InvalidationDeps` the engine uses to route an
  * `InvalidationAction` to today's orchestrator primitives.
  *
- * Compatibility wires:
- *   - `retryTask` → `orchestrator.restartTask` (rename happens in Step 13).
+ * Wires (Step 13 vocabulary update — closing the canonical
+ * `{retry, recreate} × {task, workflow}` matrix):
+ *   - `retryTask` → `orchestrator.retryTask` (canonical retry-class
+ *     verb; the legacy `restartTask` shim is deprecated and routes
+ *     to `recreateTask` for unmigrated external callers).
  *   - `recreateWorkflow` → `bumpGenerationAndRecreate` (matches today's
  *     `recreateWorkflow()` action wrapper that bumps generation first).
  *
@@ -328,7 +360,7 @@ export function buildInvalidationDeps(
   });
   return {
     cancelInFlight,
-    retryTask: (taskId: string) => deps.orchestrator.restartTask(taskId),
+    retryTask: (taskId: string) => deps.orchestrator.retryTask(taskId),
     recreateTask: (taskId: string) => deps.orchestrator.recreateTask(taskId),
     retryWorkflow: (workflowId: string) => deps.orchestrator.retryWorkflow(workflowId),
     recreateWorkflow: (workflowId: string) =>
@@ -1005,10 +1037,10 @@ export async function autoFixOnFailure(
       }
       return;
     }
-    const started = orchestrator.restartTask(taskId);
+    const started = orchestrator.retryTask(taskId);
     const runnable = started.filter(t => t.status === 'running');
     persistence.logEvent?.(taskId, 'debug.auto-fix', {
-      phase: 'auto-fix-post-route-restart',
+      phase: 'auto-fix-post-route-retry',
       startedCount: started.length,
       runnableCount: runnable.length,
       startedStatuses: started.map(t => t.status),
