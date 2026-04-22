@@ -294,7 +294,7 @@ describe('Orchestrator', () => {
 
       persistence.workflows.get(workflowId)!.status = 'failed';
 
-      const restarted = orchestrator.restartTask(taskId);
+      const restarted = orchestrator.retryTask(taskId);
 
       expect(restarted.some((task) => task.id === taskId && task.status === 'running')).toBe(true);
       expect(persistence.workflows.get(workflowId)?.status).toBe('running');
@@ -537,7 +537,7 @@ describe('Orchestrator', () => {
       repro.handleWorkerResponse(makeResponse({ actionId: midId, status: 'completed', outputs: { exitCode: 0 } }));
       expect(repro.getTask(lateId)?.status).toBe('running');
 
-      repro.restartTask(prepareId);
+      repro.retryTask(prepareId);
       expect(repro.getTask(prepareId)?.status).toBe('running');
       expect(repro.getTask(midId)?.status).toBe('pending');
       expect(repro.getTask(lateId)?.status).toBe('pending');
@@ -1610,7 +1610,7 @@ describe('Orchestrator', () => {
       orchestrator.deleteWorkflow(upstreamWfId);
       expect(orchestrator.getTask(downstreamTaskId)).toBeDefined();
 
-      const restarted = orchestrator.restartTask(downstreamTaskId);
+      const restarted = orchestrator.retryTask(downstreamTaskId);
       expect(restarted.map((t) => t.id)).toContain(downstreamTaskId);
       expect(orchestrator.getTask(downstreamTaskId)!.status).toBe('blocked');
       expect(orchestrator.getTask(downstreamTaskId)!.execution.blockedBy).toContain('missing prerequisite');
@@ -2217,7 +2217,7 @@ describe('Orchestrator', () => {
       });
 
       hydrateOrchestrator.syncFromDb('wf-hydrate');
-      const started = hydrateOrchestrator.restartTask('t1');
+      const started = hydrateOrchestrator.retryTask('t1');
 
       expect(started).toHaveLength(1);
       expect(started[0].status).toBe('running');
@@ -2247,7 +2247,7 @@ describe('Orchestrator', () => {
       });
 
       hydrateOrchestrator.syncFromDb('wf-hydrate');
-      const started = hydrateOrchestrator.restartTask('t1');
+      const started = hydrateOrchestrator.retryTask('t1');
 
       expect(started).toHaveLength(1);
       expect(started[0].status).toBe('running');
@@ -2285,7 +2285,7 @@ describe('Orchestrator', () => {
       expect(hydrateOrchestrator.getTask('a1')!.status).toBe('completed');
 
       hydrateOrchestrator.syncFromDb('wf-b');
-      const started = hydrateOrchestrator.restartTask('b1');
+      const started = hydrateOrchestrator.retryTask('b1');
       expect(started).toHaveLength(1);
       expect(started[0].status).toBe('running');
     });
@@ -4186,7 +4186,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('A')!.status).toBe('completed');
       expect(orchestrator.getTask('B')!.status).toBe('completed');
 
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       expect(orchestrator.getTask('B')!.status).toBe('pending');
       expect(warnSpy).not.toHaveBeenCalled();
     });
@@ -4211,7 +4211,7 @@ describe('Orchestrator', () => {
       );
       expect(orchestrator.getTask('C')!.status).toBe('pending');
 
-      orchestrator.restartTask('B');
+      orchestrator.retryTask('B');
 
       // C still pending because A is still failed
       expect(orchestrator.getTask('C')!.status).toBe('pending');
@@ -4237,7 +4237,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('C')!.status).toBe('pending');
 
       // Restart A — C stays pending because B is still failed
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       expect(orchestrator.getTask('C')!.status).toBe('pending');
     });
 
@@ -4298,9 +4298,9 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('D')!.status).toBe('pending');
 
       // Phase 2: Restart all three roots
-      orchestrator.restartTask('A');
-      orchestrator.restartTask('B');
-      orchestrator.restartTask('C');
+      orchestrator.retryTask('A');
+      orchestrator.retryTask('B');
+      orchestrator.retryTask('C');
       expect(orchestrator.getTask('D')!.status).toBe('pending');
 
       // Phase 3: Complete A, B, C — D should become ready after the last one
@@ -4362,7 +4362,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('B')!.status).toBe('pending');
 
       // Restart A, then complete it → B starts
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       logSpy.mockClear();
       orchestrator.handleWorkerResponse(
         makeResponse({
@@ -4396,7 +4396,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('C')!.status).toBe('pending');
 
       // Restart A, then complete it → B starts; C still pending (B not completed yet)
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       orchestrator.handleWorkerResponse(
         makeResponse({
           actionId: 'A',
@@ -4572,7 +4572,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(t1Scoped)!.status).toBe('completed');
       expect(persistence.loadAttempt(staleAttemptId)?.status).toBe('running');
 
-      const started = orchestrator.restartTask(t1Scoped);
+      const started = orchestrator.retryTask(t1Scoped);
 
       expect(started.some(task => task.id === t1Scoped)).toBe(true);
       expect(orchestrator.getTask(t1Scoped)!.status).toBe('running');
@@ -4676,7 +4676,7 @@ describe('Orchestrator', () => {
       );
       expect(orchestrator.getTask('B')!.status).toBe('pending');
 
-      const result = orchestrator.restartTask('B');
+      const result = orchestrator.retryTask('B');
 
       // B stays pending because A is still failed
       expect(result).toHaveLength(1);
@@ -4702,7 +4702,7 @@ describe('Orchestrator', () => {
       );
       expect(orchestrator.getTask('t1')!.status).toBe('needs_input');
 
-      const result = orchestrator.restartTask('t1');
+      const result = orchestrator.retryTask('t1');
 
       expect(result).toHaveLength(1);
       expect(result[0].status).toBe('running');
@@ -4719,7 +4719,7 @@ describe('Orchestrator', () => {
       orchestrator.startExecution();
       expect(orchestrator.getTask('t1')!.status).toBe('running');
 
-      const result = orchestrator.restartTask('t1');
+      const result = orchestrator.retryTask('t1');
 
       expect(result).toHaveLength(1);
       expect(result[0].status).toBe('running');
@@ -4753,7 +4753,7 @@ describe('Orchestrator', () => {
       });
 
       testOrchestrator.syncFromDb('wf-branch-test');
-      testOrchestrator.restartTask('t1');
+      testOrchestrator.retryTask('t1');
 
       const task = testOrchestrator.getTask('t1')!;
       expect(task.execution.commit).toBeUndefined();
@@ -4781,7 +4781,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('C')!.status).toBe('pending');
 
       // Restart only A — C stays pending because B is still failed
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       expect(orchestrator.getTask('C')!.status).toBe('pending');
     });
 
@@ -4831,7 +4831,7 @@ describe('Orchestrator', () => {
 
       expect(orchestrator.getTask(rid(orchestrator, 0, 'pivot'))!.status).toBe('needs_input');
 
-      orchestrator.restartTask(sid(orchestrator, 0, 'pivot-exp-v1'));
+      orchestrator.retryTask(sid(orchestrator, 0, 'pivot-exp-v1'));
 
       expect(orchestrator.getTask(rid(orchestrator, 0, 'pivot'))!.status).toBe('pending');
     });
@@ -4864,7 +4864,7 @@ describe('Orchestrator', () => {
       });
 
       testOrchestrator.syncFromDb('heartbeat-test');
-      testOrchestrator.restartTask('t1');
+      testOrchestrator.retryTask('t1');
 
       const task = testOrchestrator.getTask('t1')!;
 
@@ -6055,7 +6055,7 @@ describe('Orchestrator', () => {
       orchestrator.syncFromDb(wfId);
 
       // restartTask should recover
-      const started = orchestrator.restartTask('t1');
+      const started = orchestrator.retryTask('t1');
       const t1 = orchestrator.getTask('t1')!;
       expect(t1.status).toBe('running');
       expect(started.length).toBeGreaterThanOrEqual(1);
@@ -6128,7 +6128,7 @@ describe('Orchestrator', () => {
       expect(claimedAttemptId).toBeTruthy();
 
       orchestrator.refreshFromDb();
-      const restarted = orchestrator.restartTask(taskId);
+      const restarted = orchestrator.retryTask(taskId);
       const restartedTask = orchestrator.getTask(taskId);
       const latestAttemptId = restartedTask?.execution.selectedAttemptId;
 
@@ -7451,7 +7451,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('child')!.status).toBe('stale');
 
       // Restart the stale child — parent is completed, so child is ready and auto-starts
-      orchestrator.restartTask('child');
+      orchestrator.retryTask('child');
       expect(orchestrator.getTask('child')!.status).toBe('running');
     });
 
@@ -7468,7 +7468,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask('t1')!.status).toBe('awaiting_approval');
       expect(orchestrator.getTask('t1')!.execution.completedAt).toBeDefined();
 
-      orchestrator.restartTask('t1');
+      orchestrator.retryTask('t1');
       expect(orchestrator.getTask('t1')!.status).toBe('running');
       expect(orchestrator.getTask('t1')!.execution.completedAt).toBeUndefined();
     });
@@ -7534,7 +7534,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(reconId)!.status).toBe('completed');
       expect(orchestrator.getTask(reconId)!.execution.selectedExperiment).toBe(exp1);
 
-      orchestrator.restartTask(reconId);
+      orchestrator.retryTask(reconId);
       const recon = orchestrator.getTask(reconId)!;
       expect(recon.status).toBe('running');
       expect(recon.execution.commit).toBeUndefined();
@@ -7561,7 +7561,7 @@ describe('Orchestrator', () => {
       // B stays pending (no blocked status)
       expect(orchestrator.getTask('B')!.status).toBe('pending');
 
-      orchestrator.restartTask('A');
+      orchestrator.retryTask('A');
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: 'A', executionGeneration: 1, status: 'completed', outputs: { exitCode: 0 } }),
       );
@@ -7952,7 +7952,7 @@ describe('Orchestrator', () => {
     });
 
     it('revert with non-JSON error preserves plain string without mergeConflict', () => {
-      orchestrator.restartTask('t2');
+      orchestrator.retryTask('t2');
       orchestrator.handleWorkerResponse(
         makeResponse({
           actionId: 't2',
@@ -8050,7 +8050,7 @@ describe('Orchestrator', () => {
     it('restartTask clears the fix state', () => {
       orchestrator.beginConflictResolution('f2');
       orchestrator.setFixAwaitingApproval('f2', 'error');
-      orchestrator.restartTask('f2');
+      orchestrator.retryTask('f2');
       const task = orchestrator.getTask('f2')!;
       expect(task.status === 'pending' || task.status === 'running').toBe(true);
       expect(task.execution.isFixingWithAI).toBeFalsy();
@@ -8613,7 +8613,7 @@ describe('Orchestrator', () => {
 
       orchestrator.deferTask('task-a');
       // Restart task-a clears it from deferredTaskIds
-      orchestrator.restartTask('task-a');
+      orchestrator.retryTask('task-a');
 
       // Complete task-b — no deferred tasks should re-enqueue
       // (task-a was already restarted independently)
