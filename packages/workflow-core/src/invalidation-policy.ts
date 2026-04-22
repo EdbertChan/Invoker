@@ -23,11 +23,33 @@ import type { TaskState } from './state-machine.js';
 
 /**
  * Named invalidation classes from the chart's "Proposed API Direction".
- * `none` is the explicit no-op for non-invalidating mutations
- * (e.g. external gate policy edits, approve/reject of a finished fix).
+ *
+ * `none` is the absolute no-op for mutations that have NO runtime
+ * effect at all (e.g. approve/reject of a finished fix as classified
+ * in `docs/architecture/task-invalidation-chart.md`'s "These are not
+ * execution-defining task inputs" list).
+ *
+ * `scheduleOnly` is the chart's intentional non-invalidating outlier
+ * for **external gate policy** edits (Step 15 of
+ * `docs/architecture/task-invalidation-roadmap.md`, chart row
+ * "Change external gate policy"). Per the chart:
+ *
+ *   - "This changes scheduling policy, not the task execution ABI"
+ *   - `invalidatesExecutionSpec: false`
+ *   - `invalidateIfActive: false`
+ *
+ * Unlike retry/recreate routes, `scheduleOnly` MUST NOT call
+ * `cancelInFlight` — gate-policy edits unblock work that is stuck
+ * waiting on a gate but MUST leave any active execution lineage and
+ * any in-flight attempts alone. The matching `scheduleOnly` dep on
+ * `InvalidationDeps` triggers a scheduling pass (e.g.
+ * `autoStartExternallyUnblockedReadyTasks`) so newly-unblocked tasks
+ * get a fresh look. This encodes the chart's "scheduling-only" rule
+ * directly in the policy table.
  */
 export type InvalidationAction =
   | 'none'
+  | 'scheduleOnly'
   | 'retryTask'
   | 'retryWorkflow'
   | 'recreateTask'
@@ -91,7 +113,18 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   mergeMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   fixContext:            { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   rebaseAndRetry:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateWorkflowFromFreshBase' as const },
-  externalGatePolicy:    { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'none' as const },
+  // Step 15 (`docs/architecture/task-invalidation-roadmap.md`): the
+  // chart's Decision Table row "Change external gate policy" is the
+  // intentional non-invalidating outlier — it's a scheduling policy
+  // edit, not an execution-spec edit. Action is now the explicit
+  // `'scheduleOnly'` (was `'none'` in Step 1) so the lock-in is
+  // encoded in the policy table itself: `applyInvalidation` skips
+  // `cancelInFlight` for this action and routes to a `scheduleOnly`
+  // dep that triggers an unblock-pass (e.g.
+  // `Orchestrator.autoStartExternallyUnblockedReadyTasks`). Per chart:
+  //   - `invalidatesExecutionSpec: false` (no ABI change)
+  //   - `invalidateIfActive: false`       (in-flight work survives)
+  externalGatePolicy:    { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'scheduleOnly' as const },
   // Step 11 (`docs/architecture/task-invalidation-roadmap.md`): graph
   // topology mutations (e.g. `replaceTask`, `addTask` that changes
   // parent edges) are fork-class / workflow scope. They must NOT
@@ -140,6 +173,21 @@ export interface InvalidationDeps {
    * focused unit tests that build a partial `InvalidationDeps`.
    */
   workflowFork?: (workflowId: string) => TaskState[] | Promise<TaskState[]>;
+  /**
+   * Step 15 (`docs/architecture/task-invalidation-roadmap.md`):
+   * scheduling-only unblock pass for the chart's "Change external
+   * gate policy" row. Production callers wire this to a scheduler
+   * entrypoint (e.g.
+   * `Orchestrator.autoStartExternallyUnblockedReadyTasks`) via
+   * `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`).
+   * Unlike retry/recreate deps, this is invoked WITHOUT a
+   * preceding `cancelInFlight` call — gate-policy edits MUST NOT
+   * cancel active work. The dep takes the affected task id so it
+   * can scope the scheduling pass if desired; today's
+   * implementation re-evaluates all externally-unblocked ready
+   * tasks across the orchestrator.
+   */
+  scheduleOnly?: (taskId: string) => TaskState[] | Promise<TaskState[]>;
 }
 
 const TASK_ACTIONS = new Set<InvalidationAction>(['retryTask', 'recreateTask']);
@@ -163,6 +211,14 @@ const WORKFLOW_ACTIONS = new Set<InvalidationAction>([
  *
  * For `action === 'none'` this is a true no-op: `cancelInFlight` is
  * not called and `[]` is returned. Scope must also be `'none'`.
+ *
+ * For `action === 'scheduleOnly'` (Step 15 — chart row "Change
+ * external gate policy") this is the chart's intentional
+ * non-invalidating outlier: `cancelInFlight` is **deliberately
+ * skipped** and `deps.scheduleOnly(id)` is invoked to trigger an
+ * unblock-pass that re-evaluates tasks newly unblocked by the
+ * scheduling-policy change. Active execution lineage and any
+ * in-flight attempts are preserved.
  */
 export async function applyInvalidation(
   scope: InvalidationScope,
@@ -177,6 +233,31 @@ export async function applyInvalidation(
       );
     }
     return [];
+  }
+
+  if (action === 'scheduleOnly') {
+    if (scope !== 'task') {
+      throw new Error(
+        `applyInvalidation: action 'scheduleOnly' requires scope 'task' (got '${scope}')`,
+      );
+    }
+    if (!deps.scheduleOnly) {
+      // Step 15: production callers wire this dep via
+      // `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`)
+      // to `Orchestrator.autoStartExternallyUnblockedReadyTasks`. This
+      // branch is reachable only from focused unit tests that build a
+      // partial `InvalidationDeps` without the scheduler dep.
+      throw new Error(
+        "applyInvalidation: 'scheduleOnly' dep is missing. " +
+          'Production callers wire this via buildInvalidationDeps in ' +
+          '@invoker/app/workflow-actions; tests must supply ' +
+          'deps.scheduleOnly to use this action.',
+      );
+    }
+    // Per chart's "Change external gate policy" row: scheduling
+    // edits do NOT cancel active work and do NOT bump generation.
+    // We deliberately skip `deps.cancelInFlight` here.
+    return await deps.scheduleOnly(id);
   }
 
   if (TASK_ACTIONS.has(action) && scope !== 'task') {

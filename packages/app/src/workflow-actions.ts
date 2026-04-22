@@ -360,6 +360,17 @@ export function buildCancelInFlight(deps: BuildCancelInFlightDeps): CancelInFlig
  * shape here. The forked workflow id remains discoverable via
  * `started[0].config.workflowId` for callers that need it.
  *
+ * Step 15 (`docs/architecture/task-invalidation-roadmap.md` —
+ * "External gate policy") wires `scheduleOnly` to
+ * `Orchestrator.autoStartExternallyUnblockedReadyTasks`. Per the
+ * chart's "Change external gate policy" row this is the
+ * intentional non-invalidating outlier: `applyInvalidation` skips
+ * `cancelInFlight` for action `'scheduleOnly'` and routes here to
+ * trigger an unblock-pass that re-evaluates tasks newly unblocked
+ * by a gate-policy change. Active execution lineage and any
+ * in-flight attempts are preserved. The dep takes a task id but
+ * the underlying primitive is workflow-wide today.
+ *
  * Step 1 scaffolding: exported but unused; later steps wire callers.
  */
 export function buildInvalidationDeps(
@@ -395,6 +406,19 @@ export function buildInvalidationDeps(
       );
       return result.started;
     },
+    // Step 15 wiring (`docs/architecture/task-invalidation-roadmap.md`,
+    // chart row "Change external gate policy"). The dep is invoked
+    // by `applyInvalidation` for action `'scheduleOnly'` WITHOUT a
+    // preceding `cancelInFlight` call — gate-policy edits are
+    // non-invalidating per the chart. The orchestrator's existing
+    // `autoStartExternallyUnblockedReadyTasks` primitive is the
+    // right scheduler entrypoint: it re-evaluates every task with
+    // external dependencies whose blocker has cleared. Today's
+    // primitive is workflow-agnostic; the `taskId` argument is
+    // accepted for future scoping but ignored by the underlying
+    // method.
+    scheduleOnly: (_taskId: string) =>
+      deps.orchestrator.autoStartExternallyUnblockedReadyTasks(),
   };
 }
 
