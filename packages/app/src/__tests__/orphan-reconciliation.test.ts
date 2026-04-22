@@ -363,7 +363,7 @@ describe('orphan reconciliation on resume', () => {
     const orchestrator2 = new Orchestrator({ persistence, messageBus: new InMemoryBus() });
     orchestrator2.syncAllFromDb();
 
-    // Simulate resume-workflow IPC calling relaunchOrphansAndStartReady,
+    // resume-workflow calls relaunchOrphansAndStartReady,
     // which restarts orphaned running tasks and starts ready pending tasks.
     const allStarted = relaunchOrphansAndStartReady(orchestrator2, testLogger, 'test');
     expect(allStarted.length).toBe(1);
