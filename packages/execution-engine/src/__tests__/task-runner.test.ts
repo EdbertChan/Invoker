@@ -6031,6 +6031,7 @@ describe('TaskRunner', () => {
         cwd: '/tmp',
         remoteTargetsProvider: () => remoteTargets,
       });
+      const destroyAllSpy = vi.spyOn(SshExecutor.prototype, 'destroyAll').mockResolvedValue(undefined);
 
       const task1 = makeTask({
         id: 'task-1',
@@ -6045,8 +6046,11 @@ describe('TaskRunner', () => {
       await executor.clearSshExecutorCache();
       const executor2 = executor.selectExecutor(task2);
 
+      expect(destroyAllSpy).toHaveBeenCalledTimes(1);
+      expect(destroyAllSpy).toHaveBeenCalledWith();
       // After clearing cache, a new executor instance should be created
       expect(executor1).not.toBe(executor2);
+      destroyAllSpy.mockRestore();
     });
 
     it('throws when SSH task has no remoteTargetId', () => {
