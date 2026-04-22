@@ -254,17 +254,20 @@ describe('applyInvalidation: recreateWorkflowFromFreshBase optional dep', () => 
 });
 
 // Step 11 (`docs/architecture/task-invalidation-roadmap.md`): the
-// `'workflowFork'` action represents fork-class / workflow scope. Like
-// `'recreateWorkflowFromFreshBase'` it is gated behind an optional dep
-// that Step 12 supplies. Until then any caller that selects this
-// action sees an explicit "not yet wired (Step 12)" error so misuse
-// fails fast instead of silently no-op'ing.
-describe('applyInvalidation: workflowFork optional dep (Step 11/12)', () => {
-  it('throws an explicit "not yet wired (Step 12)" error when dep is absent', async () => {
+// `'workflowFork'` action represents fork-class / workflow scope.
+// Step 14 wires the dep in production via
+// `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`),
+// so the missing-dep error path is now reachable only from focused
+// unit tests like the one below that builds a partial deps object on
+// purpose. The error message itself was demoted from "not yet wired
+// (Step 12)" to a generic "dep is missing" + pointer to where
+// production wires it.
+describe('applyInvalidation: workflowFork optional dep (Step 11/14)', () => {
+  it('throws an explicit missing-dep error when the dep is absent', async () => {
     const deps = makeDeps();
     await expect(
       applyInvalidation('workflow', 'workflowFork', 'wf-1', deps),
-    ).rejects.toThrow(/not yet wired \(Step 12\)/);
+    ).rejects.toThrow(/'workflowFork' dep is missing/);
   });
 
   it('routes to the provided dep when present', async () => {

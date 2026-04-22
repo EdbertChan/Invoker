@@ -30,6 +30,7 @@
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
  *   POST   /api/workflows/:id/recreate     (Step 13: recreate-class)
  *   POST   /api/workflows/:id/restart      (DEPRECATED Step 13 — alias of /recreate; preserves historical behavior)
+ *   POST   /api/workflows/:id/fork         (Step 14: topology fork — branched copy of the source workflow)
  *   POST   /api/workflows/:id/cancel
  *   POST   /api/workflows/:id/merge-mode  body: { mode }
  *   DELETE /api/workflows/:id
@@ -44,6 +45,7 @@ import {
   approveTask as sharedApproveTask,
   recreateWorkflow as sharedRecreateWorkflow,
   recreateTask as sharedRecreateTask,
+  forkWorkflow as sharedForkWorkflow,
   cancelWorkflow as sharedCancelWorkflow,
   retryTask as sharedRetryTask,
   rejectTask as sharedRejectTask,
@@ -422,6 +424,40 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           });
         } catch (err) {
           json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+
+      // POST /api/workflows/:id/fork — Step 14
+      // (`docs/architecture/task-invalidation-roadmap.md`, chart
+      // "Topology inconsistency"): branch a new workflow off the
+      // current graph state of the source workflow. Cancel-first
+      // is enforced inside `Orchestrator.forkWorkflow`. Returns
+      // both ids so the caller can follow the new workflow.
+      const wfForkMatch = path.match(/^\/api\/workflows\/([^/]+)\/fork$/);
+      if (method === 'POST' && wfForkMatch) {
+        const workflowId = decodeURIComponent(wfForkMatch[1]);
+        try {
+          const result = sharedForkWorkflow(workflowId, { orchestrator, logger: apiLogger });
+          const runnable = result.started.filter((t) => t.status === 'running');
+          await taskExecutor.executeTasks(runnable);
+          await executeGlobalTopup({
+            orchestrator,
+            taskExecutor,
+            logger: apiLogger,
+            context: 'api.workflows.fork',
+            alreadyDispatched: runnable,
+          });
+          json(res, 200, {
+            ok: true,
+            sourceWorkflowId: result.sourceWorkflowId,
+            forkedWorkflowId: result.forkedWorkflowId,
+            tasksStarted: runnable.length,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          const statusCode = message.includes('not found') ? 404 : 400;
+          json(res, statusCode, { error: message });
         }
         return;
       }

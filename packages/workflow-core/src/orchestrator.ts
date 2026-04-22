@@ -250,14 +250,19 @@ const LIVE_TASK_STATUSES = new Set<string>([
 ]);
 
 /**
- * Thrown when a topology-changing graph mutation is requested against
- * a workflow that still has any live (non-terminal) task.
+ * Internal sentinel raised by `assertTopologyMutationAllowed` when a
+ * topology-changing graph mutation targets a workflow with any live
+ * (non-terminal) non-merge task.
  *
- * Step 11 (`docs/architecture/task-invalidation-roadmap.md`) introduces
- * this surface; Step 12 builds the `forkWorkflow*` API the message
- * points callers at. Until then, callers handling this error must
- * either wait for the workflow to terminate or mark the affected
- * subgraph as terminal (e.g. via `cancelWorkflow`) before retrying.
+ * Step 11 introduced this as a user-visible error; Step 14
+ * (`docs/architecture/task-invalidation-roadmap.md`) demoted it to an
+ * internal sentinel. `Orchestrator.replaceTask` now catches this gate
+ * and routes the mutation through `forkWorkflow` so callers receive a
+ * cleanly-forked workflow rather than an error. The class is kept
+ * exported so legacy / external callers (tests, third-party scripts)
+ * that still match on `instanceof TopologyForkRequired` keep
+ * compiling — but the user-visible behavior on a live workflow is
+ * "fork succeeded", not "throw".
  *
  * The message embeds both the workflow id and the offending task id so
  * the caller (and tests) can route the request to the correct fork
@@ -271,14 +276,31 @@ export class TopologyForkRequired extends Error {
       `TopologyForkRequired: cannot mutate graph topology in place on live ` +
         `workflow ${workflowId} (offending task ${taskId})` +
         (detail ? ` — ${detail}` : '') +
-        `. Topology changes must fork a new workflow from the relevant ` +
-        `node/result (see docs/architecture/task-invalidation-chart.md ` +
-        `"Topology inconsistency"; forkWorkflow API lands in Step 12).`,
+        `. Step 14 (docs/architecture/task-invalidation-chart.md ` +
+        `"Topology inconsistency") routes this case through ` +
+        `Orchestrator.forkWorkflow; this error is now an internal ` +
+        `sentinel and should not normally be observed by callers.`,
     );
     this.name = 'TopologyForkRequired';
     this.workflowId = workflowId;
     this.taskId = taskId;
   }
+}
+
+/**
+ * Result of `Orchestrator.forkWorkflow` (Step 14 of
+ * `docs/architecture/task-invalidation-roadmap.md`).
+ *
+ * `forkedWorkflowId` is the brand-new workflow created by the fork.
+ * `started` is the list of tasks auto-started inside the fork (empty
+ * when called with `{ autoStart: false }`, e.g. from inside
+ * `replaceTask` where the in-place subgraph rewrite needs to happen
+ * before any worker picks the task up).
+ */
+export interface ForkWorkflowResult {
+  readonly forkedWorkflowId: string;
+  readonly sourceWorkflowId: string;
+  readonly started: TaskState[];
 }
 
 export interface GraphMutationNodeDef {
@@ -2380,6 +2402,202 @@ export class Orchestrator {
   }
 
   /**
+   * Fork a workflow into a new workflow rooted from a clean copy of
+   * the source's task graph at the moment of fork — Step 14 of
+   * `docs/architecture/task-invalidation-roadmap.md` and the
+   * "Topology inconsistency" section of
+   * `docs/architecture/task-invalidation-chart.md`.
+   *
+   * Sequence (mirrors `applyInvalidation`'s contract for the
+   * synchronous orchestrator-internal seam):
+   *
+   *   1. **Cancel-first (Hard Invariant).** Cancels all live tasks on
+   *      the source workflow via `cancelWorkflow`, so the source no
+   *      longer has any in-flight work. The source's existing graph
+   *      shape, lineage and history are preserved as-is — terminal
+   *      statuses (`failed`/`cancelled`) make the source's record of
+   *      "what was happening at the point of fork" explicit.
+   *   2. **Allocate a new workflow id** via the same `nextWorkflowId`
+   *      helper `loadPlan` uses, and persist a new workflow row with
+   *      the source's name/description/baseBranch/etc copied across.
+   *      The new workflow's `generation` is set to `1` so observers
+   *      keying off `workflow.generation` notice the fresh execution.
+   *   3. **Copy the graph.** For every non-merge task in the source,
+   *      a fresh `TaskState` is created in the new workflow with:
+   *        - id rescoped via `scopePlanTaskId(newWfId, planLocalId)`,
+   *        - dependencies remapped through the same lookup,
+   *        - `parentTask` remapped when it points inside the source
+   *          workflow (cross-workflow parent references are
+   *          preserved verbatim — they point at other workflows),
+   *        - status reset to `pending`, execution wiped down to a
+   *          fresh `generation: 0`,
+   *        - config copied otherwise unchanged so command/prompt/
+   *          executor type/etc are preserved.
+   *      A new merge node is created in the same shape as `loadPlan`
+   *      uses so the fork is self-contained.
+   *   4. **Reconcile and (optionally) auto-start.** `reconcileMergeLeaves`
+   *      makes the new merge gate's deps consistent with the copied
+   *      graph; `autoStartReadyTasks` then dispatches any task whose
+   *      deps are already satisfied — unless the caller passes
+   *      `{ autoStart: false }`, which is what `replaceTask` does so
+   *      that it can apply its in-place subgraph rewrite to the
+   *      forked task before any worker picks it up.
+   *
+   * Lineage between the source and the fork is recorded today via
+   * structured log line + `task.forked_from` event (`source` →
+   * `fork`); persistence-layer first-class lineage (e.g. a
+   * `forked_from_workflow_id` column on `workflows`) is a follow-up
+   * the chart calls out — schema churn is intentionally out of scope
+   * for Step 14.
+   *
+   * Returns `{ forkedWorkflowId, sourceWorkflowId, started }`. The
+   * `started` list is the result of `autoStartReadyTasks` and is
+   * empty when `autoStart: false`.
+   */
+  forkWorkflow(workflowId: string, opts?: { autoStart?: boolean }): ForkWorkflowResult {
+    this.refreshWorkflowFromDb(workflowId);
+
+    const sourceTasks = this.stateMachine
+      .getAllTasks()
+      .filter((t) => t.config.workflowId === workflowId);
+    if (sourceTasks.length === 0) {
+      throw new Error(`forkWorkflow: workflow ${workflowId} not found (no tasks)`);
+    }
+
+    // 1. Cancel-first invariant — interrupt any in-flight work on
+    //    the source workflow so the fork operates against a settled
+    //    snapshot. `cancelWorkflow` is a no-op for already-terminal
+    //    workflows; safe to call unconditionally.
+    this.cancelWorkflow(workflowId);
+
+    // Re-read after cancel so we see the (now terminal) statuses.
+    this.refreshWorkflowFromDb(workflowId);
+    const settledSourceTasks = this.stateMachine
+      .getAllTasks()
+      .filter((t) => t.config.workflowId === workflowId);
+
+    // 2. Allocate the new workflow id and persist the workflow row.
+    const newWfId = nextWorkflowId();
+    const sourceMeta = this.persistence.loadWorkflow?.(workflowId);
+    const createdAt = workflowTimestamp().toISOString();
+    const baseSaveWf: Parameters<OrchestratorPersistence['saveWorkflow']>[0] = {
+      id: newWfId,
+      name: sourceMeta && (sourceMeta as { name?: string }).name
+        ? `${(sourceMeta as { name: string }).name} (fork of ${workflowId})`
+        : `Fork of ${workflowId}`,
+      status: 'running',
+      createdAt,
+      updatedAt: createdAt,
+    };
+    if (sourceMeta) {
+      const m = sourceMeta as Record<string, unknown>;
+      if (typeof m.description === 'string') baseSaveWf.description = m.description;
+      if (typeof m.visualProof === 'boolean') baseSaveWf.visualProof = m.visualProof as boolean;
+      if (typeof m.repoUrl === 'string') baseSaveWf.repoUrl = m.repoUrl;
+      if (typeof m.onFinish === 'string') baseSaveWf.onFinish = m.onFinish;
+      if (typeof m.baseBranch === 'string') baseSaveWf.baseBranch = m.baseBranch;
+      if (typeof m.featureBranch === 'string') baseSaveWf.featureBranch = m.featureBranch;
+      if (m.mergeMode === 'manual' || m.mergeMode === 'automatic' || m.mergeMode === 'external_review') {
+        baseSaveWf.mergeMode = m.mergeMode;
+      }
+    }
+    this.persistence.saveWorkflow(baseSaveWf);
+    this.persistence.updateWorkflow?.(newWfId, { generation: 1, updatedAt: createdAt });
+
+    // 3. Copy the graph: build id remap, then create fresh tasks.
+    const sourceMergeNode = settledSourceTasks.find((t) => t.config.isMergeNode);
+    const sourceNonMerge = settledSourceTasks.filter((t) => !t.config.isMergeNode);
+
+    const idRemap = new Map<string, string>();
+    for (const t of sourceNonMerge) {
+      const planLocalId = this.extractPlanLocalId(t.id, workflowId);
+      idRemap.set(t.id, scopePlanTaskId(newWfId, planLocalId));
+    }
+    const newMergeId = `__merge__${newWfId}`;
+
+    this.activeWorkflowIds.add(newWfId);
+
+    const dependedOn = new Set<string>();
+    for (const t of sourceNonMerge) {
+      for (const dep of t.dependencies) {
+        if (idRemap.has(dep)) dependedOn.add(dep);
+      }
+    }
+
+    const createdNew: TaskState[] = [];
+    for (const src of sourceNonMerge) {
+      const newId = idRemap.get(src.id)!;
+      const newDeps = src.dependencies.map((d) => idRemap.get(d) ?? d);
+      const baseConfig = src.config;
+      const remappedParent = baseConfig.parentTask && idRemap.has(baseConfig.parentTask)
+        ? idRemap.get(baseConfig.parentTask)!
+        : baseConfig.parentTask;
+      const newConfig: TaskConfig = {
+        ...baseConfig,
+        workflowId: newWfId,
+        parentTask: remappedParent,
+        summary: undefined,
+      };
+      const newTask = createTaskState(newId, src.description, newDeps, newConfig);
+      this.createAndSync(newTask);
+      this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newTask });
+      this.persistence.logEvent?.(newId, 'task.forked_from', { sourceTaskId: src.id });
+      createdNew.push(newTask);
+    }
+
+    // Recreate the merge node in the same shape `loadPlan` uses.
+    const leafIds = sourceNonMerge
+      .filter((t) => !dependedOn.has(t.id))
+      .map((t) => idRemap.get(t.id)!);
+    const mergeDescription = sourceMergeNode?.description
+      ?? `Workflow gate (fork of ${workflowId})`;
+    const newMerge = createTaskState(
+      newMergeId,
+      mergeDescription,
+      leafIds,
+      { workflowId: newWfId, isMergeNode: true, executorType: 'merge' },
+    );
+    this.createAndSync(newMerge);
+    this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newMerge });
+
+    this.reconcileMergeLeaves(newWfId);
+
+    console.log(
+      `[orchestrator] forkWorkflow: source=${workflowId} → fork=${newWfId} ` +
+        `tasks=${createdNew.length} (merge node included separately)`,
+    );
+
+    // 4. Auto-start unless the caller (e.g. replaceTask) wants to
+    //    apply further mutations before workers pick the fork up.
+    const autoStart = opts?.autoStart !== false;
+    let started: TaskState[] = [];
+    if (autoStart) {
+      const readyIds = this.stateMachine
+        .getReadyTasks()
+        .map((t) => t.id)
+        .filter((id) => this.stateGetTask(id)?.config.workflowId === newWfId);
+      started = this.autoStartReadyTasks(readyIds);
+    }
+
+    return { forkedWorkflowId: newWfId, sourceWorkflowId: workflowId, started };
+  }
+
+  /**
+   * Extract the plan-local id (the part after `${workflowId}/`) from
+   * a workflow-scoped task id. Used by `forkWorkflow` to rescope
+   * task ids into the new workflow. Falls back to the input id when
+   * the prefix doesn't match (defensive — should not happen for
+   * well-formed scoped ids).
+   */
+  private extractPlanLocalId(scopedId: string, workflowId: string): string {
+    const prefix = `${workflowId}/`;
+    if (scopedId.startsWith(prefix)) {
+      return scopedId.slice(prefix.length);
+    }
+    return scopedId;
+  }
+
+  /**
    * Transition a failed task to fixing_with_ai before an async conflict resolution.
    * Clears terminal failure fields on the row so SQLite does not show stale error/exit/completed.
    * Returns the saved error string so the caller can revert on failure.
@@ -3164,9 +3382,19 @@ export class Orchestrator {
   /**
    * Replace a broken/failed task with a new subgraph.
    *
-   * Marks the broken task as stale, creates replacement tasks,
-   * forks downstream dependents to point at the replacement output,
-   * and auto-starts ready replacement tasks.
+   * Step 14 (`docs/architecture/task-invalidation-roadmap.md`):
+   * topology mutations on a *live* workflow no longer throw
+   * `TopologyForkRequired` to the caller. Instead `replaceTask`
+   * routes the request through `forkWorkflow` (the Hard Invariant
+   * cancel-first + branch-into-new-workflow path the chart's
+   * "Topology inconsistency" section mandates) and applies the
+   * subgraph rewrite to the *forked* workflow. Terminal workflows
+   * still get in-place replacement.
+   *
+   * The return shape stays `TaskState[]` (started tasks). On the
+   * fork path the returned tasks all live in the forked workflow,
+   * so callers can recover the new workflow id from
+   * `started[0].config.workflowId`.
    */
   replaceTask(taskId: string, replacementTasks: TaskReplacementDef[]): TaskState[] {
     this.refreshFromDb();
@@ -3178,18 +3406,69 @@ export class Orchestrator {
     const wfId = task.config.workflowId;
     if (!wfId) throw new Error(`replaceTask: task ${taskId} has no workflowId`);
 
-    // Step 11: topology mutations must not mutate a live workflow in place.
-    // `replaceTask` is unconditionally a topology change (it stales the
-    // source, can stale downstream, and creates new nodes), so the gate
-    // sits at the entry. In-place is still permitted on a fully terminal
-    // workflow (all non-merge tasks in completed/failed/stale) since
-    // there is no in-flight work to race with.
-    //
-    // Use `task.id` (the resolved/scoped id) for the error so callers
-    // can route the request to the (Step 12) forkWorkflow API without
-    // re-resolving the bare plan-local id themselves.
-    this.assertTopologyMutationAllowed(wfId, task.id);
+    // Step 14: live-workflow topology mutations route through
+    // `forkWorkflow` instead of throwing `TopologyForkRequired`.
+    // `forkWorkflow({ autoStart: false })` cancels the source's
+    // in-flight work and copies the graph into a new workflow without
+    // dispatching anything yet, so the in-place subgraph rewrite below
+    // can apply to the forked task before any worker picks it up.
+    if (this.isWorkflowLive(wfId)) {
+      const fork = this.forkWorkflow(wfId, { autoStart: false });
+      const planLocalId = this.extractPlanLocalId(task.id, wfId);
+      const forkedTaskId = scopePlanTaskId(fork.forkedWorkflowId, planLocalId);
+      const forkedTask = this.stateGetTask(forkedTaskId);
+      if (!forkedTask) {
+        throw new Error(
+          `replaceTask: forked workflow ${fork.forkedWorkflowId} missing copy of ` +
+            `task ${task.id} (expected ${forkedTaskId}). This indicates a bug in ` +
+            `forkWorkflow's graph copy.`,
+        );
+      }
+      console.log(
+        `[orchestrator] replaceTask: live workflow ${wfId} forked → ${fork.forkedWorkflowId}; ` +
+          `applying replacement to forked task ${forkedTaskId} (Step 14).`,
+      );
+      const startedFromReplacement = this.replaceTaskInPlace(
+        forkedTask,
+        fork.forkedWorkflowId,
+        replacementTasks,
+      );
+      // Auto-start any other ready tasks in the fork (the replacement
+      // path only auto-starts the new replacement roots; other root
+      // tasks copied from the source need their own dispatch).
+      const otherReadyIds = this.stateMachine
+        .getReadyTasks()
+        .map((t) => t.id)
+        .filter(
+          (id) =>
+            this.stateGetTask(id)?.config.workflowId === fork.forkedWorkflowId &&
+            !startedFromReplacement.some((s) => s.id === id),
+        );
+      const otherStarted = this.autoStartReadyTasks(otherReadyIds);
+      return [...startedFromReplacement, ...otherStarted];
+    }
 
+    return this.replaceTaskInPlace(task, wfId, replacementTasks);
+  }
+
+  /**
+   * In-place subgraph rewrite for a `replaceTask` call. Marks the
+   * source (and transitive dependents) stale, creates the new
+   * replacement subgraph, reconciles the merge gate, and auto-starts
+   * the replacement root tasks.
+   *
+   * Bypasses the live-workflow topology gate because the caller has
+   * already decided the operation is safe — either because the
+   * workflow is terminal (legitimate in-place per the chart's
+   * "Topology inconsistency" carve-out for finished workflows) or
+   * because the operation targets a freshly-forked workflow whose
+   * pending tasks are owned by the in-flight `replaceTask` call.
+   */
+  private replaceTaskInPlace(
+    task: TaskState,
+    wfId: string,
+    replacementTasks: TaskReplacementDef[],
+  ): TaskState[] {
     const replacementRawIds = new Set(replacementTasks.map((t) => t.id));
     const scopeLocal = (local: string) => scopePlanTaskId(wfId, local);
 
@@ -3303,21 +3582,13 @@ export class Orchestrator {
     return tasks.some((t) => LIVE_TASK_STATUSES.has(t.status));
   }
 
-  /**
-   * Throws `TopologyForkRequired` when the workflow is live.
-   *
-   * Per `docs/architecture/task-invalidation-chart.md` ("Topology
-   * inconsistency"), graph-shape changes must fork from the relevant
-   * node/result instead of mutating a live workflow in place. Until
-   * Step 12 ships the `forkWorkflow*` API, callers handling this
-   * error must wait for the workflow to terminate (or cancel its
-   * remaining live work) before retrying.
-   */
-  private assertTopologyMutationAllowed(workflowId: string, sourceTaskId: string): void {
-    if (this.isWorkflowLive(workflowId)) {
-      throw new TopologyForkRequired(workflowId, sourceTaskId);
-    }
-  }
+  // Step 11's `assertTopologyMutationAllowed` private helper was removed
+  // in Step 14 — `replaceTask` now routes live workflows through
+  // `forkWorkflow` directly via `isWorkflowLive`, so no caller throws
+  // `TopologyForkRequired` from inside the orchestrator anymore. The
+  // class is retained as an exported sentinel solely for backward-
+  // compatibility with external `instanceof` checks (see the comment
+  // on `TopologyForkRequired`).
 
   private assertMergeLeavesInvariant(workflowId: string): void {
     assertMergeLeavesInvariantImpl(this as unknown as GraphMutationHost, workflowId);

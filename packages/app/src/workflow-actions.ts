@@ -349,6 +349,17 @@ export function buildCancelInFlight(deps: BuildCancelInFlightDeps): CancelInFlig
  * for callers that explicitly omit `taskExecutor` from their
  * `ActionDeps` (e.g. focused unit tests on `applyInvalidation`).
  *
+ * Step 14 (`docs/architecture/task-invalidation-roadmap.md` —
+ * "remove in-place remake") wires `workflowFork` to
+ * `Orchestrator.forkWorkflow`. This closes the chart's "Topology
+ * inconsistency" row: a topology mutation routed through
+ * `applyInvalidation('workflow', 'workflowFork', ...)` now produces
+ * a real branched workflow instead of the Step 11 stub error.
+ * `Orchestrator.forkWorkflow` returns a `ForkWorkflowResult`; the
+ * policy router only needs the `started` task list, so we adapt the
+ * shape here. The forked workflow id remains discoverable via
+ * `started[0].config.workflowId` for callers that need it.
+ *
  * Step 1 scaffolding: exported but unused; later steps wire callers.
  */
 export function buildInvalidationDeps(
@@ -376,7 +387,43 @@ export function buildInvalidationDeps(
         persistence: deps.persistence,
         taskExecutor: deps.taskExecutor,
       }),
+    workflowFork: (workflowId: string) => {
+      const result = deps.orchestrator.forkWorkflow(workflowId);
+      deps.logger?.info(
+        `workflowFork: source=${workflowId} fork=${result.forkedWorkflowId} started=${result.started.length}`,
+        { module: 'workflow' },
+      );
+      return result.started;
+    },
   };
+}
+
+/**
+ * Fork a workflow into a brand-new workflow rooted from a clean copy
+ * of the source's task graph at the moment of fork — Step 14
+ * (`docs/architecture/task-invalidation-roadmap.md`, chart
+ * "Topology inconsistency").
+ *
+ * Thin sync delegate to `Orchestrator.forkWorkflow`. Cancel-first is
+ * enforced inside the orchestrator method (it calls `cancelWorkflow`
+ * on the source before allocating the new id), so this wrapper MUST
+ * NOT add a parallel cancel call.
+ *
+ * The returned `ForkWorkflowResult` is `{ forkedWorkflowId,
+ * sourceWorkflowId, started }`; surfaces (headless `fork-workflow`,
+ * api `/api/workflows/:id/fork`) report all three so callers can
+ * follow the new workflow.
+ */
+export function forkWorkflow(
+  workflowId: string,
+  deps: Pick<ActionDeps, 'orchestrator' | 'logger'>,
+): { forkedWorkflowId: string; sourceWorkflowId: string; started: TaskState[] } {
+  const result = deps.orchestrator.forkWorkflow(workflowId);
+  deps.logger?.info(
+    `forkWorkflow: source=${workflowId} fork=${result.forkedWorkflowId} started=${result.started.length}`,
+    { module: 'workflow' },
+  );
+  return result;
 }
 
 /**

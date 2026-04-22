@@ -670,18 +670,20 @@ describe('State × Topology Matrix', () => {
     });
   });
 
-  // Step 11 (`docs/architecture/task-invalidation-roadmap.md`):
+  // Step 11 → 14 (`docs/architecture/task-invalidation-roadmap.md`):
   // The chart's Decision Table row "Change graph topology" is the lone
   // **fork-class** / workflow-scope row. Unlike Steps 2–10 (per-mutation
   // routes that resolve to retry/recreate × task scope), topology
   // mutations CANNOT be applied in place on a live workflow — they must
   // create a new workflow fork rooted from the offending node/result.
-  // Step 12 wires the matching `forkWorkflow*` lifecycle dep; Step 11
-  // surfaces the gate via `Orchestrator.replaceTask` and the
-  // `MUTATION_POLICIES.topology` policy entry.
   //
-  // The matrix asserts two distinct invariants compared to every
-  // earlier (per-attribute) entry:
+  // Step 11 introduced the gate (`TopologyForkRequired` thrown to the
+  // caller); Step 14 wires the matching `forkWorkflow` primitive and
+  // routes `Orchestrator.replaceTask` through it transparently. The
+  // matrix entry now asserts the post-Step-14 behavior: live workflows
+  // get a real fork instead of an exception, terminal workflows still
+  // get the in-place rewrite. `TopologyForkRequired` is retained as an
+  // internal sentinel only — no production caller observes it.
   //
   //   1. **Policy classification.** `MUTATION_POLICIES.topology` is
   //      the only entry whose `action` is `'workflowFork'`. All other
@@ -690,14 +692,17 @@ describe('State × Topology Matrix', () => {
   //      first-class fork-class entry rather than a special-cased
   //      restart.
   //
-  //   2. **Live-workflow gating.** `Orchestrator.replaceTask` now
-  //      throws `TopologyForkRequired` whenever any non-merge task in
-  //      the same workflow is in a live status, surfacing both the
-  //      workflow id and the offending task id so the caller can
-  //      route the request to the (Step 12) fork API. In-place
-  //      remains permitted on a fully terminal workflow because there
-  //      is no in-flight work to race with.
-  describe('Step 11 matrix entry: graph topology is fork-class / workflow scope', () => {
+  //   2. **Live-workflow routing.** `Orchestrator.replaceTask`
+  //      detects live workflows via `isWorkflowLive` and forks
+  //      transparently, returning the started tasks rooted in the
+  //      *new* workflow (its id is recoverable via
+  //      `started[0].config.workflowId`). The source workflow is
+  //      cancel-first interrupted (cancel-first Hard Invariant) but
+  //      its graph shape and ids are preserved.
+  //
+  //   3. **Terminal in-place.** A fully-terminal workflow gets the
+  //      same in-place rewrite Step 11 already permitted.
+  describe('Step 14 matrix entry: graph topology is fork-class / workflow scope', () => {
     it('MUTATION_POLICIES.topology classifies the row as fork-class / workflow scope', () => {
       const policy = MUTATION_POLICIES.topology;
       expect(policy).toBeDefined();
@@ -713,7 +718,7 @@ describe('State × Topology Matrix', () => {
       expect(forkEntries.map(([k]) => k)).toEqual(['topology']);
     });
 
-    it('replaceTask throws TopologyForkRequired on a live diamond workflow', () => {
+    it('replaceTask forks a live diamond workflow and rewrites the fork', () => {
       orchestrator.loadPlan(diamondPlan());
       orchestrator.startExecution();
 
@@ -723,26 +728,37 @@ describe('State × Topology Matrix', () => {
       // D is `pending` (blocked by failed B) — workflow is live.
 
       const bTask = orchestrator.getTask('B')!;
-      const wfId = bTask.config.workflowId!;
+      const sourceWfId = bTask.config.workflowId!;
       const scopedBId = bTask.id;
 
-      let caught: unknown;
-      try {
-        orchestrator.replaceTask('B', [
-          { id: 'B-fix', description: 'Fix B', command: 'echo fix' },
-        ]);
-      } catch (err) {
-        caught = err;
-      }
-      expect(caught).toBeInstanceOf(TopologyForkRequired);
-      const err = caught as TopologyForkRequired;
-      expect(err.workflowId).toBe(wfId);
-      expect(err.taskId).toBe(scopedBId);
+      const started = orchestrator.replaceTask('B', [
+        { id: 'B-fix', description: 'Fix B', command: 'echo fix' },
+      ]);
 
-      // No in-place mutation: B stays failed, no replacement node was
-      // created, and the merge gate's deps are unchanged.
-      expect(orchestrator.getTask('B')!.status).toBe('failed');
-      expect(orchestrator.getTask('B-fix')).toBeUndefined();
+      // Replacement is rooted in a brand-new workflow.
+      expect(started.length).toBeGreaterThan(0);
+      const forkedWfId = started[0].config.workflowId!;
+      expect(forkedWfId).not.toBe(sourceWfId);
+      expect(orchestrator.getWorkflowIds()).toContain(forkedWfId);
+
+      // Source workflow's pre-existing nodes survive (status is
+      // either failed=cancelled or its prior terminal status).
+      expect(orchestrator.getTask(scopedBId)).toBeDefined();
+      expect(orchestrator.getTask(scopedBId)!.status).toBe('failed');
+
+      // A `B-fix` exists in the *fork*, not in the source.
+      const forkedFix = orchestrator
+        .getAllTasks()
+        .find(
+          (t) => t.config.workflowId === forkedWfId && t.id.endsWith('/B-fix'),
+        );
+      expect(forkedFix).toBeDefined();
+      const sourceFix = orchestrator
+        .getAllTasks()
+        .find(
+          (t) => t.config.workflowId === sourceWfId && t.id.endsWith('/B-fix'),
+        );
+      expect(sourceFix).toBeUndefined();
     });
 
     it('replaceTask succeeds in place on a terminal diamond workflow', () => {
@@ -754,14 +770,24 @@ describe('State × Topology Matrix', () => {
       orchestrator.handleWorkerResponse(fail('B'));
       // Cancel D so the workflow has no live non-merge tasks.
       orchestrator.cancelTask('D');
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
 
-      orchestrator.replaceTask('B', [
+      const started = orchestrator.replaceTask('B', [
         { id: 'B-fix', description: 'Fix B', command: 'echo fix' },
       ]);
 
-      // B is staled and the replacement node now exists.
+      // No fork: in-place rewrite landed in the source workflow.
+      expect(started[0].config.workflowId).toBe(sourceWfId);
       expect(orchestrator.getTask('B')!.status).toBe('stale');
       expect(orchestrator.getTask('B-fix')).toBeDefined();
+    });
+
+    it('TopologyForkRequired is retained as an internal sentinel', () => {
+      // Step 14 demoted the class but kept it exported for backward
+      // compatibility with external `instanceof` checks.
+      const err = new TopologyForkRequired('wf-1', 'wf-1/X');
+      expect(err.message).toMatch(/Step 14/);
+      expect(err.message).toMatch(/forkWorkflow/);
     });
   });
 });

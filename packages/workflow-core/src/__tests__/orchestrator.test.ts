@@ -8632,15 +8632,19 @@ describe('Orchestrator', () => {
     });
   });
 
-  // Step 11 (`docs/architecture/task-invalidation-roadmap.md`): topology
-  // mutations on a live workflow throw `TopologyForkRequired`. The
-  // orchestrator unit-test layer asserts the gate's interaction with
-  // adjacent invariants here; replace-task.test.ts and
-  // state-topology-matrix.test.ts cover the full matrix.
-  describe('Step 11: replaceTask topology-fork gate', () => {
-    it('throws TopologyForkRequired with workflowId + taskId on a live workflow', () => {
+  // Step 11 → 14 (`docs/architecture/task-invalidation-roadmap.md`):
+  // Step 11 introduced the topology-fork gate as a thrown error;
+  // Step 14 wires the matching `forkWorkflow` primitive and routes
+  // live `replaceTask` through it transparently. The orchestrator
+  // unit-test layer asserts the gate's interaction with adjacent
+  // invariants here; replace-task.test.ts and
+  // state-topology-matrix.test.ts cover the full matrix; the focused
+  // fork-workflow.test.ts suite covers `forkWorkflow` itself in
+  // isolation.
+  describe('Step 14: replaceTask routes live workflows through forkWorkflow', () => {
+    it('forks the workflow when live and applies the rewrite to the fork', () => {
       orchestrator.loadPlan({
-        name: 'topology-gate-live',
+        name: 'topology-fork-live',
         tasks: [
           { id: 'A', description: 'A', command: 'echo A' },
           { id: 'X', description: 'X', command: 'echo X', dependencies: ['A'] },
@@ -8656,32 +8660,37 @@ describe('Orchestrator', () => {
       );
 
       const xTask = orchestrator.getTask('X')!;
-      const wfId = xTask.config.workflowId!;
+      const sourceWfId = xTask.config.workflowId!;
       const scopedXId = xTask.id;
 
-      let caught: unknown;
-      try {
-        orchestrator.replaceTask('X', [
-          { id: 'fix', description: 'Fix', command: 'echo fix' },
-        ]);
-      } catch (err) {
-        caught = err;
-      }
-      expect(caught).toBeInstanceOf(TopologyForkRequired);
-      const err = caught as TopologyForkRequired;
-      expect(err.workflowId).toBe(wfId);
-      expect(err.taskId).toBe(scopedXId);
-      expect(err.message).toContain(wfId);
-      expect(err.message).toContain(scopedXId);
+      const started = orchestrator.replaceTask('X', [
+        { id: 'fix', description: 'Fix', command: 'echo fix' },
+      ]);
 
-      // Source unchanged, no replacement created.
-      expect(orchestrator.getTask('X')!.status).toBe('failed');
-      expect(orchestrator.getTask('fix')).toBeUndefined();
+      expect(started.length).toBeGreaterThan(0);
+      const forkedWfId = started[0].config.workflowId!;
+      expect(forkedWfId).not.toBe(sourceWfId);
+
+      // Source's pre-existing nodes survive, but its in-flight work
+      // has been cancel-first interrupted by forkWorkflow.
+      expect(orchestrator.getTask(scopedXId)).toBeDefined();
+      expect(orchestrator.getTask(scopedXId)!.status).toBe('failed');
+
+      // The replacement landed in the fork, not the source.
+      const forkedFix = orchestrator
+        .getAllTasks()
+        .find(
+          (t) => t.config.workflowId === forkedWfId && t.id.endsWith('/fix'),
+        );
+      expect(forkedFix).toBeDefined();
+      expect(orchestrator.getAllTasks().find(
+        (t) => t.config.workflowId === sourceWfId && t.id.endsWith('/fix'),
+      )).toBeUndefined();
     });
 
     it('allows in-place replacement on a fully terminal workflow', () => {
       orchestrator.loadPlan({
-        name: 'topology-gate-terminal',
+        name: 'topology-fork-terminal',
         tasks: [
           { id: 'A', description: 'A', command: 'echo A' },
           { id: 'X', description: 'X', command: 'echo X', dependencies: ['A'] },
@@ -8697,18 +8706,22 @@ describe('Orchestrator', () => {
       );
       // Cancel C → workflow now has no live non-merge tasks.
       orchestrator.cancelTask('C');
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
 
-      orchestrator.replaceTask('X', [
+      const started = orchestrator.replaceTask('X', [
         { id: 'fix', description: 'Fix', command: 'echo fix' },
       ]);
 
+      // No fork: in-place rewrite landed in the source workflow.
+      expect(started[0].config.workflowId).toBe(sourceWfId);
+      expect(orchestrator.getWorkflowIds()).toHaveLength(1);
       expect(orchestrator.getTask('X')!.status).toBe('stale');
       expect(orchestrator.getTask('fix')).toBeDefined();
     });
 
-    it('does not gate pure-attribute mutations even when the workflow is live', () => {
+    it('does not fork pure-attribute mutations even when the workflow is live', () => {
       orchestrator.loadPlan({
-        name: 'topology-gate-attr',
+        name: 'topology-fork-attr',
         tasks: [
           { id: 'A', description: 'A', command: 'echo A' },
           { id: 'X', description: 'X', command: 'echo X', dependencies: ['A'] },
@@ -8724,10 +8737,159 @@ describe('Orchestrator', () => {
       );
       // C is `pending` → workflow is live by the Step 11 definition.
       expect(orchestrator.getTask('C')!.status).toBe('pending');
+      const wfsBefore = orchestrator.getWorkflowIds().length;
 
-      // Pure-attribute edit must succeed without raising the topology gate.
+      // Pure-attribute edit must succeed without raising the topology
+      // gate or forking — only `replaceTask` (graph topology) forks.
       expect(() => orchestrator.editTaskCommand('A', 'echo A-v2')).not.toThrow();
       expect(orchestrator.getTask('A')!.config.command).toBe('echo A-v2');
+      expect(orchestrator.getWorkflowIds()).toHaveLength(wfsBefore);
+    });
+  });
+
+  // Step 14 (`docs/architecture/task-invalidation-roadmap.md`): focused
+  // unit tests on `Orchestrator.forkWorkflow` itself. The full
+  // user-visible matrix lives in `replace-task.test.ts` and
+  // `state-topology-matrix.test.ts`; this suite asserts the
+  // primitive's intrinsic invariants — cancel-first, distinct id,
+  // graph copy, source preservation, generation bump, autoStart opt.
+  describe('Step 14: Orchestrator.forkWorkflow primitive', () => {
+    it('returns a new workflow id distinct from the source', () => {
+      orchestrator.loadPlan({
+        name: 'fork-id',
+        tasks: [
+          { id: 'A', description: 'A', command: 'echo A' },
+          { id: 'B', description: 'B', command: 'echo B', dependencies: ['A'] },
+        ],
+      });
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
+      const result = orchestrator.forkWorkflow(sourceWfId);
+      expect(result.sourceWorkflowId).toBe(sourceWfId);
+      expect(result.forkedWorkflowId).not.toBe(sourceWfId);
+      expect(orchestrator.getWorkflowIds()).toContain(result.forkedWorkflowId);
+    });
+
+    it('cancel-first invariant: cancels active source tasks before copying', () => {
+      orchestrator.loadPlan({
+        name: 'fork-cancel-first',
+        tasks: [
+          { id: 'A', description: 'A', command: 'echo A' },
+          { id: 'B', description: 'B', command: 'echo B', dependencies: ['A'] },
+        ],
+      });
+      orchestrator.startExecution();
+      // A is `running` (auto-started by loadPlan + startExecution).
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
+      const aId = sid(orchestrator, 0, 'A');
+      expect(orchestrator.getTask(aId)!.status).toBe('running');
+
+      orchestrator.forkWorkflow(sourceWfId);
+
+      // Source's running A is now `failed` (cancelled).
+      expect(orchestrator.getTask(aId)!.status).toBe('failed');
+    });
+
+    it('copies the graph: fork has same plan-local ids and dep shape', () => {
+      orchestrator.loadPlan({
+        name: 'fork-graph-shape',
+        tasks: [
+          { id: 'A', description: 'A', command: 'echo A' },
+          { id: 'B', description: 'B', command: 'echo B', dependencies: ['A'] },
+          { id: 'C', description: 'C', command: 'echo C', dependencies: ['B'] },
+        ],
+      });
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
+      const { forkedWorkflowId } = orchestrator.forkWorkflow(sourceWfId);
+
+      const forkedTasks = orchestrator
+        .getAllTasks()
+        .filter((t) => t.config.workflowId === forkedWorkflowId && !t.config.isMergeNode);
+      const forkedIds = forkedTasks.map((t) => t.id).sort();
+      expect(forkedIds).toEqual(
+        ['A', 'B', 'C'].map((p) => `${forkedWorkflowId}/${p}`).sort(),
+      );
+
+      const forkedB = forkedTasks.find((t) => t.id.endsWith('/B'))!;
+      expect(forkedB.dependencies).toEqual([`${forkedWorkflowId}/A`]);
+
+      const forkedC = forkedTasks.find((t) => t.id.endsWith('/C'))!;
+      expect(forkedC.dependencies).toEqual([`${forkedWorkflowId}/B`]);
+    });
+
+    it('source workflow graph is preserved across the fork', () => {
+      orchestrator.loadPlan({
+        name: 'fork-source-preserved',
+        tasks: [
+          { id: 'A', description: 'A', command: 'echo A' },
+          { id: 'B', description: 'B', command: 'echo B', dependencies: ['A'] },
+        ],
+      });
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
+      const sourceIds = orchestrator
+        .getAllTasks()
+        .filter((t) => t.config.workflowId === sourceWfId)
+        .map((t) => t.id)
+        .sort();
+
+      orchestrator.forkWorkflow(sourceWfId);
+
+      const sourceIdsAfter = orchestrator
+        .getAllTasks()
+        .filter((t) => t.config.workflowId === sourceWfId)
+        .map((t) => t.id)
+        .sort();
+      expect(sourceIdsAfter).toEqual(sourceIds);
+    });
+
+    it('mutations to the fork do not affect the source', () => {
+      orchestrator.loadPlan({
+        name: 'fork-isolation',
+        tasks: [
+          { id: 'A', description: 'A', command: 'echo A' },
+          { id: 'B', description: 'B', command: 'echo B', dependencies: ['A'] },
+        ],
+      });
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
+      const sourceAId = sid(orchestrator, 0, 'A');
+      const sourceACommandBefore = orchestrator.getTask(sourceAId)!.config.command;
+
+      const { forkedWorkflowId } = orchestrator.forkWorkflow(sourceWfId);
+      const forkedAId = `${forkedWorkflowId}/A`;
+      orchestrator.editTaskCommand(forkedAId, 'echo A-mutated-in-fork');
+
+      expect(orchestrator.getTask(forkedAId)!.config.command).toBe(
+        'echo A-mutated-in-fork',
+      );
+      expect(orchestrator.getTask(sourceAId)!.config.command).toBe(
+        sourceACommandBefore,
+      );
+    });
+
+    it('autoStart: false skips dispatching ready tasks in the fork', () => {
+      orchestrator.loadPlan({
+        name: 'fork-autostart-false',
+        tasks: [{ id: 'A', description: 'A', command: 'echo A' }],
+      });
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
+      const result = orchestrator.forkWorkflow(sourceWfId, { autoStart: false });
+
+      expect(result.started).toEqual([]);
+      const forkedA = orchestrator
+        .getAllTasks()
+        .find((t) => t.config.workflowId === result.forkedWorkflowId && t.id.endsWith('/A'))!;
+      expect(forkedA.status).toBe('pending');
+    });
+
+    it('autoStart default starts ready tasks in the fork', () => {
+      orchestrator.loadPlan({
+        name: 'fork-autostart-default',
+        tasks: [{ id: 'A', description: 'A', command: 'echo A' }],
+      });
+      const sourceWfId = orchestrator.getWorkflowIds()[0];
+      const result = orchestrator.forkWorkflow(sourceWfId);
+      expect(result.started.length).toBeGreaterThan(0);
+      expect(result.started[0].id).toBe(`${result.forkedWorkflowId}/A`);
+      expect(result.started[0].status).toBe('running');
     });
   });
 });
