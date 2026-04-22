@@ -2725,6 +2725,155 @@ export class Orchestrator {
   }
 
   /**
+   * Edit a task's fix-session prompt and/or context — **retry-class**
+   * invalidation route per Step 10 of
+   * `docs/architecture/task-invalidation-roadmap.md` and the Decision
+   * Table row "Change fix prompt or fix context while `fixing_with_ai`"
+   * in `docs/architecture/task-invalidation-chart.md`
+   * (`MUTATION_POLICIES.fixContext` → `retryTask` / task scope).
+   *
+   * Why this is a migration, not a new policy. Prior to Step 10 the
+   * fix-session mutation surface had **no general policy** at all —
+   * the chart's "Behavior Today" column flags this row as
+   * "only command edit has explicit handling today; no general
+   * fix-context mutation policy" and the chart's "Fix-session
+   * inconsistency" subsection calls out the bespoke
+   * `beginConflictResolution` / `revertConflictResolution` rollback
+   * as "one special active invalidation mechanism, not a general
+   * one". Step 10 lifts that bespoke fix-session handling into a
+   * proper orchestrator policy seam (`Orchestrator.editTaskFixContext`)
+   * so cancel-first + retry-class reset are enforced uniformly across
+   * `failed` and `fixing_with_ai` task states; the app wrapper
+   * (`setTaskFixContext`) becomes a thin async delegate (mirrors
+   * Steps 2–9).
+   *
+   * "Retry from reverted failed state" semantics. The chart's
+   * `Target Action` column for this row reads
+   * `retryTask` from reverted failed state — i.e. when the user
+   * changes `fixPrompt`/`fixContext` mid-fix-session the in-flight
+   * AI fix attempt is dropped, the task lineage falls back to its
+   * `failed` baseline (volatile fix-attempt state — `agentSessionId`,
+   * `containerId`, transient `error`/`exitCode`/timing fields —
+   * cleared by `restartTask`), and a fresh fix attempt is scheduled
+   * with the new prompt/context. Branch / workspacePath lineage
+   * survives because this is the same failed task being retried
+   * through the fix loop, not a new task topology.
+   *
+   * Sequence (mirrors `applyInvalidation`'s contract for the
+   * synchronous orchestrator-internal seam — see
+   * `invalidation-policy.ts` and the Step 9 `editTaskMergeMode`
+   * precedent):
+   *   1. **Same-content no-op.** If neither `fixPrompt` nor
+   *      `fixContext` is changing (omitted keys count as "no
+   *      change"), return `[]` without canceling, persisting, or
+   *      bumping execution generation. Without this guard a UI/CLI
+   *      re-affirm of identical fix context would needlessly cancel
+   *      an active fix session and bump the task's execution
+   *      generation.
+   *   2. **Cancel-first (Hard Invariant).** When the task is
+   *      actively running an AI fix (`fixing_with_ai`) interrupt it
+   *      via `cancelTask` BEFORE the new fix prompt/context is
+   *      persisted or `restartTask` resets the task. A failed task
+   *      (the inactive fix-loop state) skips cancel — there is no
+   *      in-flight fix attempt to interrupt and `cancelTask` would
+   *      otherwise treat the failed task as already settled.
+   *   3. **Persist new fix prompt/context.** `writeAndSync` updates
+   *      `config.fixPrompt` / `config.fixContext` (only the keys
+   *      present in the patch) and emits a `task.updated` delta so
+   *      the retried fix attempt picks up the new prompt/context.
+   *   4. **Retry-class reset.** Delegate to `restartTask` (today's
+   *      `retryTask` compatibility wire — see
+   *      `MUTATION_POLICIES.fixContext` and `buildInvalidationDeps`).
+   *      It resets the task to `pending`, clears volatile attempt
+   *      state (`agentSessionId`, `containerId`, transient
+   *      `error`/`exitCode`/timing fields), and bumps execution
+   *      generation exactly once via
+   *      `withBumpedExecutionGeneration`, preserving branch /
+   *      workspacePath lineage. This is the chart's "retry from
+   *      reverted failed state" baseline.
+   *
+   * Patch shape: `{ fixPrompt?, fixContext? }`. Either or both keys
+   * may be present. Omitted keys leave the existing config field
+   * untouched — same-content detection treats missing keys as "no
+   * change" so a `fix-prompt`-only edit does not clobber an
+   * existing `fixContext`.
+   *
+   * Active states accepted: `failed`, `fixing_with_ai`. Other states
+   * throw — the chart scopes this mutation to the fix loop.
+   *
+   * NOTE: `restartTask` is intentionally used here (not
+   * `recreateTask`) because Step 10 is retry-class — fix
+   * prompt/context changes do NOT change the task's execution-defining
+   * spec (`command` / `prompt` / `executionAgent` / `executorType` /
+   * `remoteTargetId`); they only redirect the AI fix attempt that
+   * runs against an already-failed task lineage.
+   */
+  editTaskFixContext(
+    taskId: string,
+    patch: { fixPrompt?: string; fixContext?: string },
+  ): TaskState[] {
+    this.refreshFromDb();
+    const task = this.stateGetTask(taskId);
+    if (!task) throw new Error(`Task ${taskId} not found`);
+    if (task.config.isMergeNode) {
+      throw new Error(`Cannot edit fix context of merge node ${taskId}`);
+    }
+    if (task.status !== 'failed' && task.status !== 'fixing_with_ai') {
+      throw new Error(
+        `Cannot edit fix context for task "${taskId}" in status "${task.status}" ` +
+          `(expected: failed | fixing_with_ai)`,
+      );
+    }
+
+    // Step 10 same-content no-op: skip cancel + persist + retry when
+    // neither key in the patch differs from the persisted config.
+    // Omitted keys count as "no change" so a prompt-only edit does
+    // not require the caller to also re-supply the existing context.
+    const hasPromptKey = Object.prototype.hasOwnProperty.call(patch, 'fixPrompt');
+    const hasContextKey = Object.prototype.hasOwnProperty.call(patch, 'fixContext');
+    const promptMatches = !hasPromptKey || patch.fixPrompt === task.config.fixPrompt;
+    const contextMatches = !hasContextKey || patch.fixContext === task.config.fixContext;
+    if (promptMatches && contextMatches) {
+      return [];
+    }
+
+    // Step 10 cancel-first (chart Hard Invariant): when the task is
+    // actively running an AI fix attempt (`fixing_with_ai`) interrupt
+    // it BEFORE we persist the new fix prompt/context and reset the
+    // task via `restartTask`. The in-flight fix attempt's execution
+    // input — the prompt/context — just changed, so it cannot
+    // survive. A failed task (the inactive fix-loop state) skips
+    // cancel: there is no in-flight fix attempt to interrupt.
+    if (task.status === 'fixing_with_ai') {
+      this.cancelTask(taskId);
+    }
+
+    const configPatch: Record<string, unknown> = {};
+    if (hasPromptKey) configPatch.fixPrompt = patch.fixPrompt;
+    if (hasContextKey) configPatch.fixContext = patch.fixContext;
+    const fixContextChanges: TaskStateChanges = { config: configPatch };
+    this.writeAndSync(taskId, fixContextChanges);
+    const fixContextDelta: TaskDelta = {
+      type: 'updated',
+      taskId,
+      changes: fixContextChanges,
+    };
+    this.persistence.logEvent?.(taskId, 'task.updated', fixContextChanges);
+    this.messageBus.publish(TASK_DELTA_CHANNEL, fixContextDelta);
+
+    // Step 10 retry-class reset: restartTask is today's `retryTask`
+    // compatibility wire (`buildInvalidationDeps` →
+    // `orchestrator.restartTask`). It resets the task to `pending`,
+    // clears volatile attempt state (`agentSessionId`, `containerId`,
+    // transient `error`/`exitCode`/timing fields), and bumps
+    // execution generation exactly once via
+    // `withBumpedExecutionGeneration` while preserving branch /
+    // workspacePath lineage — the chart's "retry from reverted
+    // failed state" baseline for fix-context mutations.
+    return this.restartTask(taskId);
+  }
+
+  /**
    * Update gate policy on one or more external dependencies for a task, then
    * immediately re-evaluate ready tasks that were blocked by external deps.
    */
