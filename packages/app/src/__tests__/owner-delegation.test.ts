@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -16,6 +16,32 @@ describe('headless→owner delegation', () => {
   beforeEach(() => {
     messageBus = new LocalBus();
   });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function expectDelegationTimeout(
+    args: string[],
+    expectedTimeoutMs: number,
+  ): Promise<void> {
+    vi.useFakeTimers();
+    messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+
+    let settled = false;
+    const delegatedPromise = tryDelegateExec(args, messageBus).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await vi.advanceTimersByTimeAsync(expectedTimeoutMs - 1);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(delegatedPromise).resolves.toBe(false);
+    expect(settled).toBe(true);
+  }
 
   describe('delegation timeout policy', () => {
     it('uses extended timeout for workflow-scoped rebase', () => {
@@ -36,6 +62,26 @@ describe('headless→owner delegation', () => {
 
     it('uses the default timeout for other commands', () => {
       expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(5_000);
+    });
+
+    it('applies the extended timeout to delegated rebase execution', async () => {
+      await expectDelegationTimeout(['rebase', 'wf-1'], 60_000);
+    });
+
+    it('applies the extended timeout to delegated rebase-and-retry execution', async () => {
+      await expectDelegationTimeout(['rebase-and-retry', 'wf-1'], 60_000);
+    });
+
+    it('applies the extended timeout to delegated workflow restart execution', async () => {
+      await expectDelegationTimeout(['restart', 'wf-123'], 60_000);
+    });
+
+    it('keeps the default timeout for delegated task restart execution', async () => {
+      await expectDelegationTimeout(['restart', 'wf-123/task-1'], 5_000);
+    });
+
+    it('keeps the default timeout for delegated approve execution', async () => {
+      await expectDelegationTimeout(['approve', 'wf-123/task-1'], 5_000);
     });
   });
 
