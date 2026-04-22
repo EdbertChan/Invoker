@@ -9,23 +9,65 @@ import type { WorkResponse } from '@invoker/contracts';
 // ── In-Memory Persistence Mock ──────────────────────────────
 
 class InMemoryPersistence implements OrchestratorPersistence {
-  workflows = new Map<string, { id: string; name: string; status: string; createdAt: string; updatedAt: string }>();
+  workflows = new Map<string, {
+    id: string;
+    name: string;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+    repoUrl?: string;
+    mergeMode?: 'manual' | 'automatic' | 'external_review';
+  }>();
   tasks = new Map<string, { workflowId: string; task: TaskState }>();
   private attempts = new Map<string, Attempt[]>();
   events: Array<{ taskId: string; eventType: string; payload?: unknown }> = [];
   updateWorkflowCalls = new Map<string, number>();
 
-  saveWorkflow(workflow: { id: string; name: string; status: string }): void {
+  saveWorkflow(workflow: {
+    id: string;
+    name: string;
+    status: string;
+    repoUrl?: string;
+    mergeMode?: 'manual' | 'automatic' | 'external_review';
+  }): void {
     const now = new Date().toISOString();
-    this.workflows.set(workflow.id, { ...workflow, createdAt: (workflow as any).createdAt ?? now, updatedAt: (workflow as any).updatedAt ?? now });
+    this.workflows.set(workflow.id, {
+      ...workflow,
+      // Synthesize a placeholder repoUrl so SSH-validation tests
+      // (Step 5 `editTaskType` → ssh) keep passing without each
+      // plan having to spell out a remote URL.
+      repoUrl: workflow.repoUrl ?? 'memory://test-repo',
+      createdAt: (workflow as any).createdAt ?? now,
+      updatedAt: (workflow as any).updatedAt ?? now,
+    });
   }
 
-  updateWorkflow(workflowId: string, changes: { status?: string; updatedAt?: string }): void {
+  updateWorkflow(
+    workflowId: string,
+    changes: {
+      status?: string;
+      updatedAt?: string;
+      mergeMode?: 'manual' | 'automatic' | 'external_review';
+    },
+  ): void {
     const wf = this.workflows.get(workflowId);
     this.updateWorkflowCalls.set(workflowId, (this.updateWorkflowCalls.get(workflowId) ?? 0) + 1);
     if (wf && changes.status) {
       wf.status = changes.status;
     }
+    if (wf && changes.mergeMode !== undefined) {
+      wf.mergeMode = changes.mergeMode;
+    }
+  }
+
+  loadWorkflow(workflowId: string): {
+    repoUrl?: string;
+    baseBranch?: string;
+    mergeMode?: 'manual' | 'automatic' | 'external_review';
+  } | undefined {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return undefined;
+    return { repoUrl: wf.repoUrl, mergeMode: wf.mergeMode };
   }
 
   saveTask(workflowId: string, task: TaskState): void {
@@ -6437,6 +6479,209 @@ describe('Orchestrator', () => {
 
       cancelSpy.mockRestore();
       recreateSpy.mockRestore();
+    });
+  });
+
+  // ── Step 9 (task-invalidation roadmap): editTaskMergeMode ──────────────
+  //
+  // The chart's Decision Table row "Change merge mode" maps the
+  // `mergeMode` workflow-level mutation to InvalidationAction =
+  // 'retryTask' with InvalidationScope = 'task' applied to the merge
+  // node (`__merge__<workflowId>`). Step 9 migrates the previously
+  // app-layer-only special casing in `setWorkflowMergeMode` onto a
+  // proper orchestrator policy seam: `Orchestrator.editTaskMergeMode`
+  // owns the cancel-first interruption, the workflow-level
+  // `mergeMode` write, and the retry-class merge-node reset (via
+  // `restartTask`), in parity with Step 5/6 (`editTaskType`) and
+  // Step 7/8 (`selectExperiment` / `selectExperiments`).
+  //
+  // The hard invariants pinned below are:
+  //   - same-mode flips are no-ops (no cancel, no generation bump)
+  //   - different-mode flips while the merge node is ACTIVE
+  //     (`running` / `awaiting_approval`) cancel-first BEFORE the
+  //     retry-class reset, and the merge node's execution generation
+  //     bumps by exactly one
+  //   - INACTIVE merge nodes (e.g. `pending`) skip cancel but still
+  //     route through `restartTask` (state reset only, no spurious
+  //     `cancelTask` that would mark a `pending` merge node `failed`)
+  //   - the route NEVER touches `recreateTask` (retry-class only,
+  //     per the chart Decision Table)
+
+  describe('editTaskMergeMode (Step 9 invalidation)', () => {
+    function setupMergeWorkflow(initialMergeMode: 'manual' | 'automatic' | 'external_review' = 'manual'): {
+      mergeId: string;
+      workflowId: string;
+      leafId: string;
+    } {
+      orchestrator.loadPlan({
+        name: 'edit-merge-mode-step9',
+        mergeMode: initialMergeMode,
+        tasks: [
+          { id: 'leaf', description: 'Leaf task' },
+        ],
+      });
+      const workflowId = orchestrator.getWorkflowIds()[0]!;
+      const mergeNode = orchestrator
+        .getAllTasks()
+        .find((t) => t.config.isMergeNode && t.config.workflowId === workflowId);
+      expect(mergeNode).toBeDefined();
+      return {
+        mergeId: mergeNode!.id,
+        workflowId,
+        leafId: sid(orchestrator, 0, 'leaf'),
+      };
+    }
+
+    function driveMergeNodeToRunning(mergeId: string, leafId: string): void {
+      orchestrator.startExecution();
+      // Complete the leaf so the merge node becomes ready and
+      // auto-starts (`startExecution`'s ready-set scheduler drives
+      // it into `running`).
+      orchestrator.handleWorkerResponse(
+        makeResponse({ actionId: leafId, status: 'completed', outputs: { exitCode: 0 } }),
+      );
+      expect(orchestrator.getTask(mergeId)?.status).toBe('running');
+    }
+
+    it('Step 9: routes through restartTask and (when ACTIVE) cancels first — recreateTask MUST NOT be on the route', () => {
+      const { mergeId, leafId } = setupMergeWorkflow('manual');
+      driveMergeNodeToRunning(mergeId, leafId);
+
+      const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+
+      orchestrator.editTaskMergeMode(mergeId, 'automatic');
+
+      expect(cancelSpy).toHaveBeenCalledWith(mergeId);
+      expect(restartSpy).toHaveBeenCalledWith(mergeId);
+      expect(recreateSpy).not.toHaveBeenCalled();
+      // Hard Invariant: cancel-first MUST precede the retry-class
+      // reset. `mock.invocationCallOrder` is the global vi-internal
+      // ordering counter — comparing the first cancel/restart call
+      // pins the synchronous ordering inside `editTaskMergeMode`.
+      expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        restartSpy.mock.invocationCallOrder[0],
+      );
+
+      cancelSpy.mockRestore();
+      restartSpy.mockRestore();
+      recreateSpy.mockRestore();
+    });
+
+    it('Step 9: same-mode flip is a NO-OP (no cancel, no restart, no generation bump, no workflow write)', () => {
+      const { mergeId, leafId, workflowId } = setupMergeWorkflow('manual');
+      driveMergeNodeToRunning(mergeId, leafId);
+
+      const beforeGeneration = orchestrator.getTask(mergeId)!.execution.generation ?? 0;
+      const beforeUpdates = persistence.updateWorkflowCalls.get(workflowId) ?? 0;
+
+      const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+
+      const result = orchestrator.editTaskMergeMode(mergeId, 'manual');
+
+      expect(result).toEqual([]);
+      expect(cancelSpy).not.toHaveBeenCalled();
+      expect(restartSpy).not.toHaveBeenCalled();
+
+      const afterGeneration = orchestrator.getTask(mergeId)!.execution.generation ?? 0;
+      expect(afterGeneration).toBe(beforeGeneration);
+
+      const afterUpdates = persistence.updateWorkflowCalls.get(workflowId) ?? 0;
+      expect(afterUpdates).toBe(beforeUpdates);
+
+      cancelSpy.mockRestore();
+      restartSpy.mockRestore();
+    });
+
+    it('Step 9: different-mode flip when merge node is ACTIVE bumps execution generation by exactly one', () => {
+      const { mergeId, leafId } = setupMergeWorkflow('manual');
+      driveMergeNodeToRunning(mergeId, leafId);
+
+      const before = orchestrator.getTask(mergeId)!.execution.generation ?? 0;
+
+      orchestrator.editTaskMergeMode(mergeId, 'automatic');
+
+      const after = orchestrator.getTask(mergeId)!.execution.generation ?? 0;
+      expect(after).toBe(before + 1);
+    });
+
+    it('Step 9: different-mode flip persists the new mode on the workflow record', () => {
+      const { mergeId, leafId, workflowId } = setupMergeWorkflow('manual');
+      driveMergeNodeToRunning(mergeId, leafId);
+
+      orchestrator.editTaskMergeMode(mergeId, 'external_review');
+
+      const wf = persistence.loadWorkflow(workflowId);
+      expect(wf?.mergeMode).toBe('external_review');
+    });
+
+    it('Step 9: INACTIVE merge node (pending) skips cancel-first but still routes through restartTask', () => {
+      // Do NOT drive the merge node into a running state; with the
+      // leaf still pending the merge node sits in `pending` (no
+      // in-flight merge work). Cancel-first MUST be skipped because
+      // calling `cancelTask` on a `pending` merge node would mark it
+      // `failed` — exactly the failure mode this guard prevents.
+      const { mergeId } = setupMergeWorkflow('manual');
+      expect(orchestrator.getTask(mergeId)?.status).toBe('pending');
+
+      const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+
+      orchestrator.editTaskMergeMode(mergeId, 'automatic');
+
+      expect(cancelSpy).not.toHaveBeenCalled();
+      expect(restartSpy).toHaveBeenCalledWith(mergeId);
+      // Merge node remains `pending` after the retry-class reset
+      // (it is the natural target state of `restartTask`).
+      expect(orchestrator.getTask(mergeId)?.status).toBe('pending');
+
+      cancelSpy.mockRestore();
+      restartSpy.mockRestore();
+    });
+
+    it('Step 9: ACTIVE awaiting_approval (manual gate) merge node cancels first, then resets via restartTask', () => {
+      // The chart calls out `awaiting_approval` (the manual-gate
+      // wait state) explicitly as an ACTIVE state for the merge
+      // node — switching modes mid-review must interrupt the
+      // pending approval and re-schedule the merge under the new
+      // policy.
+      const { mergeId, leafId } = setupMergeWorkflow('manual');
+      orchestrator.startExecution();
+      orchestrator.handleWorkerResponse(
+        makeResponse({ actionId: leafId, status: 'completed', outputs: { exitCode: 0 } }),
+      );
+      orchestrator.setTaskAwaitingApproval(mergeId);
+      expect(orchestrator.getTask(mergeId)?.status).toBe('awaiting_approval');
+
+      const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+
+      orchestrator.editTaskMergeMode(mergeId, 'automatic');
+
+      expect(cancelSpy).toHaveBeenCalledWith(mergeId);
+      expect(restartSpy).toHaveBeenCalledWith(mergeId);
+      expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        restartSpy.mock.invocationCallOrder[0],
+      );
+
+      cancelSpy.mockRestore();
+      restartSpy.mockRestore();
+    });
+
+    it('Step 9: throws when called on a non-merge task', () => {
+      const { leafId } = setupMergeWorkflow('manual');
+      expect(() => orchestrator.editTaskMergeMode(leafId, 'automatic')).toThrow(
+        /not a merge node/,
+      );
+    });
+
+    it('Step 9: throws when called on an unknown task id', () => {
+      setupMergeWorkflow('manual');
+      expect(() => orchestrator.editTaskMergeMode('does-not-exist', 'automatic')).toThrow(
+        /not found/,
+      );
     });
   });
 
