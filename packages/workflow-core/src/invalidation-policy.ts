@@ -46,10 +46,49 @@ import type { TaskState } from './state-machine.js';
  * `autoStartExternallyUnblockedReadyTasks`) so newly-unblocked tasks
  * get a fresh look. This encodes the chart's "scheduling-only" rule
  * directly in the policy table.
+ *
+ * `fixApprove` / `fixReject` are the **second** non-invalidating
+ * outlier per the chart, alongside `scheduleOnly` from Step 15
+ * (Step 16 of `docs/architecture/task-invalidation-roadmap.md`,
+ * chart row "Approve or reject fix"). Per the chart:
+ *
+ *   - "This accepts or rejects an already-produced result"
+ *   - `invalidatesExecutionSpec: false`
+ *   - `invalidateIfActive: false`
+ *
+ * The chart's "These are not execution-defining task inputs" list
+ * explicitly names "approval or rejection of a finished fix" as a
+ * non-spec input. Both actions are **control-flow decisions over an
+ * existing fix attempt's output**, never retry/recreate events:
+ *
+ *   - `fixApprove`: promote the fix attempt's output (its branch
+ *     commit / workspacePath) to the task's authoritative result.
+ *     Status transitions to the post-fix terminal state
+ *     (`completed`, or `running` for merge / merge-conflict cases
+ *     that need a publish step). Branch / workspacePath / commit /
+ *     `task.execution.generation` are preserved verbatim — the fix
+ *     attempt's lineage IS the new authoritative lineage.
+ *   - `fixReject`: revert the task to its pre-fix `failed` state
+ *     (status `failed`, original error restored from
+ *     `pendingFixError`). The fix attempt's branch / commit /
+ *     workspacePath pointer is discarded but `task.execution.generation`
+ *     is preserved — the original failed attempt's lineage was never
+ *     replaced from the orchestrator's POV (it just hosted a fix
+ *     session that didn't pan out).
+ *
+ * Like `scheduleOnly`, neither `fixApprove` nor `fixReject` calls
+ * `cancelInFlight` — by the time approve/reject is invoked the task
+ * is already terminal (`awaiting_approval` / `review_ready` for
+ * approve; reject also handles the `pendingFixError`-on-failed
+ * shape) and is awaiting a human/automated decision on the fix
+ * attempt, NOT executing. Calling cancel here would be a no-op at
+ * best and a generation-bumping mistake at worst.
  */
 export type InvalidationAction =
   | 'none'
   | 'scheduleOnly'
+  | 'fixApprove'
+  | 'fixReject'
   | 'retryTask'
   | 'retryWorkflow'
   | 'recreateTask'
@@ -92,6 +131,8 @@ export type MutationKey =
   | 'fixContext'
   | 'rebaseAndRetry'
   | 'externalGatePolicy'
+  | 'fixApprove'
+  | 'fixReject'
   | 'topology';
 
 /**
@@ -125,6 +166,31 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   //   - `invalidatesExecutionSpec: false` (no ABI change)
   //   - `invalidateIfActive: false`       (in-flight work survives)
   externalGatePolicy:    { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'scheduleOnly' as const },
+  // Step 16 (`docs/architecture/task-invalidation-roadmap.md`,
+  // chart row "Approve or reject fix"): the **second** intentional
+  // non-invalidating outlier in the policy table, alongside
+  // `externalGatePolicy` (Step 15). Per the chart these are
+  // "control-flow decisions over an existing fix attempt's output",
+  // never retry/recreate events:
+  //
+  //   - `fixApprove` promotes the fix attempt's output (branch
+  //     commit / workspacePath) to the task's authoritative result.
+  //   - `fixReject` reverts to the pre-fix `failed` state with the
+  //     original error restored from `pendingFixError`.
+  //
+  // `applyInvalidation` skips `cancelInFlight` for both actions —
+  // by the time approve/reject runs the task is already terminal
+  // (`awaiting_approval` / `review_ready`, or `failed` with a
+  // dangling `pendingFixError`) and is awaiting a human/automated
+  // decision on the fix attempt, NOT executing. Cancel here would
+  // be a no-op at best and a generation-bumping mistake at worst.
+  // Both deps are wired in `buildInvalidationDeps`
+  // (`packages/app/src/workflow-actions.ts`) to the existing
+  // `approveTask` / `rejectTask` action wrappers, which already
+  // honor the chart's continue-or-revert contract end-to-end
+  // (commit-on-approve, revert-via-`revertConflictResolution`-on-reject).
+  fixApprove:            { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'fixApprove' as const },
+  fixReject:             { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'fixReject' as const },
   // Step 11 (`docs/architecture/task-invalidation-roadmap.md`): graph
   // topology mutations (e.g. `replaceTask`, `addTask` that changes
   // parent edges) are fork-class / workflow scope. They must NOT
@@ -188,6 +254,54 @@ export interface InvalidationDeps {
    * tasks across the orchestrator.
    */
   scheduleOnly?: (taskId: string) => TaskState[] | Promise<TaskState[]>;
+  /**
+   * Step 16 (`docs/architecture/task-invalidation-roadmap.md`,
+   * chart row "Approve or reject fix"): the **continue** half of
+   * the chart's second non-invalidating outlier (the **revert**
+   * half is `fixReject` below). Promotes a fix attempt's output to
+   * the task's authoritative result. Production callers wire this
+   * via `buildInvalidationDeps`
+   * (`packages/app/src/workflow-actions.ts`) to the existing
+   * `approveTask` action wrapper, which:
+   *
+   *   - calls `taskExecutor.commitApprovedFix(task)` to seal the
+   *     fix's branch commit if there is a `pendingFixError`,
+   *   - then routes to `Orchestrator.resumeTaskAfterFixApproval`
+   *     (merge nodes / merge-conflict fixes that need a publish
+   *     step) or `Orchestrator.approve` (plain fixes).
+   *
+   * Like `scheduleOnly`, this dep is invoked WITHOUT a preceding
+   * `cancelInFlight` call — by the time approve runs the task is
+   * already terminal (`awaiting_approval` / `review_ready`) and
+   * cancel here would be a no-op at best and a generation-bumping
+   * mistake at worst.
+   */
+  fixApprove?: (taskId: string) => TaskState[] | Promise<TaskState[]>;
+  /**
+   * Step 16 (`docs/architecture/task-invalidation-roadmap.md`,
+   * chart row "Approve or reject fix"): the **revert** half of the
+   * chart's second non-invalidating outlier (the **continue** half
+   * is `fixApprove` above). Reverts a task to its pre-fix state.
+   * Production callers wire this via `buildInvalidationDeps`
+   * (`packages/app/src/workflow-actions.ts`) to the existing
+   * `rejectTask` action wrapper, which:
+   *
+   *   - calls `Orchestrator.revertConflictResolution(taskId,
+   *     pendingFixError)` to restore the original failed-state
+   *     error if the task has a dangling `pendingFixError`
+   *     (the fix-flow rejection path), or
+   *   - calls `Orchestrator.reject(taskId, reason)` for
+   *     plain awaiting-approval rejections that aren't part of a
+   *     fix flow.
+   *
+   * Like `scheduleOnly`/`fixApprove`, this dep is invoked WITHOUT a
+   * preceding `cancelInFlight` call — by the time reject runs the
+   * task is already terminal and cancel here would be a no-op at
+   * best and a generation-bumping mistake at worst. The dep returns
+   * `TaskState[]` for parity with the other deps; today's
+   * `rejectTask` returns `void` so the wire returns `[]`.
+   */
+  fixReject?: (taskId: string) => TaskState[] | Promise<TaskState[]>;
 }
 
 const TASK_ACTIONS = new Set<InvalidationAction>(['retryTask', 'recreateTask']);
@@ -219,6 +333,18 @@ const WORKFLOW_ACTIONS = new Set<InvalidationAction>([
  * unblock-pass that re-evaluates tasks newly unblocked by the
  * scheduling-policy change. Active execution lineage and any
  * in-flight attempts are preserved.
+ *
+ * For `action === 'fixApprove'` / `action === 'fixReject'` (Step 16
+ * — chart row "Approve or reject fix") this is the chart's
+ * **second** intentional non-invalidating outlier alongside
+ * `scheduleOnly`. `cancelInFlight` is **deliberately skipped** for
+ * both — by the time approve/reject runs the task is already
+ * terminal (`awaiting_approval` / `review_ready` for approve;
+ * `failed` with a dangling `pendingFixError` for reject) and is
+ * awaiting a human/automated decision on the fix attempt, NOT
+ * executing. Approve promotes the fix attempt's branch/commit to
+ * authoritative; reject reverts to the pre-fix `failed` state.
+ * Neither bumps `task.execution.generation`.
  */
 export async function applyInvalidation(
   scope: InvalidationScope,
@@ -258,6 +384,58 @@ export async function applyInvalidation(
     // edits do NOT cancel active work and do NOT bump generation.
     // We deliberately skip `deps.cancelInFlight` here.
     return await deps.scheduleOnly(id);
+  }
+
+  if (action === 'fixApprove') {
+    if (scope !== 'task') {
+      throw new Error(
+        `applyInvalidation: action 'fixApprove' requires scope 'task' (got '${scope}')`,
+      );
+    }
+    if (!deps.fixApprove) {
+      // Step 16: production callers wire this dep via
+      // `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`)
+      // to the `approveTask` action wrapper. This branch is
+      // reachable only from focused unit tests that build a
+      // partial `InvalidationDeps` without the fix-decision dep.
+      throw new Error(
+        "applyInvalidation: 'fixApprove' dep is missing. " +
+          'Production callers wire this via buildInvalidationDeps in ' +
+          '@invoker/app/workflow-actions; tests must supply ' +
+          'deps.fixApprove to use this action.',
+      );
+    }
+    // Per chart's "Approve or reject fix" row: fix approve is
+    // continue-class control flow over an existing result. It does
+    // NOT cancel active work and does NOT bump generation. We
+    // deliberately skip `deps.cancelInFlight` here.
+    return await deps.fixApprove(id);
+  }
+
+  if (action === 'fixReject') {
+    if (scope !== 'task') {
+      throw new Error(
+        `applyInvalidation: action 'fixReject' requires scope 'task' (got '${scope}')`,
+      );
+    }
+    if (!deps.fixReject) {
+      // Step 16: production callers wire this dep via
+      // `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`)
+      // to the `rejectTask` action wrapper. This branch is
+      // reachable only from focused unit tests that build a
+      // partial `InvalidationDeps` without the fix-decision dep.
+      throw new Error(
+        "applyInvalidation: 'fixReject' dep is missing. " +
+          'Production callers wire this via buildInvalidationDeps in ' +
+          '@invoker/app/workflow-actions; tests must supply ' +
+          'deps.fixReject to use this action.',
+      );
+    }
+    // Per chart's "Approve or reject fix" row: fix reject is
+    // revert-class control flow over an existing result. It does
+    // NOT cancel active work and does NOT bump generation. We
+    // deliberately skip `deps.cancelInFlight` here.
+    return await deps.fixReject(id);
   }
 
   if (TASK_ACTIONS.has(action) && scope !== 'task') {

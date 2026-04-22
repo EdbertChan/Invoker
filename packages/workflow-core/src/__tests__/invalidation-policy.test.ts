@@ -26,6 +26,8 @@ type MockedDeps = InvalidationDeps & {
   recreateWorkflowFromFreshBase?: ReturnType<typeof vi.fn>;
   workflowFork?: ReturnType<typeof vi.fn>;
   scheduleOnly?: ReturnType<typeof vi.fn>;
+  fixApprove?: ReturnType<typeof vi.fn>;
+  fixReject?: ReturnType<typeof vi.fn>;
 };
 
 function makeDeps(overrides: Partial<MockedDeps> = {}): MockedDeps {
@@ -60,6 +62,19 @@ describe('MUTATION_POLICIES', () => {
     expect(MUTATION_POLICIES.externalGatePolicy.action).toBe('scheduleOnly');
     expect(MUTATION_POLICIES.externalGatePolicy.invalidatesExecutionSpec).toBe(false);
     expect(MUTATION_POLICIES.externalGatePolicy.invalidateIfActive).toBe(false);
+    // Step 16 (`docs/architecture/task-invalidation-roadmap.md`,
+    // chart row "Approve or reject fix"): the second intentional
+    // non-invalidating outlier alongside `externalGatePolicy`.
+    // Approve = continue with the fix output as-is; reject =
+    // revert to pre-fix state. Neither is execution-spec-changing
+    // and neither invalidates active work (by the time
+    // approve/reject runs the task is already terminal).
+    expect(MUTATION_POLICIES.fixApprove.action).toBe('fixApprove');
+    expect(MUTATION_POLICIES.fixApprove.invalidatesExecutionSpec).toBe(false);
+    expect(MUTATION_POLICIES.fixApprove.invalidateIfActive).toBe(false);
+    expect(MUTATION_POLICIES.fixReject.action).toBe('fixReject');
+    expect(MUTATION_POLICIES.fixReject.invalidatesExecutionSpec).toBe(false);
+    expect(MUTATION_POLICIES.fixReject.invalidateIfActive).toBe(false);
     // Step 11: graph topology is the lone fork-class / workflow-scope row.
     expect(MUTATION_POLICIES.topology.action).toBe('workflowFork');
     expect(MUTATION_POLICIES.topology.invalidatesExecutionSpec).toBe(true);
@@ -67,11 +82,15 @@ describe('MUTATION_POLICIES', () => {
   });
 
   it('marks every spec-changing mutation as invalidating-if-active', () => {
+    // Step 15 added `'scheduleOnly'`; Step 16 added `'fixApprove'` /
+    // `'fixReject'`. Together with the original `'none'` these are
+    // the engine's non-invalidating action classes — they do NOT
+    // change the execution ABI and do NOT cancel/invalidate active
+    // work, so both policy flags stay `false`. Every other action
+    // (retry/recreate/fork) is execution-spec-changing.
+    const NON_INVALIDATING_ACTIONS = new Set(['none', 'scheduleOnly', 'fixApprove', 'fixReject']);
     for (const [key, policy] of Object.entries(MUTATION_POLICIES)) {
-      // Step 15: `'scheduleOnly'` joins `'none'` as a
-      // non-invalidating action class — gate-policy edits change
-      // scheduling, not the execution ABI, so neither flag flips.
-      if (policy.action === 'none' || policy.action === 'scheduleOnly') {
+      if (NON_INVALIDATING_ACTIONS.has(policy.action)) {
         expect(policy.invalidatesExecutionSpec, key).toBe(false);
         expect(policy.invalidateIfActive, key).toBe(false);
       } else {
@@ -91,6 +110,35 @@ describe('MUTATION_POLICIES', () => {
       ([, p]) => p.action === 'scheduleOnly',
     );
     expect(scheduleOnlyEntries.map(([k]) => k)).toEqual(['externalGatePolicy']);
+  });
+
+  // Step 16 lock-in: `fixApprove` / `fixReject` are the lone
+  // `'fixApprove'` / `'fixReject'` entries respectively, mirroring
+  // how `externalGatePolicy` is the lone `'scheduleOnly'` entry.
+  // Together they form the **only** non-invalidating-but-not-no-op
+  // pair of policy entries (the chart's "Approve or reject fix" row).
+  it('fixApprove / fixReject are the only fix-decision entries in the policy table', () => {
+    const fixApproveEntries = Object.entries(MUTATION_POLICIES).filter(
+      ([, p]) => p.action === 'fixApprove',
+    );
+    expect(fixApproveEntries.map(([k]) => k)).toEqual(['fixApprove']);
+    const fixRejectEntries = Object.entries(MUTATION_POLICIES).filter(
+      ([, p]) => p.action === 'fixReject',
+    );
+    expect(fixRejectEntries.map(([k]) => k)).toEqual(['fixReject']);
+  });
+
+  // Step 16 cross-check: the chart's "These are not execution-defining
+  // task inputs" list now has TWO mapped policy outliers — gate-policy
+  // edits (Step 15) and fix-decisions (Step 16). Pin the exact set so
+  // a future migration that accidentally adds a third non-invalidating
+  // entry (or demotes one of these to retry/recreate) trips this test.
+  it('non-invalidating policy entries are exactly the chart-mapped outliers', () => {
+    const nonInvalidating = Object.entries(MUTATION_POLICIES)
+      .filter(([, p]) => !p.invalidatesExecutionSpec && !p.invalidateIfActive)
+      .map(([k]) => k)
+      .sort();
+    expect(nonInvalidating).toEqual(['externalGatePolicy', 'fixApprove', 'fixReject']);
   });
 
   it('is frozen — the policy table is a constant, not a mutable map', () => {
@@ -387,5 +435,162 @@ describe("applyInvalidation: action='scheduleOnly' (Step 15)", () => {
     expect(deps.recreateWorkflow).not.toHaveBeenCalled();
     expect(recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
     expect(workflowFork).not.toHaveBeenCalled();
+  });
+});
+
+// Step 16 (`docs/architecture/task-invalidation-roadmap.md`,
+// chart row "Approve or reject fix"): the `'fixApprove'` /
+// `'fixReject'` actions are the chart's **second** intentional
+// non-invalidating outlier alongside `'scheduleOnly'` (Step 15).
+// The router MUST skip `cancelInFlight` for both — by the time
+// approve/reject runs the task is already terminal
+// (`awaiting_approval` / `review_ready` for approve; `failed`
+// with a dangling `pendingFixError` for reject) and is awaiting
+// a human/automated decision on the fix attempt, NOT executing.
+// Approve = continue with the fix output as-is; reject = revert
+// to the pre-fix state. Neither bumps `task.execution.generation`.
+describe("applyInvalidation: action='fixApprove' (Step 16)", () => {
+  it('does NOT call cancelInFlight and routes to deps.fixApprove', async () => {
+    const fixApprove = vi.fn(async () => []);
+    const deps = makeDeps({ fixApprove });
+    const out = await applyInvalidation('task', 'fixApprove', 'task-a', deps);
+    expect(out).toEqual([]);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+    expect(fixApprove).toHaveBeenCalledWith('task-a');
+  });
+
+  it('returns the started tasks from deps.fixApprove verbatim', async () => {
+    const fakeStarted = [{ id: 'task-a' } as never, { id: 'task-b' } as never];
+    const fixApprove = vi.fn(async () => fakeStarted);
+    const deps = makeDeps({ fixApprove });
+    const out = await applyInvalidation('task', 'fixApprove', 'task-a', deps);
+    expect(out).toBe(fakeStarted);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+  });
+
+  it('rejects workflow-scoped invocation with fixApprove action', async () => {
+    const fixApprove = vi.fn(async () => []);
+    const deps = makeDeps({ fixApprove });
+    await expect(
+      applyInvalidation('workflow', 'fixApprove', 'wf-1', deps),
+    ).rejects.toThrow(/requires scope 'task'/);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+    expect(fixApprove).not.toHaveBeenCalled();
+  });
+
+  it('rejects scope=none with fixApprove action', async () => {
+    const fixApprove = vi.fn(async () => []);
+    const deps = makeDeps({ fixApprove });
+    await expect(
+      applyInvalidation('none', 'fixApprove', 'task-a', deps),
+    ).rejects.toThrow(/requires scope 'task'/);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+    expect(fixApprove).not.toHaveBeenCalled();
+  });
+
+  it('throws an explicit missing-dep error when fixApprove dep is absent', async () => {
+    const deps = makeDeps();
+    await expect(
+      applyInvalidation('task', 'fixApprove', 'task-a', deps),
+    ).rejects.toThrow(/'fixApprove' dep is missing/);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+  });
+
+  it('does not call any retry/recreate/fork/scheduleOnly lifecycle dep', async () => {
+    const fixApprove = vi.fn(async () => []);
+    const fixReject = vi.fn(async () => []);
+    const scheduleOnly = vi.fn(async () => []);
+    const recreateWorkflowFromFreshBase = vi.fn(async () => []);
+    const workflowFork = vi.fn(async () => []);
+    const deps = makeDeps({
+      fixApprove,
+      fixReject,
+      scheduleOnly,
+      recreateWorkflowFromFreshBase,
+      workflowFork,
+    });
+    await applyInvalidation('task', 'fixApprove', 'task-a', deps);
+    expect(deps.retryTask).not.toHaveBeenCalled();
+    expect(deps.recreateTask).not.toHaveBeenCalled();
+    expect(deps.retryWorkflow).not.toHaveBeenCalled();
+    expect(deps.recreateWorkflow).not.toHaveBeenCalled();
+    expect(recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
+    expect(workflowFork).not.toHaveBeenCalled();
+    expect(scheduleOnly).not.toHaveBeenCalled();
+    expect(fixReject).not.toHaveBeenCalled();
+  });
+});
+
+describe("applyInvalidation: action='fixReject' (Step 16)", () => {
+  it('does NOT call cancelInFlight and routes to deps.fixReject', async () => {
+    const fixReject = vi.fn(async () => []);
+    const deps = makeDeps({ fixReject });
+    const out = await applyInvalidation('task', 'fixReject', 'task-a', deps);
+    expect(out).toEqual([]);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+    expect(fixReject).toHaveBeenCalledWith('task-a');
+  });
+
+  it('returns the result from deps.fixReject verbatim (today: empty)', async () => {
+    // Production wire is `app/workflow-actions.ts → rejectTask`,
+    // which is `void` and the wire returns `[]`. The router must
+    // pass that through unchanged so a future fan-out (e.g. revert
+    // wakes a downstream task) can be observed end-to-end.
+    const fixReject = vi.fn(async () => []);
+    const deps = makeDeps({ fixReject });
+    const out = await applyInvalidation('task', 'fixReject', 'task-a', deps);
+    expect(out).toEqual([]);
+  });
+
+  it('rejects workflow-scoped invocation with fixReject action', async () => {
+    const fixReject = vi.fn(async () => []);
+    const deps = makeDeps({ fixReject });
+    await expect(
+      applyInvalidation('workflow', 'fixReject', 'wf-1', deps),
+    ).rejects.toThrow(/requires scope 'task'/);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+    expect(fixReject).not.toHaveBeenCalled();
+  });
+
+  it('rejects scope=none with fixReject action', async () => {
+    const fixReject = vi.fn(async () => []);
+    const deps = makeDeps({ fixReject });
+    await expect(
+      applyInvalidation('none', 'fixReject', 'task-a', deps),
+    ).rejects.toThrow(/requires scope 'task'/);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+    expect(fixReject).not.toHaveBeenCalled();
+  });
+
+  it('throws an explicit missing-dep error when fixReject dep is absent', async () => {
+    const deps = makeDeps();
+    await expect(
+      applyInvalidation('task', 'fixReject', 'task-a', deps),
+    ).rejects.toThrow(/'fixReject' dep is missing/);
+    expect(deps.cancelInFlight).not.toHaveBeenCalled();
+  });
+
+  it('does not call any retry/recreate/fork/scheduleOnly lifecycle dep', async () => {
+    const fixApprove = vi.fn(async () => []);
+    const fixReject = vi.fn(async () => []);
+    const scheduleOnly = vi.fn(async () => []);
+    const recreateWorkflowFromFreshBase = vi.fn(async () => []);
+    const workflowFork = vi.fn(async () => []);
+    const deps = makeDeps({
+      fixApprove,
+      fixReject,
+      scheduleOnly,
+      recreateWorkflowFromFreshBase,
+      workflowFork,
+    });
+    await applyInvalidation('task', 'fixReject', 'task-a', deps);
+    expect(deps.retryTask).not.toHaveBeenCalled();
+    expect(deps.recreateTask).not.toHaveBeenCalled();
+    expect(deps.retryWorkflow).not.toHaveBeenCalled();
+    expect(deps.recreateWorkflow).not.toHaveBeenCalled();
+    expect(recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
+    expect(workflowFork).not.toHaveBeenCalled();
+    expect(scheduleOnly).not.toHaveBeenCalled();
+    expect(fixApprove).not.toHaveBeenCalled();
   });
 });

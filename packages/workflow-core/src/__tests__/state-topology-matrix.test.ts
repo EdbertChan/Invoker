@@ -884,4 +884,160 @@ describe('State × Topology Matrix', () => {
       expect(deps[0]!.gatePolicy).toBe('review_ready');
     });
   });
+
+  // Step 16 (`docs/architecture/task-invalidation-roadmap.md`,
+  // chart row "Approve or reject fix"): the matrix entry for
+  // fix-decision mutations is the chart's **second** intentional
+  // non-invalidating outlier, alongside `externalGatePolicy`
+  // (Step 15). Concretely:
+  //
+  //   1. `MUTATION_POLICIES.fixApprove.action === 'fixApprove'`
+  //      and `MUTATION_POLICIES.fixReject.action === 'fixReject'`.
+  //      Both have `invalidatesExecutionSpec: false` and
+  //      `invalidateIfActive: false`.
+  //   2. Approve = continue with the fix attempt's output as the
+  //      task's authoritative result. Reject = revert to the
+  //      pre-fix `failed` state with the original error restored.
+  //   3. NEITHER path bumps `task.execution.generation` on the
+  //      edited task or on any dependent in the same workflow.
+  //      This is the hard contract that distinguishes fix
+  //      decisions from every Step 2–10 retry/recreate row above
+  //      (which bumps generation on the root + transitive
+  //      dependents).
+  //
+  // The test exercises the orchestrator primitives directly
+  // (`setTaskAwaitingApproval` / `approve` for the approve half;
+  // `setFixAwaitingApproval` / `revertConflictResolution` for the
+  // reject half). The app-layer `approveTask` / `rejectTask`
+  // wrappers delegate to these, and the wires in
+  // `buildInvalidationDeps` route policy-driven invocations
+  // through the wrappers without adding any generation bump
+  // (`packages/app/src/workflow-actions.ts`).
+  describe('Step 16 matrix entry: fix approve/reject is non-invalidating / task scope', () => {
+    it('MUTATION_POLICIES.fixApprove classifies the row as fixApprove / non-invalidating', () => {
+      const policy = MUTATION_POLICIES.fixApprove;
+      expect(policy).toBeDefined();
+      expect(policy.action).toBe('fixApprove');
+      expect(policy.invalidatesExecutionSpec).toBe(false);
+      expect(policy.invalidateIfActive).toBe(false);
+    });
+
+    it('MUTATION_POLICIES.fixReject classifies the row as fixReject / non-invalidating', () => {
+      const policy = MUTATION_POLICIES.fixReject;
+      expect(policy).toBeDefined();
+      expect(policy.action).toBe('fixReject');
+      expect(policy.invalidatesExecutionSpec).toBe(false);
+      expect(policy.invalidateIfActive).toBe(false);
+    });
+
+    it('fixApprove and fixReject are the only fix-decision entries in the policy table', () => {
+      const fixApproveEntries = Object.entries(MUTATION_POLICIES).filter(
+        ([, p]) => p.action === 'fixApprove',
+      );
+      expect(fixApproveEntries.map(([k]) => k)).toEqual(['fixApprove']);
+      const fixRejectEntries = Object.entries(MUTATION_POLICIES).filter(
+        ([, p]) => p.action === 'fixReject',
+      );
+      expect(fixRejectEntries.map(([k]) => k)).toEqual(['fixReject']);
+    });
+
+    // Mirrors the Step 15 matrix shape (gen-bump assertion
+    // INVERTED) — the chart's "Approve or reject fix" rule means
+    // generation MUST be unchanged on the approved task and on
+    // every dependent in its workflow, even though the task
+    // transitions to a new terminal status. This is the
+    // continue-class half of the contract.
+    it('approve does not bump task.execution.generation on the approved task or its dependents', async () => {
+      orchestrator.loadPlan(diamondPlan());
+      orchestrator.startExecution();
+
+      orchestrator.handleWorkerResponse(complete('A'));
+      orchestrator.handleWorkerResponse(complete('C'));
+      // Park B in `awaiting_approval`. No fix attempt — this is
+      // the plain awaiting-approval branch of `approveTask`,
+      // which routes to `Orchestrator.approve`.
+      orchestrator.setTaskAwaitingApproval('B');
+
+      const genBefore = {
+        A: orchestrator.getTask('A')!.execution.generation ?? 0,
+        B: orchestrator.getTask('B')!.execution.generation ?? 0,
+        C: orchestrator.getTask('C')!.execution.generation ?? 0,
+        D: orchestrator.getTask('D')!.execution.generation ?? 0,
+      };
+
+      await orchestrator.approve('B');
+      expect(orchestrator.getTask('B')!.status).toBe('completed');
+      // D becomes runnable as a side effect — that is expected
+      // continue-class scheduling, not invalidation.
+      expect(orchestrator.getTask('D')!.status).toBe('running');
+
+      const genAfter = {
+        A: orchestrator.getTask('A')!.execution.generation ?? 0,
+        B: orchestrator.getTask('B')!.execution.generation ?? 0,
+        C: orchestrator.getTask('C')!.execution.generation ?? 0,
+        D: orchestrator.getTask('D')!.execution.generation ?? 0,
+      };
+
+      // Continue-class: NOT a single generation bump anywhere.
+      expect(genAfter.A).toBe(genBefore.A);
+      expect(genAfter.B).toBe(genBefore.B);
+      expect(genAfter.C).toBe(genBefore.C);
+      expect(genAfter.D).toBe(genBefore.D);
+    });
+
+    // The reject-after-fix-attempt branch is the revert-class
+    // half of the contract. It exercises the
+    // `setFixAwaitingApproval` → `revertConflictResolution` path
+    // that `app/workflow-actions.ts → rejectTask` uses when the
+    // task has a dangling `pendingFixError`. The chart says this
+    // restores the pre-fix `failed` state with the original
+    // error — no generation bump, no fan-out.
+    it('reject (revertConflictResolution) does not bump task.execution.generation on the rejected task or its dependents', () => {
+      orchestrator.loadPlan(diamondPlan());
+      orchestrator.startExecution();
+
+      orchestrator.handleWorkerResponse(complete('A'));
+      orchestrator.handleWorkerResponse(complete('C'));
+      // Park B in `awaiting_approval` WITH a `pendingFixError`
+      // so the rejection path matches the
+      // `revertConflictResolution` branch in `rejectTask` —
+      // which is the one the policy wire actually exercises in
+      // production for fix flows.
+      const savedError = 'original failed-state error';
+      orchestrator.setFixAwaitingApproval('B', savedError);
+
+      const genBefore = {
+        A: orchestrator.getTask('A')!.execution.generation ?? 0,
+        B: orchestrator.getTask('B')!.execution.generation ?? 0,
+        C: orchestrator.getTask('C')!.execution.generation ?? 0,
+        D: orchestrator.getTask('D')!.execution.generation ?? 0,
+      };
+
+      orchestrator.revertConflictResolution('B', savedError);
+      // Reverted to the pre-fix `failed` state with the original
+      // error restored.
+      const bAfter = orchestrator.getTask('B')!;
+      expect(bAfter.status).toBe('failed');
+      expect(bAfter.execution.error).toBe(savedError);
+
+      const genAfter = {
+        A: orchestrator.getTask('A')!.execution.generation ?? 0,
+        B: orchestrator.getTask('B')!.execution.generation ?? 0,
+        C: orchestrator.getTask('C')!.execution.generation ?? 0,
+        D: orchestrator.getTask('D')!.execution.generation ?? 0,
+      };
+
+      // Revert-class: NOT a single generation bump anywhere.
+      // (`beginConflictResolution` itself bumps the failed task's
+      // generation when entering a fix attempt, but the *decision*
+      // — accept-the-fix vs revert-to-original — must not.)
+      expect(genAfter.A).toBe(genBefore.A);
+      expect(genAfter.B).toBe(genBefore.B);
+      expect(genAfter.C).toBe(genBefore.C);
+      expect(genAfter.D).toBe(genBefore.D);
+
+      // D stays pending — revert does not unblock anything.
+      expect(orchestrator.getTask('D')!.status).toBe('pending');
+    });
+  });
 });

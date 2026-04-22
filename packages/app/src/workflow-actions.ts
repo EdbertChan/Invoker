@@ -371,6 +371,36 @@ export function buildCancelInFlight(deps: BuildCancelInFlightDeps): CancelInFlig
  * in-flight attempts are preserved. The dep takes a task id but
  * the underlying primitive is workflow-wide today.
  *
+ * Step 16 (`docs/architecture/task-invalidation-roadmap.md` —
+ * "Approve or reject fix") wires `fixApprove` and `fixReject` to
+ * the existing `approveTask` and `rejectTask` action wrappers
+ * (this file). Per the chart's "Approve or reject fix" row these
+ * are the **second** intentional non-invalidating outliers
+ * alongside `scheduleOnly`: `applyInvalidation` skips
+ * `cancelInFlight` for both actions and routes to the wrappers,
+ * which already honor the chart's continue-or-revert contract
+ * end-to-end:
+ *
+ *   - `fixApprove` → `approveTask` commits the fix's branch
+ *     (`taskExecutor.commitApprovedFix`) when there is a
+ *     `pendingFixError`, then routes to
+ *     `Orchestrator.resumeTaskAfterFixApproval` (merge nodes /
+ *     merge-conflict fixes) or `Orchestrator.approve` (plain
+ *     fixes). Returns the started tasks.
+ *   - `fixReject` → `rejectTask` calls
+ *     `Orchestrator.revertConflictResolution(taskId,
+ *     pendingFixError)` for fix-flow rejections (restoring the
+ *     pre-fix `failed` state with the original error) or
+ *     `Orchestrator.reject(taskId)` for plain awaiting-approval
+ *     rejections. Returns `[]` because today's wrapper is `void`.
+ *
+ * Both wires are intentionally **dep-shaped** (taking a `taskId`
+ * and returning `TaskState[]`) so the policy router can route any
+ * future `fixApprove` / `fixReject` invocation through the same
+ * scaffolding as retry/recreate without special-casing the call
+ * site. Neither wire bumps `task.execution.generation` (that's the
+ * whole point — see chart row).
+ *
  * Step 1 scaffolding: exported but unused; later steps wire callers.
  */
 export function buildInvalidationDeps(
@@ -419,6 +449,32 @@ export function buildInvalidationDeps(
     // method.
     scheduleOnly: (_taskId: string) =>
       deps.orchestrator.autoStartExternallyUnblockedReadyTasks(),
+    // Step 16 wiring (`docs/architecture/task-invalidation-roadmap.md`,
+    // chart row "Approve or reject fix"). Both deps are invoked by
+    // `applyInvalidation` for actions `'fixApprove'` / `'fixReject'`
+    // WITHOUT a preceding `cancelInFlight` call — fix decisions are
+    // non-invalidating control flow over an existing fix attempt's
+    // output per the chart. The wires delegate to the existing
+    // `approveTask` / `rejectTask` action wrappers (this file),
+    // which already honor the continue-or-revert contract end-to-end
+    // (commit-on-approve via `taskExecutor.commitApprovedFix`;
+    // revert-on-reject via `Orchestrator.revertConflictResolution`).
+    // Neither wire bumps `task.execution.generation`.
+    fixApprove: async (taskId: string) => {
+      const result = await approveTask(taskId, {
+        orchestrator: deps.orchestrator,
+        taskExecutor: deps.taskExecutor,
+      });
+      return result.started;
+    },
+    fixReject: (taskId: string) => {
+      rejectTask(taskId, { orchestrator: deps.orchestrator });
+      // `rejectTask` returns `void` today — the policy router's
+      // dep contract is `TaskState[]`, so the wire returns `[]`.
+      // A reject does not start any new tasks (the only effect is
+      // a status revert on the rejected task itself).
+      return [];
+    },
   };
 }
 
