@@ -246,6 +246,15 @@ const invokerConfig: InvokerConfig = (() => {
   }
 })();
 
+function createSafeInvokerConfig(config: InvokerConfig): Omit<InvokerConfig, 'r2'> {
+  const safeConfig = { ...config };
+  delete safeConfig.r2;
+  if (safeConfig.docker?.secretsFile) {
+    safeConfig.docker = { ...safeConfig.docker, secretsFile: '<redacted>' };
+  }
+  return safeConfig;
+}
+
 async function maybeDelayWorkflowResumeForTest(): Promise<void> {
   if (process.env.NODE_ENV !== 'test') return;
   const raw = process.env.INVOKER_TEST_RESUME_PENDING_DELAY_MS;
@@ -274,6 +283,19 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   mkdirSync(invokerHomeRoot, { recursive: true });
   const readOnly = options?.readOnly === true;
   const dbPath = path.join(invokerHomeRoot, 'invoker.db');
+  const initLog = isHeadless
+    ? (...args: unknown[]) => {
+      const line = args.map((arg) => {
+        if (typeof arg === 'string') return arg;
+        try {
+          return JSON.stringify(arg);
+        } catch {
+          return String(arg);
+        }
+      }).join(' ');
+      process.stderr.write(line + '\n');
+    }
+    : (msg: string, meta?: Record<string, unknown>) => { logger.info(msg, { module: 'init', ...meta }); };
   ensureSqliteFlushDebounceForOwner(process.env, readOnly);
   if (!readOnly) {
     writerLock = acquireDbWriterLock(dbPath);
@@ -329,9 +351,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   commandService = new CommandService(orchestrator);
 
   const startupSyncMode = options?.startupSyncMode ?? 'all';
-  const initLog = isHeadless
-    ? (...args: unknown[]) => { process.stderr.write(args.join(' ') + '\n'); }
-    : (msg: string) => { logger.info(msg, { module: 'init' }); };
+  initLog('[init] Effective configuration', { config: createSafeInvokerConfig(invokerConfig) });
   const workflows = persistence.listWorkflows();
   if (startupSyncMode === 'all') {
     try {
@@ -2246,6 +2266,7 @@ if (isHeadless) {
     logger.info(`Database: ${dbPath}`, { module: 'init' });
     logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
     logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
+    logger.info('Effective configuration', { config: createSafeInvokerConfig(invokerConfig), module: 'startup' });
     recordStartupMark('startup.ready-for-window');
 
     // Forward deltas to renderer and keep snapshot cache in sync so
