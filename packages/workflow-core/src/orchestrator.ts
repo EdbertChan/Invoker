@@ -1973,14 +1973,52 @@ export class Orchestrator {
   }
 
   /**
-   * Edit a task's command, fork its downstream subtree, and restart it.
+   * Edit a task's command — recreate-class invalidation route per Step 2 of
+   * `docs/architecture/task-invalidation-roadmap.md` and the Decision Table
+   * row "Edit `command`" in `docs/architecture/task-invalidation-chart.md`.
+   *
+   * A `command` edit changes the task's execution-defining spec, so the
+   * existing attempt's lineage (branch, commit, workspacePath, agent
+   * session, container) is no longer authoritative. The chart maps this to
+   * `InvalidationAction = 'recreateTask'` with `InvalidationScope = 'task'`.
+   *
+   * Sequence (mirrors `applyInvalidation`'s contract for the synchronous
+   * orchestrator-internal seam — see `invalidation-policy.ts`):
+   *   1. **Cancel-first (Hard Invariant).** If the task is actively
+   *      executing (`running` or `fixing_with_ai`) we interrupt it via
+   *      `cancelTask` BEFORE any authoritative state is reset. The
+   *      executor-aware kill (`taskExecutor.killActiveExecution`) is wired
+   *      by the app-layer wrapper through `applyInvalidation`'s
+   *      `cancelInFlight` dep; this method only handles the orchestrator
+   *      side of cancel and does NOT add a parallel cancel call.
+   *   2. **Persist new command.** `writeAndSync` updates `config.command`
+   *      and emits a `task.updated` delta so the recreated attempt picks
+   *      up the new spec.
+   *   3. **Recreate-class reset.** Delegate to `recreateTask`, which
+   *      discards stale lineage (branch, commit, workspacePath,
+   *      agentSessionId, containerId, error, exitCode, ...) and bumps the
+   *      execution generation exactly once via
+   *      `withBumpedExecutionGeneration`. This is the single source of
+   *      truth for the recreate reset shape — Step 2 deliberately reuses
+   *      it instead of duplicating the field list here.
+   *
+   * Public surface is unchanged: same `(taskId, newCommand)` signature
+   * returning `TaskState[]` of newly-started tasks. The previous behavior
+   * of throwing on active tasks is REMOVED — that's the whole point of
+   * cancel-first per the chart.
+   *
+   * NOTE: `restartTask` is intentionally NOT called any more for this
+   * mutation; that path will be removed entirely in Step 13.
    */
   editTaskCommand(taskId: string, newCommand: string): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
     if (task.config.isMergeNode) throw new Error(`Cannot edit merge node ${taskId}`);
-    if (task.status === 'running' || task.status === 'fixing_with_ai') throw new Error(`Cannot edit running task ${taskId}`);
+
+    if (task.status === 'running' || task.status === 'fixing_with_ai') {
+      this.cancelTask(taskId);
+    }
 
     const cmdChanges: TaskStateChanges = { config: { command: newCommand } };
     this.writeAndSync(taskId, cmdChanges);
@@ -1988,7 +2026,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', cmdChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, cmdDelta);
 
-    return this.restartTask(taskId);
+    return this.recreateTask(taskId);
   }
 
   /**
