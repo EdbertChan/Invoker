@@ -5,6 +5,7 @@
  * orchestrator when an `updated` delta arrives for an unknown task
  * (out-of-order delta — the `created` delta was missed).
  */
+import type { Logger } from '@invoker/contracts';
 import type { TaskDelta, TaskState } from '@invoker/workflow-core';
 
 export interface TaskLookup {
@@ -22,12 +23,17 @@ export function applyDelta(
   delta: TaskDelta,
   stateMap: Map<string, string>,
   taskLookup?: TaskLookup,
+  logger?: Logger,
 ): void {
   if (delta.type === 'created') {
     stateMap.set(delta.task.id, JSON.stringify(delta.task));
   } else if (delta.type === 'updated') {
     let existing = stateMap.get(delta.taskId);
     if (!existing && taskLookup) {
+      logger?.debug(`TASK_DELTA updated fallback seeded task state from orchestrator for "${delta.taskId}"`, {
+        module: 'delta-merge',
+        taskId: delta.taskId,
+      });
       const task = taskLookup.getAllTasks().find(t => t.id === delta.taskId);
       if (task) {
         existing = JSON.stringify(task);
