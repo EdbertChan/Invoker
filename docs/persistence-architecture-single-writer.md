@@ -89,12 +89,14 @@ This table lists every mutating command path and how the owner-boundary contract
 | `setWorkflowMergeMode()` | workflow-actions.ts:189 | N/A | Called by owner → persistence.updateWorkflow | |
 | `resolveConflictAction()` | workflow-actions.ts:208 | N/A | Called by owner → orchestrator → persistence | |
 
+Delegated `headless.exec` timeout policy is command-shape aware: workflow-scoped `rebase`, `rebase-and-retry`, and `restart` requests use a 60s owner RPC timeout; other delegated exec requests keep the 5s timeout.
+
 ### Enforcement Locations
 
 | Component | File | Line(s) | Enforcement Mechanism |
 |-----------|------|---------|----------------------|
 | **GUI main process** | packages/app/src/main.ts | 605-613 | `initServices()` opens writable DB (no `readOnly` flag) |
-| **Headless delegation** | packages/app/src/main.ts | 346-381 | `tryDelegateRun()`, `tryDelegateResume()`, `tryDelegateExec()` send IPC request to owner; 5s timeout → standalone fallback |
+| **Headless delegation** | packages/app/src/main.ts | 346-381 | `tryDelegateRun()`, `tryDelegateResume()`, `tryDelegateExec()` send IPC request to owner; `run`/`resume` use 5s, and `exec` uses command-shape timeout selection before standalone fallback |
 | **Headless standalone** | packages/app/src/main.ts | 386 | `initServices({ readOnly: isHeadlessReadOnlyCommand(cliArgs) })` — read-only for query commands, writable for standalone mutating commands (when `INVOKER_HEADLESS_STANDALONE=1` or no GUI) |
 | **SQLiteAdapter read-only gate** | packages/persistence/src/sqlite-adapter.ts | 113-117 | `ensureWritable()` throws if `readOnly: true` and a write is attempted |
 | **Delegation handlers (owner)** | packages/app/src/main.ts | 618-674 | `headless.run`, `headless.resume`, `headless.exec` IPC handlers receive delegated commands, execute via owner's writable orchestrator/persistence |
@@ -102,10 +104,10 @@ This table lists every mutating command path and how the owner-boundary contract
 ### Critical Guarantees
 
 1. **GUI always owns DB**: When GUI is running, `initServices()` (main.ts:605) opens writable persistence. All IPC handlers mutate via this owner instance.
-2. **Headless delegates by default**: When GUI is present, headless commands try delegation (5s timeout). Only if delegation fails (no GUI) does headless open its own writable DB.
+2. **Headless delegates by default**: When GUI is present, headless commands try delegation. `run` and `resume` use a 5s timeout; delegated `exec` requests use a 60s timeout only for workflow-scoped `rebase`, `rebase-and-retry`, and `restart`, while other delegated exec commands keep the 5s timeout. Only if delegation fails (no GUI or timeout) does headless open its own writable DB.
 3. **Read-only commands never delegate**: `query` subcommands always open `readOnly: true` persistence (main.ts:386), never write.
 4. **Standalone escape hatch**: `INVOKER_HEADLESS_STANDALONE=1` skips delegation, allowing headless to own the DB (main.ts:348-349).
-5. **Delegation timeout prevents deadlock**: 5s IPC timeout (headless.ts:1145, 1219) ensures headless doesn't hang if GUI is unresponsive.
+5. **Delegation timeout prevents deadlock**: IPC delegation remains bounded so headless does not hang if GUI is unresponsive. Most delegation paths time out after 5s, but workflow-scoped `rebase`, `rebase-and-retry`, and `restart` delegated through `headless.exec` get a 60s timeout because those owner-side command shapes can run longer.
 
 ### Test Coverage
 
