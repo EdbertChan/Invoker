@@ -314,6 +314,93 @@ describe('State × Topology Matrix', () => {
       expect(allTasks.find((t) => t.id === 'D-v2')).toBeUndefined();
     });
 
+    // Step 5 (task-invalidation roadmap):
+    // The chart's Decision Table row "Edit `executorType`" is the lone
+    // **retry-class** / task scope row (substrate-only mutation; chart
+    // explicitly preserves "valid" workspace lineage). Today's
+    // compatibility seam routes `retryTask` → `Orchestrator.restartTask`
+    // (`buildInvalidationDeps` in `packages/app/src/workflow-actions.ts`;
+    // Step 13 renames the primitive). The matrix entry must therefore
+    // assert two distinct invariants compared to Step 2's recreate-class
+    // entry above:
+    //
+    //   1. **Generation bump shape (task scope, same as recreate).** The
+    //      retry path still resets the root + transitive downstream
+    //      subgraph through `resetSubgraphToPending`, so root + all
+    //      transitive dependents get `withBumpedExecutionGeneration`
+    //      applied exactly once. This is identical to the Step 2
+    //      command-edit matrix entry above and is what proves "task
+    //      scope" semantics are uniform across retry-class and
+    //      recreate-class — only the lineage shape differs.
+    //
+    //   2. **Lineage preservation (retry-class, NOT recreate).** The
+    //      chart explicitly preserves branch / workspacePath on the
+    //      ROOT task because only the execution substrate changed. This
+    //      is the assertion that fails if a future change accidentally
+    //      flips executor-type to recreate-class semantics.
+    it('Step 5 matrix entry: executor-type edit is retry-class / task scope (root + descendants get gen bump; root branch/workspacePath preserved)', () => {
+      orchestrator.loadPlan(diamondPlan());
+      orchestrator.startExecution();
+
+      orchestrator.handleWorkerResponse(complete('A'));
+      orchestrator.handleWorkerResponse(complete('B'));
+      orchestrator.handleWorkerResponse(complete('C'));
+      orchestrator.handleWorkerResponse(complete('D'));
+
+      // Hydrate workspace lineage on the root so the preservation half
+      // of the assertion is meaningful (the in-memory persistence mock
+      // does not write branch/workspacePath itself for completed work).
+      // `editTaskType()` calls `refreshFromDb()` internally, which
+      // re-loads from the persistence mock — no manual sync needed.
+      // Tasks in the matrix tests are persisted under their fully-qualified
+      // `<workflowId>/<bareId>` key (e.g. `wf-test-N/A`), even though
+      // `orchestrator.getTask('A')` accepts the bare id via state-machine
+      // resolution. Find the persisted key for `A` so the seed actually
+      // updates the right entry.
+      const persistedAKey = Array.from(persistence.tasks.keys()).find(
+        (k) => k === 'A' || k.endsWith('/A'),
+      );
+      if (!persistedAKey) throw new Error('Test setup: could not find persisted key for task A');
+      persistence.updateTask(persistedAKey, {
+        execution: {
+          branch: 'experiment/preserved-branch',
+          commit: 'cafef00d',
+          workspacePath: '/tmp/preserved-workspace',
+        },
+      });
+
+      const genBefore = {
+        A: orchestrator.getTask('A')!.execution.generation ?? 0,
+        B: orchestrator.getTask('B')!.execution.generation ?? 0,
+        C: orchestrator.getTask('C')!.execution.generation ?? 0,
+        D: orchestrator.getTask('D')!.execution.generation ?? 0,
+      };
+
+      orchestrator.editTaskType('A', 'worktree');
+
+      const genAfter = {
+        A: orchestrator.getTask('A')!.execution.generation ?? 0,
+        B: orchestrator.getTask('B')!.execution.generation ?? 0,
+        C: orchestrator.getTask('C')!.execution.generation ?? 0,
+        D: orchestrator.getTask('D')!.execution.generation ?? 0,
+      };
+
+      // ── Task-scope generation bump (root + transitive dependents). ──
+      expect(genAfter.A).toBe(genBefore.A + 1);
+      expect(genAfter.B).toBe(genBefore.B + 1);
+      expect(genAfter.C).toBe(genBefore.C + 1);
+      expect(genAfter.D).toBe(genBefore.D + 1);
+
+      // ── Retry-class lineage preservation on the root task. ──
+      // The chart's "Edit `executorType`" row says workspace lineage is
+      // still valid, so branch/workspacePath survive the edit even
+      // though the substrate (executorType) flipped from docker → worktree.
+      const rootAfter = orchestrator.getTask('A')!;
+      expect(rootAfter.config.executorType).toBe('worktree');
+      expect(rootAfter.execution.branch).toBe('experiment/preserved-branch');
+      expect(rootAfter.execution.workspacePath).toBe('/tmp/preserved-workspace');
+    });
+
     // Step 2 (task-invalidation roadmap):
     // The chart's Decision Table row "Edit `command`" is recreate-class /
     // task scope. After the edit, the root task AND every transitive
