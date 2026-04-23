@@ -92,7 +92,6 @@ export class SshExecutor extends BaseExecutor<SshEntry> {
     this.remotePath = process.env.PATH ?? '';
   }
 
-
   private buildSshArgs(): string[] {
     return [
       '-i', this.sshKeyPath,
@@ -117,9 +116,6 @@ export class SshExecutor extends BaseExecutor<SshEntry> {
     if (!this.remotePath) return ['bash', '-s'];
     return ['env', `PATH=${this.remotePath}`, 'bash', '-s'];
   }
-
-
-
 
   private async execRemoteCapture(script: string, phase?: string): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -463,7 +459,6 @@ echo ${payloadB64} | base64 -d | bash -se
     if (handle.containerId) (wrapped as any).containerId = handle.containerId;
     return wrapped;
   }
-
 
   /**
    * On the remote host: commit task result (same semantics as local recordTaskResult) then push branch.

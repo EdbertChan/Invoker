@@ -584,7 +584,6 @@ export async function fixWithAgentImpl(
   }
 }
 
-
 /**
  * Spawn an agent on a remote SSH host for fixing SSH-executed tasks.
  */
