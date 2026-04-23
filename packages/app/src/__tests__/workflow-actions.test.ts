@@ -923,19 +923,9 @@ describe('selectExperiment', () => {
 });
 
 describe('setWorkflowMergeMode', () => {
-  // Step 9 (task-invalidation roadmap) migrated the merge-mode
-  // mutation off the app-layer-only special casing that used to
-  // live here onto the `Orchestrator.editTaskMergeMode` policy
-  // seam. The wrapper is now a thin async delegate:
-  //   - merge node present  → `orchestrator.editTaskMergeMode`
-  //                           (orchestrator owns same-mode no-op
-  //                           detection, cancel-first interruption,
-  //                           the `updateWorkflow({ mergeMode })`
-  //                           write, and the retry-class reset)
-  //   - merge node absent   → direct `persistence.updateWorkflow`
-  //                           write (no-merge-gate workflows have
-  //                           no merge node to retry)
-  // These tests pin those two branches.
+  // These tests pin the wrapper's two branches:
+  //   - merge node present  -> `orchestrator.editTaskMergeMode`
+  //   - merge node absent   -> direct `persistence.updateWorkflow`
   let orchestrator: { editTaskMergeMode: ReturnType<typeof vi.fn> };
   let persistence: {
     updateWorkflow: ReturnType<typeof vi.fn>;
