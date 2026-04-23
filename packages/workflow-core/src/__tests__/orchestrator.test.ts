@@ -6482,6 +6482,33 @@ describe('Orchestrator', () => {
     });
   });
 
+<<<<<<< HEAD
+=======
+  // ── Step 9 (task-invalidation roadmap): editTaskMergeMode ──────────────
+  //
+  // The chart's Decision Table row "Change merge mode" maps the
+  // `mergeMode` workflow-level mutation to InvalidationAction =
+  // 'retryTask' with InvalidationScope = 'task' applied to the merge
+  // node (`__merge__<workflowId>`). Step 9 migrates the previously
+  // app-layer-only special casing in `setWorkflowMergeMode` onto a
+  // proper orchestrator policy seam: `Orchestrator.editTaskMergeMode`
+  // owns the cancel-first interruption, the workflow-level
+  // `mergeMode` write, and the retry-class merge-node reset (via
+  // `restartTask`), in parity with Step 5/6 (`editTaskType`) and
+  // Step 7/8 (`selectExperiment` / `selectExperiments`).
+  //
+  // The hard invariants pinned below are:
+  //   - same-mode flips are no-ops (no cancel, no generation bump)
+  //   - different-mode flips while the merge node is ACTIVE
+  //     (`running` / `awaiting_approval`) cancel-first BEFORE the
+  //     retry-class reset, and the merge node's execution generation
+  //     bumps by exactly one
+  //   - INACTIVE merge nodes (e.g. `pending`) skip cancel but still
+  //     route through `restartTask` (state reset only, no spurious
+  //     `cancelTask` that would mark a `pending` merge node `failed`)
+  //   - the route NEVER touches `recreateTask` (retry-class only,
+  //     per the chart Decision Table)
+
   describe('editTaskMergeMode invalidation', () => {
     function setupMergeWorkflow(initialMergeMode: 'manual' | 'automatic' | 'external_review' = 'manual'): {
       mergeId: string;
