@@ -62,6 +62,17 @@ const POST_BOOTSTRAP_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 8_000;
 
+export class SharedMutationOwnerTimeoutError extends Error {
+  constructor(message: string = 'Timed out waiting for a shared mutation owner to become available') {
+    super(message);
+    this.name = 'SharedMutationOwnerTimeoutError';
+  }
+}
+
+export function isSharedMutationOwnerTimeoutError(error: unknown): error is SharedMutationOwnerTimeoutError {
+  return error instanceof SharedMutationOwnerTimeoutError;
+}
+
 async function delegateMutation(
   args: string[],
   bus: MessageBus,
@@ -205,7 +216,7 @@ async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void>
       if (owner) return;
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
     }
-    throw new Error('Timed out waiting for a shared mutation owner to become available');
+    throw new SharedMutationOwnerTimeoutError();
   } finally {
     bootstrapLock?.release();
   }
@@ -271,7 +282,7 @@ export async function runHeadlessClientCommand(
   try {
     await deps.ensureStandaloneOwner(messageBus);
   } catch (err) {
-    if (!(err instanceof Error) || !err.message.includes('Timed out waiting for a shared mutation owner')) {
+    if (!isSharedMutationOwnerTimeoutError(err)) {
       throw err;
     }
     if (!deps.refreshMessageBus) {

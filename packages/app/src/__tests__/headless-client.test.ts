@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { LocalBus } from '@invoker/transport';
 
-import { runHeadlessClientCommand } from '../headless-client.js';
+import { SharedMutationOwnerTimeoutError, runHeadlessClientCommand } from '../headless-client.js';
 
 describe('headless-client', () => {
   it('delegates mutating commands to an existing owner without electron fallback', async () => {
@@ -107,7 +107,7 @@ describe('headless-client', () => {
     const ensureStandaloneOwner = vi.fn(async () => {
       bootstrapCalls += 1;
       if (bootstrapCalls === 1) {
-        throw new Error('Timed out waiting for a shared mutation owner to become available');
+        throw new SharedMutationOwnerTimeoutError();
       }
     });
     const refreshMessageBus = vi.fn()
