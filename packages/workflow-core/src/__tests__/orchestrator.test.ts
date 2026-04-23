@@ -5271,17 +5271,7 @@ describe('Orchestrator', () => {
       expect(merge.status).toBe('running');
     });
 
-    it('cancels running tasks first then resets them (Step 18 cancel-first invariant)', () => {
-      // Step 18 (`docs/architecture/task-invalidation-roadmap.md`,
-      // Hard Invariant from
-      // `docs/architecture/task-invalidation-chart.md`): direct
-      // callers of `retryWorkflow` (e.g. `CommandService.retryWorkflow`)
-      // bypass `applyInvalidation`'s upstream `cancelInFlight`. The
-      // primitive itself MUST cancel any active task in scope BEFORE
-      // the retry reset. The previous "skips running tasks" behavior
-      // was a chart violation — running tasks are now cancelled
-      // (transitioned to `failed` with the cancel marker) and then
-      // included in the retry reset's affected set.
+    it('cancels running tasks before resetting them', () => {
       const p = new InMemoryPersistence();
       const b = new InMemoryBus();
       const wfId = 'wf-retry-running';

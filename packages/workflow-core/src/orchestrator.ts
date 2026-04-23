@@ -873,9 +873,6 @@ export class Orchestrator {
     scope: 'task' | 'workflow',
     id: string,
   ): string[] {
-    const isActive = (s: TaskState['status']) =>
-      s === 'running' || s === 'fixing_with_ai';
-
     let candidates: TaskState[];
     if (scope === 'task') {
       const root = this.stateGetTask(id);
@@ -901,7 +898,7 @@ export class Orchestrator {
 
     const cancelled: string[] = [];
     for (const t of candidates) {
-      if (!isActive(t.status)) continue;
+      if (!isActiveForInvalidation(t.status)) continue;
       const error = `Cancelled before ${scope}-scope invalidation`;
       const completedAt = new Date();
       const changes: TaskStateChanges = {

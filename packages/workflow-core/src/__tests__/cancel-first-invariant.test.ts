@@ -1,46 +1,3 @@
-/**
- * Step 18 cross-cutting cancel-first invariant lock-in
- * (`docs/architecture/task-invalidation-roadmap.md` Step 18,
- * Hard Invariant from
- * `docs/architecture/task-invalidation-chart.md`).
- *
- * This file is the **policy-table-level proof** that every
- * invalidating mutation honors the chart's Hard Invariant:
- * affected in-flight work is interrupted BEFORE the lifecycle
- * dep applies the authoritative state reset and rescheduling.
- *
- * Two sub-suites cooperate:
- *
- *   1. `applyInvalidation` routing (policy-table iteration):
- *      iterates EVERY entry in `MUTATION_POLICIES`, invokes
- *      `applyInvalidation` with a single shared spy that
- *      records call order, and asserts:
- *        - For invalidating actions (retryTask / recreateTask
- *          / retryWorkflow / recreateWorkflow /
- *          recreateWorkflowFromFreshBase / workflowFork):
- *          `cancelInFlight` was called BEFORE the lifecycle
- *          dep.
- *        - For non-invalidating actions (scheduleOnly /
- *          fixApprove / fixReject): `cancelInFlight` was
- *          NOT called (the chart's intentional outliers).
- *      `lifecycle-matrix.test.ts` already pins the canonical
- *      5-cell matrix (Step 17); this file extends the proof
- *      to the full `MUTATION_POLICIES` table so any future
- *      policy entry must classify itself.
- *
- *   2. Direct primitive calls (bypasses `applyInvalidation`):
- *      seeds a workflow with a `running` task, calls each
- *      orchestrator primitive directly (the path used by
- *      `CommandService.{retry,recreate}{Task,Workflow}` and
- *      `CommandService.recreateWorkflowFromFreshBase` wired
- *      in Step 17), and asserts the active task transitions
- *      to a terminal-or-pending state with a `task.cancelled`
- *      event recorded BEFORE any reset event. This proves the
- *      defense-in-depth `cancelActiveBeforeInvalidation`
- *      helper inside the primitives — direct callers cannot
- *      bypass cancel-first.
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import {
   applyInvalidation,
@@ -266,7 +223,7 @@ function classify(action: InvalidationAction): {
   throw new Error(`Unclassified action: ${action}`);
 }
 
-describe('Step 18: cancel-first invariant — policy-table iteration', () => {
+describe('cancel-first invariant — policy-table iteration', () => {
   // Walk every entry in MUTATION_POLICIES so any future policy
   // addition is forced to classify itself per the chart.
   const allEntries = Object.entries(MUTATION_POLICIES) as Array<[
@@ -330,11 +287,11 @@ describe('Step 18: cancel-first invariant — policy-table iteration', () => {
     // invalidating action to keep the cross-cutting guarantee
     // self-contained.
     const { deps, spies } = buildSpyDeps();
-    spies.cancelInFlight.mockRejectedValueOnce(new Error('boom-step-18'));
+    spies.cancelInFlight.mockRejectedValueOnce(new Error('boom-cancel-first'));
 
     await expect(
       applyInvalidation('task', 'recreateTask', 't-rejected', deps),
-    ).rejects.toThrow('boom-step-18');
+    ).rejects.toThrow('boom-cancel-first');
 
     expect(spies.recreateTask).not.toHaveBeenCalled();
   });
@@ -377,7 +334,7 @@ function makeOrchestrator(p: InMemoryPersistence): Orchestrator {
   });
 }
 
-describe('Step 18: cancel-first invariant — direct primitive calls bypass applyInvalidation', () => {
+describe('cancel-first invariant — direct primitive calls bypass applyInvalidation', () => {
   // Every direct caller (CommandService.retryTask /
   // CommandService.recreateTask /
   // CommandService.retryWorkflow /
