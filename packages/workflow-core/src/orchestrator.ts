@@ -1805,6 +1805,14 @@ export class Orchestrator {
     return started;
   }
 
+  restartTask(taskId: string): TaskState[] {
+    console.warn(
+      `[orchestrator] restartTask("${taskId}") is deprecated. Routing to recreateTask. ` +
+        'Use retryTask() for lineage-preserving reset or recreateTask() for fresh-lineage reset explicitly.',
+    );
+    return this.recreateTask(taskId);
+  }
+
   retryTask(taskId: string): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
@@ -4067,10 +4075,3 @@ export class Orchestrator {
     return true;
   }
 }
-  restartTask(taskId: string): TaskState[] {
-    console.warn(
-      `[orchestrator] restartTask("${taskId}") is deprecated. Routing to recreateTask. ` +
-        'Use retryTask() for lineage-preserving reset or recreateTask() for fresh-lineage reset explicitly.',
-    );
-    return this.recreateTask(taskId);
-  }
