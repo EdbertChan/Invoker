@@ -1,32 +1,3 @@
-/**
- * Step 13 lock-in tests for the `restartTask` deprecation.
- *
- * Step 13 of the task-invalidation migration
- * (`docs/architecture/task-invalidation-roadmap.md`,
- * `docs/architecture/task-invalidation-chart.md` "Naming
- * inconsistency" section) demoted the overloaded `restartTask`
- * verb to a deprecated compatibility shim that delegates to
- * `recreateTask`. The canonical `{retry, recreate} × {task,
- * workflow}` matrix now lives in `Orchestrator.retryTask` and
- * `Orchestrator.recreateTask`.
- *
- * These tests pin three things:
- *   1. `Orchestrator.restartTask` still exists (for unmigrated
- *      external callers) but routes to `recreateTask` rather
- *      than its historical retry-class behavior. Callers that
- *      want the old lineage-preserving reset MUST move to
- *      `retryTask` explicitly.
- *   2. `CommandService.restartTask` does the same — delegates
- *      to `commandService.recreateTask` /
- *      `orchestrator.recreateTask`.
- *   3. **Lock-in regex**: no production source file under
- *      `packages/workflow-core/src/` (excluding `__tests__`)
- *      _calls_ `.restartTask(` on the orchestrator anymore. The
- *      method declaration / docstring tokens are allowed; this
- *      is what prevents future code from regressing back to the
- *      deprecated verb.
- */
-
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -76,7 +47,7 @@ describe('restartTask deprecation shim', () => {
       const message = String(warnSpy.mock.calls[0][0]);
       expect(message).toContain('restartTask');
       expect(message).toContain('deprecated');
-      expect(message).toMatch(/Step 13/i);
+      expect(message).toContain('Routing to recreateTask');
       expect(message).toContain('retryTask');
       expect(message).toContain('recreateTask');
     });
@@ -132,11 +103,11 @@ describe('restartTask deprecation shim', () => {
       const message = String(warnSpy.mock.calls[0][0]);
       expect(message).toContain('restartTask');
       expect(message).toContain('deprecated');
-      expect(message).toMatch(/Step 13/i);
+      expect(message).toContain('Routing to recreateTask');
     });
 
     it('exposes explicit retryTask + recreateTask methods', async () => {
-      // Sanity: the Step 13 canonical verbs exist on the service
+      // Sanity: the canonical verbs exist on the service
       // surface (so callers have somewhere to migrate to). If
       // either is missing, this test will fail at compile time.
       expect(typeof svc.retryTask).toBe('function');
@@ -203,7 +174,7 @@ describe('restartTask deprecation shim', () => {
         }
       }
 
-      expect(offenders, `Step 13 regression — production code still calls .restartTask(:\n${offenders.join('\n')}`).toEqual([]);
+      expect(offenders, `Regression: production code still calls .restartTask(:\n${offenders.join('\n')}`).toEqual([]);
     });
   });
 });

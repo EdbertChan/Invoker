@@ -3217,15 +3217,15 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(taskId)?.status).toBe('running');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       const started = orchestrator.editTaskType(taskId, 'worktree');
 
       expect(cancelSpy).toHaveBeenCalledWith(taskId);
-      expect(restartSpy).toHaveBeenCalledWith(taskId);
+      expect(retrySpy).toHaveBeenCalledWith(taskId);
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        restartSpy.mock.invocationCallOrder[0],
+        retrySpy.mock.invocationCallOrder[0],
       );
       expect(recreateSpy).not.toHaveBeenCalled();
 
@@ -3237,11 +3237,11 @@ describe('Orchestrator', () => {
       expect(started[0].id).toBe(taskId);
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
-    it('editing an INACTIVE (failed) task skips cancel but still routes through restartTask (retry-class)', () => {
+    it('editing an INACTIVE (failed) task skips cancel but still routes through retryTask', () => {
       orchestrator.loadPlan({
         name: 'edit-type-inactive-test',
         tasks: [{ id: 't1', description: 'Task 1', command: 'echo old', executorType: 'docker' }],
@@ -3254,17 +3254,17 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(taskId)?.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskType(taskId, 'worktree');
 
-      // Inactive → no cancel needed; restartTask still resets volatile
+      // Inactive → no cancel needed; retryTask still resets volatile
       // attempt state and bumps generation.
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(restartSpy).toHaveBeenCalledWith(taskId);
+      expect(retrySpy).toHaveBeenCalledWith(taskId);
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('preserves valid lineage (branch / workspacePath) — retry-class does NOT discard substrate lineage', () => {
@@ -3296,7 +3296,7 @@ describe('Orchestrator', () => {
       // ── Preserved (chart says substrate-only change keeps these) ──
       expect(task.execution.branch).toBe('experiment/preserved-branch');
       expect(task.execution.workspacePath).toBe('/tmp/preserved-workspace');
-      // ── Cleared (volatile attempt state per restartTask reset shape) ──
+      // ── Cleared (volatile attempt state per retryTask reset shape) ──
       expect(task.execution.agentSessionId).toBeUndefined();
       expect(task.execution.containerId).toBeUndefined();
       expect(task.execution.error).toBeUndefined();
@@ -6812,29 +6812,29 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('running');
     }
 
-    it('routes through restartTask and cancels active merge work first', () => {
+    it('routes through retryTask and cancels active merge work first', () => {
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
 
       expect(cancelSpy).toHaveBeenCalledWith(mergeId);
-      expect(restartSpy).toHaveBeenCalledWith(mergeId);
+      expect(retrySpy).toHaveBeenCalledWith(mergeId);
       expect(recreateSpy).not.toHaveBeenCalled();
       // Hard Invariant: cancel-first MUST precede the retry-class
       // reset. `mock.invocationCallOrder` is the global vi-internal
       // ordering counter — comparing the first cancel/restart call
       // pins the synchronous ordering inside `editTaskMergeMode`.
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        restartSpy.mock.invocationCallOrder[0],
+        retrySpy.mock.invocationCallOrder[0],
       );
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
@@ -6846,13 +6846,13 @@ describe('Orchestrator', () => {
       const beforeUpdates = persistence.updateWorkflowCalls.get(workflowId) ?? 0;
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       const result = orchestrator.editTaskMergeMode(mergeId, 'manual');
 
       expect(result).toEqual([]);
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(restartSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
 
       const afterGeneration = orchestrator.getTask(mergeId)!.execution.generation ?? 0;
       expect(afterGeneration).toBe(beforeGeneration);
@@ -6861,7 +6861,7 @@ describe('Orchestrator', () => {
       expect(afterUpdates).toBe(beforeUpdates);
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('different-mode flips on active merge nodes bump execution generation by exactly one', () => {
@@ -6886,7 +6886,7 @@ describe('Orchestrator', () => {
       expect(wf?.mergeMode).toBe('external_review');
     });
 
-    it('inactive merge nodes skip cancel-first but still route through restartTask', () => {
+    it('inactive merge nodes skip cancel-first but still route through retryTask', () => {
       // Do NOT drive the merge node into a running state; with the
       // leaf still pending the merge node sits in `pending` (no
       // in-flight merge work). Cancel-first MUST be skipped because
@@ -6896,21 +6896,20 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('pending');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
 
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(restartSpy).toHaveBeenCalledWith(mergeId);
-      // Merge node remains `pending` after the retry-class reset
-      // (it is the natural target state of `restartTask`).
+      expect(retrySpy).toHaveBeenCalledWith(mergeId);
+      // Merge node remains `pending` after the retry-class reset.
       expect(orchestrator.getTask(mergeId)?.status).toBe('pending');
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
-    it('active awaiting_approval merge nodes cancel first, then reset via restartTask', () => {
+    it('active awaiting_approval merge nodes cancel first, then reset via retryTask', () => {
       // The chart calls out `awaiting_approval` (the manual-gate
       // wait state) explicitly as an ACTIVE state for the merge
       // node — switching modes mid-review must interrupt the
@@ -6925,18 +6924,18 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('awaiting_approval');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
 
       expect(cancelSpy).toHaveBeenCalledWith(mergeId);
-      expect(restartSpy).toHaveBeenCalledWith(mergeId);
+      expect(retrySpy).toHaveBeenCalledWith(mergeId);
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        restartSpy.mock.invocationCallOrder[0],
+        retrySpy.mock.invocationCallOrder[0],
       );
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('throws when called on a non-merge task', () => {
@@ -6954,32 +6953,7 @@ describe('Orchestrator', () => {
     });
   });
 
-  // ── Step 9 (task-invalidation roadmap): editTaskMergeMode ──────────────
-  //
-  // The chart's Decision Table row "Change merge mode" maps the
-  // `mergeMode` workflow-level mutation to InvalidationAction =
-  // 'retryTask' with InvalidationScope = 'task' applied to the merge
-  // node (`__merge__<workflowId>`). Step 9 migrates the previously
-  // app-layer-only special casing in `setWorkflowMergeMode` onto a
-  // proper orchestrator policy seam: `Orchestrator.editTaskMergeMode`
-  // owns the cancel-first interruption, the workflow-level
-  // `mergeMode` write, and the retry-class merge-node reset (via
-  // `restartTask`), in parity with Step 5/6 (`editTaskType`) and
-  // Step 7/8 (`selectExperiment` / `selectExperiments`).
-  //
-  // The hard invariants pinned below are:
-  //   - same-mode flips are no-ops (no cancel, no generation bump)
-  //   - different-mode flips while the merge node is ACTIVE
-  //     (`running` / `awaiting_approval`) cancel-first BEFORE the
-  //     retry-class reset, and the merge node's execution generation
-  //     bumps by exactly one
-  //   - INACTIVE merge nodes (e.g. `pending`) skip cancel but still
-  //     route through `restartTask` (state reset only, no spurious
-  //     `cancelTask` that would mark a `pending` merge node `failed`)
-  //   - the route NEVER touches `recreateTask` (retry-class only,
-  //     per the chart Decision Table)
-
-  describe('editTaskMergeMode (Step 9 invalidation)', () => {
+  describe('editTaskMergeMode invalidation', () => {
     function setupMergeWorkflow(initialMergeMode: 'manual' | 'automatic' | 'external_review' = 'manual'): {
       mergeId: string;
       workflowId: string;
@@ -7015,33 +6989,33 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('running');
     }
 
-    it('Step 9: routes through restartTask and (when ACTIVE) cancels first — recreateTask MUST NOT be on the route', () => {
+    it('routes through retryTask and cancels active merge work first', () => {
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
 
       expect(cancelSpy).toHaveBeenCalledWith(mergeId);
-      expect(restartSpy).toHaveBeenCalledWith(mergeId);
+      expect(retrySpy).toHaveBeenCalledWith(mergeId);
       expect(recreateSpy).not.toHaveBeenCalled();
       // Hard Invariant: cancel-first MUST precede the retry-class
       // reset. `mock.invocationCallOrder` is the global vi-internal
       // ordering counter — comparing the first cancel/restart call
       // pins the synchronous ordering inside `editTaskMergeMode`.
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        restartSpy.mock.invocationCallOrder[0],
+        retrySpy.mock.invocationCallOrder[0],
       );
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
-    it('Step 9: same-mode flip is a NO-OP (no cancel, no restart, no generation bump, no workflow write)', () => {
+    it('same-mode flip is a no-op', () => {
       const { mergeId, leafId, workflowId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -7049,13 +7023,13 @@ describe('Orchestrator', () => {
       const beforeUpdates = persistence.updateWorkflowCalls.get(workflowId) ?? 0;
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       const result = orchestrator.editTaskMergeMode(mergeId, 'manual');
 
       expect(result).toEqual([]);
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(restartSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
 
       const afterGeneration = orchestrator.getTask(mergeId)!.execution.generation ?? 0;
       expect(afterGeneration).toBe(beforeGeneration);
@@ -7064,10 +7038,10 @@ describe('Orchestrator', () => {
       expect(afterUpdates).toBe(beforeUpdates);
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
-    it('Step 9: different-mode flip when merge node is ACTIVE bumps execution generation by exactly one', () => {
+    it('different-mode flip on an active merge node bumps execution generation by exactly one', () => {
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -7079,7 +7053,7 @@ describe('Orchestrator', () => {
       expect(after).toBe(before + 1);
     });
 
-    it('Step 9: different-mode flip persists the new mode on the workflow record', () => {
+    it('different-mode flip persists the new mode on the workflow record', () => {
       const { mergeId, leafId, workflowId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -7089,7 +7063,7 @@ describe('Orchestrator', () => {
       expect(wf?.mergeMode).toBe('external_review');
     });
 
-    it('Step 9: INACTIVE merge node (pending) skips cancel-first but still routes through restartTask', () => {
+    it('inactive merge node (pending) skips cancel-first but still routes through retryTask', () => {
       // Do NOT drive the merge node into a running state; with the
       // leaf still pending the merge node sits in `pending` (no
       // in-flight merge work). Cancel-first MUST be skipped because
@@ -7099,21 +7073,21 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('pending');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
 
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(restartSpy).toHaveBeenCalledWith(mergeId);
+      expect(retrySpy).toHaveBeenCalledWith(mergeId);
       // Merge node remains `pending` after the retry-class reset
       // (it is the natural target state of `restartTask`).
       expect(orchestrator.getTask(mergeId)?.status).toBe('pending');
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
-    it('Step 9: ACTIVE awaiting_approval (manual gate) merge node cancels first, then resets via restartTask', () => {
+    it('active awaiting_approval merge node cancels first, then resets via retryTask', () => {
       // The chart calls out `awaiting_approval` (the manual-gate
       // wait state) explicitly as an ACTIVE state for the merge
       // node — switching modes mid-review must interrupt the
@@ -7128,18 +7102,18 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('awaiting_approval');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskMergeMode(mergeId, 'automatic');
 
       expect(cancelSpy).toHaveBeenCalledWith(mergeId);
-      expect(restartSpy).toHaveBeenCalledWith(mergeId);
+      expect(retrySpy).toHaveBeenCalledWith(mergeId);
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        restartSpy.mock.invocationCallOrder[0],
+        retrySpy.mock.invocationCallOrder[0],
       );
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('Step 9: throws when called on a non-merge task', () => {
@@ -7219,29 +7193,29 @@ describe('Orchestrator', () => {
       publishedDeltas = [];
     }
 
-    it('routes through restartTask and cancels active fix sessions first', () => {
+    it('routes through retryTask and cancels active fix sessions first', () => {
       const { taskId } = setupFailedTask();
       driveTaskToFixingWithAi(taskId);
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.editTaskFixContext(taskId, { fixPrompt: 'try a different approach' });
 
       expect(cancelSpy).toHaveBeenCalledWith(taskId);
-      expect(restartSpy).toHaveBeenCalledWith(taskId);
+      expect(retrySpy).toHaveBeenCalledWith(taskId);
       expect(recreateSpy).not.toHaveBeenCalled();
       // Hard Invariant: cancel-first MUST precede the retry-class
       // reset. `mock.invocationCallOrder` is the global vi-internal
       // ordering counter — comparing the first cancel/restart call
       // pins the synchronous ordering inside `editTaskFixContext`.
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        restartSpy.mock.invocationCallOrder[0],
+        retrySpy.mock.invocationCallOrder[0],
       );
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
@@ -7267,7 +7241,7 @@ describe('Orchestrator', () => {
       });
 
       const task = orchestrator.getTask(taskId)!;
-      // restartTask resets to `pending` and may auto-start to
+      // retryTask resets to `pending` and may auto-start to
       // `running` if the task is ready — both are valid
       // post-retry pre-execution states for the chart's "retry
       // from reverted failed state" baseline (the fix-loop attempt
@@ -7278,7 +7252,7 @@ describe('Orchestrator', () => {
       expect(task.config.fixContext).toBe('see notes/foo.md');
     });
 
-    it('edit on INACTIVE failed task skips cancel but still routes through restartTask', () => {
+    it('edit on INACTIVE failed task skips cancel but still routes through retryTask', () => {
       // Failed (not fixing_with_ai) is the inactive fix-loop state.
       // Cancel-first MUST be skipped because there is no in-flight
       // fix attempt to interrupt; the task is still settled in
@@ -7288,19 +7262,19 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(taskId)?.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.editTaskFixContext(taskId, { fixPrompt: 'fresh try' });
 
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(restartSpy).toHaveBeenCalledWith(taskId);
+      expect(retrySpy).toHaveBeenCalledWith(taskId);
 
       const task = orchestrator.getTask(taskId)!;
       expect(['pending', 'running']).toContain(task.status);
       expect(task.config.fixPrompt).toBe('fresh try');
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('same-content edit is a NO-OP', () => {
@@ -7315,7 +7289,7 @@ describe('Orchestrator', () => {
       publishedDeltas = [];
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       const result = orchestrator.editTaskFixContext(taskId, {
         fixPrompt: 'identical',
@@ -7324,7 +7298,7 @@ describe('Orchestrator', () => {
 
       expect(result).toEqual([]);
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(restartSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
 
       const afterGeneration = orchestrator.getTask(taskId)!.execution.generation ?? 0;
       expect(afterGeneration).toBe(beforeGeneration);
@@ -7339,7 +7313,7 @@ describe('Orchestrator', () => {
       expect(fixContextDeltas).toHaveLength(0);
 
       cancelSpy.mockRestore();
-      restartSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('omitted patch key leaves the existing config field untouched', () => {
