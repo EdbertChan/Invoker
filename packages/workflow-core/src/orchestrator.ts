@@ -19,7 +19,7 @@ import { TaskStateMachine } from './state-machine.js';
 import { ResponseHandler } from './response-handler.js';
 import type { ParsedResponse } from './response-handler.js';
 import { TaskScheduler } from './scheduler.js';
-import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, ExternalDependency } from '@invoker/workflow-graph';
+import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, ExternalDependency, TaskStatus } from '@invoker/workflow-graph';
 import type { ExecutorType } from '@invoker/workflow-graph';
 import { createTaskState, createAttempt } from '@invoker/workflow-graph';
 import type { WorkResponse } from '@invoker/contracts';
@@ -31,6 +31,15 @@ function mergeTrace(tag: string, data: Record<string, unknown>): void {
     mkdirSync(resolve(homedir(), '.invoker'), { recursive: true });
     appendFileSync(MERGE_TRACE_LOG, `${new Date().toISOString()} [merge-trace:orchestrator] ${tag} ${JSON.stringify(data)}\n`);
   } catch { /* best effort */ }
+}
+
+function isActiveForInvalidation(status: TaskStatus): boolean {
+  return (
+    status === 'running' ||
+    status === 'fixing_with_ai' ||
+    status === 'awaiting_approval' ||
+    status === 'review_ready'
+  );
 }
 import { getTransitiveDependents } from '@invoker/workflow-graph';
 import { ActionGraph } from '@invoker/workflow-graph';
@@ -1522,7 +1531,6 @@ export class Orchestrator {
       prevCanon.length === newCanon.length &&
       prevCanon.every((id, i) => id === newCanon[i]);
     const isReSelection = previousSet !== undefined && !sameAsPrev;
-
     const allTasksBefore = this.stateMachine.getAllTasks();
 
     if (isReSelection) {
@@ -1609,7 +1617,7 @@ export class Orchestrator {
       for (const dsId of downstreamIds) {
         const dt = this.stateGetTask(dsId);
         if (!dt) continue;
-        if (dt.status === 'running' || dt.status === 'fixing_with_ai') {
+        if (isActiveForInvalidation(dt.status)) {
           this.cancelTask(dsId);
         }
       }
@@ -2279,12 +2287,7 @@ export class Orchestrator {
     // cancel: there is no in-flight work to interrupt and
     // `cancelTask` would otherwise mark a `pending` merge node as
     // `failed`.
-    const isActive =
-      task.status === 'running' ||
-      task.status === 'fixing_with_ai' ||
-      task.status === 'awaiting_approval' ||
-      task.status === 'review_ready';
-    if (isActive) {
+    if (isActiveForInvalidation(task.status)) {
       this.cancelTask(taskId);
     }
 

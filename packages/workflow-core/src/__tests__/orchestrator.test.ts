@@ -6507,7 +6507,7 @@ describe('Orchestrator', () => {
   //   - the route NEVER touches `recreateTask` (retry-class only,
   //     per the chart Decision Table)
 
-  describe('editTaskMergeMode (Step 9 invalidation)', () => {
+  describe('editTaskMergeMode invalidation', () => {
     function setupMergeWorkflow(initialMergeMode: 'manual' | 'automatic' | 'external_review' = 'manual'): {
       mergeId: string;
       workflowId: string;
@@ -6543,7 +6543,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(mergeId)?.status).toBe('running');
     }
 
-    it('Step 9: routes through restartTask and (when ACTIVE) cancels first — recreateTask MUST NOT be on the route', () => {
+    it('routes through restartTask and cancels active merge work first', () => {
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -6569,7 +6569,7 @@ describe('Orchestrator', () => {
       recreateSpy.mockRestore();
     });
 
-    it('Step 9: same-mode flip is a NO-OP (no cancel, no restart, no generation bump, no workflow write)', () => {
+    it('same-mode flip is a NO-OP', () => {
       const { mergeId, leafId, workflowId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -6595,7 +6595,7 @@ describe('Orchestrator', () => {
       restartSpy.mockRestore();
     });
 
-    it('Step 9: different-mode flip when merge node is ACTIVE bumps execution generation by exactly one', () => {
+    it('different-mode flip when merge node is ACTIVE bumps execution generation by exactly one', () => {
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -6607,7 +6607,7 @@ describe('Orchestrator', () => {
       expect(after).toBe(before + 1);
     });
 
-    it('Step 9: different-mode flip persists the new mode on the workflow record', () => {
+    it('different-mode flip persists the new mode on the workflow record', () => {
       const { mergeId, leafId, workflowId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -6617,7 +6617,7 @@ describe('Orchestrator', () => {
       expect(wf?.mergeMode).toBe('external_review');
     });
 
-    it('Step 9: INACTIVE merge node (pending) skips cancel-first but still routes through restartTask', () => {
+    it('INACTIVE merge node skips cancel-first but still routes through restartTask', () => {
       // Do NOT drive the merge node into a running state; with the
       // leaf still pending the merge node sits in `pending` (no
       // in-flight merge work). Cancel-first MUST be skipped because
@@ -6641,7 +6641,7 @@ describe('Orchestrator', () => {
       restartSpy.mockRestore();
     });
 
-    it('Step 9: ACTIVE awaiting_approval (manual gate) merge node cancels first, then resets via restartTask', () => {
+    it('ACTIVE awaiting_approval merge node cancels first, then resets via restartTask', () => {
       // The chart calls out `awaiting_approval` (the manual-gate
       // wait state) explicitly as an ACTIVE state for the merge
       // node — switching modes mid-review must interrupt the
@@ -6670,14 +6670,14 @@ describe('Orchestrator', () => {
       restartSpy.mockRestore();
     });
 
-    it('Step 9: throws when called on a non-merge task', () => {
+    it('throws when called on a non-merge task', () => {
       const { leafId } = setupMergeWorkflow('manual');
       expect(() => orchestrator.editTaskMergeMode(leafId, 'automatic')).toThrow(
         /not a merge node/,
       );
     });
 
-    it('Step 9: throws when called on an unknown task id', () => {
+    it('throws when called on an unknown task id', () => {
       setupMergeWorkflow('manual');
       expect(() => orchestrator.editTaskMergeMode('does-not-exist', 'automatic')).toThrow(
         /not found/,
