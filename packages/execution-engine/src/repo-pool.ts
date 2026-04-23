@@ -234,6 +234,17 @@ export class RepoPool {
     this.activeWorktrees.set(repoUrl, live);
   }
 
+  private async isReusableManagedWorktree(worktreePath: string, expectedBranch: string): Promise<boolean> {
+    try {
+      const head = (await this.execGit(['rev-parse', '--abbrev-ref', 'HEAD'], worktreePath)).trim();
+      if (!abbrevRefMatchesBranch(head, expectedBranch)) return false;
+      await this.execGit(['status', '--porcelain'], worktreePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async doAcquireWorktree(
     repoUrl: string,
     branch: string,
@@ -324,9 +335,8 @@ export class RepoPool {
         contentCandidate = { path: contentHit.path, branch: contentHit.branch };
       }
 
-      // Cross-actionId hash collisions: never fatal under the new branch shape
-      // because lifecycle tag + actionId path component still differ. Log a
-      // structured warning so collisions are observable in production.
+      // Cross-actionId hash collisions are observable but not actionable here
+      // because the actionId/lifecycle parts of the branch still disambiguate.
       const collisions = findContentHashCollisions(
         porcelain,
         parsedTargetBranch.contentHash,
@@ -337,14 +347,13 @@ export class RepoPool {
         const summary = collisions
           .map((c) => `${c.branch} @ ${c.path}`)
           .join('; ');
-        // eslint-disable-next-line no-console
-        console.warn(
+        traceExecution(
           `[branch-hash-collision] contentHash=${parsedTargetBranch.contentHash} target=${branch} collides with: ${summary}`,
         );
       }
     }
 
-    const plan = planManagedWorktree({
+    let plan = planManagedWorktree({
       targetBranch: branch,
       targetWorktreePath: worktreePath,
       forceFresh: opts?.forceFresh,
@@ -352,6 +361,26 @@ export class RepoPool {
       actionIdCandidate,
       contentCandidate,
     });
+
+    if (plan.kind === 'reuse_exact') {
+      const reusable = await this.isReusableManagedWorktree(plan.worktreePath, branch);
+      if (!reusable) {
+        plan = {
+          kind: 'recreate',
+          worktreePath,
+          cleanupPaths: [worktreePath, plan.worktreePath],
+        };
+      }
+    } else if (plan.kind === 'rename_reuse' || plan.kind === 'rename_to_lifecycle') {
+      const reusable = await this.isReusableManagedWorktree(plan.worktreePath, plan.fromBranch);
+      if (!reusable) {
+        plan = {
+          kind: 'recreate',
+          worktreePath,
+          cleanupPaths: [worktreePath, plan.worktreePath],
+        };
+      }
+    }
 
     let effectivePath = worktreePath;
     switch (plan.kind) {
