@@ -21,7 +21,7 @@ export async function tryDelegateRun(
     'headless.run',
     { planPath: resolvePath(planPath) },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs: 5_000 },
+    { waitForApproval, noTrack, timeoutMs: delegationTimeoutMs(['run', planPath]) },
   );
 }
 
@@ -35,16 +35,20 @@ export async function tryDelegateResume(
     'headless.resume',
     { workflowId },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs: 5_000 },
+    { waitForApproval, noTrack, timeoutMs: delegationTimeoutMs(['resume', workflowId]) },
   );
 }
 
+const LONG_RUNNING_COMMANDS = new Set(['rebase', 'rebase-and-retry', 'restart']);
+const WORKFLOW_ID_RE = /^wf-[^/]+$/;
+
 export function delegationTimeoutMs(args: string[]): number {
   const command = args[0] ?? '';
-  if (command) {
-    return 900_000;
+  const target = args[1] ?? '';
+  if (LONG_RUNNING_COMMANDS.has(command) && WORKFLOW_ID_RE.test(target)) {
+    return 60_000;
   }
-  return 15_000;
+  return 5_000;
 }
 
 export async function tryDelegateExec(
