@@ -220,6 +220,24 @@ test_stacked_basebranch_master() {
   return 0
 }
 
+# Specific test for edge-ui-change-missing-visual-proof
+test_edge_ui_missing_visual_proof() {
+  local fixture="$NEGATIVE_DIR/edge-ui-change-missing-visual-proof.yaml"
+  local output
+  set +e
+  output=$(bash "$VALIDATE_SCRIPT" "$fixture" 2>&1)
+  set -e
+
+  # Should contain missing_visual_proof_flag error
+  if ! echo "$output" | jq -e '[.[] | select(.errorType == "missing_visual_proof_flag")] | length > 0' &>/dev/null; then
+    echo "Expected missing_visual_proof_flag error" >&2
+    echo "Output: $output" >&2
+    return 1
+  fi
+
+  return 0
+}
+
 # Check dependencies
 if ! command -v jq &>/dev/null; then
   fail "jq is required for JSON parsing tests"
@@ -273,6 +291,7 @@ run_test "Edge: empty_required_field for tasks" test_edge_empty_tasks
 run_test "Edge: invalid_dependency_reference" test_edge_invalid_dependency
 run_test "Edge: unrendered_template_placeholder" test_unrendered_template_placeholder
 run_test "Edge: stacked_basebranch_default" test_stacked_basebranch_master
+run_test "Edge: missing_visual_proof_flag for UI plan" test_edge_ui_missing_visual_proof
 
 echo ""
 echo "========================================="
