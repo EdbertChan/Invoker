@@ -38,10 +38,10 @@ function createSandbox() {
   const gateDir = join(root, 'gate');
 
   // Bare origin
-  execSync(`git init --bare -b master "${originDir}"`, { stdio: 'pipe' });
+  execSync(`git init --bare -b master "${originDir}"`, { cwd: root, stdio: 'pipe' });
 
   // Host clone
-  execSync(`git clone "${originDir}" "${hostDir}"`, { stdio: 'pipe' });
+  execSync(`git clone "${originDir}" "${hostDir}"`, { cwd: root, stdio: 'pipe' });
   git('config user.email "test@test.com"', hostDir);
   git('config user.name "Test"', hostDir);
   writeFileSync(join(hostDir, 'initial.txt'), 'initial');
@@ -58,7 +58,7 @@ function createSandbox() {
   git('checkout master', hostDir);
 
   // Gate clone (simulates createMergeWorktree — a separate clone from origin)
-  execSync(`git clone "${originDir}" "${gateDir}"`, { stdio: 'pipe' });
+  execSync(`git clone "${originDir}" "${gateDir}"`, { cwd: root, stdio: 'pipe' });
   git('config user.email "test@test.com"', gateDir);
   git('config user.name "Test"', gateDir);
 
