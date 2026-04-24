@@ -21,7 +21,7 @@ export async function tryDelegateRun(
     'headless.run',
     { planPath: resolvePath(planPath) },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs: 5_000 },
+    { waitForApproval, noTrack, timeoutMs: delegationTimeoutMs(['run', planPath]) },
   );
 }
 
@@ -35,16 +35,27 @@ export async function tryDelegateResume(
     'headless.resume',
     { workflowId },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs: 5_000 },
+    { waitForApproval, noTrack, timeoutMs: delegationTimeoutMs(['resume', workflowId]) },
   );
 }
 
+/** Commands whose delegation may trigger long-running git operations. */
+const LONG_RUNNING_COMMANDS = new Set(['rebase', 'rebase-and-retry', 'restart']);
+
+/**
+ * Returns the delegation timeout for an exec-style command.
+ *
+ * Long-running commands (`rebase`, `rebase-and-retry`, `restart`) targeting a
+ * workflow id (matches `wf-*` with no slash) get 60 000 ms so the owner has
+ * time to complete git operations.  Everything else gets 5 000 ms.
+ */
 export function delegationTimeoutMs(args: string[]): number {
   const command = args[0] ?? '';
-  if (command) {
-    return 900_000;
+  const target = args[1] ?? '';
+  if (LONG_RUNNING_COMMANDS.has(command) && /^wf-[^/]+$/.test(target)) {
+    return 60_000;
   }
-  return 15_000;
+  return 5_000;
 }
 
 export async function tryDelegateExec(
