@@ -1,0 +1,51 @@
+# Edge case: UI change plan without visualProof flag
+# Expected error: missing_visual_proof_flag
+#
+# Plans that reference packages/ui/ in task prompts or commands must set
+# visualProof: true at the plan level. This triggers automatic before/after
+# screenshot capture in the merge gate. Omitting the flag means UI changes
+# ship without visual regression evidence.
+
+name: "Update button hover states in design system"
+description: |
+  Updates the hover and focus styles for the primary Button component in
+  packages/ui/src/components/Button.tsx. The current hover state uses a
+  simple opacity change, which fails WCAG 2.1 contrast requirements on
+  light backgrounds.
+
+  The fix replaces the opacity-based hover with an explicit darker shade
+  from the design token palette. Focus-visible rings are added for keyboard
+  navigation. Both interactive states are derived from the existing color
+  tokens in packages/ui/src/theme/tokens.ts.
+
+  Blast radius: limited to Button component rendering. No prop interface
+  changes, no new dependencies. Existing button unit tests must pass.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: fix/button-hover-contrast
+
+tasks:
+  - id: update-button-hover-styles
+    description: "Replace opacity hover with token-based darker shade for WCAG compliance"
+    prompt: |
+      In packages/ui/src/components/Button.tsx, update the hover and focus-visible styles
+      for the primary variant. You must replace the current opacity-based hover
+      (opacity: 0.85) with an explicit background-color change using the --color-primary-dark
+      token from packages/ui/src/theme/tokens.ts. Ensure the focus-visible state adds a 2px
+      solid ring using --color-focus-ring with a 2px offset. Verify that the interactive
+      states only apply to the primary variant and do not affect secondary or ghost variants.
+      The updated styles must meet WCAG 2.1 AA contrast ratio of at least 4.5:1 against white
+      backgrounds. Do not modify the component prop interface or add new exports.
+    dependencies: []
+
+  - id: run-button-unit-tests
+    description: "Run UI package tests to verify button hover style changes"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [update-button-hover-styles]
+
+  - id: verify-type-check-passes
+    description: "Run TypeScript type checking across the UI package"
+    command: "cd packages/ui && pnpm tsc --noEmit"
+    dependencies: [update-button-hover-styles]
