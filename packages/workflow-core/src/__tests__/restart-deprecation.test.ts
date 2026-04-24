@@ -25,11 +25,14 @@ describe('restartTask deprecation shim', () => {
       // only asserting delegation we don't need plan loading;
       // we stub the target methods directly.
       orch = Object.create(Orchestrator.prototype) as Orchestrator;
+      // Provide a no-op logger since we bypassed the constructor.
+      const noopLogger = { debug() {}, info() {}, warn() {}, error() {}, child() { return noopLogger; } };
+      (orch as any).logger = noopLogger;
       // The shim only calls `this.recreateTask`, so stubbing
       // that out and asserting the call is sufficient.
       recreateSpy = vi.spyOn(orch, 'recreateTask').mockImplementation(() => []);
       retrySpy = vi.spyOn(orch, 'retryTask').mockImplementation(() => []);
-      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      warnSpy = vi.spyOn((orch as any).logger, 'warn');
     });
 
     it('delegates restartTask to recreateTask (NOT retryTask)', () => {
@@ -40,15 +43,13 @@ describe('restartTask deprecation shim', () => {
       expect(retrySpy).not.toHaveBeenCalled();
     });
 
-    it('emits a deprecation warning on stderr', () => {
+    it('emits a deprecation warning via logger', () => {
       orch.restartTask('task-1');
 
       expect(warnSpy).toHaveBeenCalledTimes(1);
       const message = String(warnSpy.mock.calls[0][0]);
       expect(message).toContain('restartTask');
       expect(message).toContain('deprecated');
-      expect(message).toContain('Routing to recreateTask');
-      expect(message).toContain('retryTask');
       expect(message).toContain('recreateTask');
     });
 

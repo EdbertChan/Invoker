@@ -468,7 +468,7 @@ describe('Orchestrator', () => {
     });
 
     it('rejects a completion signal when attemptId is stale', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const warnSpy = vi.spyOn((orchestrator as any).logger, 'warn');
       try {
         orchestrator.loadPlan({
           name: 'reject-stale-attempt-signal',
@@ -502,7 +502,8 @@ describe('Orchestrator', () => {
         expect(orchestrator.getTask(taskId)?.status).toBe('running');
         expect(orchestrator.getTask(taskId)?.execution.selectedAttemptId).toBe(currentAttemptId);
         expect(warnSpy).toHaveBeenCalledWith(
-          expect.stringContaining(`STALE_ATTEMPT_REJECTED taskId=${taskId}`),
+          expect.stringContaining('STALE_ATTEMPT_REJECTED'),
+          expect.objectContaining({ taskId }),
         );
       } finally {
         warnSpy.mockRestore();
@@ -4134,8 +4135,8 @@ describe('Orchestrator', () => {
     let logSpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
-      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      warnSpy = vi.spyOn((orchestrator as any).logger, 'warn');
+      logSpy = vi.spyOn((orchestrator as any).logger, 'info');
     });
 
     afterEach(() => {
@@ -4261,8 +4262,7 @@ describe('Orchestrator', () => {
           (c) =>
             typeof c[0] === 'string' &&
             c[0].includes('handleCompleted') &&
-            c[0].includes('newly ready: [') &&
-            c[0].includes('/B]'),
+            c[1]?.readyTaskIds?.some((id: string) => id.includes('/B')),
         ),
       ).toBe(true);
     });
@@ -4321,8 +4321,7 @@ describe('Orchestrator', () => {
           (c) =>
             typeof c[0] === 'string' &&
             c[0].includes('handleCompleted') &&
-            c[0].includes('newly ready: [') &&
-            c[0].includes('/D]'),
+            c[1]?.readyTaskIds?.some((id: string) => id.includes('/D')),
         ),
       ).toBe(true);
       expect(orchestrator.getTask('D')!.status).toBe('running');
@@ -4336,8 +4335,8 @@ describe('Orchestrator', () => {
     let warnSpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
-      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      logSpy = vi.spyOn((orchestrator as any).logger, 'info');
+      warnSpy = vi.spyOn((orchestrator as any).logger, 'warn');
     });
 
     afterEach(() => {
@@ -4430,7 +4429,8 @@ describe('Orchestrator', () => {
 
       expect(orchestrator.getTask('A')!.status).toBe('failed');
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('ignoring "completed" for non-executable task "A" (status=failed)'),
+        expect.stringContaining('ignoring response for non-executable task'),
+        expect.objectContaining({ taskId: 'A', taskStatus: 'failed' }),
       );
     });
 
@@ -4461,8 +4461,8 @@ describe('Orchestrator', () => {
     let warnSpy: ReturnType<typeof vi.spyOn>;
 
     beforeEach(() => {
-      logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      logSpy = vi.spyOn((orchestrator as any).logger, 'info');
+      warnSpy = vi.spyOn((orchestrator as any).logger, 'warn');
     });
 
     afterEach(() => {
@@ -4638,7 +4638,8 @@ describe('Orchestrator', () => {
           (c) =>
             typeof c[0] === 'string' &&
             c[0].includes('selectExperiments') &&
-            c[0].includes('pivot-reconciliation'),
+            typeof c[1]?.reconId === 'string' &&
+            c[1].reconId.includes('pivot-reconciliation'),
         ),
       ).toBe(true);
     });
