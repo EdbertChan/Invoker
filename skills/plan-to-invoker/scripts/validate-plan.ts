@@ -371,6 +371,47 @@ function validatePlan(yamlContent: string): ValidationError[] {
     }
   });
 
+  // Validate visual proof requirements
+  const uiPattern = /packages\/ui\/|@invoker\/ui/;
+  const hasUiReference = raw.tasks.some((task: RawPlanTask) =>
+    uiPattern.test(task.prompt || '') ||
+    uiPattern.test(task.description || '') ||
+    uiPattern.test(task.command || ''),
+  );
+
+  if (hasUiReference && raw.visualProof !== true) {
+    errors.push({
+      errorType: 'missing_visual_proof_flag',
+      field: 'visualProof',
+      message: 'Plan references packages/ui/ but does not set visualProof: true. UI plans must include visual proof. See skills/visual-proof/SKILL.md.',
+    });
+  }
+
+  if (raw.visualProof === true) {
+    const hasVisualProofTestTask = raw.tasks.some((task: RawPlanTask) =>
+      (task.prompt || '').includes('visual-proof.spec.ts') ||
+      (task.prompt || '').includes('captureScreenshot'),
+    );
+    if (!hasVisualProofTestTask) {
+      errors.push({
+        errorType: 'missing_visual_proof_test_task',
+        field: 'tasks',
+        message: 'Plan has visualProof: true but no task prompt references "visual-proof.spec.ts" or "captureScreenshot". Add a prompt task that generates visual proof tests.',
+      });
+    }
+
+    const hasVisualProofCaptureTask = raw.tasks.some((task: RawPlanTask) =>
+      (task.command || '').includes('ui-visual-proof.sh'),
+    );
+    if (!hasVisualProofCaptureTask) {
+      errors.push({
+        errorType: 'missing_visual_proof_capture_task',
+        field: 'tasks',
+        message: 'Plan has visualProof: true but no task command references "ui-visual-proof.sh". Add a command task that captures visual proof screenshots.',
+      });
+    }
+  }
+
   return errors;
 }
 
