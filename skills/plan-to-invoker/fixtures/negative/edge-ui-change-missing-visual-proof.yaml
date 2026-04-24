@@ -1,0 +1,32 @@
+# Edge case: UI change task references packages/ui/ without visual proof enabled
+# Expected error: missing_visual_proof_flag
+#
+# Plans that modify UI code under packages/ui/ must set visualProof: true.
+
+name: "UI change missing visual proof flag"
+description: |
+  Updates a button styling path under packages/ui/ and intentionally references UI source
+  files in a prompt task without enabling the required visual proof workflow.
+
+  This fixture should otherwise remain structurally valid so the validator isolates the
+  failure to the missing visual proof flag instead of reporting unrelated schema issues.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: fix/button-spacing-without-visual-proof
+
+tasks:
+  - id: update-ui-button-spacing
+    description: "Adjust button spacing in shared UI components"
+    prompt: |
+      Update the relevant button implementation under packages/ui/src/components/ so spacing
+      changes are applied consistently across primary and secondary variants. The task must
+      ensure the modified component keeps existing props intact, verify no layout regressions
+      are introduced in nearby usages, and preserve current accessibility behavior.
+    dependencies: []
+
+  - id: run-ui-package-tests
+    description: "Run UI package tests after changes"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [update-ui-button-spacing]
