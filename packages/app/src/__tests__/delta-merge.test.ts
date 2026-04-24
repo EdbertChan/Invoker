@@ -38,8 +38,9 @@ describe('applyDelta', () => {
       const task = makeTask('t1');
       const delta: TaskDelta = { type: 'created', task };
 
-      applyDelta(delta, stateMap);
+      const usedFallback = applyDelta(delta, stateMap);
 
+      expect(usedFallback).toBe(false);
       expect(stateMap.has('t1')).toBe(true);
       const stored = JSON.parse(stateMap.get('t1')!);
       expect(stored.id).toBe('t1');
@@ -48,7 +49,7 @@ describe('applyDelta', () => {
   });
 
   describe('updated delta with prior created', () => {
-    it('merges changes onto existing snapshot', () => {
+    it('merges changes onto existing snapshot and returns false', () => {
       const stateMap = new Map<string, string>();
       const task = makeTask('t1');
       stateMap.set('t1', JSON.stringify(task));
@@ -59,8 +60,9 @@ describe('applyDelta', () => {
         changes: { status: 'completed', execution: { exitCode: 0 } },
       };
 
-      applyDelta(delta, stateMap);
+      const usedFallback = applyDelta(delta, stateMap);
 
+      expect(usedFallback).toBe(false);
       const stored = JSON.parse(stateMap.get('t1')!);
       expect(stored.status).toBe('completed');
       expect(stored.execution.exitCode).toBe(0);
@@ -80,8 +82,10 @@ describe('applyDelta', () => {
         changes: { status: 'completed', execution: { exitCode: 0 } },
       };
 
-      applyDelta(delta, stateMap, lookup);
+      const usedFallback = applyDelta(delta, stateMap, lookup);
 
+      // The fallback must have been used.
+      expect(usedFallback).toBe(true);
       // The task must be populated, not dropped.
       expect(stateMap.has('t1')).toBe(true);
       const stored = JSON.parse(stateMap.get('t1')!);
@@ -127,8 +131,9 @@ describe('applyDelta', () => {
       };
 
       // No lookup provided — update should be silently dropped.
-      applyDelta(delta, stateMap);
+      const usedFallback = applyDelta(delta, stateMap);
 
+      expect(usedFallback).toBe(false);
       expect(stateMap.has('unknown')).toBe(false);
     });
 
@@ -142,8 +147,9 @@ describe('applyDelta', () => {
         changes: { status: 'completed' },
       };
 
-      applyDelta(delta, stateMap, lookup);
+      const usedFallback = applyDelta(delta, stateMap, lookup);
 
+      expect(usedFallback).toBe(false);
       expect(stateMap.has('ghost')).toBe(false);
     });
   });
@@ -155,8 +161,9 @@ describe('applyDelta', () => {
 
       const delta: TaskDelta = { type: 'removed', taskId: 't1' };
 
-      applyDelta(delta, stateMap);
+      const usedFallback = applyDelta(delta, stateMap);
 
+      expect(usedFallback).toBe(false);
       expect(stateMap.has('t1')).toBe(false);
     });
   });
