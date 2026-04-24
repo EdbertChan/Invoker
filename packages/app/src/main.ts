@@ -342,6 +342,12 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   const initLog = isHeadless
     ? (...args: unknown[]) => { process.stderr.write(args.join(' ') + '\n'); }
     : (msg: string) => { logger.info(msg, { module: 'init' }); };
+  const safeConfigInit = { ...invokerConfig };
+  delete safeConfigInit.imageStorage;
+  if (safeConfigInit.docker?.secretsFile) {
+    safeConfigInit.docker = { ...safeConfigInit.docker, secretsFile: '<redacted>' };
+  }
+  initLog(`[init] Effective configuration: ${JSON.stringify(safeConfigInit)}`);
   const workflows = persistence.listWorkflows();
   if (startupSyncMode === 'all') {
     try {
@@ -2357,7 +2363,12 @@ if (isHeadless) {
     const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
     logger.info(`Database: ${dbPath}`, { module: 'init' });
     logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
-    logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
+    const safeConfig = { ...invokerConfig };
+    delete safeConfig.imageStorage;
+    if (safeConfig.docker?.secretsFile) {
+      safeConfig.docker = { ...safeConfig.docker, secretsFile: '<redacted>' };
+    }
+    logger.info('Effective configuration', { config: safeConfig, module: 'startup' });
     recordStartupMark('startup.ready-for-window');
 
     // Forward deltas to renderer and keep snapshot cache in sync so
