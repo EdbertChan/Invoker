@@ -219,9 +219,16 @@ interface HeadlessExecMutationPayload {
   noTrack?: boolean;
 }
 
+// Build metadata injected by tsup define (see tsup.config.ts).
+declare const __BUILD_SHA__: string;
+declare const __BUILD_VERSION__: string;
+const buildSha = typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev';
+const buildVersion = typeof __BUILD_VERSION__ !== 'undefined' ? __BUILD_VERSION__ : 'dev';
+
 // Root logger: created early in initServices() once persistence is available.
 // Before initServices(), use the pre-init logger (file-only, no DB).
 let logger: Logger = new FileAndDbLogger({ module: 'main' });
+logger.info(`Invoker ${buildVersion} (${buildSha})`, { module: 'startup' });
 
 process.on('uncaughtException', (err) => {
   try {
