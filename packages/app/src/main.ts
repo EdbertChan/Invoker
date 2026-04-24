@@ -223,6 +223,12 @@ interface HeadlessExecMutationPayload {
 // Before initServices(), use the pre-init logger (file-only, no DB).
 let logger: Logger = new FileAndDbLogger({ module: 'main' });
 
+declare const __BUILD_SHA__: string | undefined;
+declare const __BUILD_VERSION__: string | undefined;
+const buildSha = typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev';
+const buildVersion = typeof __BUILD_VERSION__ !== 'undefined' ? __BUILD_VERSION__ : 'dev';
+logger.info(`Invoker ${buildVersion} (${buildSha})`, { module: 'startup' });
+
 process.on('uncaughtException', (err) => {
   try {
     logger.error(`uncaughtException: ${err instanceof Error ? err.stack ?? err.message : String(err)}`, { module: 'process' });
