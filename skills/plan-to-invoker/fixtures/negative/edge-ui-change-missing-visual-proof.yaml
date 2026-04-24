@@ -1,0 +1,54 @@
+# Edge case: UI change plan missing visualProof flag
+# Expected error: missing_visual_proof_flag
+#
+# When a task prompt references packages/ui/src/components/, the plan must set
+# visualProof: true at the top level. This ensures every UI change produces
+# before/after screenshot comparisons for review. This fixture omits the flag
+# to trigger the missing_visual_proof_flag validation error.
+
+name: "Add tooltip component to design system"
+description: |
+  Adds a reusable Tooltip component to packages/ui/src/components/ that wraps
+  any child element with a hover-activated popover. The component supports top,
+  bottom, left, and right placement via a `position` prop.
+
+  Implementation uses CSS-only positioning with a data-attribute trigger so no
+  JavaScript event listeners are needed for basic hover behavior. The tooltip
+  arrow is rendered via a ::before pseudo-element rotated 45 degrees.
+
+  Blast radius: limited to a new file in packages/ui/src/components/. No
+  existing components are modified. All existing UI package tests must pass.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: feat/add-tooltip-component
+
+tasks:
+  - id: implement-tooltip-component
+    description: "Create the Tooltip component with position prop support"
+    prompt: |
+      Create packages/ui/src/components/Tooltip.tsx with a Tooltip React component. The
+      component must accept children, content (tooltip text), and position (top, bottom, left,
+      right) props. Use CSS modules for styling with packages/ui/src/components/Tooltip.module.css.
+      Ensure the tooltip container uses position: relative and the popover uses position: absolute
+      with placement offsets derived from the position prop. Export the component from
+      packages/ui/src/components/index.ts. Verify the component follows existing patterns in
+      packages/ui/src/components/ for prop typing and default exports.
+    dependencies: []
+
+  - id: add-tooltip-unit-tests
+    description: "Add unit tests covering all tooltip placement positions"
+    prompt: |
+      Create packages/ui/src/components/__tests__/Tooltip.test.tsx with unit tests for the
+      Tooltip component. The tests must verify: (1) default rendering with children visible,
+      (2) tooltip text appears on hover, (3) each position prop value (top, bottom, left, right)
+      applies the correct CSS class, (4) tooltip hides when hover ends. Ensure each test uses
+      render() from @testing-library/react and screen queries. Use userEvent.hover() for
+      interaction tests. All four position variants must have dedicated assertions.
+    dependencies: [implement-tooltip-component]
+
+  - id: run-ui-package-tests
+    description: "Run UI package tests to verify tooltip and regression"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [add-tooltip-unit-tests]
