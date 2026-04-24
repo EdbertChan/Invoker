@@ -18,24 +18,34 @@ describe('headless→owner delegation', () => {
   });
 
   describe('delegation timeout policy', () => {
-    it('uses extended timeout for rebase', () => {
-      expect(delegationTimeoutMs(['rebase', 'wf-1/task-1'])).toBe(900_000);
+    it('uses 60s timeout for rebase targeting a workflow id', () => {
+      expect(delegationTimeoutMs(['rebase', 'wf-123'])).toBe(60_000);
     });
 
-    it('uses extended timeout for rebase-and-retry', () => {
-      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1/task-1'])).toBe(900_000);
+    it('uses 60s timeout for rebase-and-retry targeting a workflow id', () => {
+      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-456'])).toBe(60_000);
     });
 
-    it('uses extended timeout for retry at workflow scope', () => {
-      expect(delegationTimeoutMs(['retry', 'wf-123'])).toBe(900_000);
+    it('uses 60s timeout for restart targeting a workflow id', () => {
+      expect(delegationTimeoutMs(['restart', 'wf-abc'])).toBe(60_000);
     });
 
-    it('treats task-scoped retry as long-running maintenance too', () => {
-      expect(delegationTimeoutMs(['retry-task', 'wf-123/task-1'])).toBe(900_000);
+    it('uses default 5s timeout for rebase targeting a task path (has slash)', () => {
+      expect(delegationTimeoutMs(['rebase', 'wf-1/task-1'])).toBe(5_000);
     });
 
-    it('uses the extended timeout for tracked mutation commands', () => {
-      expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(900_000);
+    it('uses default 5s timeout for rebase-and-retry targeting a task path', () => {
+      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1/task-1'])).toBe(5_000);
+    });
+
+    it('uses default 5s timeout for non-long-running commands', () => {
+      expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(5_000);
+      expect(delegationTimeoutMs(['retry', 'wf-123'])).toBe(5_000);
+      expect(delegationTimeoutMs(['retry-task', 'wf-123/task-1'])).toBe(5_000);
+    });
+
+    it('uses default 5s timeout for empty args', () => {
+      expect(delegationTimeoutMs([])).toBe(5_000);
     });
   });
 

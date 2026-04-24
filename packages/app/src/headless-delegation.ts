@@ -39,12 +39,25 @@ export async function tryDelegateResume(
   );
 }
 
+/**
+ * Returns the delegation timeout for a headless exec command.
+ *
+ * Long-running maintenance commands (`rebase`, `rebase-and-retry`, `restart`)
+ * targeting a workflow (second arg matches `wf-*` with no slash) get 60 000 ms
+ * so the owner has time to complete git operations.  All other commands get the
+ * default 5 000 ms handshake window.
+ */
 export function delegationTimeoutMs(args: string[]): number {
   const command = args[0] ?? '';
-  if (command) {
-    return 900_000;
+  const LONG_RUNNING_COMMANDS = new Set(['rebase', 'rebase-and-retry', 'restart']);
+  if (LONG_RUNNING_COMMANDS.has(command)) {
+    const target = args[1] ?? '';
+    // workflow-scoped: matches wf-<id> with no slash (not a task path)
+    if (/^wf-[^/]+$/.test(target)) {
+      return 60_000;
+    }
   }
-  return 15_000;
+  return 5_000;
 }
 
 export async function tryDelegateExec(
