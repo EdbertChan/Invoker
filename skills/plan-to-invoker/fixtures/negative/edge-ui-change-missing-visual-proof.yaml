@@ -1,0 +1,49 @@
+# Edge case: UI change plan missing visualProof flag
+# Expected error: missing_visual_proof_flag
+#
+# This plan modifies packages/ui/src/components/ in a prompt task but does NOT
+# set visualProof: true. Plans that touch UI component source files must enable
+# visual proof so that before/after screenshots are captured for review.
+
+name: "Add tooltip to icon buttons"
+description: |
+  Adds accessible tooltips to all icon-only buttons in the toolbar component
+  located in packages/ui/src/components/Toolbar.tsx. Currently these buttons
+  have no visible label, which fails WCAG 2.1 AA contrast and naming criteria.
+
+  The fix wraps each IconButton in a Tooltip component from the existing design
+  system. Tooltip text is derived from the existing aria-label prop. No new
+  dependencies are introduced; the Tooltip component already exists in
+  packages/ui/src/components/Tooltip.tsx.
+
+  Blast radius is limited to the Toolbar component. No state management or data
+  flow changes. All existing unit tests for Toolbar and Tooltip must continue to
+  pass after the change.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: fix/icon-button-tooltips
+
+tasks:
+  - id: implement-toolbar-tooltips
+    description: "Wrap icon buttons in Tooltip components for accessibility"
+    prompt: |
+      In packages/ui/src/components/Toolbar.tsx, wrap every IconButton element with the
+      existing Tooltip component from packages/ui/src/components/Tooltip.tsx. Each Tooltip
+      must receive the text from the IconButton's aria-label prop as its content. Ensure the
+      Tooltip placement defaults to "bottom" and that the IconButton retains its existing
+      onClick handler and styling. Verify that the Tooltip import is added at the top of the
+      file and that no other components in packages/ui/src/components/ are modified by this
+      change. The resulting markup must pass axe-core accessibility checks for button naming.
+    dependencies: []
+
+  - id: run-toolbar-unit-tests
+    description: "Run UI package unit tests to verify tooltip integration"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [implement-toolbar-tooltips]
+
+  - id: verify-full-build
+    description: "Build all packages to confirm no type or compilation errors"
+    command: "pnpm build 2>&1"
+    dependencies: [run-toolbar-unit-tests]
