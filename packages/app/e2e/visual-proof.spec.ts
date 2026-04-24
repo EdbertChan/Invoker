@@ -22,6 +22,21 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
 
+/** Plan with a prompt-based Claude task for testing prompt editing UI. */
+const PROMPT_TASK_PLAN = {
+  name: 'Prompt edit visual test',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'prompt-task',
+      description: 'Prompt-based task for editing',
+      prompt: 'Implement feature X',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
 /** Multi-task DAG for verifying deterministic layout ordering. */
 const DAG_DETERMINISM_PLAN = {
   name: 'DAG determinism test',
@@ -582,5 +597,38 @@ test.describe('Visual proof capture', () => {
 
     // Capture second screenshot in edit mode
     await captureScreenshot(page, 'redesign-gate-policy-ui-edit-mode');
+  });
+
+  test('edit prompt double-click — prompt editing UI state', async ({ page }) => {
+    await page.evaluate((yaml) => window.invoker.loadPlan(yaml), yamlStringify(PROMPT_TASK_PLAN));
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').first().waitFor({ state: 'visible', timeout: 10000 });
+
+    // Click the task node to select it in the TaskPanel
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').click();
+    await expect(page.getByRole('heading', { name: 'Prompt-based task for editing' })).toBeVisible();
+
+    // Set the task to 'completed' so it becomes editable
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-task',
+        changes: {
+          status: 'completed',
+          execution: {
+            startedAt: new Date(Date.now() - 5000),
+            completedAt: new Date(),
+          },
+        },
+      },
+    ]);
+
+    // Double-click the prompt display area to enter edit mode
+    const commandDisplay = page.getByTestId('command-display');
+    await expect(commandDisplay).toBeVisible();
+    await commandDisplay.dblclick();
+
+    // Verify the edit textarea appears
+    await expect(page.getByTestId('edit-prompt-input')).toBeVisible({ timeout: 2000 });
+
+    await captureScreenshot(page, 'edit-prompt-double-click');
   });
 });
