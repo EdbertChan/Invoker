@@ -458,6 +458,52 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'queue-view-concurrency');
   });
 
+  test('edit-prompt-double-click — prompt editing UI state', async ({ page }) => {
+    const promptPlan = {
+      name: 'Prompt edit visual proof',
+      repoUrl: E2E_REPO_URL,
+      onFinish: 'none' as const,
+      tasks: [
+        {
+          id: 'prompt-task',
+          description: 'Prompt-based task',
+          prompt: 'Implement feature X',
+          dependencies: [] as string[],
+        },
+      ],
+    };
+
+    await page.evaluate((p) => window.invoker.loadPlan(p), yamlStringify(promptPlan));
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').first().waitFor({ state: 'visible', timeout: 10000 });
+
+    // Click the task node to select it in the TaskPanel
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').click();
+    await expect(page.getByRole('heading', { name: 'Prompt-based task' })).toBeVisible();
+
+    // Set the task to 'completed' status so it's editable
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-task',
+        changes: {
+          status: 'completed',
+          execution: {
+            startedAt: new Date(Date.now() - 5000),
+            completedAt: new Date(),
+          },
+        },
+      },
+    ]);
+
+    // Double-click the prompt display area to enter edit mode
+    await page.getByTestId('command-display').dblclick();
+
+    // Verify the edit textarea appears
+    await expect(page.getByTestId('edit-prompt-input')).toBeVisible();
+
+    await captureScreenshot(page, 'edit-prompt-double-click');
+    await assertPageScreenshot(page, 'edit-prompt-double-click');
+  });
+
   test('gate-policy-side-panel — blocked task with satisfied and offender gates', async ({ page }) => {
     // First, load three prerequisite workflows (all with merge gates via onFinish: pull_request)
     const prereq1Plan = {
