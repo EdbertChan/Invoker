@@ -6,9 +6,10 @@
  * The fix fetches the task from the orchestrator fallback so the
  * update is not silently dropped.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { applyDelta, type TaskLookup } from '../delta-merge.js';
 import type { TaskState, TaskDelta } from '@invoker/workflow-core';
+import type { Logger } from '@invoker/contracts';
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -27,6 +28,16 @@ function makeTask(id: string, overrides: Partial<TaskState> = {}): TaskState {
 
 function makeLookup(tasks: TaskState[]): TaskLookup {
   return { getAllTasks: () => tasks };
+}
+
+function makeLogger(): Logger & { debug: ReturnType<typeof vi.fn> } {
+  return {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    child: () => makeLogger(),
+  };
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -115,6 +126,43 @@ describe('applyDelta', () => {
       expect(stored.status).toBe('completed');
       expect(stored.execution.exitCode).toBe(0);
       expect(stored.execution.error).toBe('test failure');
+    });
+
+    it('logs a debug diagnostic when seeding from orchestrator fallback', () => {
+      const stateMap = new Map<string, string>();
+      const knownTask = makeTask('t1', { status: 'running' });
+      const lookup = makeLookup([knownTask]);
+      const logger = makeLogger();
+
+      const delta: TaskDelta = {
+        type: 'updated',
+        taskId: 't1',
+        changes: { status: 'completed' },
+      };
+
+      applyDelta(delta, stateMap, lookup, logger);
+
+      expect(logger.debug).toHaveBeenCalledOnce();
+      expect(logger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('out-of-order delta'),
+        expect.objectContaining({ module: 'delta-merge', taskId: 't1' }),
+      );
+    });
+
+    it('does not log when the task already exists in the state map', () => {
+      const stateMap = new Map<string, string>();
+      stateMap.set('t1', JSON.stringify(makeTask('t1')));
+      const logger = makeLogger();
+
+      const delta: TaskDelta = {
+        type: 'updated',
+        taskId: 't1',
+        changes: { status: 'completed' },
+      };
+
+      applyDelta(delta, stateMap, undefined, logger);
+
+      expect(logger.debug).not.toHaveBeenCalled();
     });
 
     it('drops the update when task is unknown and no fallback available', () => {
