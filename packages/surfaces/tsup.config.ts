@@ -10,9 +10,7 @@ export default defineConfig({
   // sql.js/dockerode stay external — resolved from node_modules.
   noExternal: [
     '@invoker/workflow-core',
-    '@invoker/contracts',
     '@invoker/data-store',
-    '@invoker/transport',
     'yaml',
   ],
   external: ['@slack/bolt', 'sql.js', 'dockerode'],
