@@ -458,6 +458,56 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'queue-view-concurrency');
   });
 
+  test('edit prompt — double-click prompt display enters edit mode', async ({ page }) => {
+    const PROMPT_PLAN = {
+      name: 'Prompt edit visual test',
+      repoUrl: E2E_REPO_URL,
+      onFinish: 'none' as const,
+      tasks: [
+        {
+          id: 'prompt-task',
+          description: 'Claude prompt task',
+          prompt: 'Implement feature X',
+          dependencies: [] as string[],
+        },
+      ],
+    };
+
+    await page.evaluate((yaml) => window.invoker.loadPlan(yaml), yamlStringify(PROMPT_PLAN));
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').first().waitFor({ state: 'visible', timeout: 10000 });
+
+    // Click the task node to select it in the TaskPanel
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').click();
+    await expect(page.getByRole('heading', { name: 'Claude prompt task' })).toBeVisible();
+
+    // Set the task to 'completed' so it's editable (canEditPrompt requires non-running status)
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-task',
+        changes: {
+          status: 'completed',
+          execution: {
+            startedAt: new Date(Date.now() - 5000),
+            completedAt: new Date(),
+          },
+        },
+      },
+    ]);
+
+    // Re-click to ensure task panel is still showing the updated task
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').click();
+    await expect(page.getByTestId('command-display')).toBeVisible();
+
+    // Double-click the prompt display area to enter edit mode
+    await page.getByTestId('command-display').dblclick();
+
+    // Verify the edit textarea appears
+    await expect(page.getByTestId('edit-prompt-input')).toBeVisible({ timeout: 2000 });
+
+    await captureScreenshot(page, 'edit-prompt-double-click');
+    await assertPageScreenshot(page, 'edit-prompt-double-click');
+  });
+
   test('gate-policy-side-panel — blocked task with satisfied and offender gates', async ({ page }) => {
     // First, load three prerequisite workflows (all with merge gates via onFinish: pull_request)
     const prereq1Plan = {
