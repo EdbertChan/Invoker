@@ -1350,4 +1350,170 @@ describe('TaskPanel double-click editing', () => {
       });
     });
   });
+
+  describe('Prompt editing via double-click', () => {
+    const mockOnEditPrompt = vi.fn();
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('enters edit mode when double-clicking prompt display with onEditPrompt provided', () => {
+      const task = makeTask({ prompt: 'Write a test', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      const commandDisplay = screen.getByTestId('command-display');
+      fireEvent.doubleClick(commandDisplay);
+
+      expect(screen.getByTestId('edit-prompt-input')).toBeInTheDocument();
+    });
+
+    it('shows current prompt value in textarea after entering edit mode', () => {
+      const task = makeTask({ prompt: 'Implement feature X', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+
+      const input = screen.getByTestId('edit-prompt-input') as HTMLTextAreaElement;
+      expect(input.value).toBe('Implement feature X');
+    });
+
+    it('calls onEditPrompt with (taskId, newValue) when clicking save', () => {
+      const task = makeTask({ prompt: 'Original prompt', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+
+      const input = screen.getByTestId('edit-prompt-input');
+      fireEvent.change(input, { target: { value: 'Updated prompt' } });
+
+      fireEvent.click(screen.getByTestId('save-prompt-btn'));
+
+      expect(mockOnEditPrompt).toHaveBeenCalledWith('test-task-1', 'Updated prompt');
+    });
+
+    it('cancels edit without calling onEditPrompt and restores original text', () => {
+      const task = makeTask({ prompt: 'Original prompt', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('command-display'));
+
+      const input = screen.getByTestId('edit-prompt-input');
+      fireEvent.change(input, { target: { value: 'Changed prompt' } });
+
+      fireEvent.click(screen.getByTestId('cancel-prompt-edit-btn'));
+
+      expect(mockOnEditPrompt).not.toHaveBeenCalled();
+      expect(screen.getByTestId('command-display')).toHaveTextContent('Original prompt');
+    });
+
+    it('does NOT enter edit mode when task status is running', () => {
+      const task = makeTask({ prompt: 'Running prompt', status: 'running' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      const commandDisplay = screen.getByTestId('command-display');
+      fireEvent.doubleClick(commandDisplay);
+
+      expect(screen.queryByTestId('edit-prompt-input')).not.toBeInTheDocument();
+    });
+
+    it('does NOT enter edit mode when onEditPrompt is not provided', () => {
+      const task = makeTask({ prompt: 'Read-only prompt', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          // no onEditPrompt provided
+        />,
+      );
+
+      const commandDisplay = screen.getByTestId('command-display');
+      fireEvent.doubleClick(commandDisplay);
+
+      expect(screen.queryByTestId('edit-prompt-input')).not.toBeInTheDocument();
+    });
+
+    it('applies cursor-pointer class when onEditPrompt is provided and task not running', () => {
+      const task = makeTask({ prompt: 'Editable prompt', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          onEditPrompt={mockOnEditPrompt}
+        />,
+      );
+
+      const commandDisplay = screen.getByTestId('command-display');
+      expect(commandDisplay).toHaveClass('cursor-pointer');
+    });
+
+    it('applies cursor-text class when onEditPrompt is not provided', () => {
+      const task = makeTask({ prompt: 'Read-only prompt', status: 'pending' });
+      render(
+        <TaskPanel
+          task={task}
+          onProvideInput={mockOnProvideInput}
+          onApprove={mockOnApprove}
+          onReject={mockOnReject}
+          onSelectExperiment={mockOnSelectExperiment}
+          // no onEditPrompt
+        />,
+      );
+
+      const commandDisplay = screen.getByTestId('command-display');
+      expect(commandDisplay).toHaveClass('cursor-text');
+      expect(commandDisplay).not.toHaveClass('cursor-pointer');
+    });
+  });
 });
