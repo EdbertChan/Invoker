@@ -1,0 +1,49 @@
+# Edge case: UI change plan without visualProof flag
+# Expected error: missing_visual_proof_flag
+#
+# When a plan modifies packages/ui/ (referenced in task prompts or commands),
+# it must set visualProof: true at the plan level so the merge gate captures
+# before/after screenshots. This plan references packages/ui/src/components/
+# in a prompt task and runs UI tests, but omits the visualProof field entirely.
+
+name: "Update button hover states in design system"
+description: |
+  Updates the hover and focus styles for the primary Button component in
+  packages/ui/src/components/Button.tsx. The current hover state uses a
+  hardcoded color value that does not respect the active theme palette.
+
+  The fix replaces the hardcoded hex color with a CSS custom property
+  reference so hover and focus rings adapt to both light and dark themes.
+  This affects all surfaces that render the primary Button variant.
+
+  Blast radius: limited to Button component styling. No prop API changes.
+  All existing Button unit tests and snapshot tests must continue to pass.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: fix/button-hover-theme-aware
+
+tasks:
+  - id: update-button-hover-styles
+    description: "Replace hardcoded hover color with theme-aware CSS custom property"
+    prompt: |
+      In packages/ui/src/components/Button.tsx, locate the hover style object applied
+      to the primary variant container. The current implementation uses a hardcoded hex
+      value (#1a73e8) for the hover background. You must replace this with the CSS custom
+      property var(--color-primary-hover) so the hover state respects the active theme.
+      Also update the focus ring outline color from #1a73e8 to var(--color-primary-focus).
+      Ensure the Button component still exports the same public props interface defined in
+      packages/ui/src/components/Button.types.ts. Verify that no other style properties in
+      the primary variant object are changed beyond hover and focus colors.
+    dependencies: []
+
+  - id: run-button-unit-tests
+    description: "Run UI package tests to verify button hover changes"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [update-button-hover-styles]
+
+  - id: verify-snapshot-consistency
+    description: "Rebuild UI package and confirm no unintended snapshot drift"
+    command: "cd packages/ui && pnpm test -- --update-snapshots=none 2>&1"
+    dependencies: [run-button-unit-tests]
