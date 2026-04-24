@@ -17,12 +17,14 @@ export interface TaskLookup {
  * @param delta       The incoming delta.
  * @param stateMap    Map of taskId → JSON-serialized TaskState snapshots.
  * @param taskLookup  Optional fallback to seed unknown tasks (e.g. orchestrator).
+ * @returns `true` when the orchestrator fallback was used to seed an unknown task.
  */
 export function applyDelta(
   delta: TaskDelta,
   stateMap: Map<string, string>,
   taskLookup?: TaskLookup,
-): void {
+): boolean {
+  let usedFallback = false;
   if (delta.type === 'created') {
     stateMap.set(delta.task.id, JSON.stringify(delta.task));
   } else if (delta.type === 'updated') {
@@ -32,6 +34,7 @@ export function applyDelta(
       if (task) {
         existing = JSON.stringify(task);
         stateMap.set(delta.taskId, existing);
+        usedFallback = true;
       }
     }
     if (existing) {
@@ -48,4 +51,5 @@ export function applyDelta(
   } else if (delta.type === 'removed') {
     stateMap.delete(delta.taskId);
   }
+  return usedFallback;
 }

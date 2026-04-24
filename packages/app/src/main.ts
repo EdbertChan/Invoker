@@ -2386,7 +2386,10 @@ if (isHeadless) {
         }
       }
 
-      applyDelta(d, lastKnownTaskStates, orchestrator);
+      const usedFallback = applyDelta(d, lastKnownTaskStates, orchestrator);
+      if (usedFallback) {
+        logger.debug(`delta-merge: seeded task ${d.type === 'updated' ? d.taskId : '?'} from orchestrator (out-of-order delta)`, { module: 'delta' });
+      }
     });
 
     uiPerfLogInterval = setInterval(() => {
