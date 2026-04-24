@@ -2456,7 +2456,7 @@ export class Orchestrator {
     return this.recreateTask(taskId);
   }
 
-    editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
+  editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
