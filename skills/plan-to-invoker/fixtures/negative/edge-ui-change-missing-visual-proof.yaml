@@ -1,0 +1,48 @@
+# Edge case: UI change without visualProof flag
+# Expected error: missing_visual_proof_flag
+#
+# When a task prompt references packages/ui/ paths, the plan must set
+# visualProof: true so the merge gate captures before/after screenshots.
+# This plan omits the flag, which the validator must reject.
+
+name: "Refactor button component hover states"
+description: |
+  Refactors the hover and focus-visible styles on the primary Button component
+  in packages/ui/src/components/Button.tsx. The current hover state uses opacity
+  changes that look washed-out on light backgrounds.
+
+  The fix replaces the opacity-based hover with a background-color shift using
+  CSS custom properties. This keeps the component theme-aware while producing
+  higher contrast hover feedback. No changes to the Button public API.
+
+  Blast radius: only affects Button rendering. All existing snapshot and unit
+  tests in packages/ui must continue to pass after the style update.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: refactor/button-hover-states
+
+tasks:
+  - id: update-button-hover-styles
+    description: "Replace opacity hover with background-color shift in Button component"
+    prompt: |
+      In packages/ui/src/components/Button.tsx, locate the hover style definition on the
+      primary variant. Replace the current opacity-based hover (opacity: 0.85) with a
+      background-color transition using the CSS custom property --btn-hover-bg. You must
+      ensure the transition property is set to 'background-color 150ms ease' on the base
+      state so the hover animates smoothly. Verify that the focus-visible outline remains
+      unchanged and that the component still reads its color tokens from the theme context
+      defined in packages/ui/src/components/ThemeProvider.tsx. The hover contrast ratio
+      must meet WCAG AA (4.5:1 minimum) against the default light-theme background.
+    dependencies: []
+
+  - id: run-button-unit-tests
+    description: "Run UI package tests to verify button hover refactor"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [update-button-hover-styles]
+
+  - id: verify-no-api-regression
+    description: "Ensure no public API exports changed in the UI package"
+    command: "cd packages/ui && pnpm test -- --grep 'exports'"
+    dependencies: [update-button-hover-styles]
