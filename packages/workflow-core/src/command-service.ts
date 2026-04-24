@@ -196,7 +196,7 @@ export class CommandService {
     );
   }
 
-    async editTaskPrompt(
+  async editTaskPrompt(
     envelope: CommandEnvelope<{ taskId: string; newPrompt: string }>,
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
