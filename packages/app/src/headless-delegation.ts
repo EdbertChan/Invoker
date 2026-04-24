@@ -39,12 +39,21 @@ export async function tryDelegateResume(
   );
 }
 
+/**
+ * Returns the delegation timeout for a headless exec command.
+ *
+ * Long-running workflow-scope mutations (`rebase`, `rebase-and-retry`,
+ * `restart`) get 60 000 ms when the second argument is a bare workflow
+ * id (`wf-*` with no slash).  Everything else gets the default 5 000 ms.
+ */
 export function delegationTimeoutMs(args: string[]): number {
   const command = args[0] ?? '';
-  if (command) {
-    return 900_000;
+  const target = args[1] ?? '';
+  const isWorkflowId = /^wf-[^/]+$/.test(target);
+  if (isWorkflowId && (command === 'rebase' || command === 'rebase-and-retry' || command === 'restart')) {
+    return 60_000;
   }
-  return 15_000;
+  return 5_000;
 }
 
 export async function tryDelegateExec(
