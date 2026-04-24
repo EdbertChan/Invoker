@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -50,8 +50,97 @@ describe('headless→owner delegation', () => {
       expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(5_000);
     });
 
+    it('uses default timeout for restart targeting a task id (has slash)', () => {
+      expect(delegationTimeoutMs(['restart', 'wf-123/task-1'])).toBe(5_000);
+    });
+
     it('uses default timeout when no args are provided', () => {
       expect(delegationTimeoutMs([])).toBe(5_000);
+    });
+  });
+
+  describe('timeout wiring through tryDelegateExec (fake timers)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('rebase wf-* survives default 5s timeout and only expires at 60s', async () => {
+      // Handler that never resolves — simulates a slow owner
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+
+      const delegatePromise = tryDelegateExec(['rebase', 'wf-42'], messageBus);
+
+      // Advance past the default 5s — should still be pending
+      await vi.advanceTimersByTimeAsync(5_001);
+      // Promise should not have resolved yet (extended timeout is 60s)
+      const raceResult = await Promise.race([
+        delegatePromise.then(() => 'resolved'),
+        Promise.resolve('still-pending'),
+      ]);
+      expect(raceResult).toBe('still-pending');
+
+      // Advance to 60s — now it should timeout and return false
+      await vi.advanceTimersByTimeAsync(55_000);
+      const result = await delegatePromise;
+      expect(result).toBe(false);
+    });
+
+    it('rebase-and-retry wf-* survives default 5s timeout and only expires at 60s', async () => {
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+
+      const delegatePromise = tryDelegateExec(['rebase-and-retry', 'wf-99'], messageBus);
+
+      await vi.advanceTimersByTimeAsync(5_001);
+      const raceResult = await Promise.race([
+        delegatePromise.then(() => 'resolved'),
+        Promise.resolve('still-pending'),
+      ]);
+      expect(raceResult).toBe('still-pending');
+
+      await vi.advanceTimersByTimeAsync(55_000);
+      const result = await delegatePromise;
+      expect(result).toBe(false);
+    });
+
+    it('restart wf-* survives default 5s timeout and only expires at 60s', async () => {
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+
+      const delegatePromise = tryDelegateExec(['restart', 'wf-77'], messageBus);
+
+      await vi.advanceTimersByTimeAsync(5_001);
+      const raceResult = await Promise.race([
+        delegatePromise.then(() => 'resolved'),
+        Promise.resolve('still-pending'),
+      ]);
+      expect(raceResult).toBe('still-pending');
+
+      await vi.advanceTimersByTimeAsync(55_000);
+      const result = await delegatePromise;
+      expect(result).toBe(false);
+    });
+
+    it('restart wf-*/task-* expires at 5s (default timeout)', async () => {
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+
+      const delegatePromise = tryDelegateExec(['restart', 'wf-77/task-1'], messageBus);
+
+      await vi.advanceTimersByTimeAsync(5_001);
+      const result = await delegatePromise;
+      expect(result).toBe(false);
+    });
+
+    it('approve expires at 5s (default timeout)', async () => {
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+
+      const delegatePromise = tryDelegateExec(['approve', 'wf-123/task-1'], messageBus);
+
+      await vi.advanceTimersByTimeAsync(5_001);
+      const result = await delegatePromise;
+      expect(result).toBe(false);
     });
   });
 
