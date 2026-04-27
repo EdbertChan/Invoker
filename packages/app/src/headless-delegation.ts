@@ -41,10 +41,14 @@ export async function tryDelegateResume(
 
 export function delegationTimeoutMs(args: string[]): number {
   const command = args[0] ?? '';
-  if (command) {
-    return 900_000;
+  const target = args[1] ?? '';
+  if (
+    (command === 'rebase' || command === 'rebase-and-retry' || command === 'restart')
+    && /^wf-[^/]+$/.test(target)
+  ) {
+    return 60_000;
   }
-  return 15_000;
+  return 5_000;
 }
 
 export async function tryDelegateExec(
