@@ -45,9 +45,10 @@ export function topologicalSort(tasks: TaskState[]): TaskState[] {
   }
 
   const sorted: TaskState[] = [];
+  let queueHead = 0;
 
-  while (queue.length > 0) {
-    const id = queue.shift()!;
+  while (queueHead < queue.length) {
+    const id = queue[queueHead++];
     sorted.push(taskMap.get(id)!);
 
     for (const neighbor of adjacency.get(id)!) {
