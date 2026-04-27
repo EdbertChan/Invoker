@@ -60,6 +60,7 @@
     "test": "vitest run",
     "start": "unset ELECTRON_RUN_AS_NODE && electron dist/main.js",
     "dev": "tsup src/main.ts src/preload.ts --format cjs --outDir dist --external electron && unset ELECTRON_RUN_AS_NODE && electron dist/main.js",
+    "pretest:e2e": "tsup",
     "test:e2e": "xvfb-run --auto-servernum playwright test"
   },
   "dependencies": {
