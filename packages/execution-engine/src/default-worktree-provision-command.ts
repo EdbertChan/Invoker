@@ -16,6 +16,7 @@ export const DEFAULT_WORKTREE_PROVISION_COMMAND =
     echo "[provision] pnpm config production (debug): $(pnpm config get production 2>/dev/null || echo unknown)" && \
     ( [ -f packages/transport/node_modules/@types/node/package.json ] && echo "[provision] @types/node linked under packages/transport" ) || \
     ( FOUND_TYPES=0 && for f in node_modules/.pnpm/@types+node@*/node_modules/@types/node/package.json; do [ -f "$f" ] && FOUND_TYPES=1 && echo "[provision] @types/node in pnpm store: $f" && break; done && [ "$FOUND_TYPES" -eq 1 ] ) || \
+    ( [ -f node_modules/@types/node/package.json ] && echo "[provision] @types/node hoisted to root node_modules" ) || \
     ( \
       echo "[provision] Missing @types/node after install (not under transport or pnpm virtual store)" && \
       echo "[provision] transport @types dir:" && \
