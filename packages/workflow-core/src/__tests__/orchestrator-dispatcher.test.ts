@@ -164,40 +164,50 @@ describe('Orchestrator taskDispatcher', () => {
     expect(new Set(dispatched).size).toBe(2);
   });
 
-  it('dispatches tasks for restart/retry/recreate entrypoints', () => {
+  it('workflow retry dispatches the recreated root scope immediately, while task retry dispatches only the targeted subgraph root', () => {
     const dispatched: string[] = [];
     const { orchestrator } = makeOrchestrator((tasks) => tasks.forEach((task) => dispatched.push(task.id)));
     orchestrator.loadPlan({
       name: 'dispatcher-retry-paths',
       onFinish: 'none',
-      tasks: [{ id: 't1', description: 'one', command: 'exit 1' }],
+      tasks: [
+        { id: 'root', description: 'root', command: 'echo root' },
+        { id: 'mid', description: 'mid', command: 'echo mid', dependencies: ['root'] },
+        { id: 'leaf', description: 'leaf', command: 'echo leaf', dependencies: ['mid'] },
+        { id: 'sibling', description: 'sibling', command: 'echo sibling' },
+      ],
     });
 
-    const taskId = taskIdBySuffix(orchestrator, 't1');
+    const rootId = taskIdBySuffix(orchestrator, 'root');
+    const midId = taskIdBySuffix(orchestrator, 'mid');
+    const leafId = taskIdBySuffix(orchestrator, 'leaf');
+    const siblingId = taskIdBySuffix(orchestrator, 'sibling');
     const workflowId = orchestrator.getWorkflowIds()[0]!;
 
     orchestrator.startExecution();
-    respondForTask(orchestrator, taskId, 'failed', 1);
+    respondForTask(orchestrator, rootId, 'completed', 0);
+    respondForTask(orchestrator, siblingId, 'completed', 0);
+    respondForTask(orchestrator, midId, 'failed', 1);
 
-    dispatched.length = 0;
-    orchestrator.retryTask(taskId);
-    expect(dispatched).toEqual([taskId]);
-
-    respondForTask(orchestrator, taskId, 'failed', 1);
     dispatched.length = 0;
     orchestrator.retryWorkflow(workflowId);
-    expect(dispatched).toEqual([taskId]);
+    expect(new Set(dispatched)).toEqual(new Set([rootId, siblingId]));
+    expect(orchestrator.getTask(rootId)?.status).toBe('running');
+    expect(orchestrator.getTask(siblingId)?.status).toBe('running');
+    expect(orchestrator.getTask(midId)?.status).toBe('pending');
+    expect(orchestrator.getTask(leafId)?.status).toBe('pending');
 
-    respondForTask(orchestrator, taskId, 'failed', 1);
+    respondForTask(orchestrator, rootId, 'completed', 0);
+    respondForTask(orchestrator, siblingId, 'completed', 0);
+    respondForTask(orchestrator, midId, 'completed', 0);
+    respondForTask(orchestrator, leafId, 'completed', 0);
     dispatched.length = 0;
-    orchestrator.recreateTask(taskId);
-    expect(dispatched).toEqual([taskId]);
-
-    respondForTask(orchestrator, taskId, 'failed', 1);
-    dispatched.length = 0;
-    orchestrator.recreateWorkflow(workflowId);
-    expect(dispatched).toEqual([taskId]);
-
+    orchestrator.retryTask(midId);
+    expect(dispatched).toEqual([midId]);
+    expect(orchestrator.getTask(rootId)?.status).toBe('completed');
+    expect(orchestrator.getTask(siblingId)?.status).toBe('completed');
+    expect(orchestrator.getTask(midId)?.status).toBe('running');
+    expect(orchestrator.getTask(leafId)?.status).toBe('pending');
   });
 
   it('resumeWorkflow dispatches persisted pending tasks', () => {

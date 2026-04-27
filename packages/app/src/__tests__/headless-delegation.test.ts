@@ -864,8 +864,10 @@ describe('headless delegation enforcement', () => {
         expect(runnable[0]?.id).toBe('wf-1/task-1');
       });
 
-      it('headless retry always preempts, even when the workflow has no active execution', async () => {
+      it('headless retry always preempts before the retry mutation, even when the workflow has no active execution', async () => {
         const preemptWorkflowExecution = vi.fn(async () => {});
+        mockDeps.orchestrator.recreateWorkflow = vi.fn(() => []);
+        mockDeps.orchestrator.recreateWorkflowFromFreshBase = vi.fn(async () => []);
         const depsWithNoTrack: HeadlessDeps = {
           ...mockDeps,
           noTrack: true,
@@ -877,6 +879,11 @@ describe('headless delegation enforcement', () => {
 
         expect(preemptWorkflowExecution).toHaveBeenCalledWith('wf-1');
         expect(mockDeps.commandService.retryWorkflow).toHaveBeenCalled();
+        const preemptOrder = (preemptWorkflowExecution.mock.invocationCallOrder ?? [])[0];
+        const retryOrder = ((mockDeps.commandService.retryWorkflow as any).mock.invocationCallOrder ?? [])[0];
+        expect(preemptOrder).toBeLessThan(retryOrder);
+        expect(mockDeps.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+        expect(mockDeps.orchestrator.recreateWorkflowFromFreshBase).not.toHaveBeenCalled();
       });
 
       it('headless recreate preempts workflow before recreate mutation', async () => {

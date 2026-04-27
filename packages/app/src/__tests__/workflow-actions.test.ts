@@ -201,6 +201,34 @@ describe('retryWorkflow', () => {
     expect(orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
     expect(result).toBe(tasks);
   });
+
+  it('does not bump workflow generation the way recreate and rebase do', async () => {
+    const orchestrator = {
+      retryWorkflow: vi.fn(() => []),
+      recreateWorkflow: vi.fn(() => []),
+      recreateWorkflowFromFreshBase: vi.fn(async () => []),
+    };
+    const persistence = {
+      loadWorkflow: vi.fn(() => ({ id: 'wf-1', generation: 7, repoUrl: 'https://example/repo.git', baseBranch: 'main' })),
+      updateWorkflow: vi.fn(),
+    };
+
+    retryWorkflow('wf-1', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+    });
+    recreateWorkflow('wf-1', {
+      persistence: persistence as unknown as SQLiteAdapter,
+      orchestrator: orchestrator as unknown as Orchestrator,
+    });
+    await recreateWorkflowFromFreshBase('wf-1', {
+      persistence: persistence as unknown as SQLiteAdapter,
+      orchestrator: orchestrator as unknown as Orchestrator,
+    });
+
+    expect(orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(persistence.updateWorkflow).toHaveBeenNthCalledWith(1, 'wf-1', { generation: 8 });
+    expect(persistence.updateWorkflow).toHaveBeenNthCalledWith(2, 'wf-1', { generation: 8 });
+  });
 });
 
 describe('recreateWorkflowFromFreshBase', () => {
