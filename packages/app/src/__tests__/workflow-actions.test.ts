@@ -193,12 +193,15 @@ describe('retryWorkflow', () => {
   it('calls orchestrator.retryWorkflow and returns result', () => {
     const tasks = [makeRunningTask()];
     const orchestrator = { retryWorkflow: vi.fn(() => tasks) };
+    const persistence = { updateWorkflow: vi.fn() };
 
     const result = retryWorkflow('wf-1', {
       orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
     });
 
     expect(orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(persistence.updateWorkflow).not.toHaveBeenCalled();
     expect(result).toBe(tasks);
   });
 });
@@ -1327,6 +1330,7 @@ describe('buildInvalidationDeps', () => {
     await deps.retryWorkflow('wf-1');
 
     expect(orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(persistence.updateWorkflow).not.toHaveBeenCalled();
   });
 
   it('routes recreateWorkflow through bumpGenerationAndRecreate', async () => {
@@ -1389,6 +1393,38 @@ describe('buildInvalidationDeps', () => {
     expect(orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledTimes(1);
     expect(orchestrator.recreateWorkflowFromFreshBase.mock.calls[0]?.[0]).toBe('wf-1');
     expect(result).toHaveLength(1);
+  });
+
+  it('keeps the three workflow-scope reset tiers distinct', async () => {
+    const orchestrator = {
+      ...makeBaseOrchestrator(),
+      recreateWorkflowFromFreshBase: vi.fn(async () => [makeRunningTask({ id: 'task-a' })]),
+    };
+    const persistence = makePersistence();
+    persistence.loadWorkflow = vi
+      .fn()
+      .mockReturnValueOnce({ id: 'wf-1', generation: 0 })
+      .mockReturnValueOnce({ id: 'wf-1', generation: 1, repoUrl: 'https://example/repo.git', baseBranch: 'main' });
+
+    const deps = buildInvalidationDeps({
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+    });
+
+    await deps.retryWorkflow('wf-1');
+    await deps.recreateWorkflow('wf-1');
+    await deps.recreateWorkflowFromFreshBase!('wf-1');
+
+    expect(orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
+      'wf-1',
+      expect.objectContaining({ refreshBase: expect.any(Function) }),
+    );
+    expect(persistence.updateWorkflow.mock.calls).toEqual([
+      ['wf-1', { generation: 1 }],
+      ['wf-1', { generation: 2 }],
+    ]);
   });
 
   it('recreateWorkflowFromFreshBase wire still calls orchestrator method when no taskExecutor is supplied', async () => {

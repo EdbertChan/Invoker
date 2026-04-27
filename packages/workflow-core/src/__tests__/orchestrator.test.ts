@@ -5151,7 +5151,7 @@ describe('Orchestrator', () => {
       expect(persistence.loadTasksCalls).not.toContain(wfB);
     });
 
-    it('preserves completed tasks and resets failed tasks', () => {
+    it('resets every task in the workflow immediately, including previously completed roots', () => {
       const p = new InMemoryPersistence();
       const b = new InMemoryBus();
       const wfId = 'wf-retry-1';
@@ -5178,42 +5178,45 @@ describe('Orchestrator', () => {
 
       const started = o.retryWorkflow(wfId);
 
-      // A should stay completed
+      // Workflow-scope retry now matches recreate-style reset scope:
+      // even previously completed roots reset immediately.
       const a = o.getTask('a')!;
-      expect(a.status).toBe('completed');
+      expect(a.status).toBe('running');
       expect(a.execution.branch).toBe('br-a');
+      expect(a.execution.commit).toBe('abc');
 
-      // B should be reset (and auto-started since it has no deps)
+      // B is also retried immediately because it is a ready root.
       const bTask = o.getTask('b')!;
       expect(bTask.status).toBe('running');
       expect(bTask.execution.error).toBeUndefined();
+      expect(bTask.execution.branch).toBe('br-b');
 
-      // Merge should be reset to pending (waiting on B)
+      // Merge resets too, but waits for the fresh root executions.
       const merge = o.getTask(`__merge__${wfId}`)!;
       expect(merge.status).toBe('pending');
 
-      // Only B should be in the started list
+      // Both roots were restarted immediately.
+      expect(started.some(t => t.id === 'a')).toBe(true);
       expect(started.some(t => t.id === 'b')).toBe(true);
-      expect(started.some(t => t.id === 'a')).toBe(false);
     });
 
-    it('differs from recreate: retry preserves completed roots while recreate resets them', () => {
+    it('matches recreate-style immediacy/scope but keeps lineage that recreate wipes', () => {
       const wfId = 'wf-retry-vs-recreate';
       const seed = (p: InMemoryPersistence): void => {
         p.saveTask(wfId, {
           id: 'a', description: 'Task A', status: 'completed',
           dependencies: [], createdAt: new Date(),
-          config: { workflowId: wfId }, execution: { exitCode: 0, branch: 'br-a', commit: 'abc' },
+          config: { workflowId: wfId }, execution: { exitCode: 0, branch: 'br-a', commit: 'abc', workspacePath: '/wt/a' },
         });
         p.saveTask(wfId, {
           id: 'b', description: 'Task B', status: 'failed',
           dependencies: [], createdAt: new Date(),
-          config: { workflowId: wfId }, execution: { exitCode: 1, error: 'boom', branch: 'br-b' },
+          config: { workflowId: wfId }, execution: { exitCode: 1, error: 'boom', branch: 'br-b', commit: 'def', workspacePath: '/wt/b' },
         });
         p.saveTask(wfId, {
           id: `__merge__${wfId}`, description: 'Merge gate', status: 'completed',
           dependencies: ['a', 'b'], createdAt: new Date(),
-          config: { workflowId: wfId, isMergeNode: true }, execution: {},
+          config: { workflowId: wfId, isMergeNode: true }, execution: { branch: 'merge-br', commit: 'merge-1', workspacePath: '/wt/merge' },
         });
       };
 
@@ -5233,18 +5236,40 @@ describe('Orchestrator', () => {
       recreateOrchestrator.recreateWorkflow(wfId);
 
       const retryA = retryOrchestrator.getTask('a')!;
+      const retryB = retryOrchestrator.getTask('b')!;
+      const retryMerge = retryOrchestrator.getTask(`__merge__${wfId}`)!;
       const recreateA = recreateOrchestrator.getTask('a')!;
+      const recreateB = recreateOrchestrator.getTask('b')!;
+      const recreateMerge = recreateOrchestrator.getTask(`__merge__${wfId}`)!;
 
-      expect(retryA.status).toBe('completed');
+      expect(['running', 'pending']).toContain(retryA.status);
       expect(retryA.execution.branch).toBe('br-a');
       expect(retryA.execution.commit).toBe('abc');
+      expect(retryA.execution.workspacePath).toBe('/wt/a');
+      expect(['running', 'pending']).toContain(retryB.status);
+      expect(retryB.execution.branch).toBe('br-b');
+      expect(retryB.execution.commit).toBe('def');
+      expect(retryB.execution.workspacePath).toBe('/wt/b');
+      expect(retryMerge.status).toBe('pending');
+      expect(retryMerge.execution.branch).toBe('merge-br');
+      expect(retryMerge.execution.commit).toBe('merge-1');
+      expect(retryMerge.execution.workspacePath).toBe('/wt/merge');
 
       expect(['running', 'pending']).toContain(recreateA.status);
+      expect(['running', 'pending']).toContain(recreateB.status);
+      expect(recreateMerge.status).toBe('pending');
       expect(recreateA.execution.branch).toBeUndefined();
       expect(recreateA.execution.commit).toBeUndefined();
+      expect(recreateA.execution.workspacePath).toBeUndefined();
+      expect(recreateB.execution.branch).toBeUndefined();
+      expect(recreateB.execution.commit).toBeUndefined();
+      expect(recreateB.execution.workspacePath).toBeUndefined();
+      expect(recreateMerge.execution.branch).toBeUndefined();
+      expect(recreateMerge.execution.commit).toBeUndefined();
+      expect(recreateMerge.execution.workspacePath).toBeUndefined();
     });
 
-    it('resets merge node even when leaf tasks are all completed', () => {
+    it('resets merge node and completed leaves together when the workflow is retried', () => {
       const p = new InMemoryPersistence();
       const b = new InMemoryBus();
       const wfId = 'wf-retry-merge';
@@ -5267,8 +5292,9 @@ describe('Orchestrator', () => {
       o.retryWorkflow(wfId);
 
       const merge = o.getTask(`__merge__${wfId}`)!;
-      // Merge should be running since its only dep (a) is completed
-      expect(merge.status).toBe('running');
+      // Retry resets the completed leaf too, so merge waits on the new run.
+      expect(o.getTask('a')!.status).toBe('running');
+      expect(merge.status).toBe('pending');
     });
 
     it('cancels running tasks before resetting them', () => {
@@ -5322,7 +5348,7 @@ describe('Orchestrator', () => {
       }
     });
 
-    it('handles all-completed workflow (no resets needed)', () => {
+    it('retries an all-completed workflow by resetting it to a fresh execution round', () => {
       const p = new InMemoryPersistence();
       const b = new InMemoryBus();
       const wfId = 'wf-retry-allcomplete';
@@ -5342,10 +5368,9 @@ describe('Orchestrator', () => {
       o.syncFromDb(wfId);
 
       const started = o.retryWorkflow(wfId);
-      // No tasks should be started (all already complete, nothing to retry)
-      // Merge node gets reset to pending (always), but no ready tasks should start it
-      // because leaf task 'a' is completed → merge becomes ready → merge starts
-      expect(started.length).toBeGreaterThanOrEqual(0);
+      expect(o.getTask('a')!.status).toBe('running');
+      expect(o.getTask(`__merge__${wfId}`)!.status).toBe('pending');
+      expect(started.some((task) => task.id === 'a')).toBe(true);
     });
 
     it('resets blocked tasks to pending', () => {
@@ -5374,10 +5399,12 @@ describe('Orchestrator', () => {
 
       const started = o.retryWorkflow(wfId);
 
-      // B was blocked but its dep (A) is completed → should become running
+      // A is retried immediately, so B remains pending until A completes again.
+      expect(o.getTask('a')!.status).toBe('running');
       const bTask = o.getTask('b')!;
-      expect(bTask.status).toBe('running');
-      expect(started.some(t => t.id === 'b')).toBe(true);
+      expect(bTask.status).toBe('pending');
+      expect(started.some(t => t.id === 'a')).toBe(true);
+      expect(started.some(t => t.id === 'b')).toBe(false);
     });
 
     it('cascades correctly: B depends on A(completed), C depends on B(failed)', () => {
@@ -5411,12 +5438,13 @@ describe('Orchestrator', () => {
 
       const started = o.retryWorkflow(wfId);
 
-      // A stays completed
-      expect(o.getTask('a')!.status).toBe('completed');
+      // Workflow-scope retry restarts the root immediately.
+      expect(o.getTask('a')!.status).toBe('running');
+      expect(started.some(t => t.id === 'a')).toBe(true);
 
-      // B should start (dep A is complete)
-      expect(o.getTask('b')!.status).toBe('running');
-      expect(started.some(t => t.id === 'b')).toBe(true);
+      // B waits for the rerun of A.
+      expect(o.getTask('b')!.status).toBe('pending');
+      expect(started.some(t => t.id === 'b')).toBe(false);
 
       // C should be pending (dep B is not yet complete)
       expect(o.getTask('c')!.status).toBe('pending');
@@ -5457,8 +5485,8 @@ describe('Orchestrator', () => {
 
       o.retryWorkflow(wfId);
 
-      expect(o.getTask('a')!.status).toBe('completed');
-      expect(o.getTask('b')!.status).toBe('running');
+      expect(o.getTask('a')!.status).toBe('running');
+      expect(o.getTask('b')!.status).toBe('pending');
       expect(o.getTask('c')!.status).toBe('pending');
       expect(o.getTask(`__merge__${wfId}`)!.status).toBe('pending');
     });
@@ -5550,13 +5578,13 @@ describe('Orchestrator', () => {
 
       const started = o.retryWorkflow(wfId);
 
-      expect(o.getTask('add-eslint-disable-comments')!.status).toBe('completed');
-
+      expect(o.getTask('add-eslint-disable-comments')!.status).toBe('running');
       const verifyLint = o.getTask('verify-lint-passes')!;
-      expect(verifyLint.status).toBe('running');
+      expect(verifyLint.status).toBe('pending');
       expect(verifyLint.execution.pendingFixError).toBeUndefined();
       expect(verifyLint.execution.isFixingWithAI).toBeFalsy();
-      expect(started.some((t) => t.id === 'verify-lint-passes')).toBe(true);
+      expect(started.some((t) => t.id === 'add-eslint-disable-comments')).toBe(true);
+      expect(started.some((t) => t.id === 'verify-lint-passes')).toBe(false);
 
       expect(o.getTask('verify-check-all')!.status).toBe('pending');
       expect(o.getTask(`__merge__${wfId}`)!.status).toBe('pending');
@@ -5600,11 +5628,12 @@ describe('Orchestrator', () => {
 
       const started = o.retryWorkflow(wfId);
 
-      expect(o.getTask('root')!.status).toBe('completed');
-      expect(o.getTask('needs-approval')!.status).toBe('running');
+      expect(o.getTask('root')!.status).toBe('running');
+      expect(o.getTask('needs-approval')!.status).toBe('pending');
       expect(o.getTask('needs-approval')!.execution.pendingFixError).toBeUndefined();
       expect(o.getTask('descendant')!.status).toBe('pending');
-      expect(started.some((t) => t.id === 'needs-approval')).toBe(true);
+      expect(started.some((t) => t.id === 'root')).toBe(true);
+      expect(started.some((t) => t.id === 'needs-approval')).toBe(false);
     });
 
     it('retries persisted auto-fix experiment descendants like normal tasks', () => {
@@ -5758,8 +5787,8 @@ describe('Orchestrator', () => {
       });
     }
 
-    describe('retryWorkflow preserves lineage and bumps per-task execution generation', () => {
-      it('keeps branch/workspacePath on the reset task', () => {
+    describe('retryWorkflow preserves lineage while matching recreate-style workflow reset scope', () => {
+      it('keeps branch/workspacePath on every immediately reset task', () => {
         const p = new InMemoryPersistence();
         const b = new InMemoryBus();
         const wfId = 'wf-step12-retry-lineage';
@@ -5769,7 +5798,12 @@ describe('Orchestrator', () => {
 
         o.retryWorkflow(wfId);
 
+        const aTask = o.getTask('a')!;
         const bTask = o.getTask('b')!;
+        expect(['running', 'pending']).toContain(aTask.status);
+        expect(aTask.execution.branch).toBe('br-a');
+        expect(aTask.execution.workspacePath).toBe('/wt/a');
+        expect(aTask.execution.commit).toBe('aaa');
         expect(bTask.execution.branch).toBe('br-b');
         expect(bTask.execution.workspacePath).toBe('/wt/b');
         expect(bTask.execution.commit).toBe('bbb');
@@ -6235,6 +6269,33 @@ describe('Orchestrator', () => {
       expect(staleGenerationResult).toEqual([]);
       expect(orchestrator.getTask(taskId)?.execution.selectedAttemptId).toBe(activeAttemptId);
       expect(orchestrator.getTask(taskId)?.status).toBe('running');
+    });
+
+    it('clears queued stale scheduler entries when retry refreshes the selected attempt', () => {
+      orchestrator.loadPlan({
+        name: 'retry-stale-queue-clear',
+        tasks: [{ id: 't1', description: 'Task 1' }],
+      });
+      orchestrator.startExecution();
+
+      const taskId = sid(orchestrator, 0, 't1');
+      orchestrator.handleWorkerResponse(
+        makeResponse({ actionId: taskId, status: 'failed', outputs: { exitCode: 1, error: 'boom' } }),
+      );
+
+      const staleAttemptId = orchestrator.getTask(taskId)!.execution.selectedAttemptId!;
+      const scheduler = (orchestrator as any).scheduler;
+      scheduler.enqueue({ taskId, attemptId: staleAttemptId, priority: 0 });
+      expect(scheduler.getQueuedJobs().some((job: { attemptId?: string }) => job.attemptId === staleAttemptId)).toBe(true);
+
+      orchestrator.retryWorkflow(orchestrator.getWorkflowIds()[0]!);
+
+      const activeAttemptId = orchestrator.getTask(taskId)!.execution.selectedAttemptId!;
+      expect(activeAttemptId).not.toBe(staleAttemptId);
+      expect(
+        scheduler.getQueuedJobs().some((job: { attemptId?: string }) => job.attemptId === staleAttemptId),
+      ).toBe(false);
+      expect(orchestrator.getQueueStatus().queued.some((job) => job.attemptId === staleAttemptId)).toBe(false);
     });
 
     it('recreateWorkflow selects a fresh persisted attempt for recreated tasks', () => {
