@@ -1053,14 +1053,22 @@ export class SQLiteAdapter implements PersistenceAdapter {
   }
 
   deleteAllWorkflows(): void {
-    this.runTransaction(() => {
+    this.ensureWritable();
+    this.db.run('BEGIN');
+    try {
       this.db.run('DELETE FROM events');
       this.db.run('DELETE FROM task_output');
       this.db.run('DELETE FROM attempts');
       this.db.run('DELETE FROM output_spool');
       this.db.run('DELETE FROM tasks');
       this.db.run('DELETE FROM workflows');
-    });
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    this.dirty = true;
+    this.scheduleFlush();
     this.outputTailCache.clear();
   }
 
