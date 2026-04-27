@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -44,8 +44,65 @@ describe('headless→owner delegation', () => {
       expect(delegationTimeoutMs(['retry-task', 'wf-123/task-1'])).toBe(5_000);
     });
 
+    it('uses default timeout for restart targeting a task id (has slash)', () => {
+      expect(delegationTimeoutMs(['restart', 'wf-1/task-1'])).toBe(5_000);
+    });
+
     it('uses default timeout when args are empty', () => {
       expect(delegationTimeoutMs([])).toBe(5_000);
+    });
+  });
+
+  describe('tryDelegateExec timeout wiring (fake timers)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /**
+     * Helper: register a never-resolving handler, call tryDelegateExec,
+     * advance timers just below `expectedTimeout` (should still be pending),
+     * then advance past it (should resolve as false / timed-out).
+     */
+    async function assertTimeoutAt(args: string[], expectedTimeout: number) {
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+
+      const delegatePromise = tryDelegateExec(args, messageBus);
+
+      // Just before the timeout — delegation should still be pending
+      let resolved = false;
+      delegatePromise.then(() => { resolved = true; });
+
+      await vi.advanceTimersByTimeAsync(expectedTimeout - 1);
+      expect(resolved).toBe(false);
+
+      // At the timeout boundary — delegation should resolve as false (timed out)
+      await vi.advanceTimersByTimeAsync(2);
+      const result = await delegatePromise;
+      expect(result).toBe(false);
+    }
+
+    it('rebase wf-* uses extended timeout (60s)', async () => {
+      await assertTimeoutAt(['rebase', 'wf-123'], 60_000);
+    });
+
+    it('rebase-and-retry wf-* uses extended timeout (60s)', async () => {
+      await assertTimeoutAt(['rebase-and-retry', 'wf-456'], 60_000);
+    });
+
+    it('restart wf-* uses extended timeout (60s)', async () => {
+      await assertTimeoutAt(['restart', 'wf-789'], 60_000);
+    });
+
+    it('restart wf-*/task-* uses default timeout (5s)', async () => {
+      await assertTimeoutAt(['restart', 'wf-1/task-1'], 5_000);
+    });
+
+    it('approve uses default timeout (5s)', async () => {
+      await assertTimeoutAt(['approve', 'wf-123/task-1'], 5_000);
     });
   });
 
