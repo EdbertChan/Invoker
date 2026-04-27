@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -16,6 +16,31 @@ describe('headless→owner delegation', () => {
   beforeEach(() => {
     messageBus = new LocalBus();
   });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function trackPromise<T>(promise: Promise<T>) {
+    const state: {
+      settled: boolean;
+      value?: T;
+      error?: unknown;
+    } = { settled: false };
+
+    promise.then(
+      (value) => {
+        state.settled = true;
+        state.value = value;
+      },
+      (error) => {
+        state.settled = true;
+        state.error = error;
+      },
+    );
+
+    return state;
+  }
 
   describe('delegation timeout policy', () => {
     it('uses 60s timeout for workflow-scoped rebase', () => {
@@ -175,16 +200,57 @@ describe('headless→owner delegation', () => {
     });
 
     it('returns false when delegation times out (owner unresponsive)', async () => {
-      // Register handler that hangs (never resolves)
-      messageBus.onRequest('headless.exec', async () => {
-        return new Promise(() => {}); // Never resolves
-      });
+      vi.useFakeTimers();
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
 
-      // Should timeout and return false.
-      const delegated = await tryDelegateExec(['approve', 'wf-1/task-1'], messageBus, undefined, undefined, 25);
+      const delegatedPromise = tryDelegateExec(['approve', 'wf-1/task-1'], messageBus);
+      const tracked = trackPromise(delegatedPromise);
 
-      expect(delegated).toBe(false);
-    }, 5_000);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(tracked.settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(delegatedPromise).resolves.toBe(false);
+    });
+  });
+
+  describe('tryDelegateExec applies command-aware timeout selection deterministically', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      messageBus.onRequest('headless.exec', async () => new Promise(() => {}));
+    });
+
+    it.each([
+      ['rebase', ['rebase', 'wf-1']],
+      ['rebase-and-retry', ['rebase-and-retry', 'wf-1']],
+      ['restart workflow', ['restart', 'wf-123']],
+    ])('keeps %s pending at 5s and only times out at 60s', async (_label, args) => {
+      const delegatedPromise = tryDelegateExec(args, messageBus);
+      const tracked = trackPromise(delegatedPromise);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(tracked.settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(54_999);
+      expect(tracked.settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(delegatedPromise).resolves.toBe(false);
+    });
+
+    it.each([
+      ['restart task', ['restart', 'wf-123/task-1']],
+      ['approve', ['approve', 'wf-123/task-1']],
+    ])('times out at the default 5s for %s', async (_label, args) => {
+      const delegatedPromise = tryDelegateExec(args, messageBus);
+      const tracked = trackPromise(delegatedPromise);
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(tracked.settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(delegatedPromise).resolves.toBe(false);
+    });
   });
 
   describe('error propagation from owner', () => {
