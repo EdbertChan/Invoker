@@ -1,0 +1,25 @@
+# Edge case: UI change plan without visualProof flag
+# Expected errors: missing_visual_proof_flag
+#
+# Plans that modify packages/ui/ must set visualProof: true so the merge gate
+# captures before/after screenshots for review.
+
+name: "Fix button hover state"
+description: "Fix the hover effect on the primary button in packages/ui/"
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: main
+onFinish: pull_request
+mergeMode: github
+
+tasks:
+  - id: fix-button-hover
+    description: "Fix hover state in packages/ui/src/Button.tsx"
+    prompt: |
+      In packages/ui/src/Button.tsx, update the hover style so it uses
+      a subtle background-color transition instead of an opacity change.
+    dependencies: []
+
+  - id: run-ui-tests
+    description: "Run UI package unit tests"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [fix-button-hover]
