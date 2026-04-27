@@ -228,6 +228,16 @@ export function ContextMenu({
   );
 
   return (
+    <>
+    {/* Full-screen transparent backdrop — catches clicks that might be
+        swallowed by stopPropagation() before reaching document listeners
+        (e.g. ReactFlow canvas/node mousedown handlers). */}
+    <div
+      data-testid="context-menu-backdrop"
+      role="presentation"
+      className="fixed inset-0 z-40"
+      onMouseDown={onClose}
+    />
     <div
       ref={menuRef}
       role="menu"
@@ -277,5 +287,6 @@ export function ContextMenu({
         </div>
       )}
     </div>
+    </>
   );
 }
