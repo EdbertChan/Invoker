@@ -2,15 +2,15 @@
  * Regression test: context menu dismissal must not depend on document
  * mousedown bubbling.
  *
- * The fix renders a full-screen backdrop behind the menu and closes from that
- * backdrop's own `onMouseDown`. This test encodes that contract directly:
- * right-click a node, then left-click the backdrop, and assert the menu is
- * dismissed.
+ * The fix closes from a capture-phase document mousedown listener, so outside
+ * dismissal does not depend on bubbling surviving React Flow or graph-layer
+ * handlers. This test encodes that directly by stopping bubbling on the click
+ * target itself and asserting the menu still closes.
  *
  * Why this fails on the old implementation:
- * - the old code relied on `document.addEventListener('mousedown', ...)`
- * - there was no dedicated backdrop target to click outside the menu
- * - this test therefore cannot find `context-menu-backdrop`
+ * - the old code relied on a bubble-phase `document` mousedown listener
+ * - the outside target below stops propagation during bubbling
+ * - the old listener never observed the event, so the menu stayed open
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -62,17 +62,25 @@ describe('Context menu dismissal (node-right-click regression)', () => {
     return screen.findByRole('menu');
   }
 
-  it('dismisses from a backdrop left-click after right-clicking a node', async () => {
+  it('dismisses from an outside left-click even when bubbling is stopped', async () => {
     const menu = await openContextMenu();
     expect(menu).toBeInTheDocument();
 
-    const backdrop = screen.getByTestId('context-menu-backdrop');
-    expect(backdrop).toHaveAttribute('role', 'presentation');
-
-    fireEvent.mouseDown(backdrop, { button: 0 });
-
-    await waitFor(() => {
-      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    const interceptor = document.createElement('div');
+    interceptor.setAttribute('data-testid', 'outside-dismiss-target');
+    interceptor.addEventListener('mousedown', (event) => {
+      event.stopPropagation();
     });
+    document.body.appendChild(interceptor);
+
+    try {
+      fireEvent.mouseDown(interceptor, { button: 0 });
+
+      await waitFor(() => {
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      });
+    } finally {
+      interceptor.remove();
+    }
   });
 });

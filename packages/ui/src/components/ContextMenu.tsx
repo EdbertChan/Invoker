@@ -114,9 +114,11 @@ export function ContextMenu({
     setPosition({ left, top });
   }, [x, y]);
 
-  // Close on click-outside or Escape
+  // Capture-phase outside dismissal stays reliable even if graph layers stop
+  // bubbling on mousedown before it reaches document listeners.
   useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
+    const handleMouseDownCapture = (e: MouseEvent) => {
+      if (e.button !== 0) return;
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
@@ -125,10 +127,10 @@ export function ContextMenu({
       if (e.key === 'Escape') onClose();
     };
 
-    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('mousedown', handleMouseDownCapture, true);
     document.addEventListener('keydown', handleKey);
     return () => {
-      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('mousedown', handleMouseDownCapture, true);
       document.removeEventListener('keydown', handleKey);
     };
   }, [onClose]);
@@ -228,16 +230,6 @@ export function ContextMenu({
   );
 
   return (
-    <>
-    {/* Full-screen transparent backdrop — catches clicks that might be
-        swallowed by stopPropagation() before reaching document listeners
-        (e.g. ReactFlow canvas/node mousedown handlers). */}
-    <div
-      data-testid="context-menu-backdrop"
-      role="presentation"
-      className="fixed inset-0 z-40"
-      onMouseDown={onClose}
-    />
     <div
       ref={menuRef}
       role="menu"
@@ -287,6 +279,5 @@ export function ContextMenu({
         </div>
       )}
     </div>
-    </>
   );
 }
