@@ -52,6 +52,21 @@ const MERGE_GATE_TEXT_VISUAL_PLAN = {
   ],
 };
 
+/** Minimal plan with a prompt-based Claude task for testing prompt editing UI. */
+const PROMPT_TASK_PLAN = {
+  name: 'Prompt editing test',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'prompt-task',
+      description: 'Prompt-based task for editing',
+      prompt: 'Implement feature X',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
 function taskNodeCard(page: import('@playwright/test').Page, taskIdSuffix: string) {
   return page.locator(`.react-flow__node[data-testid$="${taskIdSuffix}"] > div`).first();
 }
@@ -456,6 +471,37 @@ test.describe('Visual proof capture', () => {
     await expect(page.getByRole('heading', { name: 'Backlog (Pending/Blocked, not in queue) (3)' })).toBeVisible();
     await captureScreenshot(page, 'queue-view-concurrency');
     await assertPageScreenshot(page, 'queue-view-concurrency');
+  });
+
+  test('edit prompt double-click — prompt editing UI state', async ({ page }) => {
+    await page.evaluate((yaml) => window.invoker.loadPlan(yaml), yamlStringify(PROMPT_TASK_PLAN));
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').first().waitFor({ state: 'visible', timeout: 15000 });
+
+    // Click task node to select it in the TaskPanel
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').click();
+    await expect(page.getByRole('heading', { name: 'Prompt-based task for editing' })).toBeVisible();
+
+    // Set task to completed so it's editable (not running)
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-task',
+        changes: {
+          status: 'completed',
+          execution: {
+            startedAt: new Date(Date.now() - 5000),
+            completedAt: new Date(),
+          },
+        },
+      },
+    ]);
+
+    // Double-click the prompt display area to enter edit mode
+    await page.getByTestId('command-display').dblclick();
+
+    // Verify the edit textarea appears
+    await expect(page.getByTestId('edit-prompt-input')).toBeVisible();
+
+    await captureScreenshot(page, 'edit-prompt-double-click');
   });
 
   test('gate-policy-side-panel — blocked task with satisfied and offender gates', async ({ page }) => {
