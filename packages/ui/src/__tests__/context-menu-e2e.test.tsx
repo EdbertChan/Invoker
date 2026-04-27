@@ -62,6 +62,13 @@ describe('Context menu (component)', () => {
     fireEvent.contextMenu(screen.getByTestId(taskTestId));
   }
 
+  async function expectContextMenuOpen() {
+    await waitFor(() => {
+      expect(screen.getByRole('menu')).toBeInTheDocument();
+      expect(screen.getByText('Restart Task')).toBeInTheDocument();
+    });
+  }
+
   it('right-clicking a task node shows context menu', async () => {
     await setupAndRightClick();
 
@@ -88,14 +95,43 @@ describe('Context menu (component)', () => {
   it('clicking outside closes the context menu', async () => {
     await setupAndRightClick();
 
-    await waitFor(() => {
-      expect(screen.getByText('Restart Task')).toBeInTheDocument();
-    });
+    await expectContextMenuOpen();
 
     fireEvent.mouseDown(document.body);
 
     await waitFor(() => {
       expect(screen.queryByText('Restart Task')).not.toBeInTheDocument();
+    });
+  });
+
+  it('left-clicking outside closes the context menu even when outside mousedown does not bubble to document', async () => {
+    render(
+      <>
+        <button
+          data-testid="outside-dismiss-target"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          outside target
+        </button>
+        <App />
+      </>,
+    );
+    act(() => mock.setTasks([alpha, beta], workflows));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('rf__node-task-alpha')).toBeInTheDocument();
+    });
+
+    fireEvent.contextMenu(screen.getByTestId('rf__node-task-alpha'));
+    await expectContextMenuOpen();
+
+    const outsideTarget = screen.getByTestId('outside-dismiss-target');
+    fireEvent.mouseDown(outsideTarget);
+    fireEvent.mouseUp(outsideTarget);
+    fireEvent.click(outsideTarget);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     });
   });
 

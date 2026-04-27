@@ -114,9 +114,10 @@ export function ContextMenu({
     setPosition({ left, top });
   }, [x, y]);
 
-  // Close on click-outside or Escape
+  // Close on click-outside or Escape. Some surfaces consume bubbling
+  // mousedown events, so also listen for click to keep outside-dismiss reliable.
   useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
+    const handlePointerOutside = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
@@ -125,10 +126,12 @@ export function ContextMenu({
       if (e.key === 'Escape') onClose();
     };
 
-    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('mousedown', handlePointerOutside);
+    document.addEventListener('click', handlePointerOutside);
     document.addEventListener('keydown', handleKey);
     return () => {
-      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('mousedown', handlePointerOutside);
+      document.removeEventListener('click', handlePointerOutside);
       document.removeEventListener('keydown', handleKey);
     };
   }, [onClose]);
