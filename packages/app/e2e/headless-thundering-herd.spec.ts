@@ -17,6 +17,10 @@ import {
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
 
+// ---------------------------------------------------------------------------
+// Infrastructure helpers — mechanics only, no test logic
+// ---------------------------------------------------------------------------
+
 async function runHeadlessClient(testDir: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   const configPath = path.join(testDir, 'e2e-config.json');
   const ipcSocketPath = path.join(testDir, 'ipc-transport.sock');
@@ -42,6 +46,52 @@ function parseWorkflowId(stdout: string): string {
   throw new Error(`No workflow id found in stdout:\n${stdout}`);
 }
 
+/** Build a minimal single-task plan for the headless burst. */
+function makeHerdSeedPlan() {
+  return {
+    name: 'Headless Herd Seed',
+    repoUrl: E2E_REPO_URL,
+    onFinish: 'none' as const,
+    tasks: [
+      {
+        id: 'burst-root',
+        description: 'Burst root',
+        command: 'sleep 1 && echo burst-root',
+        dependencies: [],
+      },
+    ],
+  };
+}
+
+/**
+ * Fire `count` sequential headless-client `run --no-track` invocations, each
+ * delegating to the running GUI owner. Returns the set of all workflow IDs
+ * (including the initial GUI workflow) so the caller can burst-retry them.
+ */
+async function fireHeadlessBurst(
+  testDir: string,
+  planPath: string,
+  initialWorkflowId: string,
+  count: number,
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+  ids.add(initialWorkflowId);
+  for (let i = 0; i < count; i += 1) {
+    const result = await runHeadlessClient(testDir, ['run', planPath, '--no-track']);
+    ids.add(parseWorkflowId(result.stdout));
+  }
+  return ids;
+}
+
+// ---------------------------------------------------------------------------
+// Herd-contract assertion helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * The core UI-responsiveness check: click a task node and verify the command
+ * panel appears within `timeoutMs`. This proves the renderer event loop is not
+ * blocked by the burst of workflow mutations happening in the main process.
+ */
 async function assertTaskPanelResponsive(page: Page, timeoutMs: number): Promise<void> {
   const taskNode = page.locator('.react-flow__node[data-testid$="task-alpha"]');
   const commandDisplay = page.locator('[data-testid="command-display"]');
@@ -54,71 +104,100 @@ async function assertTaskPanelResponsive(page: Page, timeoutMs: number): Promise
   expect(interactionMs).toBeLessThan(timeoutMs);
 }
 
+// ---------------------------------------------------------------------------
+// The herd contract
+// ---------------------------------------------------------------------------
+//
+// CI failure mode this spec guards against:
+//   When many headless clients delegate mutations to a GUI owner in a burst,
+//   the renderer can stall (long tasks, event-loop lag) or orphan standalone
+//   owner-serve processes can accumulate. Both cause CI timeouts and flakes.
+//
+// After the routing fix (commit be107e4), headless clients correctly delegate
+// to a live GUI owner instead of falling through to standalone-owner bootstrap.
+// This spec verifies three properties under burst load:
+//   1. The UI remains interactive (task panel responds within budget).
+//   2. Renderer perf stays within bounds (no long tasks or event-loop spikes).
+//   3. No orphan owner-serve processes are left behind.
+// ---------------------------------------------------------------------------
+
 test.describe('Headless thundering herd', () => {
   test('burst headless restarts do not spawn headless electron herds or freeze the UI', async ({ page, testDir }) => {
+
+    // -- Phase 1: Establish a GUI owner with an active workflow ---------------
+    // Load and start a plan so the GUI's Electron process becomes the mutation
+    // owner. All subsequent headless clients should delegate to this owner
+    // rather than bootstrapping standalone owner-serve processes.
     await loadPlan(page, TEST_PLAN);
     await startPlan(page);
     await page.locator('.react-flow__node[data-testid$="task-alpha"]').waitFor({ state: 'visible', timeout: 10000 });
 
-    // Discover the active workflow through the owner's IPC bridge (listWorkflows),
-    // not by reaching into task internals or opening the DB directly.
+    // Discover the active workflow through the owner's IPC bridge, not by
+    // reaching into the DB. This respects the owner-boundary policy.
     const workflows = await page.evaluate(() => window.invoker.listWorkflows());
     expect(workflows.length).toBeGreaterThan(0);
     const currentWorkflowId = workflows[0].id as string;
 
-    const herdPlan = {
-      name: 'Headless Herd Seed',
-      repoUrl: E2E_REPO_URL,
-      onFinish: 'none' as const,
-      tasks: [
-        {
-          id: 'burst-root',
-          description: 'Burst root',
-          command: 'sleep 1 && echo burst-root',
-          dependencies: [],
-        },
-      ],
-    };
+    // -- Phase 2: Fire the headless burst ------------------------------------
+    // 8 sequential headless-client `run --no-track` calls. Each one delegates
+    // its mutation to the live GUI owner. This is the load that historically
+    // caused the thundering-herd problem: too many concurrent workflow
+    // mutations stalling the renderer.
     const planPath = path.join(testDir, 'headless-herd-plan.yaml');
-    await writeFile(planPath, yamlStringify(herdPlan), 'utf8');
+    await writeFile(planPath, yamlStringify(makeHerdSeedPlan()), 'utf8');
 
-    const workflowIds = new Set<string>();
-    if (currentWorkflowId) workflowIds.add(currentWorkflowId);
-    for (let i = 0; i < 8; i += 1) {
-      const result = await runHeadlessClient(testDir, ['run', planPath, '--no-track']);
-      // Use the workflow id echoed by this exact submission. Querying shared
-      // persisted state from the app layer both violates the owner boundary
-      // and is ambiguous when many workflows are created concurrently.
-      const workflowId = parseWorkflowId(result.stdout);
-      workflowIds.add(workflowId);
-    }
+    const workflowIds = await fireHeadlessBurst(testDir, planPath, currentWorkflowId, 8);
 
+    // -- Phase 3: Burst-retry through the IPC bridge -------------------------
+    // Retry all collected workflows simultaneously via `page.evaluate` to
+    // stress the renderer's ability to process many mutations at once. This
+    // exercises the same code path as the headless burst but without the IPC
+    // transport contention from external Node processes — isolating the
+    // renderer-side impact.
+    //
+    // The 500ms pause lets the headless delegation responses settle in the
+    // main process before we add more load.
     await page.waitForTimeout(500);
 
-    // Burst-retry all workflows through the owner's IPC bridge to stress-test
-    // UI responsiveness without the IPC transport contention caused by many
-    // concurrent external headless-client processes.
     const retryIds = Array.from(workflowIds);
     const burst = retryIds.map((workflowId) =>
       page.evaluate(async (id) => window.invoker.retryWorkflow(id), workflowId),
     );
 
-    const firstInteractionStartedAt = Date.now();
-    await assertTaskPanelResponsive(page, 15000);
-    expect(Date.now() - firstInteractionStartedAt).toBeLessThan(15000);
+    // -- Phase 4: Assert UI responsiveness under load ------------------------
+    // Two responsiveness checks with a gap: the first catches immediate stalls
+    // from the burst; the second catches delayed stalls from queued IPC work
+    // that unblocks after the initial burst settles.
+    const UI_RESPONSE_BUDGET_MS = 15000;
 
+    const firstStart = Date.now();
+    await assertTaskPanelResponsive(page, UI_RESPONSE_BUDGET_MS);
+    expect(Date.now() - firstStart).toBeLessThan(UI_RESPONSE_BUDGET_MS);
+
+    // 1.5s gap: allow queued main-process work (DB writes, IPC replies) to
+    // propagate to the renderer before the second check.
     await page.waitForTimeout(1500);
 
-    const secondInteractionStartedAt = Date.now();
-    await assertTaskPanelResponsive(page, 15000);
-    expect(Date.now() - secondInteractionStartedAt).toBeLessThan(15000);
+    const secondStart = Date.now();
+    await assertTaskPanelResponsive(page, UI_RESPONSE_BUDGET_MS);
+    expect(Date.now() - secondStart).toBeLessThan(UI_RESPONSE_BUDGET_MS);
 
+    // Let all retry promises resolve before checking side effects.
     await Promise.allSettled(burst);
 
+    // -- Phase 5: Assert renderer perf stayed within bounds ------------------
+    // These thresholds match the CI failure mode: event-loop lag >1s or long
+    // tasks >1.5s caused Playwright timeouts in other specs running in the
+    // same shard.
     const perf = await page.evaluate(async () => await window.invoker.getUiPerfStats());
     expect(perf.maxRendererEventLoopLagMs).toBeLessThan(1000);
     expect(perf.maxRendererLongTaskMs).toBeLessThan(1500);
 
+    // -- Phase 6: No orphan owner-serve processes ----------------------------
+    // If headless clients incorrectly bypassed the GUI owner and bootstrapped
+    // standalone owner-serve processes, those Electron zombies would
+    // accumulate and consume CI resources. This was the root cause of the
+    // original thundering-herd CI failures.
     const ownerServe = await execFileAsync('bash', [
       '-lc',
       "pgrep -af '[e]lectron/dist/electron .*packages/app/dist/main.js.*--headless owner-serve' || true",
