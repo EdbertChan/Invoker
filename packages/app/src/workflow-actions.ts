@@ -363,6 +363,7 @@ export function editTaskCommand(
   return deps.orchestrator.editTaskCommand(taskId, newCommand);
 }
 
+
 export function editTaskPrompt(
   taskId: string,
   newPrompt: string,
