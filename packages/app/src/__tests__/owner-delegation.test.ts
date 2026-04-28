@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
+import type { HeadlessTargetLookup } from '../headless-command-classification.js';
 
 /**
  * Regression tests for headless→owner RPC delegation.
@@ -12,9 +13,24 @@ import type { MessageBus } from '@invoker/transport';
  */
 describe('headless→owner delegation', () => {
   let messageBus: MessageBus;
+  let targetLookup: HeadlessTargetLookup;
 
   beforeEach(() => {
     messageBus = new LocalBus();
+    targetLookup = {
+      loadWorkflow: (workflowId) => (
+        workflowId === 'wf-1' || workflowId === 'wf-123'
+          ? { id: workflowId } as any
+          : undefined
+      ),
+      listWorkflows: () => [{ id: 'wf-1' } as any, { id: 'wf-123' } as any],
+      loadTasks: (workflowId) => {
+        if (workflowId === 'wf-123') {
+          return [{ id: 'wf-123/task-1' }] as any;
+        }
+        return [];
+      },
+    };
   });
 
   afterEach(() => {
@@ -44,27 +60,27 @@ describe('headless→owner delegation', () => {
 
   describe('delegation timeout policy', () => {
     it('uses 60s timeout for workflow-scoped rebase', () => {
-      expect(delegationTimeoutMs(['rebase', 'wf-1'])).toBe(60_000);
+      expect(delegationTimeoutMs(['rebase', 'wf-1'], targetLookup)).toBe(60_000);
     });
 
     it('uses 60s timeout for workflow-scoped rebase-and-retry', () => {
-      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1'])).toBe(60_000);
+      expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1'], targetLookup)).toBe(60_000);
     });
 
     it('uses 60s timeout for workflow-scoped restart', () => {
-      expect(delegationTimeoutMs(['restart', 'wf-123'])).toBe(60_000);
+      expect(delegationTimeoutMs(['restart', 'wf-123'], targetLookup)).toBe(60_000);
     });
 
     it('keeps task-scoped rebase at the default timeout', () => {
-      expect(delegationTimeoutMs(['rebase', 'wf-123/task-1'])).toBe(5_000);
+      expect(delegationTimeoutMs(['rebase', 'wf-123/task-1'], targetLookup)).toBe(5_000);
     });
 
     it('keeps non-matching workflow ids at the default timeout', () => {
-      expect(delegationTimeoutMs(['restart', 'not-a-workflow-id'])).toBe(5_000);
+      expect(delegationTimeoutMs(['restart', 'not-a-workflow-id'], targetLookup)).toBe(5_000);
     });
 
     it('keeps unrelated commands at the default timeout', () => {
-      expect(delegationTimeoutMs(['approve', 'wf-123/task-1'])).toBe(5_000);
+      expect(delegationTimeoutMs(['approve', 'wf-123/task-1'], targetLookup)).toBe(5_000);
     });
   });
 
@@ -225,7 +241,13 @@ describe('headless→owner delegation', () => {
       ['rebase-and-retry', ['rebase-and-retry', 'wf-1']],
       ['restart workflow', ['restart', 'wf-123']],
     ])('keeps %s pending at 5s and only times out at 60s', async (_label, args) => {
-      const delegatedPromise = tryDelegateExec(args, messageBus);
+      const delegatedPromise = tryDelegateExec(
+        args,
+        messageBus,
+        undefined,
+        undefined,
+        delegationTimeoutMs(args, targetLookup),
+      );
       const tracked = trackPromise(delegatedPromise);
 
       await vi.advanceTimersByTimeAsync(5_000);
@@ -242,7 +264,13 @@ describe('headless→owner delegation', () => {
       ['restart task', ['restart', 'wf-123/task-1']],
       ['approve', ['approve', 'wf-123/task-1']],
     ])('times out at the default 5s for %s', async (_label, args) => {
-      const delegatedPromise = tryDelegateExec(args, messageBus);
+      const delegatedPromise = tryDelegateExec(
+        args,
+        messageBus,
+        undefined,
+        undefined,
+        delegationTimeoutMs(args, targetLookup),
+      );
       const tracked = trackPromise(delegatedPromise);
 
       await vi.advanceTimersByTimeAsync(4_999);

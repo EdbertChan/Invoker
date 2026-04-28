@@ -1,8 +1,14 @@
-import { resolve as resolvePath } from 'node:path';
+import { resolve as resolvePath, join as joinPath } from 'node:path';
 
+import { SQLiteAdapter } from '@invoker/data-store';
 import type { MessageBus } from '@invoker/transport';
 import type { TaskState } from '@invoker/workflow-core';
 
+import {
+  resolveHeadlessTarget,
+  type HeadlessTargetLookup,
+} from './headless-command-classification.js';
+import { resolveInvokerHomeRoot } from './delete-all-snapshot.js';
 import { createDelegatedTaskFeed, trackWorkflow } from './headless-watch.js';
 
 type DelegateTrackingOptions = {
@@ -39,16 +45,34 @@ export async function tryDelegateResume(
   );
 }
 
-export function delegationTimeoutMs(args: string[]): number {
+function usesExtendedDelegationTimeout(command: string): boolean {
+  return command === 'rebase' || command === 'rebase-and-retry' || command === 'restart';
+}
+
+export function delegationTimeoutMs(
+  args: string[],
+  targetLookup: HeadlessTargetLookup,
+): number {
   const command = args[0] ?? '';
-  const target = args[1] ?? '';
-  if (
-    (command === 'rebase' || command === 'rebase-and-retry' || command === 'restart')
-    && /^wf-[^/]+$/.test(target)
-  ) {
+  if (!usesExtendedDelegationTimeout(command)) {
+    return 5_000;
+  }
+
+  const resolvedTarget = resolveHeadlessTarget(args[1], targetLookup);
+  if (resolvedTarget.kind === 'workflow') {
     return 60_000;
   }
   return 5_000;
+}
+
+export async function resolveDelegationTimeoutMs(args: string[]): Promise<number> {
+  const dbPath = joinPath(resolveInvokerHomeRoot(), 'invoker.db');
+  const targetLookup = await SQLiteAdapter.create(dbPath, { readOnly: true });
+  try {
+    return delegationTimeoutMs(args, targetLookup);
+  } finally {
+    targetLookup.close();
+  }
 }
 
 export async function tryDelegateExec(
@@ -56,13 +80,14 @@ export async function tryDelegateExec(
   messageBus: MessageBus,
   waitForApproval?: boolean,
   noTrack?: boolean,
-  timeoutMs: number = delegationTimeoutMs(args),
+  timeoutMs?: number,
 ): Promise<boolean> {
+  const resolvedTimeoutMs = timeoutMs ?? await resolveDelegationTimeoutMs(args);
   return tryDelegate(
     'headless.exec',
     { args, waitForApproval, noTrack },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs },
+    { waitForApproval, noTrack, timeoutMs: resolvedTimeoutMs },
   );
 }
 
