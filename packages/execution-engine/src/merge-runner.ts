@@ -161,7 +161,7 @@ export interface MergeRunnerHost {
   detectDefaultBranch(): Promise<string>;
   gitLogMessage(commitHash: string, cwd?: string): Promise<string>;
   gitDiffStat(branch: string, cwd?: string): Promise<string>;
-  startPrPolling(taskId: string, reviewId: string, workflowId: string): void;
+  startPrPolling(taskId: string): void;
   executeTasks(tasks: TaskState[]): Promise<void>;
   buildMergeSummary(workflowId: string): Promise<string>;
   runVisualProofCapture?(baseBranch: string, featureBranch: string, slug: string, repoUrl?: string): Promise<string | undefined>;
@@ -474,7 +474,7 @@ export async function executeMergeNodeImpl(
           },
         });
         await startReviewReadyDependents(host);
-        host.startPrPolling(task.id, result.identifier, workflowId!);
+        host.startPrPolling(task.id);
         return;
       }
       response = {
@@ -933,7 +933,7 @@ export async function publishAfterFixImpl(
         },
       });
       await startReviewReadyDependents(host);
-      host.startPrPolling(task.id, result.identifier, workflowId!);
+      host.startPrPolling(task.id);
       return;
     }
 

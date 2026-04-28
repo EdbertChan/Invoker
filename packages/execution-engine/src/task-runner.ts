@@ -1404,11 +1404,11 @@ export class TaskRunner {
       if (
         task.config.isMergeNode &&
         (task.status === 'review_ready' || task.status === 'awaiting_approval') &&
-        task.execution.reviewId &&
+        (task.execution.reviewUrl || task.execution.reviewId) &&
         !this.activePrPollers.has(task.id)
       ) {
-        this.logger.info(`[merge-gate] Resuming PR polling for ${task.id} (PR ${task.execution.reviewId})`);
-        this.startPrPolling(task.id, task.execution.reviewId, task.config.workflowId!);
+        this.logger.info(`[merge-gate] Resuming PR polling for ${task.id} (${this.getReviewPollLabel(task)})`);
+        this.startPrPolling(task.id);
       }
     }
   }
@@ -1419,22 +1419,19 @@ export class TaskRunner {
       if (
         task.config.isMergeNode &&
         (task.status === 'review_ready' || task.status === 'awaiting_approval') &&
-        task.execution.reviewId
+        (task.execution.reviewUrl || task.execution.reviewId)
       ) {
         try {
-          const status = await this.mergeGateProvider.checkApproval({
-            identifier: task.execution.reviewId,
-            cwd: this.cwd,
-          });
+          const status = await this.mergeGateProvider.checkApproval(this.getReviewPollTarget(task));
           this.persistence.updateTask(task.id, {
             execution: { reviewStatus: status.statusText },
           });
           if (status.approved) {
-            this.logger.info(`[merge-gate] PR ${task.execution.reviewId} approved (refresh), completing merge gate`);
+            this.logger.info(`[merge-gate] ${this.getReviewPollLabel(task)} approved (refresh), completing merge gate`);
             this.stopPrPolling(task.id);
             await this.orchestrator.approve(task.id);
           } else if (status.rejected) {
-            this.logger.info(`[merge-gate] PR ${task.execution.reviewId} rejected (refresh): ${status.statusText}`);
+            this.logger.info(`[merge-gate] ${this.getReviewPollLabel(task)} rejected (refresh): ${status.statusText}`);
             this.stopPrPolling(task.id);
           }
         } catch (err) {
@@ -1444,15 +1441,17 @@ export class TaskRunner {
     }
   }
 
-  /** @internal */ startPrPolling(taskId: string, reviewId: string, workflowId: string): void {
+  /** @internal */ startPrPolling(taskId: string): void {
     const pollIntervalMs = 30_000;
     const interval = setInterval(async () => {
       try {
         if (!this.mergeGateProvider) return;
-        const status = await this.mergeGateProvider.checkApproval({
-          identifier: reviewId,
-          cwd: this.cwd,
-        });
+        const task = this.orchestrator.getTask(taskId);
+        if (!task || (!task.execution.reviewUrl && !task.execution.reviewId)) {
+          this.stopPrPolling(taskId);
+          return;
+        }
+        const status = await this.mergeGateProvider.checkApproval(this.getReviewPollTarget(task));
 
         // Update PR status on task
         this.persistence.updateTask(taskId, {
@@ -1460,11 +1459,11 @@ export class TaskRunner {
         });
 
         if (status.approved) {
-          this.logger.info(`[merge-gate] PR ${reviewId} approved, completing merge gate`);
+          this.logger.info(`[merge-gate] ${this.getReviewPollLabel(task)} approved, completing merge gate`);
           this.stopPrPolling(taskId);
           await this.orchestrator.approve(taskId);
         } else if (status.rejected) {
-          this.logger.info(`[merge-gate] PR ${reviewId} rejected: ${status.statusText}`);
+          this.logger.info(`[merge-gate] ${this.getReviewPollLabel(task)} rejected: ${status.statusText}`);
           this.stopPrPolling(taskId);
           // Leave in review_ready/awaiting_approval — user can retry
         }
@@ -1490,30 +1489,44 @@ export class TaskRunner {
 
     // Read reviewId from persistence
     const task = this.orchestrator.getTask(taskId);
-    const reviewId = task?.execution.reviewId;
-    if (!reviewId) return;
+    if (!task || (!task.execution.reviewUrl && !task.execution.reviewId)) return;
 
     try {
-      const status = await this.mergeGateProvider.checkApproval({
-        identifier: reviewId,
-        cwd: this.cwd,
-      });
+      const status = await this.mergeGateProvider.checkApproval(this.getReviewPollTarget(task));
 
       this.persistence.updateTask(taskId, {
         execution: { reviewStatus: status.statusText },
       });
 
       if (status.approved) {
-        this.logger.info(`[merge-gate] PR ${reviewId} approved (manual check), completing merge gate`);
+        this.logger.info(`[merge-gate] ${this.getReviewPollLabel(task)} approved (manual check), completing merge gate`);
         this.stopPrPolling(taskId);
         await this.orchestrator.approve(taskId);
       } else if (status.rejected) {
-        this.logger.info(`[merge-gate] PR ${reviewId} rejected (manual check): ${status.statusText}`);
+        this.logger.info(`[merge-gate] ${this.getReviewPollLabel(task)} rejected (manual check): ${status.statusText}`);
         this.stopPrPolling(taskId);
       }
     } catch (err) {
       this.logger.error(`[merge-gate] Manual PR check error for ${taskId}`, { err });
     }
+  }
+
+  private getReviewPollTarget(task: TaskState): {
+    reviewUrl?: string;
+    reviewId?: string;
+    workspacePath?: string;
+    fallbackCwd: string;
+  } {
+    return {
+      reviewUrl: task.execution.reviewUrl,
+      reviewId: task.execution.reviewId,
+      workspacePath: task.execution.workspacePath,
+      fallbackCwd: this.cwd,
+    };
+  }
+
+  private getReviewPollLabel(task: TaskState): string {
+    return task.execution.reviewUrl ?? task.execution.reviewId ?? `review for ${task.id}`;
   }
 
   spawnAgentFix(
