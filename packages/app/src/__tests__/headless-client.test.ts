@@ -57,6 +57,100 @@ describe('headless-client', () => {
     expect(ensureStandaloneOwner).toHaveBeenCalledTimes(1);
   });
 
+  // --- Regression: standalone-owner scope for headless.run ---
+
+  it('delegates headless.run to an existing standalone owner', async () => {
+    const bus = new LocalBus();
+    const runHandler = vi.fn(async () => ({ ok: true }));
+    bus.onRequest('headless.run', runHandler);
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
+
+    const exitCode = await runHeadlessClientCommand(['run', '/tmp/plan.yaml', '--no-track'], {
+      messageBus: bus,
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      runElectronHeadless: vi.fn(async () => 0),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(runHandler).toHaveBeenCalledTimes(1);
+    expect(runHandler).toHaveBeenCalledWith(expect.objectContaining({ planPath: expect.stringContaining('plan.yaml') }));
+  });
+
+  it('does not delegate headless.run to a GUI owner and bootstraps standalone instead', async () => {
+    const bus = new LocalBus();
+    const guiRunHandler = vi.fn(async () => ({ ok: true }));
+    const standaloneRunHandler = vi.fn(async () => ({ ok: true }));
+    let ownerMode: 'gui' | 'standalone' = 'gui';
+
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: ownerMode }));
+    bus.onRequest('headless.run', async (payload) => {
+      if (ownerMode === 'gui') return guiRunHandler(payload);
+      return standaloneRunHandler(payload);
+    });
+
+    const ensureStandaloneOwner = vi.fn(async () => {
+      ownerMode = 'standalone';
+    });
+
+    const exitCode = await runHeadlessClientCommand(['run', '/tmp/plan.yaml', '--no-track'], {
+      messageBus: bus,
+      ensureStandaloneOwner,
+      runElectronHeadless: vi.fn(async () => 0),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(guiRunHandler).not.toHaveBeenCalled();
+    expect(standaloneRunHandler).toHaveBeenCalledTimes(1);
+    expect(ensureStandaloneOwner).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Regression: standalone-owner scope for headless.resume ---
+
+  it('delegates headless.resume to an existing standalone owner', async () => {
+    const bus = new LocalBus();
+    const resumeHandler = vi.fn(async () => ({ ok: true }));
+    bus.onRequest('headless.resume', resumeHandler);
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
+
+    const exitCode = await runHeadlessClientCommand(['resume', 'wf-42', '--no-track'], {
+      messageBus: bus,
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      runElectronHeadless: vi.fn(async () => 0),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(resumeHandler).toHaveBeenCalledTimes(1);
+    expect(resumeHandler).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-42' }));
+  });
+
+  it('does not delegate headless.resume to a GUI owner and bootstraps standalone instead', async () => {
+    const bus = new LocalBus();
+    const guiResumeHandler = vi.fn(async () => ({ ok: true }));
+    const standaloneResumeHandler = vi.fn(async () => ({ ok: true }));
+    let ownerMode: 'gui' | 'standalone' = 'gui';
+
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: ownerMode }));
+    bus.onRequest('headless.resume', async (payload) => {
+      if (ownerMode === 'gui') return guiResumeHandler(payload);
+      return standaloneResumeHandler(payload);
+    });
+
+    const ensureStandaloneOwner = vi.fn(async () => {
+      ownerMode = 'standalone';
+    });
+
+    const exitCode = await runHeadlessClientCommand(['resume', 'wf-42', '--no-track'], {
+      messageBus: bus,
+      ensureStandaloneOwner,
+      runElectronHeadless: vi.fn(async () => 0),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(guiResumeHandler).not.toHaveBeenCalled();
+    expect(standaloneResumeHandler).toHaveBeenCalledTimes(1);
+    expect(ensureStandaloneOwner).toHaveBeenCalledTimes(1);
+  });
+
   it('bootstraps a standalone owner once when no owner is present, then delegates', async () => {
     const bus = new LocalBus();
     const ownerHandler = vi.fn(async () => ({ ok: true }));
