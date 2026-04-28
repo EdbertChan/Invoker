@@ -297,6 +297,10 @@ export async function runHeadlessClientCommand(
       return resolvedExitCode();
     }
   } else if (isGuiOwner(owner)) {
+    // GUI owners handle the same mutation IPC as standalone owners, but we use
+    // a shorter timeout here so headless CLI callers do not wait too long on a
+    // busy or interactive GUI process before falling back to standalone-owner
+    // bootstrap.
     if (await delegateMutation(args, messageBus, waitForApproval, noTrack, GUI_DELEGATION_TIMEOUT_MS)) {
       return resolvedExitCode();
     }
