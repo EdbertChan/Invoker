@@ -1952,8 +1952,13 @@ export class Orchestrator {
       `[agent-session-trace] retryTask: before writeAndSync task="${id}" agentSessionId=${t0.execution.agentSessionId ?? 'null'} ` +
         '(reset clears agentSessionId/containerId; branch/workspacePath unchanged)',
     );
+    const retryScopeIds = this.collectSubgraphTaskIds([id]);
     const { affectedIds } = this.resetSubgraphToPending([id], resetChanges, {
-      forceResetIds: new Set([id]),
+      // Retry now matches recreateTask reset timing/scope: every task in
+      // the invalidated subgraph gets a fresh pending-state reset
+      // immediately, while retry-specific lineage fields remain intact via
+      // the narrower reset payload above.
+      forceResetIds: new Set(retryScopeIds),
     });
     const afterRt = this.stateGetTask(id)!;
     console.log(
