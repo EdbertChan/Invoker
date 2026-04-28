@@ -2523,26 +2523,38 @@ export class Orchestrator {
     return this.recreateTask(taskId);
   }
 
-    editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
+  /**
+   * Edit a task's prompt, fork its downstream subtree, and restart it.
+   */
+  editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
     if (task.config.isMergeNode) throw new Error(`Cannot edit merge node ${taskId}`);
-
     if (task.status === 'running' || task.status === 'fixing_with_ai') {
       this.cancelTask(taskId);
     }
-
-    const promptChanges: TaskStateChanges = { config: { prompt: newPrompt } };
-    this.writeAndSync(taskId, promptChanges);
-    const promptDelta: TaskDelta = { type: 'updated', taskId, changes: promptChanges };
-    this.persistence.logEvent?.(taskId, 'task.updated', promptChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, promptDelta);
-
+    const changes: TaskStateChanges = { config: { prompt: newPrompt } };
+    this.writeAndSync(taskId, changes);
+    const delta: TaskDelta = { type: 'updated', taskId, changes };
+    this.persistence.logEvent?.(taskId, 'task.updated', changes);
+    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    // Supersede current attempt (best-effort)
+    try {
+      const attempts = this.persistence.loadAttempts(taskId);
+      const current = attempts[attempts.length - 1];
+      if (current && (current.status === 'running' || current.status === 'pending')) {
+        this.taskRepository.updateAttempt(current.id, { status: 'superseded' });
+      }
+      const freshAttempt = createAttempt(taskId, {
+        supersedesAttemptId: current?.id,
+      });
+      this.taskRepository.saveAttempt(freshAttempt);
+    } catch { /* best effort */ }
     return this.recreateTask(taskId);
   }
 
-    editTaskType(taskId: string, executorType: string, remoteTargetId?: string): TaskState[] {
+  editTaskType(taskId: string, executorType: string, remoteTargetId?: string): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
