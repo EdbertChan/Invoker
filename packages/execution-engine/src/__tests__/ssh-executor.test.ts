@@ -338,17 +338,96 @@ branch refs/heads/experiment/test-task-oldhash
         ].join('\n');
       }
       if (script.includes('printf %s "$HOME"')) return '/home/testuser';
+      if (phase === 'cleanup_worktree') {
+        cleanupScript = script;
+        return '';
+      }
       if (script.includes('worktree list --porcelain')) {
         return `worktree ${ownerPath}
 HEAD deadbeef
 branch refs/heads/${targetBranch}
 `;
       }
+      if (script.includes('rev-parse --abbrev-ref HEAD')) return 'not-the-target-branch\n';
+      return '';
+    });
+
+    const setupTaskBranchSpy = vi.spyOn(ssh, 'setupTaskBranch').mockResolvedValue(undefined);
+    vi.spyOn(ssh, 'spawnSshRemoteStdin').mockImplementation(
+      (_executionId: string, _request: any, handle: any) => handle,
+    );
+
+    const req = makeRequest({
+      actionType: 'command',
+      actionId: 'test-task-conflict',
+      inputs: {
+        command: 'pnpm test',
+        description: 'run tests',
+        repoUrl: 'git@github.com:owner/repo.git',
+      },
+    });
+
+    try {
+      await ssh.start(req);
+
+      const encodedPaths = cleanupScript.match(/WORKTREES_B64="([^"]+)"/)?.[1];
+      const decodedPaths = Buffer.from(encodedPaths ?? '', 'base64').toString('utf8');
+      expect(decodedPaths).toContain(ownerPath);
+      expect(setupTaskBranchSpy).toHaveBeenCalled();
+    } finally {
+      if (prevCleanup === undefined) {
+        delete process.env.INVOKER_ENABLE_WORKSPACE_CLEANUP;
+      } else {
+        process.env.INVOKER_ENABLE_WORKSPACE_CLEANUP = prevCleanup;
+      }
+    }
+  });
+
+  it('cleans up a stale exact-branch owner when HEAD probing fails even with cleanup disabled', async () => {
+    const prevCleanup = process.env.INVOKER_ENABLE_WORKSPACE_CLEANUP;
+    delete process.env.INVOKER_ENABLE_WORKSPACE_CLEANUP;
+
+    const ssh = new SshExecutor({
+      host: 'localhost',
+      user: 'testuser',
+      sshKeyPath: '/dev/null',
+      managedWorkspaces: true,
+    }) as any;
+
+    const repoHash = computeRepoUrlHash('git@github.com:owner/repo.git');
+    const baseHead = 'abc123def456abc123def456abc123def456abc1';
+    const branchHash = computeContentHash(
+      'test-task-conflict',
+      'pnpm test',
+      undefined,
+      [],
+      baseHead,
+    );
+    const targetBranch = buildExperimentBranchName('test-task-conflict', '', branchHash);
+    const ownerPath = `/home/testuser/.invoker/worktrees/${repoHash}/stale-owner-${branchHash}`;
+    let cleanupScript = '';
+
+    vi.spyOn(ssh, 'execRemoteCapture').mockImplementation(async (script: string, phase?: string) => {
+      if (script.includes('__INVOKER_BASE_REF__=')) {
+        return [
+          '__INVOKER_BASE_REF__=origin/main',
+          `__INVOKER_BASE_HEAD__=${baseHead}`,
+        ].join('\n');
+      }
+      if (script.includes('printf %s "$HOME"')) return '/home/testuser';
       if (phase === 'cleanup_worktree') {
         cleanupScript = script;
         return '';
       }
-      if (script.includes('rev-parse --abbrev-ref HEAD')) return 'not-the-target-branch\n';
+      if (script.includes('worktree list --porcelain')) {
+        return `worktree ${ownerPath}
+HEAD deadbeef
+branch refs/heads/${targetBranch}
+`;
+      }
+      if (script.includes('rev-parse --abbrev-ref HEAD')) {
+        throw createSshRemoteScriptError(1, '', `bash: line 1: cd: ${ownerPath}: No such file or directory\n`);
+      }
       return '';
     });
 

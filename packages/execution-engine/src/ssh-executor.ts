@@ -373,7 +373,13 @@ echo ${payloadB64} | base64 -d | bash -se
           headMatchesTargetBranch: abbrevRefMatchesBranch(head, experimentBranch),
         };
       } catch {
-        exactBranchCandidate = undefined;
+        // If the branch still appears in `git worktree list --porcelain` but we
+        // cannot read its HEAD, treat it as a stale owner that must be cleaned
+        // up before recreating the canonical branch/worktree pair.
+        exactBranchCandidate = {
+          path: reuseAbs,
+          headMatchesTargetBranch: false,
+        };
       }
     }
 
@@ -397,11 +403,10 @@ echo ${payloadB64} | base64 -d | bash -se
       case 'rename_reuse':
         throw new Error('SSH managed workspaces do not support same-task different-branch rename reuse');
       case 'recreate': {
-        // Workspace cleanup is gated by INVOKER_ENABLE_WORKSPACE_CLEANUP. With
-        // attemptId mixed into the branch hash, the canonical worktree path
-        // for the new attempt has never existed, so cleanup is unnecessary
-        // for correctness. Re-enable the env flag if you need disk hygiene.
-        if (isWorkspaceCleanupEnabled()) {
+        // General workspace cleanup remains opt-in for disk hygiene, but exact
+        // branch-owner collisions must always be reconciled for correctness.
+        const needsOwnerCleanup = !!exactBranchCandidate;
+        if (isWorkspaceCleanupEnabled() || needsOwnerCleanup) {
           const cleanupScript = buildWorktreeCleanupScript({
             remoteClone,
             worktreePaths: worktreePlan.cleanupPaths,

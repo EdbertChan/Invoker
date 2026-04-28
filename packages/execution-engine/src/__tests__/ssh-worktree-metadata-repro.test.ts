@@ -74,6 +74,41 @@ describe('SSH worktree metadata repro', () => {
     }).toThrow(new RegExp(`already used by worktree at '${realOldPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
   });
 
+  it('reproduces a same-branch relaunch failure when the worktree dir is deleted without clearing git admin state', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ssh-worktree-race-repro-'));
+    tempRoots.push(root);
+
+    const repoDir = join(root, 'repo');
+    const worktreePath = join(root, 'experiment-wf-1-run-app-retry-tests-g0.t5.aaaa-12345678');
+    const branch = 'experiment/wf-1/run-app-retry-tests/g0.t5.aaaa-12345678';
+
+    execSync(`mkdir -p ${JSON.stringify(repoDir)}`);
+    git('git init -b master', repoDir);
+    git('git config user.email "test@example.com"', repoDir);
+    git('git config user.name "Test User"', repoDir);
+    writeFileSync(join(repoDir, 'README.md'), 'seed\n');
+    git('git add README.md', repoDir);
+    git('git commit -m "seed"', repoDir);
+
+    // First launch claims the branch and creates the worktree.
+    git(`git worktree add -B ${JSON.stringify(branch)} ${JSON.stringify(worktreePath)} master`, repoDir);
+    expect(existsSync(worktreePath)).toBe(true);
+
+    // Raw directory deletion leaves git's worktree admin entry behind.
+    rmSync(worktreePath, { recursive: true, force: true });
+    expect(existsSync(worktreePath)).toBe(false);
+
+    const porcelain = git('git worktree list --porcelain', repoDir);
+    expect(porcelain).toContain(`branch refs/heads/${branch}`);
+    expect(porcelain).toContain(`worktree ${worktreePath}`);
+
+    // Second launch of the same task/branch now collides with the stale admin
+    // registration, even though the filesystem path is gone.
+    expect(() => {
+      git(`git worktree add -B ${JSON.stringify(branch)} ${JSON.stringify(worktreePath)} master`, repoDir);
+    }).toThrow(new RegExp(`already used by worktree at '${worktreePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+  });
+
   it('proves TaskRunner should persist the owning worktree path on SSH startup failure', async () => {
     const ownerPath = '/home/invoker/.invoker/worktrees/049de5b865cc/experiment-wf-1-test-execution-engine-bc7a0b71';
     const branch = 'experiment/wf-1/test-execution-engine-b68b146f';
