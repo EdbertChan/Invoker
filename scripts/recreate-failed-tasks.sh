@@ -5,9 +5,6 @@
 # selection purposes, and recreate the pending/failed tasks that are closest to
 # the start of the DAG: tasks whose dependencies are all completed.
 #
-# This keeps the script intentionally explicit rather than DRY with the retry
-# scripts.
-#
 # Usage:
 #   bash scripts/recreate-failed-tasks.sh
 #   bash scripts/recreate-failed-tasks.sh --dry-run
@@ -17,10 +14,8 @@
 #   bash scripts/recreate-failed-tasks.sh --follow
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
+# shellcheck source=lib-headless-bulk.sh
+source "$(dirname "$0")/lib-headless-bulk.sh"
 
 DRY_RUN=false
 STATUS_FILTER=""
@@ -74,30 +69,6 @@ if [[ -n "$PARALLELISM" ]] && ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid --parallel value: $PARALLELISM (expected integer >= 1)" >&2
   exit 1
 fi
-
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  # shellcheck disable=SC2086
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-headless_query() {
-  # shellcheck disable=SC2086
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-headless_mutation() {
-  node "$IPC_HELPER" exec -- "$@"
-}
-
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
 
 QUERY_ARGS=(query workflows --output label)
 if [[ -n "$STATUS_FILTER" ]]; then
@@ -233,82 +204,53 @@ launch_one_workflow() {
 
 FAILED=0
 SUCCEEDED=0
-IDX=0
+LOG_DIR="$(mktemp -d -t recreate-failed-tasks-logs.XXXXXX)"
+
+# Callback for bulk_follow: wraps launch_one_workflow with log management.
+process_one_workflow() {
+  local wf_id="$1"
+  local results_file="$2"
+  local log_file="$LOG_DIR/${wf_id}.log"
+
+  if launch_one_workflow "$wf_id" "$log_file"; then
+    printf "%s\tSUCCEEDED\n" "$wf_id" >> "$results_file"
+  else
+    printf "%s\tFAILED\n" "$wf_id" >> "$results_file"
+  fi
+  if $FOLLOW; then
+    cat "$log_file"
+  fi
+}
 
 if $FOLLOW; then
-  RESULTS_FILE="$(mktemp -t recreate-failed-tasks-results.XXXXXX)"
-  LOG_DIR="$(mktemp -d -t recreate-failed-tasks-logs.XXXXXX)"
-  PIDS=()
-
+  IDX=0
   while IFS= read -r WF_ID; do
     [[ -z "$WF_ID" ]] && continue
     IDX=$((IDX + 1))
     echo "[queue $IDX/$WORKFLOW_COUNT] $WF_ID"
-    log_file="$LOG_DIR/${WF_ID}.log"
-    (
-      if launch_one_workflow "$WF_ID" "$log_file"; then
-        printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULTS_FILE"
-      else
-        printf "%s\tFAILED\n" "$WF_ID" >> "$RESULTS_FILE"
-      fi
-      cat "$log_file"
-    ) &
-    PIDS+=("$!")
-
-    while [[ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]]; do
-      sleep 0.2
-    done
   done <<< "$WORKFLOW_IDS"
 
-  for pid in "${PIDS[@]}"; do
-    wait "$pid" || true
-  done
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
-else
-  LOG_DIR="$(mktemp -d -t recreate-failed-tasks-logs.XXXXXX)"
-  DISPATCHED=0
   RESULTS_FILE="$(mktemp -t recreate-failed-tasks-results.XXXXXX)"
-  PIDS=()
+  bulk_follow "$PARALLELISM" process_one_workflow "$RESULTS_FILE" "$WORKFLOW_IDS"
+  count_results "$RESULTS_FILE"
 
+  SUCCEEDED=$_BULK_SUCCEEDED
+  FAILED=$_BULK_FAILED
+else
+  RESULTS_FILE="$(mktemp -t recreate-failed-tasks-results.XXXXXX)"
+
+  IDX=0
   while IFS= read -r WF_ID; do
     [[ -z "$WF_ID" ]] && continue
     IDX=$((IDX + 1))
-    log_file="$LOG_DIR/${WF_ID}.log"
-    (
-      if launch_one_workflow "$WF_ID" "$log_file"; then
-        printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULTS_FILE"
-      else
-        printf "%s\tFAILED\n" "$WF_ID" >> "$RESULTS_FILE"
-      fi
-    ) &
-    PIDS+=("$!")
-    echo "[dispatch $IDX/$WORKFLOW_COUNT] $WF_ID log=$log_file"
-
-    while [[ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]]; do
-      sleep 0.2
-    done
+    echo "[dispatch $IDX/$WORKFLOW_COUNT] $WF_ID log=$LOG_DIR/${WF_ID}.log"
   done <<< "$WORKFLOW_IDS"
 
-  for pid in "${PIDS[@]}"; do
-    wait "$pid" || true
-  done
+  bulk_follow "$PARALLELISM" process_one_workflow "$RESULTS_FILE" "$WORKFLOW_IDS"
+  count_results "$RESULTS_FILE"
 
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED)
-        DISPATCHED=$((DISPATCHED + 1))
-        ;;
-      FAILED)
-        FAILED=$((FAILED + 1))
-        ;;
-    esac
-  done < "$RESULTS_FILE"
+  DISPATCHED=$_BULK_SUCCEEDED
+  FAILED=$_BULK_FAILED
 fi
 
 echo "---"
