@@ -257,12 +257,12 @@ while IFS= read -r WT; do
   [ -z "$WT" ] && continue
   ${bashNormalizeTildePath('WT')}
   mkdir -p "$(dirname "$WT")"
-  if [ -e "$WT" ]; then
+  if git -C "$CLONE" worktree list --porcelain | grep -Fq "worktree $WT"; then
     echo "[SshGitExec] Removing stale worktree path: $WT"
     git -C "$CLONE" worktree remove --force "$WT" 2>/dev/null || true
-    rm -rf "$WT"
     git -C "$CLONE" worktree prune 2>/dev/null || true
   fi
+  rm -rf "$WT"
 done < <(echo "$WORKTREES_B64" | base64 -d)
 `;
 }
