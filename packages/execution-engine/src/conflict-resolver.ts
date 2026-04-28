@@ -50,6 +50,7 @@ export interface ConflictResolverHost {
 }
 
 const DEFAULT_MAX_INLINE_PROMPT_BYTES = 64 * 1024;
+const REMOTE_FIX_WAIT_LOG_INTERVAL_MS = 30_000;
 const MAX_INLINE_PROMPT_BYTES = (() => {
   const raw = process.env.INVOKER_MAX_INLINE_AGENT_PROMPT_BYTES;
   if (!raw) return DEFAULT_MAX_INLINE_PROMPT_BYTES;
@@ -466,8 +467,23 @@ export async function fixWithAgentImpl(
     if (!target) {
       throw new Error(`No remote target config for "${task.config.remoteTargetId}" — cannot fix on remote`);
     }
+    const resolveStartedAt = Date.now();
+    host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
+      phase: 'fix-with-agent-remote-path-resolve-start',
+      branch: task.execution.branch ?? null,
+      workspacePath,
+      remoteTargetId: task.config.remoteTargetId,
+    });
     const resolvedWorkspacePath =
       (await resolveRemoteBranchOwnerPath(task.execution.branch, workspacePath, target)) ?? workspacePath;
+    host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
+      phase: 'fix-with-agent-remote-path-resolve-finished',
+      branch: task.execution.branch ?? null,
+      workspacePath,
+      resolvedWorkspacePath,
+      repaired: resolvedWorkspacePath !== workspacePath,
+      durationMs: Date.now() - resolveStartedAt,
+    });
     if (resolvedWorkspacePath !== workspacePath) {
       host.persistence.updateTask(taskId, {
         execution: {
@@ -481,13 +497,61 @@ export async function fixWithAgentImpl(
       });
     }
     const remoteAgentBin = agentName ?? 'claude';
-    const { stdout: output, sessionId } = await spawnRemoteAgentFixImpl(
-      prompt,
-      resolvedWorkspacePath,
-      target,
-      agentName,
-      host.agentRegistry,
-    );
+    const remoteSpawnStartedAt = Date.now();
+    host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
+      phase: 'fix-with-agent-spawn-remote-start',
+      agent: remoteAgentBin,
+      remoteTargetId: task.config.remoteTargetId,
+      remoteCwd: resolvedWorkspacePath,
+      promptBytes: promptByteLength(prompt),
+    });
+    let output: string;
+    let sessionId: string;
+    const remoteWaitTimer = setInterval(() => {
+      host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
+        phase: 'fix-with-agent-spawn-remote-waiting',
+        agent: remoteAgentBin,
+        remoteTargetId: task.config.remoteTargetId,
+        remoteCwd: resolvedWorkspacePath,
+        elapsedMs: Date.now() - remoteSpawnStartedAt,
+      });
+    }, REMOTE_FIX_WAIT_LOG_INTERVAL_MS);
+    try {
+      ({ stdout: output, sessionId } = await spawnRemoteAgentFixImpl(
+        prompt,
+        resolvedWorkspacePath,
+        target,
+        agentName,
+        host.agentRegistry,
+      ));
+    } catch (err: any) {
+      clearInterval(remoteWaitTimer);
+      host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
+        phase: 'fix-with-agent-spawn-remote-failed',
+        agent: remoteAgentBin,
+        remoteTargetId: task.config.remoteTargetId,
+        remoteCwd: resolvedWorkspacePath,
+        durationMs: Date.now() - remoteSpawnStartedAt,
+        errorType: err instanceof Error ? err.name : typeof err,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        exitCode: typeof err?.exitCode === 'number' ? err.exitCode : null,
+        cmd: typeof err?.cmd === 'string' ? err.cmd : null,
+        args: Array.isArray(err?.args) ? err.args : null,
+        stdoutTail: tailText(err?.stdoutTail ?? err?.stdout),
+        stderrTail: tailText(err?.stderrTail ?? err?.stderr),
+      });
+      throw err;
+    }
+    clearInterval(remoteWaitTimer);
+    host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
+      phase: 'fix-with-agent-spawn-remote-finished',
+      agent: remoteAgentBin,
+      remoteTargetId: task.config.remoteTargetId,
+      remoteCwd: resolvedWorkspacePath,
+      durationMs: Date.now() - remoteSpawnStartedAt,
+      stdoutLength: output.length,
+      sessionId,
+    });
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${remoteAgentBin} (remote)] Output:\n${output}`);
     }
@@ -535,7 +599,22 @@ export async function fixWithAgentImpl(
       workspacePath: cwd,
       agent: agentLabel,
     });
-    const { stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName);
+    const localSpawnStartedAt = Date.now();
+    const localWaitTimer = setInterval(() => {
+      host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
+        phase: 'fix-with-agent-spawn-local-waiting',
+        workspacePath: cwd,
+        agent: agentLabel,
+        elapsedMs: Date.now() - localSpawnStartedAt,
+      });
+    }, REMOTE_FIX_WAIT_LOG_INTERVAL_MS);
+    let output: string;
+    let sessionId: string;
+    try {
+      ({ stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName));
+    } finally {
+      clearInterval(localWaitTimer);
+    }
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${agentLabel}] Output:\n${output}`);
     }
@@ -555,6 +634,13 @@ export async function fixWithAgentImpl(
       agent: agentLabel,
     });
   } catch (err: any) {
+    host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
+      phase: 'fix-with-agent-spawn-local-failed',
+      workspacePath: cwd,
+      agent: agentLabel,
+      errorType: err instanceof Error ? err.name : typeof err,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
     // Persist session ID even on failure so the session can be audited
     const failedSessionId = err?.sessionId as string | undefined;
     if (failedSessionId) {

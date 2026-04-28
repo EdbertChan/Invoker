@@ -1250,18 +1250,63 @@ if (isHeadless) {
       });
       logAutoFixDebug(taskId, 'dispatch-attempt-bumped', { attemptsBefore, attemptsAfter });
     }
+    logAutoFixDebug(taskId, 'execute-fix-begin-conflict-resolution-start', {
+      agent: agentName ?? 'claude',
+      source,
+    });
     const { savedError } = orchestrator.beginConflictResolution(taskId);
+    logAutoFixDebug(taskId, 'execute-fix-begin-conflict-resolution-finished', {
+      agent: agentName ?? 'claude',
+      source,
+      savedErrorLength: savedError.length,
+    });
     try {
+      logAutoFixDebug(taskId, 'execute-fix-read-output-start', {
+        agent: agentName ?? 'claude',
+        source,
+      });
       const output = persistence.getTaskOutput(taskId);
+      logAutoFixDebug(taskId, 'execute-fix-read-output-finished', {
+        agent: agentName ?? 'claude',
+        source,
+        outputLength: output.length,
+      });
+      const fixStartedAt = Date.now();
+      logAutoFixDebug(taskId, 'execute-fix-runner-start', {
+        agent: agentName ?? 'claude',
+        source,
+      });
       await requireTaskExecutor().fixWithAgent(taskId, output, agentName, savedError);
+      logAutoFixDebug(taskId, 'execute-fix-runner-finished', {
+        agent: agentName ?? 'claude',
+        source,
+        durationMs: Date.now() - fixStartedAt,
+      });
+      const finalizeStartedAt = Date.now();
+      logAutoFixDebug(taskId, 'execute-fix-finalize-start', {
+        agent: agentName ?? 'claude',
+        source,
+      });
       const result = await finalizeAppliedFix(taskId, savedError, {
         orchestrator,
         taskExecutor: requireTaskExecutor(),
         autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
       });
+      logAutoFixDebug(taskId, 'execute-fix-finalize-finished', {
+        agent: agentName ?? 'claude',
+        source,
+        durationMs: Date.now() - finalizeStartedAt,
+        startedCount: result.started.length,
+        startedStatuses: result.started.map((task) => task.status),
+      });
       return result.started;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      logAutoFixDebug(taskId, 'execute-fix-failed', {
+        agent: agentName ?? 'claude',
+        source,
+        error: err instanceof Error ? err.stack ?? err.message : String(err),
+      });
       const errorLabel = source === 'auto-fix' ? 'Auto-fix' : `Fix with ${agentName ?? 'Claude'}`;
       persistence.appendTaskOutput(taskId, `\n[${errorLabel}] Failed: ${msg}`);
       orchestrator.revertConflictResolution(taskId, savedError, msg);
