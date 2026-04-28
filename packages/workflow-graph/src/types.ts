@@ -128,7 +128,6 @@ export interface TaskExecution {
   readonly pendingFixError?: string;
   readonly isFixingWithAI?: boolean;
   readonly reviewUrl?: string;
-  readonly reviewId?: string;
   readonly reviewStatus?: string;
   readonly reviewProviderId?: string;
   readonly phase?: TaskRunPhase;
