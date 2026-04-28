@@ -2008,9 +2008,9 @@ export class Orchestrator {
   }
 
   /**
-   * Incremental retry: reset only failed/stuck tasks to pending, preserve completed.
-   * Merge nodes are always reset (they depend on all leaf tasks).
-   * After reset, startExecution() finds newly-ready tasks via getReadyNodes().
+   * Workflow-scoped retry now resets the entire workflow immediately like
+   * recreateWorkflow, but preserves retry lineage metadata such as
+   * branch/commit/workspacePath for every task.
    */
   retryWorkflow(workflowId: string): TaskState[] {
     const retryStartMs = Date.now();
@@ -2034,16 +2034,6 @@ export class Orchestrator {
       (t) => t.config.workflowId === workflowId,
     );
 
-    const retryStatuses = new Set([
-      'failed',
-      'needs_input',
-      'blocked',
-      'stale',
-      'fixing_with_ai',
-      'awaiting_approval',
-      'review_ready',
-    ]);
-
     const resetChanges: TaskStateChanges = {
       status: 'pending',
       config: { summary: undefined },
@@ -2055,24 +2045,27 @@ export class Orchestrator {
         exitCode: undefined,
         pendingFixError: undefined,
         isFixingWithAI: false,
-        // Preserve branch/commit/workspacePath — they contain valid work context
-        // Only clear error-related and timing fields
+        lastHeartbeatAt: undefined,
+        agentSessionId: undefined,
+        containerId: undefined,
+        // Preserve branch/commit/workspacePath/review lineage; retry is now
+        // recreate-style in scope/timing, not lineage wiping.
       },
     };
 
-    const retryRootIds = allTasks
-      .filter((task) => retryStatuses.has(task.status))
-      .map((task) => task.id);
-    const { affectedIds } = this.resetSubgraphToPending(retryRootIds, resetChanges);
+    const workflowTaskIds = allTasks.map((task) => task.id);
+    const { affectedIds } = this.resetSubgraphToPending(workflowTaskIds, resetChanges, {
+      forceResetIds: new Set(workflowTaskIds),
+    });
     const afterResetMs = Date.now();
 
     console.log(
       `[orchestrator] retryWorkflow invalidation: workflow=${workflowId} ` +
-      `roots=[${retryRootIds.join(', ')}] affected=${affectedIds.length}`,
+      `resetMode=full-workflow-immediate affected=${affectedIds.length}`,
     );
     console.log(
       `[orchestrator] retryWorkflow: reset ${affectedIds.length}/${allTasks.length} tasks for ${workflowId} ` +
-        `(roots=${retryRootIds.length}, preserved completed outside invalidated subgraphs)`,
+        '(entire workflow reset immediately; retry lineage preserved)',
     );
 
     const readyIds = this.stateMachine
