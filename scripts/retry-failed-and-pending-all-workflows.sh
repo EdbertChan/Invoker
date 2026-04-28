@@ -129,7 +129,11 @@ else
     local code=0
 
     set +e
-    cmd_out="$(node "$IPC_HELPER" exec --no-track -- retry "$wf_id" 2>&1)"
+    if [ "${INVOKER_HEADLESS_STANDALONE:-0}" = "1" ]; then
+      cmd_out="$("$REPO_ROOT/run.sh" --headless --no-track retry "$wf_id" 2>&1)"
+    else
+      cmd_out="$(node "$IPC_HELPER" exec --no-track -- retry "$wf_id" 2>&1)"
+    fi
     code=$?
     set -e
 

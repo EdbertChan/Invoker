@@ -73,9 +73,13 @@ ensure_workspace_bootstrapped
 # Unset ELECTRON_RUN_AS_NODE so Electron loads its full API.
 unset ELECTRON_RUN_AS_NODE
 
-# In headless mode (child of running app), skip cleanup and rebuild.
+# In headless mode, build the app bundle if it hasn't been compiled yet.
 if [ "$1" = "--headless" ]; then
   shift
+  if [ ! -f "$REPO_ROOT/packages/app/dist/headless-client.js" ]; then
+    echo "Building @invoker/app for headless mode..." >&2
+    pnpm --filter @invoker/app build >&2
+  fi
   exec node ./packages/app/dist/headless-client.js "$@"
 fi
 
