@@ -2048,8 +2048,10 @@ export class Orchestrator {
         lastHeartbeatAt: undefined,
         agentSessionId: undefined,
         containerId: undefined,
-        // Preserve branch/commit/workspacePath/review lineage; retry is now
+        commit: undefined,
+        // Preserve branch/workspacePath/review lineage; retry is now
         // recreate-style in scope/timing, not lineage wiping.
+        // commit is cleared so re-execution records a fresh commit hash.
       },
     };
 
