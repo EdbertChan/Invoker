@@ -38,12 +38,28 @@ async function runHeadlessClient(testDir: string, args: string[]): Promise<{ std
   });
 }
 
-function parseWorkflowId(stdout: string): string {
+function parseWorkflowId(stdout: string, stderr?: string): string {
   const delegated = stdout.match(/Delegated to owner — workflow: (wf-[^\s]+)/);
   if (delegated?.[1]) return delegated[1];
   const direct = stdout.match(/Workflow ID: (wf-[^\s]+)/);
   if (direct?.[1]) return direct[1];
-  throw new Error(`No workflow id found in stdout:\n${stdout}`);
+  const stderrHint = stderr ? `\nstderr: ${stderr.slice(0, 500)}` : '';
+  throw new Error(`No workflow id found in stdout:\n${stdout}${stderrHint}`);
+}
+
+/**
+ * Poll `listWorkflows()` until at least one workflow appears or `timeoutMs`
+ * elapses. Decouples workflow-registration timing from the herd-contract
+ * assertions so that slow CI nodes don't cause a false failure in Phase 1.
+ */
+async function waitForWorkflow(page: Page, timeoutMs = 10_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const workflows = await page.evaluate(() => window.invoker.listWorkflows());
+    if (workflows.length > 0) return workflows[0].id as string;
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`No workflow appeared within ${timeoutMs}ms`);
 }
 
 /** Build a minimal single-task plan for the headless burst. */
@@ -77,8 +93,14 @@ async function fireHeadlessBurst(
   const ids = new Set<string>();
   ids.add(initialWorkflowId);
   for (let i = 0; i < count; i += 1) {
-    const result = await runHeadlessClient(testDir, ['run', planPath, '--no-track']);
-    ids.add(parseWorkflowId(result.stdout));
+    let result: { stdout: string; stderr: string };
+    try {
+      result = await runHeadlessClient(testDir, ['run', planPath, '--no-track']);
+    } catch (err: any) {
+      const detail = err.stderr ? `\nstderr: ${err.stderr}` : '';
+      throw new Error(`Headless burst invocation ${i + 1}/${count} failed: ${err.message}${detail}`);
+    }
+    ids.add(parseWorkflowId(result.stdout, result.stderr));
   }
   return ids;
 }
@@ -95,13 +117,13 @@ async function fireHeadlessBurst(
 async function assertTaskPanelResponsive(page: Page, timeoutMs: number): Promise<void> {
   const taskNode = page.locator('.react-flow__node[data-testid$="task-alpha"]');
   const commandDisplay = page.locator('[data-testid="command-display"]');
-  const startedAt = Date.now();
+  // toPass retries the click+visibility pair until the budget is exhausted.
+  // If toPass succeeds, the interaction completed within budget — no
+  // separate elapsed-time assertion needed.
   await expect(async () => {
     await taskNode.click();
     await expect(commandDisplay).toBeVisible({ timeout: 1000 });
   }).toPass({ timeout: timeoutMs });
-  const interactionMs = Date.now() - startedAt;
-  expect(interactionMs).toBeLessThan(timeoutMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,9 +156,8 @@ test.describe('Headless thundering herd', () => {
 
     // Discover the active workflow through the owner's IPC bridge, not by
     // reaching into the DB. This respects the owner-boundary policy.
-    const workflows = await page.evaluate(() => window.invoker.listWorkflows());
-    expect(workflows.length).toBeGreaterThan(0);
-    const currentWorkflowId = workflows[0].id as string;
+    // Uses polling to decouple setup timing from the herd-contract assertions.
+    const currentWorkflowId = await waitForWorkflow(page);
 
     // -- Phase 2: Fire the headless burst ------------------------------------
     // 8 sequential headless-client `run --no-track` calls. Each one delegates
@@ -170,17 +191,13 @@ test.describe('Headless thundering herd', () => {
     // that unblocks after the initial burst settles.
     const UI_RESPONSE_BUDGET_MS = 15000;
 
-    const firstStart = Date.now();
     await assertTaskPanelResponsive(page, UI_RESPONSE_BUDGET_MS);
-    expect(Date.now() - firstStart).toBeLessThan(UI_RESPONSE_BUDGET_MS);
 
     // 1.5s gap: allow queued main-process work (DB writes, IPC replies) to
     // propagate to the renderer before the second check.
     await page.waitForTimeout(1500);
 
-    const secondStart = Date.now();
     await assertTaskPanelResponsive(page, UI_RESPONSE_BUDGET_MS);
-    expect(Date.now() - secondStart).toBeLessThan(UI_RESPONSE_BUDGET_MS);
 
     // Let all retry promises resolve before checking side effects.
     await Promise.allSettled(burst);
