@@ -4,6 +4,16 @@ import { resolve } from 'node:path';
 import { IpcBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
 
+// Re-export transport primitives for scripts/headless-ipc.js (plain Node wrapper).
+export { IpcBus } from '@invoker/transport';
+export { HeadlessTransport } from './headless-transport.js';
+export type {
+  HeadlessExecOptions,
+  HeadlessExecResult,
+  HeadlessBatchOptions,
+  HeadlessTransportDeps,
+} from './headless-transport.js';
+
 import { resolveInvokerHomeRoot } from './delete-all-snapshot.js';
 import { isHeadlessMutatingCommand } from './headless-command-classification.js';
 import {
@@ -227,7 +237,7 @@ export interface HeadlessClientDeps {
   runElectronHeadless: (args: string[]) => Promise<number>;
 }
 
-async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void> {
+export async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void> {
   const invokerHomeRoot = resolveInvokerHomeRoot();
   const bootstrapLock = tryAcquireOwnerBootstrapLock(invokerHomeRoot);
   try {
