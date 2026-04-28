@@ -1022,6 +1022,9 @@ if (isHeadless) {
       process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
       exitCode = 1;
     } finally {
+      if (ownsHeadlessShutdown && taskExecutor) {
+        await taskExecutor.clearSshExecutorCache().catch(() => undefined);
+      }
       if (ownsHeadlessShutdown && executorRegistry) {
         await Promise.all(executorRegistry.getAll().map(f => f.destroyAll().catch(() => undefined)));
       }
@@ -1396,7 +1399,10 @@ if (isHeadless) {
     }
   });
 
-  function rebuildTaskRunner(): void {
+  async function rebuildTaskRunner(): Promise<void> {
+    if (taskExecutor) {
+      await taskExecutor.clearSshExecutorCache();
+    }
     taskExecutor = new TaskRunner({
       orchestrator,
       persistence,
@@ -2349,7 +2355,7 @@ if (isHeadless) {
     }
 
     if (ownerMode) {
-      rebuildTaskRunner();
+      await rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
         persistence,
         workflowMutationOwnerId,
@@ -2583,6 +2589,7 @@ if (isHeadless) {
 
     registerGuiMutationHandler('invoker:stop', async () => {
       logger.info('stop — destroying all executors', { module: 'ipc' });
+      await requireTaskExecutor().clearSshExecutorCache();
       await Promise.all(executorRegistry.getAll().map(f => f.destroyAll()));
       const allTasks = orchestrator.getAllTasks();
       for (const task of allTasks) {
@@ -2623,7 +2630,7 @@ if (isHeadless) {
         taskDispatcher: dispatchStartedTasks,
       });
       commandService = new CommandService(orchestrator);
-      rebuildTaskRunner();
+      await rebuildTaskRunner();
       taskHandles.clear();
     });
 
@@ -3434,6 +3441,9 @@ if (isHeadless) {
       if (hourlyBackupInterval) {
         clearInterval(hourlyBackupInterval);
         hourlyBackupInterval = null;
+      }
+      if (taskExecutor) {
+        await taskExecutor.clearSshExecutorCache().catch(() => undefined);
       }
       if (executorRegistry) {
         await Promise.all(executorRegistry.getAll().map(f => f.destroyAll()));
