@@ -68,7 +68,7 @@ describe('QueueView', () => {
     expect(screen.getByText('Running')).toBeInTheDocument();
     expect(screen.getByText('Pending')).toBeInTheDocument();
     expect(screen.getByText('phase: Executing')).toBeInTheDocument();
-    expect(screen.getByText('priority: 0')).toBeInTheDocument();
+    expect(screen.queryByText(/priority:/)).not.toBeInTheDocument();
     expect(screen.getByText('deps: running-task')).toBeInTheDocument();
     // Backlog rows now show canonical status badge
     expect(screen.getByText('Blocked')).toBeInTheDocument();
@@ -113,7 +113,7 @@ describe('QueueView', () => {
     fireEvent.click(screen.getByText('run-all-fixture-tests'));
     expect(onTaskClick).toHaveBeenCalledWith(expect.objectContaining({ id: runningTask.id }));
 
-    fireEvent.click(screen.getAllByText('Terminate')[0]);
+    fireEvent.click(screen.getByLabelText('Cancel run-all-fixture-tests'));
     expect(onCancel).toHaveBeenCalledWith(runningTask.id);
     // Confirm dialog uses display-friendly task ID, not raw ID
     expect(window.confirm).toHaveBeenCalledWith(
@@ -256,7 +256,7 @@ describe('QueueView', () => {
     expect(screen.getByText('Action Queue (1)')).toBeInTheDocument();
     expect(screen.getByText('Backlog (0)')).toBeInTheDocument();
     expect(screen.getByText('Pending')).toBeInTheDocument();
-    expect(screen.getByText('priority: 5')).toBeInTheDocument();
+    expect(screen.queryByText(/priority:/)).not.toBeInTheDocument();
   });
 
   describe('relationship expander', () => {
@@ -521,12 +521,12 @@ describe('QueueView', () => {
       expect(deployRels.textContent).toContain('upstream:');
       expect(deployRels.textContent).toContain('build');
 
-      // 3. Task-level Terminate buttons present on all action rows
-      const terminateButtons = screen.getAllByText('Terminate');
-      expect(terminateButtons.length).toBe(3); // 2 action + 1 backlog
+      // 3. Compact cancel controls present on all rows (× with accessible labels)
+      const cancelButtons = screen.getAllByLabelText(/^Cancel /);
+      expect(cancelButtons.length).toBe(3); // 2 action + 1 backlog
 
-      // Click Terminate on the running task — confirm uses display-friendly ID
-      fireEvent.click(terminateButtons[0]);
+      // Click cancel on the running task — confirm uses display-friendly ID
+      fireEvent.click(cancelButtons[0]);
       expect(window.confirm).toHaveBeenCalledWith(
         expect.stringContaining('build'),
       );
