@@ -116,7 +116,7 @@ import { collectSystemDiagnostics } from './system-diagnostics.js';
 import { installBundledSkills, resolveBundledSkillsStatus } from './bundled-skills.js';
 import { createRequire } from 'node:module';
 import { acquireDbWriterLock, type DbWriterLockResult } from './db-writer-lock.js';
-import { applyDelta } from './delta-merge.js';
+import { applyDelta, resolveQuarantine, TaskSnapshotCache } from './delta-merge.js';
 import { shouldSkipAutoFixForError } from './auto-fix-gating.js';
 import { ensureSqliteFlushDebounceForOwner } from './sqlite-flush-policy.js';
 import type { WorkflowMutationPriority } from './workflow-mutation-coordinator.js';
@@ -995,7 +995,7 @@ if (isHeadless) {
   let dbPollInterval: ReturnType<typeof setInterval> | null = null;
   let activityPollInterval: ReturnType<typeof setInterval> | null = null;
   let uiPerfLogInterval: ReturnType<typeof setInterval> | null = null;
-  const lastKnownTaskStates = new Map<string, string>();
+  const lastKnownTaskStates = new TaskSnapshotCache();
   const deferredWorkflowLaunches = new Map<string, {
     timer: ReturnType<typeof setTimeout>;
     taskIds: string[];
@@ -2426,7 +2426,15 @@ if (isHeadless) {
         }
       }
 
-      applyDelta(d, lastKnownTaskStates, orchestrator);
+      const { quarantined } = applyDelta(d, lastKnownTaskStates);
+      for (const taskId of quarantined) {
+        logger.info(`[gap-detect] quarantined task="${taskId}" — triggering authoritative reload`, { module: 'delta-merge' });
+        const authoritative = persistence.loadTask(taskId);
+        resolveQuarantine(lastKnownTaskStates, taskId, authoritative);
+        if (authoritative) {
+          sendTaskDeltaToRenderer({ type: 'created', task: authoritative });
+        }
+      }
     });
 
     uiPerfLogInterval = setInterval(() => {
