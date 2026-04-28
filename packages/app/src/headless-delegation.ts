@@ -93,6 +93,36 @@ export async function tryDelegateExec(
   );
 }
 
+/**
+ * Dispatch a mutating command to the owner via the correct IPC channel.
+ *
+ * Handles the command→channel mapping (run → headless.run, resume →
+ * headless.resume, everything else → headless.exec) so callers don't
+ * need to duplicate that routing.
+ */
+export async function dispatchToOwner(
+  args: string[],
+  bus: MessageBus,
+  options: { waitForApproval?: boolean; noTrack?: boolean; timeoutMs?: number },
+): Promise<boolean> {
+  const command = args[0] ?? '';
+  const { waitForApproval, noTrack, timeoutMs } = options;
+
+  if (command === 'run') {
+    const planPath = args[1];
+    if (!planPath) return false;
+    return tryDelegateRun(planPath, bus, waitForApproval, noTrack, timeoutMs);
+  }
+
+  if (command === 'resume') {
+    const workflowId = args[1];
+    if (!workflowId) return false;
+    return tryDelegateResume(workflowId, bus, waitForApproval, noTrack, timeoutMs);
+  }
+
+  return tryDelegateExec(args, bus, waitForApproval, noTrack, timeoutMs);
+}
+
 export async function tryPingHeadlessOwner(
   messageBus: MessageBus,
   timeoutMs = 1_000,
