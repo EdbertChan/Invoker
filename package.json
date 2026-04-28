@@ -33,6 +33,7 @@
     "dev:hot": "concurrently \"pnpm --filter @invoker/ui dev\" \"sleep 3 && VITE_DEV_SERVER_URL=http://localhost:5173 pnpm --filter @invoker/app build && VITE_DEV_SERVER_URL=http://localhost:5173 pnpm --filter @invoker/app start\"",
     "check:deps": "depcruise packages --config .dependency-cruiser.js",
     "check:types": "tsc -p tsconfig.typecheck.json",
+    "check:owner-boundary": "bash scripts/check-owner-boundary.sh",
     "check:all": "pnpm check:deps && pnpm check:types && pnpm check:owner-boundary && pnpm lint",
     "lint": "eslint packages/"
   },
