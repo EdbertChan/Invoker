@@ -29,21 +29,14 @@ describe('headless-client', () => {
     expect(runElectronHeadless).not.toHaveBeenCalled();
   });
 
-  it('does not delegate mutating commands to a GUI owner and bootstraps standalone instead', async () => {
+  it('delegates mutating commands to a responsive GUI owner without bootstrapping standalone', async () => {
     const bus = new LocalBus();
     const guiOwnerHandler = vi.fn(async () => ({ ok: true }));
-    const standaloneOwnerHandler = vi.fn(async () => ({ ok: true }));
-    let ownerMode: 'gui' | 'standalone' = 'gui';
 
-    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: ownerMode }));
-    bus.onRequest('headless.exec', async (payload) => {
-      if (ownerMode === 'gui') return guiOwnerHandler(payload);
-      return standaloneOwnerHandler(payload);
-    });
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'gui' }));
+    bus.onRequest('headless.exec', guiOwnerHandler);
 
-    const ensureStandaloneOwner = vi.fn(async () => {
-      ownerMode = 'standalone';
-    });
+    const ensureStandaloneOwner = vi.fn(async () => {});
 
     const exitCode = await runHeadlessClientCommand(['retry', 'wf-1', '--no-track'], {
       messageBus: bus,
@@ -52,9 +45,8 @@ describe('headless-client', () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(guiOwnerHandler).not.toHaveBeenCalled();
-    expect(standaloneOwnerHandler).toHaveBeenCalledTimes(1);
-    expect(ensureStandaloneOwner).toHaveBeenCalledTimes(1);
+    expect(guiOwnerHandler).toHaveBeenCalledTimes(1);
+    expect(ensureStandaloneOwner).not.toHaveBeenCalled();
   });
 
   it('bootstraps a standalone owner once when no owner is present, then delegates', async () => {
@@ -284,7 +276,8 @@ describe('headless-client', () => {
     expect(exitCode).toBe(0);
     expect(ensureStandaloneOwner).not.toHaveBeenCalled();
     expect(refreshMessageBus).toHaveBeenCalledTimes(1);
-    expect(firstExecCalls).toBe(0);
+    // GUI delegation is attempted but times out after 5s, then falls through
+    expect(firstExecCalls).toBe(1);
     expect(secondExecCalls).toBe(1);
   }, 15_000);
 

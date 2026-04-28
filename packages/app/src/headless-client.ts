@@ -68,6 +68,12 @@ function isStandaloneOwner(owner: HeadlessOwnerInfo | null | undefined): owner i
   return owner?.mode === 'standalone';
 }
 
+function isGuiOwner(owner: HeadlessOwnerInfo | null | undefined): owner is HeadlessOwnerInfo & { mode: 'gui' } {
+  return owner?.mode === 'gui';
+}
+
+const GUI_DELEGATION_TIMEOUT_MS = 5_000;
+
 export class SharedMutationOwnerTimeoutError extends Error {
   constructor(message: string = 'Timed out waiting for a standalone shared mutation owner to become available') {
     super(message);
@@ -272,6 +278,10 @@ export async function runHeadlessClientCommand(
   const owner = await tryPingHeadlessOwner(messageBus, 3_000);
   if (isStandaloneOwner(owner)) {
     if (await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
+      return resolvedExitCode();
+    }
+  } else if (isGuiOwner(owner)) {
+    if (await delegateMutation(args, messageBus, waitForApproval, noTrack, GUI_DELEGATION_TIMEOUT_MS)) {
       return resolvedExitCode();
     }
   }
