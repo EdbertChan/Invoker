@@ -7,9 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import type { ExecutionAgent } from './agent.js';
 import type { SessionDriver } from './session-driver.js';
 import { cleanElectronEnv } from './process-utils.js';
-
-const REQUIRED_SECTIONS = ['## Summary', '## Test Plan', '## Revert Plan'] as const;
-const DISCOURAGED_HEADINGS = ['## Testing', '## Notes'] as const;
+import { validateCanonicalPrBody } from './canonical-pr-body.js';
 const DEFAULT_MAX_INLINE_PROMPT_BYTES = 64 * 1024;
 const MAX_INLINE_PROMPT_BYTES = (() => {
   const raw = process.env.INVOKER_MAX_INLINE_AGENT_PROMPT_BYTES;
@@ -18,40 +16,7 @@ const MAX_INLINE_PROMPT_BYTES = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_INLINE_PROMPT_BYTES;
 })();
 
-export function validateCanonicalPrBody(body: string): string[] {
-  const errors: string[] = [];
-  const trimmed = body.trim();
-
-  if (!trimmed) {
-    return [
-      'PR body is empty. Use the canonical schema: ## Summary, ## Test Plan, ## Revert Plan, plus optional ## Architecture.',
-    ];
-  }
-
-  for (const heading of REQUIRED_SECTIONS) {
-    if (!trimmed.includes(heading)) {
-      errors.push(`Missing required section: ${heading}`);
-    }
-  }
-
-  for (const heading of DISCOURAGED_HEADINGS) {
-    if (trimmed.includes(heading)) {
-      errors.push(
-        `Unsupported section: ${heading}. Do not use the lightweight PR format; use ## Test Plan and ## Revert Plan instead.`,
-      );
-    }
-  }
-
-  if (trimmed.includes('## Architecture')) {
-    for (const subsection of ['### Before', '### After']) {
-      if (!trimmed.includes(subsection)) {
-        errors.push(`Architecture section is missing required subsection: ${subsection}`);
-      }
-    }
-  }
-
-  return errors;
-}
+export { validateCanonicalPrBody };
 
 function promptByteLength(prompt: string): number {
   return Buffer.byteLength(prompt, 'utf8');
@@ -131,7 +96,7 @@ export function buildMakePrPrompt(args: {
     '- If the change is small and has no architectural impact, omit `## Architecture`.',
     '- Ensure the final body satisfies the canonical schema required by this repo.',
     '',
-    'You may inspect the working tree, git diff, `scripts/pr-body-template.md`, and `scripts/validate-pr-body.mjs` before writing.',
+    'You may inspect the working tree, git diff, `scripts/pr-body-template.md`, `scripts/validate-pr-body.mjs`, and `packages/execution-engine/src/canonical-pr-body.js` before writing.',
     '',
     'Merge workflow context:',
     '```md',

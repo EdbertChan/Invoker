@@ -5,8 +5,8 @@
  * capabilities) as its first parameter, avoiding circular imports.
  */
 
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
-import { join, normalize, resolve } from 'node:path';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { normalize, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
@@ -17,6 +17,7 @@ import type { TaskRunnerCallbacks } from './task-runner.js';
 import type { MergeGateProvider } from './merge-gate-provider.js';
 import type { ReviewProviderRegistry } from './review-provider-registry.js';
 import { normalizeBranchForGithubCli } from './github-branch-ref.js';
+import { renderCanonicalPrBody } from './canonical-pr-body.js';
 
 // ── Trace logging ────────────────────────────────────────
 
@@ -995,25 +996,6 @@ export async function publishAfterFixImpl(
   }
 }
 
-function sanitizeMermaidId(id: string): string {
-  return id.replace(/[^a-zA-Z0-9_]/g, '_');
-}
-
-function escapeMermaidLabel(text: string): string {
-  return text
-    .replaceAll('"', '#quot;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
-}
-
-function renderTemplate(templatePath: string, substitutions: Record<string, string>): string {
-  let content = readFileSync(templatePath, 'utf-8');
-  for (const [key, value] of Object.entries(substitutions)) {
-    content = content.replaceAll(`%${key}%`, value);
-  }
-  return content.replace(/\n{3,}/g, '\n\n').trim();
-}
-
 function buildTaskBreakdownSection(workflowTasks: TaskState[]): string {
   const lines = [
     '<details>',
@@ -1111,10 +1093,10 @@ function buildSkippedSection(skipped: TaskState[]): string {
 function buildTestPlanSection(workflowTasks: TaskState[]): string {
   const commandTasks = workflowTasks.filter((t) => t.config.command);
   if (commandTasks.length === 0) {
-    return '';
+    return '- No command tasks were run in this workflow.';
   }
 
-  const lines = ['## Test Plan', ''];
+  const lines: string[] = [];
   for (const t of commandTasks) {
     if (t.status === 'completed') {
       lines.push(`- [x] \`${t.config.command}\` — passed`);
@@ -1127,50 +1109,13 @@ function buildTestPlanSection(workflowTasks: TaskState[]): string {
   return lines.join('\n');
 }
 
-function buildArchitectureSection(description: string | undefined, workflowTasks: TaskState[]): string {
-  if (description?.includes('```mermaid')) {
-    return '## Architecture\n\n*Architecture diagrams are included in the Summary section above.*';
-  }
-  if (workflowTasks.length < 3) {
-    return '';
-  }
-
-  const taskIds = new Set(workflowTasks.map((t) => t.id));
-  const lines = [
-    '## Architecture',
-    '',
-    '<details>',
-    '<summary>Task dependency graph</summary>',
-    '',
-    '```mermaid',
-    'graph TD',
-  ];
-
-  for (const t of workflowTasks) {
-    const icon = t.status === 'completed' ? '✓' : t.status === 'failed' ? '✗' : '○';
-    const rawLabel = t.description.length > 50 ? `${t.description.slice(0, 47)}...` : t.description;
-    const label = escapeMermaidLabel(`${icon} ${rawLabel}`);
-    lines.push(`  ${sanitizeMermaidId(t.id)}["${label}"]`);
-  }
-
-  for (const t of workflowTasks) {
-    for (const dep of t.dependencies) {
-      if (taskIds.has(dep)) {
-        lines.push(`  ${sanitizeMermaidId(dep)} --> ${sanitizeMermaidId(t.id)}`);
-      }
-    }
-  }
-
-  for (const t of workflowTasks) {
-    if (t.status === 'completed') {
-      lines.push(`  style ${sanitizeMermaidId(t.id)} fill:#c8e6c9`);
-    } else if (t.status === 'failed') {
-      lines.push(`  style ${sanitizeMermaidId(t.id)} fill:#ffcdd2`);
-    }
-  }
-
-  lines.push('```', '', '</details>');
-  return lines.join('\n');
+function buildCanonicalRevertPlan(): string {
+  return [
+    '- Safe to revert? Yes',
+    '- Revert command: `git revert <merge-sha>`',
+    '- Post-revert steps: None',
+    '- Data migration? No',
+  ].join('\n');
 }
 
 export async function buildMergeSummaryImpl(
@@ -1194,26 +1139,27 @@ export async function buildMergeSummaryImpl(
   const workflow = host.persistence.loadWorkflow(workflowId);
   const workflowName = workflow?.name ?? 'Workflow';
   const description = workflow?.description;
+  const summaryBody = [
+    description?.trim() ?? '',
+    description?.trim() ? '---' : '',
+    `${workflowName} — ${completed.length} tasks completed, ${failed.length} failed, ${skipped.length} skipped`,
+  ].filter(Boolean).join('\n\n');
 
   const MAX_BODY_LENGTH = 60_000;
-  const templatePath = join(__dirname, '..', '..', '..', 'templates', 'pr-body.md');
-  const summaryDescription = description?.trim() ? `${description.trim()}\n\n---` : '';
-  let result = renderTemplate(templatePath, {
-    SUMMARY_DESCRIPTION: summaryDescription,
-    SUMMARY_STATS: `${workflowName} — ${completed.length} tasks completed, ${failed.length} failed, ${skipped.length} skipped`,
-    TASK_BREAKDOWN: buildTaskBreakdownSection(workflowTasks),
-    FILE_CHANGES: await buildFileChangesSection(completed, workflow, host),
-    TEST_PLAN: buildTestPlanSection(workflowTasks),
-    ARCHITECTURE: buildArchitectureSection(description, workflowTasks),
-    CONFLICT_RESOLUTIONS: buildConflictSection(claudeResolved),
-    FAILED_TASKS: buildFailedSection(failed),
-    SKIPPED_TASKS: buildSkippedSection(skipped),
+  const result = renderCanonicalPrBody({
+    summary: summaryBody,
+    testPlan: buildTestPlanSection(workflowTasks),
+    revertPlan: buildCanonicalRevertPlan(),
+    additionalSections: [
+      buildTaskBreakdownSection(workflowTasks),
+      await buildFileChangesSection(completed, workflow, host),
+      buildConflictSection(claudeResolved),
+      buildFailedSection(failed),
+      buildSkippedSection(skipped),
+    ],
   });
-  if (!summaryDescription) {
-    result = result.replace('## Summary\n\n', '## Summary\n');
-  }
   if (result.length > MAX_BODY_LENGTH) {
-    result = result.slice(0, MAX_BODY_LENGTH) + '\n\n---\n*(Summary truncated — exceeded GitHub PR body limit)*';
+    return result.slice(0, MAX_BODY_LENGTH) + '\n\n---\n*(Summary truncated — exceeded GitHub PR body limit)*';
   }
   return result;
 }

@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TaskRunner } from '../task-runner.js';
 import { collectTransitiveNonMergeTaskIds } from '../merge-runner.js';
 import { SshExecutor } from '../ssh-executor.js';
+import { validateCanonicalPrBody } from '../canonical-pr-body.js';
 import type { TaskState } from '@invoker/workflow-core';
 import type { WorkResponse, Logger } from '@invoker/contracts';
 import { EventEmitter } from 'events';
@@ -3771,10 +3772,7 @@ describe('TaskRunner', () => {
       const result = await executor.buildMergeSummary('wf-1');
 
       expect(result).toContain('## Summary');
-      const lines = result.split('\n');
-      const summaryIdx = lines.indexOf('## Summary');
-      expect(lines[summaryIdx + 1]).toContain('Feature Workflow — 1 tasks completed');
-      expect(lines[summaryIdx + 1]).not.toContain('---');
+      expect(result).toContain('Feature Workflow — 1 tasks completed');
       expect(result).not.toMatch(/\n---\n/);
     });
 
@@ -3944,7 +3942,7 @@ describe('TaskRunner', () => {
       expect(result).toContain('failed (exit 1)');
     });
 
-    it('omits Test Plan when no command tasks', async () => {
+    it('renders a placeholder Test Plan when no command tasks ran', async () => {
       const tasks = [
         makeTask({
           id: 'prompt-1',
@@ -3965,7 +3963,8 @@ describe('TaskRunner', () => {
 
       const result = await executor.buildMergeSummary('wf-1');
 
-      expect(result).not.toContain('## Test Plan');
+      expect(result).toContain('## Test Plan');
+      expect(result).toContain('- No command tasks were run in this workflow.');
     });
 
     it('includes Revert Plan for all workflows', async () => {
@@ -3988,7 +3987,7 @@ describe('TaskRunner', () => {
       expect(result).toContain('Data migration?');
     });
 
-    it('includes Architecture DAG for 3+ tasks', async () => {
+    it('omits Architecture when merge metadata does not include before/after flow context', async () => {
       const tasks = [
         makeTask({
           id: 'taskA',
@@ -4018,9 +4017,7 @@ describe('TaskRunner', () => {
 
       const result = await executor.buildMergeSummary('wf-1');
 
-      expect(result).toContain('## Architecture');
-      expect(result).toContain('graph TD');
-      expect(result).toContain('-->');
+      expect(result).not.toContain('## Architecture');
     });
 
     it('omits Architecture for fewer than 3 tasks', async () => {
@@ -4048,7 +4045,7 @@ describe('TaskRunner', () => {
       expect(result).not.toContain('## Architecture');
     });
 
-    it('references Summary when description has mermaid', async () => {
+    it('keeps mermaid in Summary without synthesizing an Architecture section', async () => {
       const tasks = [
         makeTask({
           id: 'task-1',
@@ -4073,11 +4070,12 @@ describe('TaskRunner', () => {
 
       const result = await executor.buildMergeSummary('wf-1');
 
-      expect(result).toContain('## Architecture');
-      expect(result).toContain('included in the Summary section above');
+      expect(result).toContain('## Summary');
+      expect(result).toContain('```mermaid');
+      expect(result).not.toContain('## Architecture');
     });
 
-    it('sanitizes task IDs with special chars in Mermaid', async () => {
+    it('produces a canonical PR body shape for merge summaries', async () => {
       const tasks = [
         makeTask({
           id: 'wf-123/my-task',
@@ -4106,10 +4104,7 @@ describe('TaskRunner', () => {
       (executor as any).gitDiffStat = vi.fn();
 
       const result = await executor.buildMergeSummary('wf-1');
-      const mermaidBlock = result.match(/```mermaid\n([\s\S]*?)\n```/)?.[1] ?? '';
-
-      expect(mermaidBlock).toContain('wf_123_my_task');
-      expect(mermaidBlock).not.toContain('wf-123/my-task');
+      expect(validateCanonicalPrBody(result)).toEqual([]);
     });
   });
 
