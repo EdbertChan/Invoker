@@ -270,12 +270,12 @@ export async function runHeadlessClientCommand(
   }
 
   const owner = await tryPingHeadlessOwner(messageBus, 3_000);
-  if (isStandaloneOwner(owner)) {
+  if (owner) {
     if (await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
       return resolvedExitCode();
     }
   }
-  if (owner && deps.refreshMessageBus) {
+  if (owner && !isStandaloneOwner(owner) && deps.refreshMessageBus) {
     messageBus = await deps.refreshMessageBus();
     const refreshedOwner = await tryPingHeadlessOwner(messageBus, 1_000);
     if (isStandaloneOwner(refreshedOwner) && await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
