@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Detect repo root
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
-
-# Set Electron paths
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
+# shellcheck source=lib-headless-bulk.sh
+source "$(dirname "$0")/lib-headless-bulk.sh"
 
 # Parse arguments
 DRY_RUN=false
@@ -19,7 +14,6 @@ RECOVER_STALE=true
 STALE_THRESHOLD_SECONDS=900
 STALE_RECOVERY_RETRIES=12
 STALE_RECOVERY_RETRY_DELAY_SECONDS=5
-STANDALONE_MODE="${INVOKER_HEADLESS_STANDALONE:-0}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -74,75 +68,9 @@ if [ "$STANDALONE_MODE" = "1" ]; then
   COMMAND_TIMEOUT_SECONDS=0
 fi
 
-# Handle Linux Electron sandbox detection
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-# Helper functions
-# Read-only queries remain quiet; mutating commands delegate to the current owner
-# so workflow-scoped mutations can run in parallel lanes.
-run_with_optional_timeout() {
-  local seconds="$1"
-  shift
-  if [ "$seconds" -le 0 ]; then
-    "$@"
-    return $?
-  fi
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@"
-    return $?
-  fi
-  if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$seconds" "$@"
-    return $?
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$seconds" "$@" <<'PY'
-import subprocess
-import sys
-
-timeout = int(sys.argv[1])
-cmd = sys.argv[2:]
-
-try:
-    completed = subprocess.run(cmd, timeout=timeout, check=False)
-    sys.exit(completed.returncode)
-except subprocess.TimeoutExpired:
-    print(f"Timed out after {timeout}s: {' '.join(cmd)}", file=sys.stderr)
-    sys.exit(124)
-PY
-    return $?
-  fi
-  echo "ERROR: timeout(1), gtimeout, and python3 are unavailable; cannot enforce per-command timeout." >&2
-  return 127
-}
-
-headless_query() {
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-headless_mutation() {
-  if [ "$STANDALONE_MODE" = "1" ]; then
-    "$REPO_ROOT/run.sh" --headless "$@"
-  else
-    node "$IPC_HELPER" exec -- "$@"
-  fi
-}
-
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
-
-headless_task_ids() {
-  headless_query "$@" | grep '/' || true
-}
+# ---------------------------------------------------------------------------
+# Stale workflow recovery
+# ---------------------------------------------------------------------------
 
 find_stale_workflow_ids() {
   local wf_id=""
@@ -201,7 +129,10 @@ resume_stale_workflow() {
   return 1
 }
 
-# Query workflow IDs
+# ---------------------------------------------------------------------------
+# Query workflows
+# ---------------------------------------------------------------------------
+
 QUERY_ARGS=(query workflows --output label)
 if [ -n "$STATUS_FILTER" ]; then
   QUERY_ARGS+=(--status "$STATUS_FILTER")
@@ -229,6 +160,10 @@ if [ "$FOLLOW" = false ]; then
   echo "Note: fire-and-forget dispatches all workflows immediately; --parallel is enforced with --follow." >&2
 fi
 
+# ---------------------------------------------------------------------------
+# Stale recovery phase
+# ---------------------------------------------------------------------------
+
 if [ "$RECOVER_STALE" = true ]; then
   STALE_WF_IDS="$(find_stale_workflow_ids)"
   if [ -n "$STALE_WF_IDS" ]; then
@@ -250,7 +185,10 @@ if [ "$RECOVER_STALE" = true ]; then
   fi
 fi
 
-# Initialize counters
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
 SUCCEEDED=0
 FAILED=0
 SKIPPED=0
@@ -258,7 +196,8 @@ DISPATCHED=0
 LAUNCH_FAILED=0
 
 if [ "$FOLLOW" = true ]; then
-  process_one_workflow() {
+  # Callback for follow-mode: rebase a single workflow.
+  rebase_one_workflow() {
     local wf_id="$1"
     local result_file="$2"
     local task_id=""
@@ -286,25 +225,17 @@ if [ "$FOLLOW" = true ]; then
     fi
     local cmd_out
     local cmd_status
-    if [ "$STANDALONE_MODE" = "1" ]; then
+    if [ "$COMMAND_TIMEOUT_SECONDS" -gt 0 ]; then
       set +e
       cmd_out="$(
-        "$REPO_ROOT/run.sh" --headless --no-track rebase "$task_id" 2>&1
-      )"
-      cmd_status=$?
-      set -e
-    elif [ "$COMMAND_TIMEOUT_SECONDS" -gt 0 ]; then
-      set +e
-      cmd_out="$(
-        run_with_optional_timeout "$COMMAND_TIMEOUT_SECONDS" node "$IPC_HELPER" exec --no-track -- rebase "$task_id" 2>&1
+        run_with_optional_timeout "$COMMAND_TIMEOUT_SECONDS" \
+          node "$IPC_HELPER" exec --no-track -- rebase "$task_id" 2>&1
       )"
       cmd_status=$?
       set -e
     else
       set +e
-      cmd_out="$(
-        node "$IPC_HELPER" exec --no-track -- rebase "$task_id" 2>&1
-      )"
+      cmd_out="$(headless_mutation --no-track rebase "$task_id" 2>&1)"
       cmd_status=$?
       set -e
     fi
@@ -325,31 +256,13 @@ if [ "$FOLLOW" = true ]; then
   }
 
   RESULTS_FILE="$(mktemp -t rebase-retry-all-results.XXXXXX)"
-  PIDS=()
-
-  # Process workflows in parallel with bounded fan-out.
-  while IFS= read -r WF_ID; do
-    process_one_workflow "$WF_ID" "$RESULTS_FILE" &
-    PIDS+=("$!")
-
-    while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]; do
-      sleep 0.2
-    done
-  done <<< "$WORKFLOW_IDS"
-
-  for pid in "${PIDS[@]}"; do
-    wait "$pid" || true
-  done
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-      SKIPPED) SKIPPED=$((SKIPPED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
-
+  bulk_follow "$PARALLELISM" rebase_one_workflow "$RESULTS_FILE" "$WORKFLOW_IDS"
+  count_results "$RESULTS_FILE"
   rm -f "$RESULTS_FILE"
+
+  SUCCEEDED=$_BULK_SUCCEEDED
+  FAILED=$_BULK_FAILED
+  SKIPPED=$_BULK_SKIPPED
 
   echo "" >&2
   echo "Summary:" >&2
@@ -363,9 +276,7 @@ if [ "$FOLLOW" = true ]; then
   fi
 else
   LOG_DIR="$(mktemp -d -t rebase-retry-all-logs.XXXXXX)"
-  RESULT_FILE="$(mktemp -t rebase-retry-all-results.XXXXXX)"
   COMMANDS_FILE="$(mktemp -t rebase-retry-all-commands.XXXXXX)"
-  OUTPUT_JSONL="$(mktemp -t rebase-retry-all-output.XXXXXX)"
 
   IDX=0
   while IFS= read -r WF_ID; do
@@ -391,40 +302,18 @@ else
     echo "  queued log=$log_file" >&2
   done <<< "$WORKFLOW_IDS"
 
-  BATCH_ARGS=(batch-exec --no-track --parallel "$PARALLELISM")
+  BATCH_EXTRA_ARGS=()
   if [ "$COMMAND_TIMEOUT_SECONDS" -gt 0 ]; then
-    BATCH_ARGS+=(--timeout-ms "$((COMMAND_TIMEOUT_SECONDS * 1000))")
+    BATCH_EXTRA_ARGS+=(--timeout-ms "$((COMMAND_TIMEOUT_SECONDS * 1000))")
   fi
-  node "$IPC_HELPER" "${BATCH_ARGS[@]}" < "$COMMANDS_FILE" > "$OUTPUT_JSONL"
-  python3 - "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL" <<'PY'
-import json
-import pathlib
-import sys
 
-result_file = pathlib.Path(sys.argv[1])
-log_dir = pathlib.Path(sys.argv[2])
-output_jsonl = pathlib.Path(sys.argv[3])
-
-for raw in output_jsonl.read_text(encoding="utf-8").splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    item = json.loads(raw)
-    workflow_id = item.get("workflowId") or item.get("label") or "unknown"
-    (log_dir / f"{workflow_id}.log").write_text(raw + "\n", encoding="utf-8")
-    with result_file.open("a", encoding="utf-8") as handle:
-        handle.write(f"{workflow_id}\t{'SUCCEEDED' if item.get('ok') else 'FAILED'}\n")
-PY
+  RESULT_FILE="$(bulk_batch "$COMMANDS_FILE" "$LOG_DIR" "$PARALLELISM" "${BATCH_EXTRA_ARGS[@]+"${BATCH_EXTRA_ARGS[@]}"}")"
   rm -f "$COMMANDS_FILE"
-  rm -f "$OUTPUT_JSONL"
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) DISPATCHED=$((DISPATCHED + 1)) ;;
-      FAILED) LAUNCH_FAILED=$((LAUNCH_FAILED + 1)) ;;
-    esac
-  done < "$RESULT_FILE"
+  count_results "$RESULT_FILE"
   rm -f "$RESULT_FILE"
+
+  DISPATCHED=$_BULK_SUCCEEDED
+  LAUNCH_FAILED=$_BULK_FAILED
 
   echo "" >&2
   echo "Summary (fire-and-forget):" >&2
