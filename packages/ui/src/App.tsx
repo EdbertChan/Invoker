@@ -63,7 +63,7 @@ export function App() {
   const [planName, setPlanName] = useState<string | null>(null);
   const [onFinish, setOnFinish] = useState<'none' | 'merge' | 'pull_request'>('merge');
   const [viewMode, setViewMode] = useState<'dag' | 'history' | 'timeline' | 'queue'>('dag');
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; task: TaskState } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; taskId: string } | null>(null);
   const [remoteTargets, setRemoteTargets] = useState<string[]>([]);
   const [executionAgents, setExecutionAgents] = useState<string[]>([]);
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
@@ -190,7 +190,7 @@ export function App() {
 
   const handleTaskContextMenu = useCallback((task: TaskState, event: React.MouseEvent) => {
     setSelectedTaskId(task.id);
-    setContextMenu({ x: event.clientX, y: event.clientY, task });
+    setContextMenu({ x: event.clientX, y: event.clientY, taskId: task.id });
   }, []);
 
   const handleRestartTask = useCallback(async (taskId: string) => {
@@ -710,11 +710,11 @@ export function App() {
         />
       )}
 
-      {contextMenu && (
+      {contextMenu && tasks.get(contextMenu.taskId) && (
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
-          task={contextMenu.task}
+          task={tasks.get(contextMenu.taskId)!}
           onRestart={handleRestartTask}
           onReplace={handleReplaceTask}
           onOpenTerminal={handleOpenTerminal}
