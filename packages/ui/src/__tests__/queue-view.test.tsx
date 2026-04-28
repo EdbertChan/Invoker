@@ -446,12 +446,12 @@ describe('QueueView', () => {
   });
 
   describe('integrated queue hardening', () => {
-    it('canonical labels, expanded rels, and Terminate coexist in a composed queue', async () => {
+    it('canonical labels, expanded rels, and compact cancel coexist in a composed queue', async () => {
       // Scenario: running task with a downstream blocked dep, plus a manual-action task.
       // Exercises all three prior-workflow features together:
       // 1. Canonical status labels (Running, Fixing With AI, Blocked)
       // 2. Relationship expanders (upstream/downstream chips)
-      // 3. Task-level Terminate wording on action buttons
+      // 3. Compact × cancel control on actionable rows
       const runningTask = makeUITask({
         id: 'wf-1/build',
         status: 'running',
