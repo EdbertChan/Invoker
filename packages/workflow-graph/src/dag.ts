@@ -45,9 +45,10 @@ export function topologicalSort(tasks: TaskState[]): TaskState[] {
   }
 
   const sorted: TaskState[] = [];
+  let head = 0;
 
-  while (queue.length > 0) {
-    const id = queue.shift()!;
+  while (head < queue.length) {
+    const id = queue[head++];
     sorted.push(taskMap.get(id)!);
 
     for (const neighbor of adjacency.get(id)!) {
@@ -106,8 +107,9 @@ export function getTransitiveDependents(
     }
   }
 
-  while (queue.length > 0) {
-    const current = queue.shift()!;
+  let head = 0;
+  while (head < queue.length) {
+    const current = queue[head++];
     const neighbors = reverseDeps.get(current) ?? [];
     for (const neighbor of neighbors) {
       if (!visited.has(neighbor)) {
@@ -169,8 +171,9 @@ export function validateDAG(tasks: TaskState[]): { valid: boolean; errors: strin
   }
 
   let processed = 0;
-  while (queue.length > 0) {
-    const id = queue.shift()!;
+  let head = 0;
+  while (head < queue.length) {
+    const id = queue[head++];
     processed++;
     for (const neighbor of adjacency.get(id)!) {
       const newDegree = inDegree.get(neighbor)! - 1;
