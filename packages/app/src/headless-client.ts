@@ -296,9 +296,8 @@ function parseArgs(argv: string[]): { args: string[]; waitForApproval?: boolean;
  *   1. Config validation — fail fast on malformed config.
  *   2. Read-only query fast-path — ui-perf / queue bypass Electron.
  *   3. Non-mutating / standalone / owner-serve → Electron subprocess.
- *   4. Try an existing standalone owner via IPC.
- *   5. If a GUI owner responded, refresh the bus and look for a standalone.
- *   6. Bootstrap loop — spawn a standalone owner, poll, and dispatch.
+ *   4. Try any existing owner (GUI or standalone) via IPC.
+ *   5. If no owner responded, bootstrap a standalone owner and dispatch.
  */
 export async function runHeadlessClientCommand(
   argv: string[],
@@ -330,29 +329,28 @@ export async function runHeadlessClientCommand(
     return deps.runElectronHeadless(argv);
   }
 
-  // --- From here on, the command is a mutation that must reach a
-  //     standalone owner via IPC. ---
+  // --- From here on, the command is a mutation that should reach an
+  //     owner (GUI or standalone) via IPC. ---
 
-  // Phase 4: Try an existing standalone owner.
+  // Phase 4: Try any existing owner — GUI owners can handle mutations
+  // just like standalone owners (they register headless.run / .exec / .resume).
   const owner = await tryPingHeadlessOwner(messageBus, 3_000);
-  if (isStandaloneOwner(owner)) {
+  if (owner) {
     if (await delegateMutationToOwner(args, messageBus, waitForApproval, noTrack)) {
       return resolvedExitCode();
     }
-  }
-
-  // Phase 5: A GUI owner responded (cannot handle mutations). Refresh the
-  // bus — a standalone owner may be running on a different socket.
-  if (owner && deps.refreshMessageBus) {
-    messageBus = await deps.refreshMessageBus();
-    const refreshedOwner = await tryPingHeadlessOwner(messageBus, 1_000);
-    if (isStandaloneOwner(refreshedOwner) && await delegateMutationToOwner(args, messageBus, waitForApproval, noTrack)) {
-      return resolvedExitCode();
+    // Delegation failed on this bus. If a standalone owner may be on a
+    // different socket, refresh and retry.
+    if (deps.refreshMessageBus) {
+      messageBus = await deps.refreshMessageBus();
+      if (await delegateMutationToOwner(args, messageBus, waitForApproval, noTrack)) {
+        return resolvedExitCode();
+      }
     }
   }
 
-  // Phase 6: Bootstrap loop — spawn a standalone owner process, then poll
-  // until it responds and dispatch the mutation. Retries up to
+  // Phase 5: No owner responded — bootstrap a standalone owner process,
+  // then poll until it responds and dispatch the mutation. Retries up to
   // POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS if the owner dies or the bus
   // goes stale between bootstrap and dispatch.
   if (deps.refreshMessageBus) {
@@ -380,7 +378,7 @@ export async function runHeadlessClientCommand(
     messageBus = await deps.refreshMessageBus();
   }
   process.stderr.write(
-    `${RED}Error:${RESET} Mutation command "${args[0] ?? ''}" could not reach a standalone shared owner after bootstrap.\n`,
+    `${RED}Error:${RESET} Mutation command "${args[0] ?? ''}" could not reach a shared owner after bootstrap.\n`,
   );
   return 1;
 }
