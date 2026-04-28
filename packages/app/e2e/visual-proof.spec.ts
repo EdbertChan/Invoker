@@ -731,6 +731,30 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'terminate-wording-task-vs-workflow');
   });
 
+  test('queue-cancel-control — compact cancel affordance without priority metadata', async ({ page }) => {
+    await loadPlan(page, TEST_PLAN);
+    const now = new Date();
+    await injectTaskStates(page, [
+      { taskId: 'task-alpha', changes: { status: 'running', execution: { startedAt: now } } },
+    ]);
+
+    // Navigate to queue view
+    await page.getByRole('button', { name: 'Queue' }).click();
+    await expect(page.getByRole('heading', { name: /Action Queue/ })).toBeVisible();
+
+    // Assert the action queue row renders the compact Terminate button (cancel affordance)
+    const actionRow = page.locator('[data-row-id$="task-alpha"]');
+    await expect(actionRow).toBeVisible();
+    const terminateButton = actionRow.getByRole('button', { name: 'Terminate' });
+    await expect(terminateButton).toBeVisible();
+
+    // Assert no visible priority metadata line on the row
+    await expect(actionRow.locator('text=priority:')).not.toBeVisible();
+
+    await captureScreenshot(page, 'queue-cancel-control');
+    await assertPageScreenshot(page, 'queue-cancel-control');
+  });
+
   test('queue-action-surface-hardening — composed queue UX with labels, relationships, and terminate', async ({ page }) => {
     await loadPlan(page, QUEUE_HARDENING_PLAN);
     const now = new Date();
