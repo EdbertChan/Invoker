@@ -129,7 +129,11 @@ headless_query() {
 }
 
 headless_mutation() {
-  node "$IPC_HELPER" exec -- "$@"
+  if [ "$STANDALONE_MODE" = "1" ]; then
+    "$REPO_ROOT/run.sh" --headless "$@"
+  else
+    node "$IPC_HELPER" exec -- "$@"
+  fi
 }
 
 headless_workflow_ids() {
@@ -282,7 +286,14 @@ if [ "$FOLLOW" = true ]; then
     fi
     local cmd_out
     local cmd_status
-    if [ "$COMMAND_TIMEOUT_SECONDS" -gt 0 ]; then
+    if [ "$STANDALONE_MODE" = "1" ]; then
+      set +e
+      cmd_out="$(
+        "$REPO_ROOT/run.sh" --headless --no-track rebase "$task_id" 2>&1
+      )"
+      cmd_status=$?
+      set -e
+    elif [ "$COMMAND_TIMEOUT_SECONDS" -gt 0 ]; then
       set +e
       cmd_out="$(
         run_with_optional_timeout "$COMMAND_TIMEOUT_SECONDS" node "$IPC_HELPER" exec --no-track -- rebase "$task_id" 2>&1

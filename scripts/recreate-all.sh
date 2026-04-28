@@ -57,7 +57,11 @@ headless_query() {
 
 # Helper: mutating command delegated to the current owner (GUI or standalone headless)
 headless_mutation() {
-  node "$IPC_HELPER" exec -- "$@"
+  if [ "${INVOKER_HEADLESS_STANDALONE:-0}" = "1" ]; then
+    "$REPO_ROOT/run.sh" --headless "$@"
+  else
+    node "$IPC_HELPER" exec -- "$@"
+  fi
 }
 
 # Helper: extract workflow IDs from label output.
