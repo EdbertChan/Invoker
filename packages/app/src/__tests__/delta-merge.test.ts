@@ -68,50 +68,36 @@ describe('applyDelta', () => {
   });
 
   describe('out-of-order: updated delta without prior created', () => {
-    it('seeds the task from orchestrator fallback and applies the update', () => {
+    it('seeds from the orchestrator and merges repeated updates without dropping state', () => {
       const stateMap = new Map<string, string>();
       const knownTask = makeTask('t1', { status: 'running' });
       const lookup = makeLookup([knownTask]);
 
       // Simulate receiving an `updated` delta for t1 without a prior `created`.
-      const delta: TaskDelta = {
+      const firstDelta: TaskDelta = {
         type: 'updated',
         taskId: 't1',
         changes: { status: 'completed', execution: { exitCode: 0 } },
       };
 
-      applyDelta(delta, stateMap, lookup);
+      applyDelta(firstDelta, stateMap, lookup);
 
       // The task must be populated, not dropped.
       expect(stateMap.has('t1')).toBe(true);
-      const stored = JSON.parse(stateMap.get('t1')!);
+      let stored = JSON.parse(stateMap.get('t1')!);
       expect(stored.id).toBe('t1');
       expect(stored.status).toBe('completed');
       expect(stored.execution.exitCode).toBe(0);
-    });
-
-    it('applies a second updated delta on top of the first', () => {
-      const stateMap = new Map<string, string>();
-      const knownTask = makeTask('t1', { status: 'running' });
-      const lookup = makeLookup([knownTask]);
-
-      // First update: seeds from orchestrator.
-      const delta1: TaskDelta = {
-        type: 'updated',
-        taskId: 't1',
-        changes: { status: 'completed', execution: { exitCode: 0 } },
-      };
-      applyDelta(delta1, stateMap, lookup);
 
       // Second update: merges on top of the first.
-      const delta2: TaskDelta = {
+      const secondDelta: TaskDelta = {
         type: 'updated',
         taskId: 't1',
         changes: { execution: { error: 'test failure' } },
       };
-      applyDelta(delta2, stateMap, lookup);
+      applyDelta(secondDelta, stateMap, lookup);
 
-      const stored = JSON.parse(stateMap.get('t1')!);
+      stored = JSON.parse(stateMap.get('t1')!);
       expect(stored.status).toBe('completed');
       expect(stored.execution.exitCode).toBe(0);
       expect(stored.execution.error).toBe('test failure');
