@@ -397,18 +397,22 @@ describe('Flow 2: restart task', () => {
     h = createTestHarness();
   });
 
-  it('restarting a completed task resets it and re-executes', () => {
+  it('task-scope retry resets the target and downstream invalidated subgraph immediately', () => {
     h.loadAndStart(LINEAR_PLAN);
     h.completeTask('A');
 
     expect(h.getTask('A')!.status).toBe('completed');
     expect(h.getTask('B')!.status).toBe('running');
+    expect(h.getTask('C')!.status).toBe('pending');
 
-    // Restart A — B is running (not blocked), so retryTask only resets A
+    // Retry A while B is already executing from A's old output.
     h.orchestrator.retryTask('A');
 
-    // A should be running (no deps, auto-started)
+    // Retry now matches recreate-style task scope: A restarts immediately and
+    // the downstream subgraph is invalidated right away.
     expect(h.getTask('A')!.status).toBe('running');
+    expect(h.getTask('B')!.status).toBe('pending');
+    expect(h.getTask('C')!.status).toBe('pending');
   });
 
   it('restarting a failed task allows downstream cascade', () => {
@@ -777,6 +781,33 @@ describe('Flow 6: content-addressable branch names', () => {
       expect(t.execution?.branch).toBeUndefined();
       expect(t.execution?.workspacePath).toBeUndefined();
     }
+  });
+
+  it('retryWorkflow matches recreate-style reset scope but preserves branch/workspace lineage', () => {
+    h.loadAndStart(PARALLEL_PLAN);
+
+    h.completeTask('A');
+    h.completeTask('B');
+    h.persistence.updateTask('A', {
+      execution: { branch: 'experiment/A-abc12345', workspacePath: '/tmp/worktrees/exec-A', commit: 'commit-a' },
+    });
+    h.persistence.updateTask('B', {
+      execution: { branch: 'experiment/B-def67890', workspacePath: '/tmp/worktrees/exec-B', commit: 'commit-b' },
+    });
+    (h.orchestrator as any).refreshFromDb();
+
+    expect(h.getTask('C')!.status).toBe('running');
+    h.orchestrator.retryWorkflow(h.orchestrator.getWorkflowIds()[0]!);
+
+    expect(['pending', 'running']).toContain(h.getTask('A')!.status);
+    expect(['pending', 'running']).toContain(h.getTask('B')!.status);
+    expect(h.getTask('C')!.status).toBe('pending');
+    expect(h.getTask('A')!.execution.branch).toBe('experiment/A-abc12345');
+    expect(h.getTask('A')!.execution.workspacePath).toBe('/tmp/worktrees/exec-A');
+    expect(h.getTask('A')!.execution.commit).toBeUndefined();
+    expect(h.getTask('B')!.execution.branch).toBe('experiment/B-def67890');
+    expect(h.getTask('B')!.execution.workspacePath).toBe('/tmp/worktrees/exec-B');
+    expect(h.getTask('B')!.execution.commit).toBeUndefined();
   });
 
   it('recreateWorkflow resets tasks so re-execution gets fresh branches', () => {

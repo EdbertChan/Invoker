@@ -1160,6 +1160,61 @@ describe('headless delegation enforcement', () => {
 
           preparePoolSpy.mockRestore();
         });
+
+        it('keeps retry, recreate, and rebase on distinct workflow-reset routes', async () => {
+          const preemptWorkflowExecution = vi.fn(async () => ({ cancelled: [], runningCancelled: [] }));
+          mockDeps.commandService.retryWorkflow = vi.fn(async () => ({ ok: true as const, data: [] }));
+          mockDeps.orchestrator.recreateWorkflow = vi.fn(() => []);
+          mockDeps.orchestrator.recreateWorkflowFromFreshBase = vi.fn(async () => []);
+          mockDeps.persistence.loadWorkflow = vi.fn(() => ({
+            id: 'wf-1',
+            name: 'wf-1',
+            status: 'running' as const,
+            generation: 2,
+            repoUrl: 'https://example/repo.git',
+            baseBranch: 'main',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }));
+          mockDeps.persistence.listWorkflows = vi.fn(() => [{
+            id: 'wf-1',
+            name: 'wf-1',
+            status: 'running' as const,
+            generation: 2,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }]);
+          mockDeps.persistence.loadTasks = vi.fn(() => [{
+            id: 'wf-1/task-1',
+            status: 'failed',
+            config: { workflowId: 'wf-1' },
+            execution: {},
+          } as any]);
+          mockDeps.orchestrator.getTask = vi.fn(() => ({
+            id: 'wf-1/task-1',
+            status: 'failed',
+            config: { workflowId: 'wf-1' },
+            execution: {},
+          } as any));
+          mockDeps.persistence.updateWorkflow = vi.fn();
+
+          const depsWithNoTrack: HeadlessDeps = {
+            ...mockDeps,
+            noTrack: true,
+            preemptWorkflowExecution,
+          } as HeadlessDeps;
+
+          await runHeadless(['retry', 'wf-1'], depsWithNoTrack);
+          await runHeadless(['recreate', 'wf-1'], depsWithNoTrack);
+          await runHeadless(['rebase', 'task-1'], depsWithNoTrack).catch(() => undefined);
+
+          expect(mockDeps.commandService.retryWorkflow).toHaveBeenCalledWith(expect.any(Object));
+          expect(mockDeps.orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
+          expect(mockDeps.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
+            'wf-1',
+            expect.objectContaining({ refreshBase: expect.any(Function) }),
+          );
+        });
       });
 
       // Step 17 (`docs/architecture/task-invalidation-roadmap.md`,

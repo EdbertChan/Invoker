@@ -164,40 +164,53 @@ describe('Orchestrator taskDispatcher', () => {
     expect(new Set(dispatched).size).toBe(2);
   });
 
-  it('dispatches tasks for restart/retry/recreate entrypoints', () => {
+  it('dispatches recreate-style immediate reset scope for retry/recreate workflow entrypoints', () => {
     const dispatched: string[] = [];
     const { orchestrator } = makeOrchestrator((tasks) => tasks.forEach((task) => dispatched.push(task.id)));
     orchestrator.loadPlan({
       name: 'dispatcher-retry-paths',
       onFinish: 'none',
-      tasks: [{ id: 't1', description: 'one', command: 'exit 1' }],
+      tasks: [
+        { id: 'root-ok', description: 'completed root', command: 'echo ok' },
+        { id: 'root-fail', description: 'failed root', command: 'exit 1' },
+        { id: 'join', description: 'downstream join', command: 'echo join', dependencies: ['root-ok', 'root-fail'] },
+      ],
     });
 
-    const taskId = taskIdBySuffix(orchestrator, 't1');
+    const completedRootId = taskIdBySuffix(orchestrator, 'root-ok');
+    const failedRootId = taskIdBySuffix(orchestrator, 'root-fail');
+    const joinId = taskIdBySuffix(orchestrator, 'join');
     const workflowId = orchestrator.getWorkflowIds()[0]!;
 
     orchestrator.startExecution();
-    respondForTask(orchestrator, taskId, 'failed', 1);
+    respondForTask(orchestrator, completedRootId, 'completed', 0);
+    respondForTask(orchestrator, failedRootId, 'failed', 1);
 
     dispatched.length = 0;
-    orchestrator.retryTask(taskId);
-    expect(dispatched).toEqual([taskId]);
+    orchestrator.retryTask(completedRootId);
+    expect(dispatched).toEqual([completedRootId]);
 
-    respondForTask(orchestrator, taskId, 'failed', 1);
+    respondForTask(orchestrator, completedRootId, 'completed', 0);
+    expect(orchestrator.getTask(joinId)?.status).toBe('pending');
     dispatched.length = 0;
     orchestrator.retryWorkflow(workflowId);
-    expect(dispatched).toEqual([taskId]);
+    expect(dispatched).toEqual(expect.arrayContaining([completedRootId, failedRootId]));
+    expect(dispatched).toHaveLength(2);
+    expect(orchestrator.getTask(joinId)?.status).toBe('pending');
 
-    respondForTask(orchestrator, taskId, 'failed', 1);
+    respondForTask(orchestrator, completedRootId, 'completed', 0);
+    respondForTask(orchestrator, failedRootId, 'failed', 1);
     dispatched.length = 0;
-    orchestrator.recreateTask(taskId);
-    expect(dispatched).toEqual([taskId]);
+    orchestrator.recreateTask(completedRootId);
+    expect(dispatched).toEqual([completedRootId]);
 
-    respondForTask(orchestrator, taskId, 'failed', 1);
+    respondForTask(orchestrator, completedRootId, 'completed', 0);
+    respondForTask(orchestrator, failedRootId, 'failed', 1);
     dispatched.length = 0;
     orchestrator.recreateWorkflow(workflowId);
-    expect(dispatched).toEqual([taskId]);
-
+    expect(dispatched).toEqual(expect.arrayContaining([completedRootId, failedRootId]));
+    expect(dispatched).toHaveLength(2);
+    expect(orchestrator.getTask(joinId)?.status).toBe('pending');
   });
 
   it('resumeWorkflow dispatches persisted pending tasks', () => {
