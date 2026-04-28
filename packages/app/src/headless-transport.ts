@@ -17,9 +17,7 @@ import type { MessageBus } from '@invoker/transport';
 
 import { isHeadlessMutatingCommand } from './headless-command-classification.js';
 import {
-  tryDelegateExec,
-  tryDelegateRun,
-  tryDelegateResume,
+  dispatchToOwner,
   tryPingHeadlessOwner,
 } from './headless-delegation.js';
 
@@ -194,56 +192,40 @@ export class HeadlessTransport {
     args: string[],
     options: HeadlessExecOptions,
   ): Promise<{ response: unknown } | null> {
-    const { noTrack, waitForApproval, timeoutMs } = options;
-    const command = args[0] ?? '';
-
-    // Always try to delegate mutating commands via IPC.
+    // Mutating commands must go to a standalone owner via IPC.
+    // Read-only commands fall through to the local executor.
     if (isHeadlessMutatingCommand(args)) {
-      return this.delegateMutating(args, command, {
-        noTrack,
-        waitForApproval,
-        timeoutMs,
-      });
+      return this.delegateMutating(args, options);
     }
-
-    // Read-only: try delegation, fall back to local.
     return null;
   }
 
   private async delegateMutating(
     args: string[],
-    command: string,
     options: HeadlessExecOptions,
   ): Promise<{ response: unknown } | null> {
     const { noTrack, waitForApproval, timeoutMs } = options;
     let bus = this.messageBus;
+    const dispatchOpts = { noTrack, waitForApproval, timeoutMs };
 
     // Check for an existing standalone owner.
     const owner = await tryPingHeadlessOwner(bus, 2_000);
     if (owner?.mode === 'standalone') {
-      const ok = await this.dispatchToOwner(
-        args,
-        command,
-        bus,
-        { noTrack, waitForApproval, timeoutMs },
-      );
-      if (ok) return { response: { delegated: true } };
+      if (await dispatchToOwner(args, bus, dispatchOpts)) {
+        return { response: { delegated: true } };
+      }
     }
 
-    // If a GUI owner responded (not standalone), refresh and look for a
-    // standalone owner (the GUI cannot handle mutations).
+    // GUI owner cannot handle mutations — refresh bus and look for a
+    // standalone owner that may be running alongside it.
     if (owner && owner.mode !== 'standalone' && this.deps.refreshMessageBus) {
       bus = await this.deps.refreshMessageBus();
       this.messageBus = bus;
       const refreshed = await tryPingHeadlessOwner(bus, 1_000);
       if (refreshed?.mode === 'standalone') {
-        const ok = await this.dispatchToOwner(
-          args,
-          command,
-          bus,
-          { noTrack, waitForApproval, timeoutMs },
-        );
-        if (ok) return { response: { delegated: true } };
+        if (await dispatchToOwner(args, bus, dispatchOpts)) {
+          return { response: { delegated: true } };
+        }
       }
     }
 
@@ -258,44 +240,11 @@ export class HeadlessTransport {
         bus = await this.deps.refreshMessageBus();
         this.messageBus = bus;
       }
-      const ok = await this.dispatchToOwner(
-        args,
-        command,
-        bus,
-        { noTrack, waitForApproval, timeoutMs },
-      );
-      if (ok) return { response: { delegated: true } };
+      if (await dispatchToOwner(args, bus, dispatchOpts)) {
+        return { response: { delegated: true } };
+      }
     }
 
     return null;
-  }
-
-  private async dispatchToOwner(
-    args: string[],
-    command: string,
-    bus: MessageBus,
-    options: HeadlessExecOptions,
-  ): Promise<boolean> {
-    const { noTrack, waitForApproval, timeoutMs } = options;
-
-    if (command === 'run') {
-      const planPath = args[1];
-      if (!planPath) return false;
-      return tryDelegateRun(planPath, bus, waitForApproval, noTrack, timeoutMs);
-    }
-
-    if (command === 'resume') {
-      const workflowId = args[1];
-      if (!workflowId) return false;
-      return tryDelegateResume(
-        workflowId,
-        bus,
-        waitForApproval,
-        noTrack,
-        timeoutMs,
-      );
-    }
-
-    return tryDelegateExec(args, bus, waitForApproval, noTrack, timeoutMs);
   }
 }
