@@ -426,6 +426,103 @@ describe('headless-client', () => {
     ).rejects.toThrow(/requires a running shared owner process/);
   }, 30_000);
 
+  // --- Regression: GUI-owner routing must delegate, never bootstrap ---
+  //
+  // When a live GUI owner accepts a mutating request, the headless client
+  // must delegate to that owner and return.  It must NOT bootstrap a
+  // standalone owner and must NOT fall back to the electron runtime.
+  // These tests pin that invariant for the three delegation channels:
+  // headless.exec, headless.run, and headless.resume.
+
+  describe('GUI owner accepts mutation — no bootstrap, no electron fallback', () => {
+    function makeDeps(bus: LocalBus) {
+      const ensureStandaloneOwner = vi.fn(async () => {});
+      const runElectronHeadless = vi.fn(async () => 0);
+      const refreshMessageBus = vi.fn(async () => bus);
+      return { ensureStandaloneOwner, runElectronHeadless, refreshMessageBus };
+    }
+
+    it('retry via headless.exec: GUI owner delegates without bootstrap', async () => {
+      const bus = new LocalBus();
+      const execHandler = vi.fn(async () => ({ ok: true }));
+
+      bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'gui-1', mode: 'gui' }));
+      bus.onRequest('headless.exec', execHandler);
+
+      const deps = makeDeps(bus);
+
+      const exitCode = await runHeadlessClientCommand(['retry', 'wf-10', '--no-track'], {
+        messageBus: bus,
+        ...deps,
+      });
+
+      expect(exitCode).toBe(0);
+      // Delegation happened exactly once via the exec channel
+      expect(execHandler).toHaveBeenCalledTimes(1);
+      expect(execHandler).toHaveBeenCalledWith({
+        args: ['retry', 'wf-10'],
+        noTrack: true,
+        waitForApproval: false,
+      });
+      // Bootstrap must NOT happen when GUI owner accepts
+      expect(deps.ensureStandaloneOwner).not.toHaveBeenCalled();
+      // Electron runtime must NOT be invoked for a delegated mutation
+      expect(deps.runElectronHeadless).not.toHaveBeenCalled();
+    });
+
+    it('run via headless.run: GUI owner delegates without bootstrap', async () => {
+      const bus = new LocalBus();
+      const runHandler = vi.fn(async () => ({ ok: true }));
+
+      bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'gui-2', mode: 'gui' }));
+      bus.onRequest('headless.run', runHandler);
+
+      const deps = makeDeps(bus);
+
+      const exitCode = await runHeadlessClientCommand(['run', '/tmp/plan.yaml', '--no-track'], {
+        messageBus: bus,
+        ...deps,
+      });
+
+      expect(exitCode).toBe(0);
+      // Delegation happened exactly once via the run channel
+      expect(runHandler).toHaveBeenCalledTimes(1);
+      expect(runHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ planPath: expect.stringContaining('plan.yaml') }),
+      );
+      // Bootstrap must NOT happen when GUI owner accepts
+      expect(deps.ensureStandaloneOwner).not.toHaveBeenCalled();
+      // Electron runtime must NOT be invoked for a delegated mutation
+      expect(deps.runElectronHeadless).not.toHaveBeenCalled();
+    });
+
+    it('resume via headless.resume: GUI owner delegates without bootstrap', async () => {
+      const bus = new LocalBus();
+      const resumeHandler = vi.fn(async () => ({ ok: true }));
+
+      bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'gui-3', mode: 'gui' }));
+      bus.onRequest('headless.resume', resumeHandler);
+
+      const deps = makeDeps(bus);
+
+      const exitCode = await runHeadlessClientCommand(['resume', 'wf-99', '--no-track'], {
+        messageBus: bus,
+        ...deps,
+      });
+
+      expect(exitCode).toBe(0);
+      // Delegation happened exactly once via the resume channel
+      expect(resumeHandler).toHaveBeenCalledTimes(1);
+      expect(resumeHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ workflowId: 'wf-99' }),
+      );
+      // Bootstrap must NOT happen when GUI owner accepts
+      expect(deps.ensureStandaloneOwner).not.toHaveBeenCalled();
+      // Electron runtime must NOT be invoked for a delegated mutation
+      expect(deps.runElectronHeadless).not.toHaveBeenCalled();
+    });
+  });
+
   it('delegates query queue to an existing owner without electron fallback', async () => {
     const bus = new LocalBus();
     bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'gui' }));
