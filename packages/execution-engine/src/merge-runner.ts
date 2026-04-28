@@ -345,7 +345,6 @@ export async function executeMergeNodeImpl(
   host.persistence.updateTask(task.id, {
     execution: {
       reviewUrl: undefined,
-      reviewId: undefined,
       reviewStatus: undefined,
     },
   });
@@ -469,7 +468,6 @@ export async function executeMergeNodeImpl(
             branch: featureBranch,
             workspacePath: gateWorkspacePath,
             reviewUrl: result.url,
-            reviewId: result.identifier,
             reviewStatus: 'Awaiting review',
           },
         });
@@ -925,7 +923,6 @@ export async function publishAfterFixImpl(
           branch: featureBranch,
           workspacePath: gateWorkspacePath,
           reviewUrl: result.url,
-          reviewId: result.identifier,
           reviewStatus: 'Awaiting review',
           fixedIntegrationSha: undefined,
           fixedIntegrationRecordedAt: undefined,

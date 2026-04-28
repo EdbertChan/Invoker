@@ -5,7 +5,7 @@ import type { MergeGateProvider } from '../merge-gate-provider.js';
 function makeFakeProvider(name: string): MergeGateProvider {
   return {
     name,
-    createReview: async () => ({ url: `https://example.com/${name}/1`, identifier: `${name}#1` }),
+    createReview: async () => ({ url: `https://example.com/${name}/1` }),
     checkApproval: async () => ({ approved: false, rejected: false, statusText: 'pending', url: '' }),
   };
 }

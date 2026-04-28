@@ -1,6 +1,5 @@
 export interface MergeGateProviderResult {
   url: string;
-  identifier: string;
 }
 
 export interface MergeGateApprovalStatus {
@@ -22,8 +21,7 @@ export interface MergeGateProvider {
   }): Promise<MergeGateProviderResult>;
 
   checkApproval(opts: {
-    reviewUrl?: string;
-    reviewId?: string;
+    reviewUrl: string;
     workspacePath?: string;
     fallbackCwd: string;
   }): Promise<MergeGateApprovalStatus>;

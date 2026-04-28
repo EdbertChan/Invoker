@@ -2422,7 +2422,6 @@ describe('TaskRunner', () => {
       const mergeGateProvider = {
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/42',
-          identifier: 'owner/repo#42',
         }),
       };
       const onComplete = vi.fn();
@@ -2487,7 +2486,6 @@ describe('TaskRunner', () => {
         execution: expect.objectContaining({
           branch: 'plan/feature',
           reviewUrl: 'https://github.com/owner/repo/pull/42',
-          reviewId: 'owner/repo#42',
           reviewStatus: 'Awaiting review',
         }),
       }));
@@ -2606,7 +2604,6 @@ describe('TaskRunner', () => {
       const mergeGateProvider = {
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/55',
-          identifier: 'owner/repo#55',
         }),
       };
       const onComplete = vi.fn();
@@ -2655,7 +2652,6 @@ describe('TaskRunner', () => {
         execution: expect.objectContaining({
           branch: 'plan/feature',
           reviewUrl: 'https://github.com/owner/repo/pull/55',
-          reviewId: 'owner/repo#55',
           reviewStatus: 'Awaiting review',
         }),
       }));
@@ -2689,7 +2685,6 @@ describe('TaskRunner', () => {
       const mergeGateProvider = {
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/55',
-          identifier: 'owner/repo#55',
         }),
       };
       const executor = new TaskRunner({
@@ -2750,7 +2745,6 @@ describe('TaskRunner', () => {
       const mergeGateProvider = {
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/55',
-          identifier: 'owner/repo#55',
         }),
       };
       const onComplete = vi.fn();
@@ -2922,7 +2916,6 @@ describe('TaskRunner', () => {
       const mergeGateProvider = {
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/99',
-          identifier: '99',
         }),
       };
       const executor = new TaskRunner({
@@ -2987,7 +2980,6 @@ describe('TaskRunner', () => {
       const mergeGateProvider = {
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/42',
-          identifier: '42',
         }),
       };
       const executor = new TaskRunner({
@@ -3199,7 +3191,6 @@ describe('TaskRunner', () => {
       const mergeGateProvider = {
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/42',
-          identifier: '42',
         }),
       };
       const executor = new TaskRunner({
@@ -3364,7 +3355,7 @@ describe('TaskRunner', () => {
         getTask: vi.fn((id: string) => ({
           id,
           status: 'awaiting_approval',
-          execution: { reviewId: 'owner/repo#42' },
+          execution: { reviewUrl: 'https://github.com/owner/repo/pull/42' },
         })),
         approve: vi.fn(),
       };
@@ -3395,8 +3386,7 @@ describe('TaskRunner', () => {
 
       expect(orchestrator.getTask).toHaveBeenCalledWith('task-1');
       expect(mergeGateProvider.checkApproval).toHaveBeenCalledWith({
-        reviewUrl: undefined,
-        reviewId: 'owner/repo#42',
+        reviewUrl: 'https://github.com/owner/repo/pull/42',
         workspacePath: undefined,
         fallbackCwd: '/tmp',
       });
@@ -3417,7 +3407,6 @@ describe('TaskRunner', () => {
           status: 'review_ready',
           execution: {
             reviewUrl: 'https://github.com/owner/repo/pull/42',
-            reviewId: 'owner/repo#42',
             workspacePath: '/tmp/gate-wt',
           },
         })),
@@ -3451,7 +3440,6 @@ describe('TaskRunner', () => {
 
       expect(mergeGateProvider.checkApproval).toHaveBeenCalledWith({
         reviewUrl: 'https://github.com/owner/repo/pull/42',
-        reviewId: 'owner/repo#42',
         workspacePath: '/tmp/gate-wt',
         fallbackCwd: '/tmp',
       });
@@ -5841,7 +5829,6 @@ describe('TaskRunner', () => {
       const mergeGateProvider = {
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/99',
-          identifier: 'owner/repo#99',
         }),
       };
 
@@ -5937,7 +5924,6 @@ describe('TaskRunner', () => {
         execution: expect.objectContaining({
           branch: 'plan/feature',
           reviewUrl: 'https://github.com/owner/repo/pull/99',
-          reviewId: 'owner/repo#99',
           reviewStatus: 'Awaiting review',
         }),
       }));

@@ -46,7 +46,6 @@ describe('GitHubMergeGateProvider', () => {
       });
 
       expect(result.url).toBe('https://github.com/owner/repo/pull/42');
-      expect(result.identifier).toBe('42');
       expect(spawnMock).toHaveBeenCalledWith(
         'git',
         ['push', '--force', '-u', 'origin', 'feature/test'],
@@ -121,7 +120,6 @@ describe('GitHubMergeGateProvider', () => {
 
       const result = await provider.checkApproval({
         reviewUrl: 'https://github.com/owner/repo/pull/42',
-        reviewId: '42',
         workspacePath: '/tmp/gate',
         fallbackCwd: '/tmp/root',
       });
@@ -134,26 +132,15 @@ describe('GitHubMergeGateProvider', () => {
       );
     });
 
-    it('uses --repo for repo-qualified review ids', async () => {
+    it('throws when reviewUrl is missing', async () => {
       const { spawn } = await import('node:child_process');
       const spawnMock = vi.mocked(spawn);
 
-      spawnMock.mockImplementation(((cmd: string) => {
-        expect(cmd).toBe('gh');
-        return mockSpawnResult('{"state":"MERGED","reviewDecision":"REVIEW_REQUIRED","url":"https://github.com/owner/repo/pull/42"}', 0);
-      }) as any);
-
-      const result = await provider.checkApproval({
-        reviewId: 'owner/repo#42',
+      await expect(provider.checkApproval({
+        reviewUrl: '',
         fallbackCwd: '/tmp/root',
-      });
-
-      expect(result.approved).toBe(true);
-      expect(spawnMock).toHaveBeenCalledWith(
-        'gh',
-        ['pr', 'view', '42', '--repo', 'owner/repo', '--json', 'state,reviewDecision,url'],
-        expect.objectContaining({ cwd: '/tmp/root' }),
-      );
+      })).rejects.toThrow('Missing reviewUrl for merge-gate approval check');
+      expect(spawnMock).not.toHaveBeenCalled();
     });
   });
 });

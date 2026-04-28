@@ -1798,7 +1798,6 @@ describe('Orchestrator', () => {
           branch: 'plan/feature',
           workspacePath: '/tmp',
           reviewUrl: 'https://github.com/owner/repo/pull/1',
-          reviewId: 'owner/repo#1',
           reviewStatus: 'Awaiting review',
         },
       });
@@ -1810,7 +1809,6 @@ describe('Orchestrator', () => {
       expect(task.execution.branch).toBe('plan/feature');
       expect(task.execution.workspacePath).toBe('/tmp');
       expect(task.execution.reviewUrl).toBe('https://github.com/owner/repo/pull/1');
-      expect(task.execution.reviewId).toBe('owner/repo#1');
       expect(task.execution.reviewStatus).toBe('Awaiting review');
       expect(task.execution.completedAt).toBeDefined();
 
@@ -4957,7 +4955,6 @@ describe('Orchestrator', () => {
         config: { isMergeNode: true, workflowId: 'workflow-pr-test' },
         execution: {
           reviewUrl: 'https://github.com/org/repo/pull/42',
-          reviewId: '42',
           reviewStatus: 'open',
         },
       });
@@ -4973,7 +4970,6 @@ describe('Orchestrator', () => {
 
       const mergeTask = testOrchestrator.getTask('__merge__workflow-pr-test')!;
       expect(mergeTask.execution.reviewUrl).toBeUndefined();
-      expect(mergeTask.execution.reviewId).toBeUndefined();
       expect(mergeTask.execution.reviewStatus).toBeUndefined();
     });
 
