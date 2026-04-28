@@ -2464,8 +2464,9 @@ export class Orchestrator {
     const task = this.stateGetTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
     if (task.config.isMergeNode) throw new Error(`Cannot edit merge node ${taskId}`);
-    if (task.status === 'running' || task.status === 'fixing_with_ai')
-      throw new Error(`Cannot edit running task ${taskId}`);
+    if (task.status === 'running' || task.status === 'fixing_with_ai') {
+      this.cancelTask(taskId);
+    }
     const changes: TaskStateChanges = { config: { prompt: newPrompt } };
     this.writeAndSync(taskId, changes);
     const delta: TaskDelta = { type: 'updated', taskId, changes };
@@ -2483,7 +2484,7 @@ export class Orchestrator {
       });
       this.taskRepository.saveAttempt(freshAttempt);
     } catch { /* best effort */ }
-    return this.restartTask(taskId);
+    return this.recreateTask(taskId);
   }
 
   editTaskType(taskId: string, executorType: string, remoteTargetId?: string): TaskState[] {
