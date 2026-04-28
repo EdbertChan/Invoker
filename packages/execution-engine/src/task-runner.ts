@@ -1404,7 +1404,7 @@ export class TaskRunner {
       if (
         task.config.isMergeNode &&
         (task.status === 'review_ready' || task.status === 'awaiting_approval') &&
-        (task.execution.reviewUrl || task.execution.reviewId) &&
+        task.execution.reviewUrl &&
         !this.activePrPollers.has(task.id)
       ) {
         this.logger.info(`[merge-gate] Resuming PR polling for ${task.id} (${this.getReviewPollLabel(task)})`);
@@ -1419,7 +1419,7 @@ export class TaskRunner {
       if (
         task.config.isMergeNode &&
         (task.status === 'review_ready' || task.status === 'awaiting_approval') &&
-        (task.execution.reviewUrl || task.execution.reviewId)
+        task.execution.reviewUrl
       ) {
         try {
           const status = await this.mergeGateProvider.checkApproval(this.getReviewPollTarget(task));
@@ -1447,7 +1447,7 @@ export class TaskRunner {
       try {
         if (!this.mergeGateProvider) return;
         const task = this.orchestrator.getTask(taskId);
-        if (!task || (!task.execution.reviewUrl && !task.execution.reviewId)) {
+        if (!task?.execution.reviewUrl) {
           this.stopPrPolling(taskId);
           return;
         }
@@ -1487,9 +1487,8 @@ export class TaskRunner {
     if (!this.mergeGateProvider) return;
     if (!this.activePrPollers.has(taskId)) return;
 
-    // Read reviewId from persistence
     const task = this.orchestrator.getTask(taskId);
-    if (!task || (!task.execution.reviewUrl && !task.execution.reviewId)) return;
+    if (!task?.execution.reviewUrl) return;
 
     try {
       const status = await this.mergeGateProvider.checkApproval(this.getReviewPollTarget(task));
@@ -1512,21 +1511,19 @@ export class TaskRunner {
   }
 
   private getReviewPollTarget(task: TaskState): {
-    reviewUrl?: string;
-    reviewId?: string;
+    reviewUrl: string;
     workspacePath?: string;
     fallbackCwd: string;
   } {
     return {
-      reviewUrl: task.execution.reviewUrl,
-      reviewId: task.execution.reviewId,
+      reviewUrl: task.execution.reviewUrl!,
       workspacePath: task.execution.workspacePath,
       fallbackCwd: this.cwd,
     };
   }
 
   private getReviewPollLabel(task: TaskState): string {
-    return task.execution.reviewUrl ?? task.execution.reviewId ?? `review for ${task.id}`;
+    return task.execution.reviewUrl ?? `review for ${task.id}`;
   }
 
   spawnAgentFix(
