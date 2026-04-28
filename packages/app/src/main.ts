@@ -19,6 +19,7 @@
  *   electron dist/main.js --headless fix <taskId>
  *   electron dist/main.js --headless resolve-conflict <taskId>
  *   electron dist/main.js --headless edit <taskId> <newCommand>
+ *   electron dist/main.js --headless edit-prompt <taskId> <newPrompt>
  *   electron dist/main.js --headless edit-executor <taskId> <executorType>
  *   electron dist/main.js --headless edit-agent <taskId> <claude|codex>
  *   electron dist/main.js --headless cancel <taskId>
@@ -1728,6 +1729,8 @@ if (isHeadless) {
           : { channel: 'headless.exec', request: { args: ['fix', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-command':
         return { channel: 'headless.exec', request: { args: ['set', 'command', String(arg0), String(arg1)] } };
+      case 'invoker:edit-task-prompt':
+        return { channel: 'headless.exec', request: { args: ['edit-prompt', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-type':
         return { channel: 'headless.exec', request: { args: ['set', 'executor', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-agent':
@@ -3187,6 +3190,22 @@ if (isHeadless) {
         });
       } catch (err) {
         logger.error(`edit-task-command failed: ${err}`, { module: 'ipc' });
+        throw err;
+      }
+    });
+
+    registerGuiMutationHandler('invoker:edit-task-prompt', async (taskIdArg: unknown, newPromptArg: unknown) => {
+      const taskId = String(taskIdArg);
+      const newPrompt = String(newPromptArg);
+      logger.info(`edit-task-prompt: "${taskId}"`, { module: 'ipc' });
+      try {
+        const envelope = makeEnvelope('edit-task-prompt', 'ui', 'task', { taskId, newPrompt });
+        const result = await commandService.editTaskPrompt(envelope);
+        if (!result.ok) throw new Error(result.error.message);
+        const runnable = result.data.filter((task) => task.status === 'running');
+        await requireTaskExecutor().executeTasks(runnable);
+      } catch (err) {
+        logger.error(`edit-task-prompt failed: ${err}`, { module: 'ipc' });
         throw err;
       }
     });
