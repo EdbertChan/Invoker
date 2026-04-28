@@ -12,10 +12,8 @@
 #   bash scripts/recreate-all.sh --follow              # wait for completion (default is fire-and-forget)
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
+# shellcheck source=lib-headless-bulk.sh
+source "$(dirname "$0")/lib-headless-bulk.sh"
 
 # Parse args
 DRY_RUN=false
@@ -36,38 +34,6 @@ if [[ -n "$PARALLELISM" ]] && ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid --parallel value: $PARALLELISM (expected integer >= 1)" >&2
   exit 1
 fi
-
-# Electron sandbox detection
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  # shellcheck disable=SC2086
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-# Helper: read-only query command (stderr hidden to keep parsing clean)
-headless_query() {
-  # shellcheck disable=SC2086
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-# Helper: mutating command delegated to the current owner (GUI or standalone headless)
-headless_mutation() {
-  if [ "${INVOKER_HEADLESS_STANDALONE:-0}" = "1" ]; then
-    "$REPO_ROOT/run.sh" --headless "$@"
-  else
-    node "$IPC_HELPER" exec -- "$@"
-  fi
-}
-
-# Helper: extract workflow IDs from label output.
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
 
 # Query workflow IDs via CLI
 QUERY_ARGS=(query workflows --output label)
@@ -95,11 +61,8 @@ if ! $FOLLOW; then
 fi
 echo ""
 
-IDX=0
-FAILED=0
-SUCCEEDED=0
-
 if $DRY_RUN; then
+  IDX=0
   while IFS= read -r WF_ID; do
     [[ -z "$WF_ID" ]] && continue
     IDX=$((IDX + 1))
@@ -107,66 +70,55 @@ if $DRY_RUN; then
     echo "         (dry-run) would run: recreate $WF_ID"
     echo ""
   done <<< "$WORKFLOWS"
-elif $FOLLOW; then
-  RESULTS_FILE="$(mktemp -t recreate-all-results.XXXXXX)"
-  PIDS=()
 
-  process_one_workflow() {
-    local wf_id="$1"
-    local result_file="$2"
-    local cmd_out=""
-    local cmd_status=0
+  echo "---"
+  echo "Dry run complete. $TOTAL workflow(s) would be recreated."
+  exit 0
+fi
 
-    set +e
-    cmd_out="$(headless_mutation recreate "$wf_id" 2>&1)"
-    cmd_status=$?
-    set -e
+# Callback for follow-mode: recreate a single workflow.
+recreate_one_workflow() {
+  local wf_id="$1"
+  local result_file="$2"
+  local cmd_out=""
+  local cmd_status=0
 
-    if [[ "$cmd_status" -eq 0 ]]; then
-      echo "[$wf_id] OK"
-      printf "%s\n" "$cmd_out"
-      printf "%s\tSUCCEEDED\n" "$wf_id" >> "$result_file"
-    else
-      echo "[$wf_id] FAILED (exit $cmd_status)"
-      printf "%s\n" "$cmd_out"
-      printf "%s\tFAILED\n" "$wf_id" >> "$result_file"
-    fi
-    echo ""
-  }
+  set +e
+  cmd_out="$(headless_mutation recreate "$wf_id" 2>&1)"
+  cmd_status=$?
+  set -e
 
+  if [[ "$cmd_status" -eq 0 ]]; then
+    echo "[$wf_id] OK"
+    printf "%s\n" "$cmd_out"
+    printf "%s\tSUCCEEDED\n" "$wf_id" >> "$result_file"
+  else
+    echo "[$wf_id] FAILED (exit $cmd_status)"
+    printf "%s\n" "$cmd_out"
+    printf "%s\tFAILED\n" "$wf_id" >> "$result_file"
+  fi
+  echo ""
+}
+
+if $FOLLOW; then
+  IDX=0
   while IFS= read -r WF_ID; do
     [[ -z "$WF_ID" ]] && continue
     IDX=$((IDX + 1))
     echo "[queue $IDX/$TOTAL] $WF_ID"
-
-    process_one_workflow "$WF_ID" "$RESULTS_FILE" &
-    PIDS+=("$!")
-
-    while [[ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]]; do
-      sleep 0.2
-    done
   done <<< "$WORKFLOWS"
 
-  for pid in "${PIDS[@]}"; do
-    wait "$pid" || true
-  done
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
-
+  RESULTS_FILE="$(mktemp -t recreate-all-results.XXXXXX)"
+  bulk_follow "$PARALLELISM" recreate_one_workflow "$RESULTS_FILE" "$WORKFLOWS"
+  count_results "$RESULTS_FILE"
   rm -f "$RESULTS_FILE"
+
+  SUCCEEDED=$_BULK_SUCCEEDED
+  FAILED=$_BULK_FAILED
 else
   LOG_DIR="$(mktemp -d -t recreate-all-logs.XXXXXX)"
-  DISPATCHED=0
-  LAUNCH_FAILED=0
-  RESULT_FILE="$(mktemp -t recreate-all-results.XXXXXX)"
   COMMANDS_FILE="$(mktemp -t recreate-all-commands.XXXXXX)"
-  OUTPUT_JSONL="$(mktemp -t recreate-all-output.XXXXXX)"
-
+  IDX=0
   while IFS= read -r WF_ID; do
     [[ -z "$WF_ID" ]] && continue
     IDX=$((IDX + 1))
@@ -174,42 +126,17 @@ else
     echo "[dispatch $IDX/$TOTAL] $WF_ID log=$LOG_DIR/${WF_ID}.log"
   done <<< "$WORKFLOWS"
 
-  node "$IPC_HELPER" batch-exec --no-track --parallel "$PARALLELISM" < "$COMMANDS_FILE" > "$OUTPUT_JSONL"
-  python3 - "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL" <<'PY'
-import json
-import pathlib
-import sys
-
-result_file = pathlib.Path(sys.argv[1])
-log_dir = pathlib.Path(sys.argv[2])
-output_jsonl = pathlib.Path(sys.argv[3])
-
-for raw in output_jsonl.read_text(encoding="utf-8").splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    item = json.loads(raw)
-    workflow_id = item.get("workflowId") or item.get("label") or "unknown"
-    (log_dir / f"{workflow_id}.log").write_text(raw + "\n", encoding="utf-8")
-    with result_file.open("a", encoding="utf-8") as handle:
-        handle.write(f"{workflow_id}\t{'SUCCEEDED' if item.get('ok') else 'FAILED'}\n")
-PY
+  RESULT_FILE="$(bulk_batch "$COMMANDS_FILE" "$LOG_DIR" "$PARALLELISM")"
   rm -f "$COMMANDS_FILE"
-  rm -f "$OUTPUT_JSONL"
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) DISPATCHED=$((DISPATCHED + 1)) ;;
-      FAILED) LAUNCH_FAILED=$((LAUNCH_FAILED + 1)) ;;
-    esac
-  done < "$RESULT_FILE"
+  count_results "$RESULT_FILE"
   rm -f "$RESULT_FILE"
+
+  DISPATCHED=$_BULK_SUCCEEDED
+  LAUNCH_FAILED=$_BULK_FAILED
 fi
 
 echo "---"
-if $DRY_RUN; then
-  echo "Dry run complete. $TOTAL workflow(s) would be recreated."
-elif $FOLLOW; then
+if $FOLLOW; then
   echo "Done. $SUCCEEDED succeeded, $FAILED failed out of $TOTAL."
   if [[ "$FAILED" -ne 0 ]]; then
     exit 1
