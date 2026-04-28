@@ -2,7 +2,7 @@
 
 **Persisted workflow orchestration: a DAG of tasks in isolated workspaces, composed through git branches, merge gates, and review.**
 
-Current version: `0.1.0`. Version history lives in [CHANGELOG.md](CHANGELOG.md).
+Current version: `0.0.1`. Version history lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Overview
 
@@ -20,7 +20,6 @@ Current version: `0.1.0`. Version history lives in [CHANGELOG.md](CHANGELOG.md).
 - **Node.js** 22.x (`>=22 <23`, see [package.json](package.json))
 - **pnpm** (version pinned in `package.json`)
 - **Git**
-- **Electron** (app + headless share `packages/app` main process)
 
 ## Installation
 
@@ -33,11 +32,93 @@ pnpm run build
 
 Invoker does not provision machines for you. You are responsible for bringing your own local workstation, VM, container host, or remote machines and making sure the required tools are installed there before running workflows.
 
+For packaged installs, the repo includes an installer script and a tag-driven release workflow:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Neko-Catpital-Labs/Invoker/master/scripts/install.sh | bash
+```
+
+Tagged releases are configured to publish:
+- macOS: `.dmg`
+- Linux: `.deb` and `.AppImage`
+
+Packaged installs bundle the first-party Invoker skills inside the app. On first GUI launch, Invoker prompts you to install those skills into the supported global skill directories for Codex, Claude, and Cursor using `invoker-`-prefixed names so they do not overwrite existing skills. For headless/package-only usage, install the same bundled skills explicitly with:
+
+```bash
+invoker --install-skills
+```
+
+## Configuration
+
+Invoker reads user config from `~/.invoker/config.json`.
+
+If you want a repo-specific config file, point the app at it explicitly:
+
+```bash
+INVOKER_REPO_CONFIG_PATH=$PWD/.invoker.local.json ./run.sh
+```
+
+The config loader does not automatically read `<repo>/.invoker.json`.
+
+Minimal example:
+
+```json
+{
+  "maxConcurrency": 3,
+  "autoFixRetries": 3,
+  "autoFixAgent": "claude",
+  "remoteTargets": {
+    "staging-a": {
+      "host": "203.0.113.10",
+      "user": "invoker",
+      "sshKeyPath": "/home/you/.ssh/invoker_staging_a",
+      "managedWorkspaces": true,
+      "remoteInvokerHome": "~/.invoker",
+      "provisionCommand": "pnpm install --frozen-lockfile"
+    },
+    "staging-b": {
+      "host": "203.0.113.11",
+      "user": "invoker",
+      "sshKeyPath": "/home/you/.ssh/invoker_staging_b",
+      "managedWorkspaces": true,
+      "remoteInvokerHome": "~/.invoker",
+      "provisionCommand": "pnpm install --frozen-lockfile"
+    }
+  }
+}
+```
+
+More examples: [docs/invoker-config-example.json](docs/invoker-config-example.json), [docs/remote-ssh-targets.md](docs/remote-ssh-targets.md), [docs/docker-executor.md](docs/docker-executor.md).
+
+### Multiple SSH Executors
+
+Define multiple entries under `remoteTargets`, then select them per task with `executorType: ssh` and `remoteTargetId`.
+
+```yaml
+name: multi-remote-example
+repoUrl: git@github.com:your-org/your-repo.git
+baseBranch: master
+tasks:
+  - id: test-a
+    description: Run checks on remote target A
+    command: pnpm test
+    executorType: ssh
+    remoteTargetId: staging-a
+
+  - id: test-b
+    description: Run checks on remote target B
+    command: pnpm test
+    executorType: ssh
+    remoteTargetId: staging-b
+```
+
+Use this when you want Invoker to spread work across machines you already manage. The SSH executor does not provision the hosts for you; it connects to the target you name and runs there.
+
 ## Quick start
 
 Start here if you want to get Invoker running locally with the smallest possible setup.
 
-If you need to turn a product or implementation plan into an Invoker workflow, use the `plan-to-invoker` skill that `bash scripts/setup-agent-skills.sh` links into supported agents. The canonical skill lives at [skills/plan-to-invoker/SKILL.md](skills/plan-to-invoker/SKILL.md), and its deterministic validation entrypoint is `bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>`.
+If you need to turn a product or implementation plan into an Invoker workflow, use the `plan-to-invoker` skill. Repo installs can link it with `bash scripts/setup-agent-skills.sh`. Packaged installs can install the bundled `invoker-plan-to-invoker` copy from the first-run System Setup prompt or with `invoker --install-skills`. The canonical skill source lives at [skills/plan-to-invoker/SKILL.md](skills/plan-to-invoker/SKILL.md), and its deterministic validation entrypoint is `bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>`.
 
 1. Install the prerequisites above.
 2. Clone the repo and run the installation commands.
@@ -61,6 +142,10 @@ If you need to turn a product or implementation plan into an Invoker workflow, u
 ./run.sh --headless query workflows
 ./run.sh --headless run /path/to/plan.yaml
 ```
+
+Mutating headless CLI commands use a standalone headless owner process. They do not delegate execution into the desktop GUI process, even if the GUI app is already running. Read-only shared queries such as `query queue` and `query ui-perf` may still talk to an existing owner.
+
+GUI-launched workflows still inherit the GUI app environment. On macOS, apps launched from Finder often have a narrower `PATH` than your terminal. If you start workflows from the desktop app, make sure tools like `pnpm`, `git`, and any configured agent CLIs are available to the GUI launch context.
 
 **Hot-reload app development**:
 
@@ -115,7 +200,7 @@ Types: [packages/workflow-graph/src/types.ts](packages/workflow-graph/src/types.
 
 | Command | What it does |
 | --- | --- |
-| `pnpm dev` | Build UI + app, start Electron |
+| `pnpm run dev` | Build UI + app, start Electron |
 | `pnpm run dev:hot` | Vite dev server + app |
 | `pnpm run build` | Build all packages |
 | `pnpm test` | Skill check + package tests (sequential) |
@@ -132,12 +217,15 @@ Layer rules: [ARCHITECTURE.md](ARCHITECTURE.md). Agent/repo conventions: [CLAUDE
 | --- | --- |
 | [docs/architecture-overview.md](docs/architecture-overview.md) | Runtime layers, scheduler, comparisons |
 | [docs/invoker-medium-article.md](docs/invoker-medium-article.md) | Product story, glossary, mapping tables |
-| [docs/architecture-overview.html](docs/architecture-overview.html) | Browser-friendly overview |
 | [docs/persistence-architecture-single-writer.md](docs/persistence-architecture-single-writer.md) | SQLite / sql.js single writer |
+| [docs/invoker-config-example.json](docs/invoker-config-example.json) | Example `config.json` with local and remote executor settings |
+| [docs/remote-ssh-targets.md](docs/remote-ssh-targets.md) | SSH executor setup, target fields, and plan examples |
+| [docs/docker-executor.md](docs/docker-executor.md) | Docker executor configuration and runtime notes |
 
 ## Troubleshooting
 
-- **DB conflicts** — Do not run two writers on the same DB; use the owning process for mutating headless commands.
+- **DB conflicts** — Do not run two writers on the same DB; headless CLI mutations use a standalone owner, while GUI-started workflows stay owned by the desktop app process.
+- **`pnpm` or `git` not found from the desktop app** — On macOS this is often a Finder/GUI `PATH` issue. Launch Invoker from a terminal with `./run.sh`, or make the required binaries available to GUI-launched apps.
 - **Missing Cursor skills** — `bash scripts/setup-agent-skills.sh`
 - **Install failures** — Use Node 22 as per `engines`
 - **Obsidian (README / Mermaid)** — In **Source** mode the diagram stays plain text. Open **Reading view** (book icon in the header, or the *Toggle reading view* command). **Live Preview** usually renders Mermaid as well; if you see an empty box or a parse error, update Obsidian, try the default theme, and disable CSS snippets (some themes hide Mermaid).
@@ -150,4 +238,12 @@ Roadmap and issue tracker: [invoker.productlane.com/roadmap](https://invoker.pro
 
 ## License
 
-[Functional Source License, Version 1.1, MIT Future License](LICENSE) (SPDX: **FSL-1.1-MIT**). Permitted use, competing use, and future MIT grant are defined in the license file.
+[Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (SPDX: **FSL-1.1-ALv2**). Permitted use, competing use, and the future Apache License 2.0 grant are defined in the license file.
+
+Invoker also includes the **Neko Catpital Ventures, LLC Addendum** in [LICENSE](LICENSE). In plain terms, that addendum says:
+
+- if you modify or redistribute the Software for commercial use, those modifications or redistributions must remain open source under the FSL and the NCV Addendum, and cannot be relicensed more restrictively
+- you may build and exploit software or developments using Invoker, so long as Invoker itself is not incorporated into that software or those developments
+- except for evaluation or testing, you may not use the Software to replace employees or reduce headcount for substantially similar roles for six months after first production use
+
+The `LICENSE` file is the controlling text, including the full NCV Addendum.

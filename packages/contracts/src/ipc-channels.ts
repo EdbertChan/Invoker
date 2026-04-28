@@ -113,6 +113,47 @@ export interface CleanupWorktreesResult {
   errors: string[];
 }
 
+export interface SystemToolStatus {
+  id: string;
+  name: string;
+  required: boolean;
+  installed: boolean;
+  version?: string;
+  installHint: string;
+}
+
+export interface BundledSkillTargetStatus {
+  id: string;
+  name: string;
+  path: string;
+  available: boolean;
+  installed: boolean;
+  upToDate: boolean;
+  installedSkillNames: string[];
+}
+
+export interface BundledSkillsStatus {
+  available: boolean;
+  promptRecommended: boolean;
+  sourcePath?: string;
+  managedPrefix: string;
+  bundledSkillNames: string[];
+  lastInstallAt?: string;
+  lastInstallError?: string;
+  targets: BundledSkillTargetStatus[];
+}
+
+export type BundledSkillsInstallMode = 'install' | 'update' | 'reinstall';
+
+export interface SystemDiagnostics {
+  platform: string;
+  arch: string;
+  appVersion: string;
+  isPackaged: boolean;
+  tools: SystemToolStatus[];
+  bundledSkills?: BundledSkillsStatus;
+}
+
 // ── Invoke Channel Registry ─────────────────────────────────
 // Each key is the channel name string; value is { request, response }.
 // `request` is a tuple of the arguments passed after the channel name.
@@ -339,6 +380,18 @@ export const IpcChannels = {
   'invoker:cleanup-worktrees': {} as {
     request: [];
     response: CleanupWorktreesResult;
+  },
+  'invoker:get-system-diagnostics': {} as {
+    request: [];
+    response: SystemDiagnostics;
+  },
+  'invoker:get-bundled-skills-status': {} as {
+    request: [];
+    response: BundledSkillsStatus;
+  },
+  'invoker:install-bundled-skills': {} as {
+    request: [mode?: BundledSkillsInstallMode];
+    response: BundledSkillsStatus;
   },
 
 } as const;

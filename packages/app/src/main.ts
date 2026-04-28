@@ -25,13 +25,15 @@
  *   electron dist/main.js --headless set-merge-mode <workflowId> <mode>
  *   electron dist/main.js --headless queue
  *   electron dist/main.js --headless audit <taskId>
+ *   electron dist/main.js --headless install-skills
+ *   electron dist/main.js --install-skills
  *
  * Using the same Electron binary for both modes provides a consistent runtime.
  */
 
 import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 
 const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
 
@@ -64,6 +66,7 @@ import type { MessageBus } from '@invoker/transport';
 import {
   ExecutorRegistry, TaskRunner,
   DockerExecutor, WorktreeExecutor, SshExecutor, GitHubMergeGateProvider, ReviewProviderRegistry,
+  initializeShellEnvironment,
   RESTART_TO_BRANCH_TRACE,
   remoteFetchForPool,
   registerBuiltinAgents,
@@ -109,6 +112,8 @@ import {
 } from './workflow-actions.js';
 import { spawn, execSync } from 'node:child_process';
 import { openExternalTerminalForTask } from './open-terminal-for-task.js';
+import { collectSystemDiagnostics } from './system-diagnostics.js';
+import { installBundledSkills, resolveBundledSkillsStatus } from './bundled-skills.js';
 import { createRequire } from 'node:module';
 import { acquireDbWriterLock, type DbWriterLockResult } from './db-writer-lock.js';
 import { applyDelta } from './delta-merge.js';
@@ -127,10 +132,15 @@ import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
 // Electron passes extra args after `--` or interleaves them.
 // We look for `--headless` anywhere in process.argv.
 const headlessIndex = process.argv.indexOf('--headless');
-const isHeadless = headlessIndex !== -1;
+const directInstallSkills = process.argv.includes('--install-skills') || process.argv.slice(2).includes('install-skills');
+const isHeadless = headlessIndex !== -1 || directInstallSkills;
 
 // In headless mode, extract the CLI args after --headless
-let cliArgs = isHeadless ? process.argv.slice(headlessIndex + 1) : [];
+let cliArgs = headlessIndex !== -1
+  ? process.argv.slice(headlessIndex + 1)
+  : directInstallSkills
+    ? ['install-skills']
+    : [];
 
 // Parse --wait-for-approval flag
 const waitForApprovalIndex = cliArgs.indexOf('--wait-for-approval');
@@ -278,6 +288,22 @@ interface InitServicesOptions {
   startupSyncMode?: 'all' | 'none';
 }
 
+function getBundledSkillsStatus() {
+  return resolveBundledSkillsStatus({
+    isPackaged: app.isPackaged,
+    repoRoot,
+    resourcesPath: process.resourcesPath,
+  });
+}
+
+function installPackagedSkills(mode: import('@invoker/contracts').BundledSkillsInstallMode = 'install') {
+  return installBundledSkills({
+    isPackaged: app.isPackaged,
+    repoRoot,
+    resourcesPath: process.resourcesPath,
+  }, mode);
+}
+
 async function initServices(options?: InitServicesOptions): Promise<void> {
   messageBus = new IpcBus();
   const invokerHomeRoot = resolveInvokerHomeRoot();
@@ -294,6 +320,14 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   });
   // Upgrade root logger with DB persistence now that SQLiteAdapter is ready.
   logger = new FileAndDbLogger({ module: 'main' }, { persistence });
+  const shellEnv = await initializeShellEnvironment();
+  if (process.platform === 'darwin') {
+    const suffix = shellEnv.reason ? ` (${shellEnv.reason})` : '';
+    logger.info(
+      `[init] shell environment ${shellEnv.status} via ${shellEnv.shell}; PATH=${shellEnv.path}${suffix}`,
+      { module: 'init' },
+    );
+  }
   if (!readOnly && !hourlyBackupInterval) {
     const hourlyMs = Number(process.env.INVOKER_HOURLY_BACKUP_MS ?? 60 * 60 * 1000);
     if (Number.isFinite(hourlyMs) && hourlyMs > 0) {
@@ -644,6 +678,8 @@ if (isHeadless) {
         waitForApproval,
         noTrack,
         executionAgentRegistry: agentRegistry,
+        getBundledSkillsStatus,
+        installBundledSkills: installPackagedSkills,
       };
 
       const createStandaloneTaskExecutor = (): TaskRunner => {
@@ -1778,6 +1814,8 @@ if (isHeadless) {
 
   function createWindow(): void {
     recordStartupMark('createWindow.begin');
+    const iconPath = path.join(__dirname, 'assets', 'icons', 'png', '256x256.png');
+    const icon = nativeImage.createFromPath(iconPath);
     mainWindow = new BrowserWindow({
       width: 1200,
       height: 800,
@@ -1791,12 +1829,12 @@ if (isHeadless) {
         nodeIntegration: false,
         sandbox: false,
       },
+      icon: !icon.isEmpty() && process.platform !== 'darwin' ? icon : undefined,
       title: 'Invoker',
     });
 
-    if (process.platform !== 'linux') {
-      const iconPath = path.join(__dirname, 'assets', 'icons', 'png', '256x256.png');
-      const icon = nativeImage.createFromPath(iconPath);
+    // BrowserWindow icons matter on Windows/Linux. macOS uses the bundle icon.
+    if (process.platform !== 'darwin') {
       if (!icon.isEmpty()) mainWindow.setIcon(icon);
     }
 
@@ -1804,7 +1842,9 @@ if (isHeadless) {
     if (devUrl) {
       mainWindow.loadURL(devUrl);
     } else {
-      const uiDistPath = path.join(__dirname, '..', '..', 'ui', 'dist', 'index.html');
+      const packagedUiPath = path.join(__dirname, 'ui', 'index.html');
+      const repoUiPath = path.join(__dirname, '..', '..', 'ui', 'dist', 'index.html');
+      const uiDistPath = existsSync(packagedUiPath) ? packagedUiPath : repoUiPath;
       mainWindow.loadFile(uiDistPath).catch(() => {
         mainWindow?.loadURL(
           `data:text/html,<html><body style="background:#1a1a2e;color:#eee;font-family:system-ui;padding:2rem"><h1>Invoker</h1><p>UI not built yet. Run: <code>pnpm --filter @invoker/ui build</code></p></body></html>`,
@@ -3224,6 +3264,24 @@ if (isHeadless) {
 
     ipcMain.handle('invoker:get-execution-agents', () => {
       return agentRegistry.listExecution().map(a => a.name);
+    });
+
+    ipcMain.handle('invoker:get-system-diagnostics', () => {
+      return collectSystemDiagnostics({
+        appVersion: app.getVersion(),
+        isPackaged: app.isPackaged,
+        platform: process.platform,
+        arch: process.arch,
+        bundledSkills: getBundledSkillsStatus(),
+      });
+    });
+
+    ipcMain.handle('invoker:get-bundled-skills-status', () => {
+      return getBundledSkillsStatus();
+    });
+
+    ipcMain.handle('invoker:install-bundled-skills', (_event, mode = 'install') => {
+      return installPackagedSkills(mode);
     });
 
     registerGuiMutationHandler('invoker:replace-task', async (taskIdArg: unknown, replacementTasksArg: unknown) => {
