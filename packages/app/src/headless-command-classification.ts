@@ -61,12 +61,13 @@ export function resolveHeadlessTarget(
 export function resolveHeadlessTargetWorkflowId(
   targetArg: unknown,
   lookup: HeadlessTargetLookup,
-): string | undefined {
+): string {
   const resolved = resolveHeadlessTarget(targetArg, lookup);
   if (resolved.kind === 'workflow' || resolved.kind === 'task') {
     return resolved.workflowId;
   }
-  return undefined;
+  const renderedTarget = resolved.target || String(targetArg ?? '');
+  throw new Error(`Could not resolve headless target workflow for "${renderedTarget}"`);
 }
 
 export function isHeadlessReadOnlyCommand(args: string[]): boolean {

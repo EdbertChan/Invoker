@@ -819,14 +819,14 @@ if (isHeadless) {
           const [command, arg0] = payload.args;
           if (!command) return { priority: 'normal' };
 
-          const standaloneWorkflowIdForTaskArg = (taskIdArg: unknown): string | undefined => {
+          const standaloneWorkflowIdForTaskArg = (taskIdArg: unknown): string => {
             return resolveHeadlessTargetWorkflowId(taskIdArg, persistence);
           };
 
           switch (command) {
             case 'retry':
               return {
-                workflowId: standaloneWorkflowIdForTaskArg(arg0) ?? (arg0 === undefined ? undefined : String(arg0)),
+                workflowId: arg0 === undefined ? undefined : standaloneWorkflowIdForTaskArg(arg0),
                 priority: 'high',
               };
             case 'recreate':
@@ -1618,6 +1618,7 @@ if (isHeadless) {
   }
 
   function workflowIdForTaskArg(taskIdArg: unknown): string | undefined {
+    if (taskIdArg === undefined) return undefined;
     return resolveHeadlessTargetWorkflowId(taskIdArg, persistence);
   }
 
@@ -1630,7 +1631,7 @@ if (isHeadless) {
 
     switch (command) {
       case 'retry':
-        return { workflowId: workflowIdForTaskArg(arg0) ?? (arg0 === undefined ? undefined : String(arg0)), priority: 'high' };
+        return { workflowId: workflowIdForTaskArg(arg0), priority: 'high' };
       case 'recreate':
       case 'cancel-workflow':
         return { workflowId: arg0, priority: 'high' };
