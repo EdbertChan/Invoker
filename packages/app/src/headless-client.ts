@@ -17,12 +17,10 @@ export type {
 import { resolveInvokerHomeRoot } from './delete-all-snapshot.js';
 import { isHeadlessMutatingCommand } from './headless-command-classification.js';
 import {
+  dispatchToOwner,
   resolveDelegationTimeoutMs,
-  tryDelegateExec,
   tryDelegateQuery,
   tryDelegateQueryUiPerf,
-  tryDelegateResume,
-  tryDelegateRun,
   tryPingHeadlessOwner,
 } from './headless-delegation.js';
 import {
@@ -103,7 +101,29 @@ export function isSharedMutationOwnerTimeoutError(error: unknown): error is Shar
   return error instanceof SharedMutationOwnerTimeoutError;
 }
 
-async function delegateMutation(
+/**
+ * Resolve the IPC timeout for a mutation delegation request.
+ *
+ * --no-track commands use a longer timeout because the owner may be under
+ * load and we only need to confirm acceptance (not track to completion).
+ */
+function resolveMutationTimeoutMs(
+  args: string[],
+  noTrack: boolean | undefined,
+  noTrackTimeoutMs: number,
+): number | Promise<number> {
+  if (noTrack) return noTrackTimeoutMs;
+  const command = args[0];
+  if (command === 'run' || command === 'resume') return 5_000;
+  return resolveDelegationTimeoutMs(args);
+}
+
+/**
+ * Validate required arguments, resolve timeout, then dispatch to the
+ * shared dispatchToOwner helper. Throws on missing required args (plan
+ * path for `run`, workflow id for `resume`).
+ */
+async function delegateMutationToOwner(
   args: string[],
   bus: MessageBus,
   waitForApproval?: boolean,
@@ -111,22 +131,14 @@ async function delegateMutation(
   noTrackTimeoutMs: number = DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS,
 ): Promise<boolean> {
   const command = args[0];
-  const timeoutMs = noTrack
-    ? noTrackTimeoutMs
-    : command === 'run' || command === 'resume'
-      ? 5_000
-      : await resolveDelegationTimeoutMs(args);
-  if (command === 'run') {
-    const planPath = args[1];
-    if (!planPath) throw new Error('Missing plan file. Usage: --headless run <plan.yaml>');
-    return tryDelegateRun(planPath, bus, waitForApproval, noTrack, timeoutMs);
+  if (command === 'run' && !args[1]) {
+    throw new Error('Missing plan file. Usage: --headless run <plan.yaml>');
   }
-  if (command === 'resume') {
-    const workflowId = args[1];
-    if (!workflowId) throw new Error('Missing workflowId. Usage: --headless resume <id>');
-    return tryDelegateResume(workflowId, bus, waitForApproval, noTrack, timeoutMs);
+  if (command === 'resume' && !args[1]) {
+    throw new Error('Missing workflowId. Usage: --headless resume <id>');
   }
-  return tryDelegateExec(args, bus, waitForApproval, noTrack, timeoutMs);
+  const timeoutMs = await resolveMutationTimeoutMs(args, noTrack, noTrackTimeoutMs);
+  return dispatchToOwner(args, bus, { waitForApproval, noTrack, timeoutMs });
 }
 
 async function delegateReadOnlyQuery(
@@ -202,7 +214,12 @@ async function delegateReadOnlyQuery(
   return true;
 }
 
-async function delegateAfterBootstrap(
+/**
+ * Poll for a standalone owner to become reachable, then dispatch the
+ * mutation. Used after bootstrap when the owner process may still be
+ * starting up.
+ */
+async function pollOwnerAndDispatch(
   args: string[],
   deps: Pick<HeadlessClientDeps, 'refreshMessageBus'>,
   bus: MessageBus,
@@ -213,7 +230,7 @@ async function delegateAfterBootstrap(
   let messageBus = bus;
   while (Date.now() < deadline) {
     const owner = await tryPingHeadlessOwner(messageBus, 1_000);
-    if (isStandaloneOwner(owner) && await delegateMutation(
+    if (isStandaloneOwner(owner) && await delegateMutationToOwner(
       args,
       messageBus,
       waitForApproval,
@@ -272,12 +289,23 @@ function parseArgs(argv: string[]): { args: string[]; waitForApproval?: boolean;
   return { args, waitForApproval, noTrack };
 }
 
+/**
+ * CLI routing entry point.
+ *
+ * Routing phases (in order):
+ *   1. Config validation — fail fast on malformed config.
+ *   2. Read-only query fast-path — ui-perf / queue bypass Electron.
+ *   3. Non-mutating / standalone / owner-serve → Electron subprocess.
+ *   4. Try an existing standalone owner via IPC.
+ *   5. If a GUI owner responded, refresh the bus and look for a standalone.
+ *   6. Bootstrap loop — spawn a standalone owner, poll, and dispatch.
+ */
 export async function runHeadlessClientCommand(
   argv: string[],
   deps: HeadlessClientDeps,
 ): Promise<number> {
-  // Validate config before any delegation path so malformed JSON fails fast
-  // even for commands that do not boot the full Electron owner process.
+  // Phase 1: Config validation — fail fast on malformed JSON before any
+  // delegation so errors surface even for non-Electron paths.
   loadConfig();
 
   let messageBus = deps.messageBus;
@@ -289,27 +317,44 @@ export async function runHeadlessClientCommand(
     return typeof exitCode === 'number' ? exitCode : 0;
   };
 
+  // Phase 2: Read-only query fast-path — query ui-perf and query queue
+  // are delegated directly to any live owner (GUI or standalone) without
+  // booting Electron.
   if (!standaloneMode && !internalOwnerServe && await delegateReadOnlyQuery(args, messageBus, deps.refreshMessageBus)) {
     return resolvedExitCode();
   }
 
+  // Phase 3: Non-mutating commands, standalone mode, and the internal
+  // owner-serve command all run inside the Electron subprocess.
   if (!isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {
     return deps.runElectronHeadless(argv);
   }
 
+  // --- From here on, the command is a mutation that must reach a
+  //     standalone owner via IPC. ---
+
+  // Phase 4: Try an existing standalone owner.
   const owner = await tryPingHeadlessOwner(messageBus, 3_000);
   if (isStandaloneOwner(owner)) {
-    if (await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
+    if (await delegateMutationToOwner(args, messageBus, waitForApproval, noTrack)) {
       return resolvedExitCode();
     }
   }
+
+  // Phase 5: A GUI owner responded (cannot handle mutations). Refresh the
+  // bus — a standalone owner may be running on a different socket.
   if (owner && deps.refreshMessageBus) {
     messageBus = await deps.refreshMessageBus();
     const refreshedOwner = await tryPingHeadlessOwner(messageBus, 1_000);
-    if (isStandaloneOwner(refreshedOwner) && await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
+    if (isStandaloneOwner(refreshedOwner) && await delegateMutationToOwner(args, messageBus, waitForApproval, noTrack)) {
       return resolvedExitCode();
     }
   }
+
+  // Phase 6: Bootstrap loop — spawn a standalone owner process, then poll
+  // until it responds and dispatch the mutation. Retries up to
+  // POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS if the owner dies or the bus
+  // goes stale between bootstrap and dispatch.
   if (deps.refreshMessageBus) {
     messageBus = await deps.refreshMessageBus();
   }
@@ -317,10 +362,7 @@ export async function runHeadlessClientCommand(
     try {
       await deps.ensureStandaloneOwner(messageBus);
     } catch (err) {
-      if (!isSharedMutationOwnerTimeoutError(err)) {
-        throw err;
-      }
-      if (!deps.refreshMessageBus) {
+      if (!isSharedMutationOwnerTimeoutError(err) || !deps.refreshMessageBus) {
         throw err;
       }
       messageBus = await deps.refreshMessageBus();
@@ -329,13 +371,7 @@ export async function runHeadlessClientCommand(
     if (deps.refreshMessageBus) {
       messageBus = await deps.refreshMessageBus();
     }
-    if (await delegateAfterBootstrap(
-      args,
-      deps,
-      messageBus,
-      waitForApproval,
-      noTrack,
-    )) {
+    if (await pollOwnerAndDispatch(args, deps, messageBus, waitForApproval, noTrack)) {
       return resolvedExitCode();
     }
     if (!deps.refreshMessageBus) {
