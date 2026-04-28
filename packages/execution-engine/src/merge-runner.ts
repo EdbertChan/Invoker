@@ -436,6 +436,16 @@ export async function executeMergeNodeImpl(
           gateWorkspacePath!,
         );
 
+        const prBody = await authorPrBodyForMerge(host, {
+          workflowId,
+          mergeNodeTaskId: task.id,
+          title: workflow?.name ?? 'Workflow',
+          baseBranch,
+          featureBranch,
+          workflowSummary: fullSummary ?? '',
+          cwd: gateWorkspacePath!,
+        });
+
         // Create PR via provider (consolidation already done above).
         // Use the gate clone dir so gh CLI resolves the correct GitHub remote.
         const result = await host.mergeGateProvider.createReview({
@@ -443,7 +453,7 @@ export async function executeMergeNodeImpl(
           featureBranch,
           title: workflow?.name ?? 'Workflow',
           cwd: gateWorkspacePath!,
-          body: fullSummary,
+          body: prBody,
         });
         console.log(`[merge] Created GitHub PR: ${result.url}`);
 
@@ -909,12 +919,22 @@ export async function publishAfterFixImpl(
         throw new Error('mergeMode is "external_review" but no review provider configured');
       }
 
+      const prBody = await authorPrBodyForMerge(host, {
+        workflowId,
+        mergeNodeTaskId: task.id,
+        title: workflow?.name ?? 'Workflow',
+        baseBranch,
+        featureBranch,
+        workflowSummary: fullSummary ?? '',
+        cwd: consolidateDir,
+      });
+
       const result = await host.mergeGateProvider.createReview({
         baseBranch,
         featureBranch,
         title: workflow?.name ?? 'Workflow',
         cwd: consolidateDir,
-        body: fullSummary,
+        body: prBody,
       });
       console.log(`[merge] Post-fix: created/updated GitHub PR: ${result.url}`);
 

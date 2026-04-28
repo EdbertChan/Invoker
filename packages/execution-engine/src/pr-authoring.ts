@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -75,6 +75,19 @@ export function resolveInstalledSkillPathForAgent(agentName: string, skillName: 
   return existsSync(join(skillDir, 'SKILL.md')) ? skillDir : null;
 }
 
+const MAKE_PR_PROMPT_TEMPLATE = readFileSync(
+  new URL('./make-pr-prompt.md', import.meta.url),
+  'utf8',
+);
+
+function renderPromptTemplate(template: string, substitutions: Record<string, string>): string {
+  let content = template;
+  for (const [key, value] of Object.entries(substitutions)) {
+    content = content.replaceAll(`%${key}%`, value);
+  }
+  return content.trim();
+}
+
 export function buildMakePrPrompt(args: {
   skillPath: string;
   title: string;
@@ -82,27 +95,13 @@ export function buildMakePrPrompt(args: {
   featureBranch: string;
   workflowSummary: string;
 }): string {
-  return [
-    `You are authoring the GitHub PR body for the branch "${args.featureBranch}" targeting "${args.baseBranch}".`,
-    '',
-    `Use the installed skill "invoker-make-pr" at: ${args.skillPath}`,
-    'Read that SKILL.md first and follow it exactly.',
-    '',
-    'Requirements:',
-    `- The PR title is already decided: "${args.title}"`,
-    '- Output only the final PR body markdown. Do not include commentary, explanations, or code fences.',
-    '- Use the repo-local PR conventions and tooling referenced by the skill.',
-    '- Only include `## Architecture` when the change modifies component interactions, control flow, state flow, or data flow.',
-    '- If the change is small and has no architectural impact, omit `## Architecture`.',
-    '- Ensure the final body satisfies the canonical schema required by this repo.',
-    '',
-    'You may inspect the working tree, git diff, `scripts/pr-body-template.md`, `scripts/validate-pr-body.mjs`, and `packages/execution-engine/src/canonical-pr-body.js` before writing.',
-    '',
-    'Merge workflow context:',
-    '```md',
-    args.workflowSummary.trim(),
-    '```',
-  ].join('\n');
+  return renderPromptTemplate(MAKE_PR_PROMPT_TEMPLATE, {
+    SKILL_PATH: args.skillPath,
+    TITLE: args.title,
+    BASE_BRANCH: args.baseBranch,
+    FEATURE_BRANCH: args.featureBranch,
+    WORKFLOW_SUMMARY: args.workflowSummary.trim(),
+  });
 }
 
 export function spawnAgentPrAuthorViaRegistry(
