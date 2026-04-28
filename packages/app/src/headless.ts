@@ -738,6 +738,10 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       warnDeprecated('edit', 'set command');
       await headlessSet(['command', ...args.slice(1)], deps);
       break;
+    case 'edit-prompt':
+      warnDeprecated('edit-prompt', 'set prompt');
+      await headlessSet(['prompt', ...args.slice(1)], deps);
+      break;
     case 'edit-executor':
     case 'edit-type':
       warnDeprecated(command, 'set executor');
@@ -820,6 +824,7 @@ ${BOLD}Configure:${RESET}
   install-skills [install|update|reinstall]          Install bundled Invoker skills into Codex
   set command <taskId> <cmd>                          Edit task command and re-run
   set prompt <taskId> <text>                          Edit task prompt and re-run
+  edit-prompt <taskId> <text>                         Deprecated alias for set prompt
   set executor <taskId> <type>                        Change executor type (worktree|docker|ssh)
   set agent <taskId> <agent>                          Change execution agent (claude|codex)
   set merge-mode <workflowId> <mode>                  manual | automatic | external_review
@@ -1642,7 +1647,9 @@ async function headlessEdit(taskId: string, newCommand: string, deps: HeadlessDe
 }
 
 async function headlessEditPrompt(taskId: string, newPrompt: string, deps: HeadlessDeps): Promise<void> {
-  if (!taskId || !newPrompt) throw new Error('Missing arguments. Usage: --headless set prompt <taskId> <newPrompt>');
+  if (!taskId || !newPrompt) {
+    throw new Error('Missing arguments. Usage: --headless edit-prompt <taskId> <newPrompt> or --headless set prompt <taskId> <newPrompt>');
+  }
   const restored = restoreWorkflowForTask(taskId, deps);
   taskId = restored.resolvedTaskId;
   const taskExecutor = createHeadlessExecutor(deps);
