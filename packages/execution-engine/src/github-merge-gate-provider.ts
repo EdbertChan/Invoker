@@ -63,15 +63,14 @@ export class GitHubMergeGateProvider implements MergeGateProvider {
   }
 
   async checkApproval(opts: {
-    identifier: string;
-    cwd: string;
+    reviewUrl?: string;
+    reviewId?: string;
+    workspacePath?: string;
+    fallbackCwd: string;
   }): Promise<MergeGateApprovalStatus> {
-    const { identifier, cwd } = opts;
-
-    const stdout = await this.exec('gh', [
-      'pr', 'view', identifier,
-      '--json', 'state,reviewDecision,url',
-    ], cwd);
+    const { reviewUrl, reviewId, workspacePath, fallbackCwd } = opts;
+    const cwd = workspacePath ?? fallbackCwd;
+    const stdout = await this.exec('gh', this.buildPrViewArgs(reviewUrl, reviewId), cwd);
 
     const data = JSON.parse(stdout) as {
       state: string;
@@ -101,6 +100,28 @@ export class GitHubMergeGateProvider implements MergeGateProvider {
       statusText,
       url: data.url,
     };
+  }
+
+  private buildPrViewArgs(reviewUrl?: string, reviewId?: string): string[] {
+    if (reviewUrl?.trim()) {
+      return ['pr', 'view', reviewUrl.trim(), '--json', 'state,reviewDecision,url'];
+    }
+
+    const normalizedReviewId = reviewId?.trim();
+    if (!normalizedReviewId) {
+      throw new Error('Missing reviewUrl/reviewId for merge-gate approval check');
+    }
+
+    const repoQualifiedMatch = normalizedReviewId.match(/^([^#\s]+\/[^#\s]+)#(\d+)$/);
+    if (repoQualifiedMatch) {
+      return ['pr', 'view', repoQualifiedMatch[2], '--repo', repoQualifiedMatch[1], '--json', 'state,reviewDecision,url'];
+    }
+
+    if (/^\d+$/.test(normalizedReviewId)) {
+      return ['pr', 'view', normalizedReviewId, '--json', 'state,reviewDecision,url'];
+    }
+
+    throw new Error(`Unsupported review identifier format: ${normalizedReviewId}`);
   }
 
   private async exec(cmd: string, args: string[], cwd: string): Promise<string> {

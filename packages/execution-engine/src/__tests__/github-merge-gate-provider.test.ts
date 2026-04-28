@@ -108,4 +108,52 @@ describe('GitHubMergeGateProvider', () => {
       );
     });
   });
+
+  describe('checkApproval', () => {
+    it('prefers the full review URL when present', async () => {
+      const { spawn } = await import('node:child_process');
+      const spawnMock = vi.mocked(spawn);
+
+      spawnMock.mockImplementation(((cmd: string) => {
+        expect(cmd).toBe('gh');
+        return mockSpawnResult('{"state":"OPEN","reviewDecision":null,"url":"https://github.com/owner/repo/pull/42"}', 0);
+      }) as any);
+
+      const result = await provider.checkApproval({
+        reviewUrl: 'https://github.com/owner/repo/pull/42',
+        reviewId: '42',
+        workspacePath: '/tmp/gate',
+        fallbackCwd: '/tmp/root',
+      });
+
+      expect(result.statusText).toBe('Awaiting review');
+      expect(spawnMock).toHaveBeenCalledWith(
+        'gh',
+        ['pr', 'view', 'https://github.com/owner/repo/pull/42', '--json', 'state,reviewDecision,url'],
+        expect.objectContaining({ cwd: '/tmp/gate' }),
+      );
+    });
+
+    it('uses --repo for repo-qualified review ids', async () => {
+      const { spawn } = await import('node:child_process');
+      const spawnMock = vi.mocked(spawn);
+
+      spawnMock.mockImplementation(((cmd: string) => {
+        expect(cmd).toBe('gh');
+        return mockSpawnResult('{"state":"MERGED","reviewDecision":"REVIEW_REQUIRED","url":"https://github.com/owner/repo/pull/42"}', 0);
+      }) as any);
+
+      const result = await provider.checkApproval({
+        reviewId: 'owner/repo#42',
+        fallbackCwd: '/tmp/root',
+      });
+
+      expect(result.approved).toBe(true);
+      expect(spawnMock).toHaveBeenCalledWith(
+        'gh',
+        ['pr', 'view', '42', '--repo', 'owner/repo', '--json', 'state,reviewDecision,url'],
+        expect.objectContaining({ cwd: '/tmp/root' }),
+      );
+    });
+  });
 });
