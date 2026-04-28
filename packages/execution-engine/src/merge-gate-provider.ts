@@ -22,7 +22,9 @@ export interface MergeGateProvider {
   }): Promise<MergeGateProviderResult>;
 
   checkApproval(opts: {
-    identifier: string;
-    cwd: string;
+    reviewUrl?: string;
+    reviewId?: string;
+    workspacePath?: string;
+    fallbackCwd: string;
   }): Promise<MergeGateApprovalStatus>;
 }

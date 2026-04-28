@@ -2662,7 +2662,7 @@ describe('TaskRunner', () => {
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
 
       // Should start polling
-      expect((executor as any).startPrPolling).toHaveBeenCalledWith('__merge__wf-1', 'owner/repo#55', 'wf-1');
+      expect((executor as any).startPrPolling).toHaveBeenCalledWith('__merge__wf-1');
     });
 
     it('executeMergeNode anchors external_review gate worktrees on the origin-backed base branch', async () => {
@@ -3395,8 +3395,10 @@ describe('TaskRunner', () => {
 
       expect(orchestrator.getTask).toHaveBeenCalledWith('task-1');
       expect(mergeGateProvider.checkApproval).toHaveBeenCalledWith({
-        identifier: 'owner/repo#42',
-        cwd: '/tmp',
+        reviewUrl: undefined,
+        reviewId: 'owner/repo#42',
+        workspacePath: undefined,
+        fallbackCwd: '/tmp',
       });
       expect(persistence.updateTask).toHaveBeenCalledWith('task-1', {
         execution: { reviewStatus: 'Awaiting review' },
@@ -3413,7 +3415,11 @@ describe('TaskRunner', () => {
         getTask: vi.fn((id: string) => ({
           id,
           status: 'review_ready',
-          execution: { reviewId: 'owner/repo#42' },
+          execution: {
+            reviewUrl: 'https://github.com/owner/repo/pull/42',
+            reviewId: 'owner/repo#42',
+            workspacePath: '/tmp/gate-wt',
+          },
         })),
         approve: vi.fn(),
       };
@@ -3443,6 +3449,12 @@ describe('TaskRunner', () => {
 
       await executor.checkPrApprovalNow('task-1');
 
+      expect(mergeGateProvider.checkApproval).toHaveBeenCalledWith({
+        reviewUrl: 'https://github.com/owner/repo/pull/42',
+        reviewId: 'owner/repo#42',
+        workspacePath: '/tmp/gate-wt',
+        fallbackCwd: '/tmp',
+      });
       expect(persistence.updateTask).toHaveBeenCalledWith('task-1', {
         execution: { reviewStatus: 'Approved' },
       });
