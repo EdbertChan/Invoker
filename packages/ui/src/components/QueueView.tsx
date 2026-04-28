@@ -223,18 +223,17 @@ export function QueueView({ tasks, onTaskClick, onCancel, selectedTaskId }: Queu
                   {phaseLabel && (
                     <span className="text-xs text-amber-300 truncate block">phase: {phaseLabel}</span>
                   )}
-                  {'priority' in job && typeof (job as Record<string, unknown>).priority === 'number' && (
-                    <span className="text-xs text-cyan-300 truncate block">priority: {(job as Record<string, unknown>).priority as number}</span>
-                  )}
                 </div>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
                     handleCancel(job.taskId);
                   }}
-                  className="ml-2 px-2 py-0.5 text-xs bg-red-700 hover:bg-red-600 text-white rounded shrink-0"
+                  title={`Cancel ${displayTaskId(job.taskId)}`}
+                  aria-label={`Cancel ${displayTaskId(job.taskId)}`}
+                  className="ml-2 px-1 py-0.5 text-xs text-gray-400 hover:text-gray-200 rounded shrink-0"
                 >
-                  Terminate
+                  ×
                 </button>
               </div>
               {isExpanded && (
@@ -331,9 +330,11 @@ export function QueueView({ tasks, onTaskClick, onCancel, selectedTaskId }: Queu
                     e.stopPropagation();
                     handleCancel(task.id);
                   }}
-                  className="ml-2 px-2 py-0.5 text-xs bg-red-700 hover:bg-red-600 text-white rounded shrink-0"
+                  title={`Cancel ${displayTaskId(task.id)}`}
+                  aria-label={`Cancel ${displayTaskId(task.id)}`}
+                  className="ml-2 px-1 py-0.5 text-xs text-gray-400 hover:text-gray-200 rounded shrink-0"
                 >
-                  Terminate
+                  ×
                 </button>
               </div>
               {isExpanded && (
