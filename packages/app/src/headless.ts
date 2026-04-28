@@ -1521,7 +1521,7 @@ async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDeps): Pr
     { module: 'headless' },
   );
 
-  process.stdout.write(`Retry workflow "${workflowId}" — ${dispatchable.length} task(s) to execute (completed tasks preserved)\n`);
+  process.stdout.write(`Retry workflow "${workflowId}" — ${dispatchable.length} task(s) to execute (full workflow reset applied)\n`);
   if (dispatchable.length === 0) return;
 
   if (deps.noTrack) {
