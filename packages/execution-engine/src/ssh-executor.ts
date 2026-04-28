@@ -180,10 +180,7 @@ export class SshExecutor extends BaseExecutor<SshEntry> {
     if (request.actionType === 'command') {
       const command = request.inputs.command;
       if (!command) throw new Error('WorkRequest with actionType "command" must have inputs.command');
-      // Strip leading `cd <absolute-path> && ` or `cd <absolute-path>; ` — the executor
-      // already sets the working directory to the worktree, so an absolute cd prefix from
-      // the authoring machine (e.g. cd /home/user/repo && ...) will fail on remote hosts.
-      payload = command.replace(/^cd\s+(?:"\/[^"]*"|'\/[^']*'|\/\S+)\s*(?:&&|;)\s*/, '');
+      payload = command;
     } else if (request.actionType === 'ai_task') {
       if (this.agentRegistry) {
         const requestedAgent = request.inputs.executionAgent ?? 'claude';
