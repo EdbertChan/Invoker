@@ -4247,6 +4247,204 @@ describe('TaskRunner', () => {
       expect(result).toContain('src/foo.ts');
     });
 
+    it('includes Test Plan with command task results', async () => {
+      const tasks = [
+        makeTask({
+          id: 'test-pass',
+          description: 'Run unit tests',
+          status: 'completed',
+          config: { workflowId: 'wf-1', command: 'pnpm test' },
+          execution: { branch: 'experiment/test-pass', exitCode: 0 },
+        }),
+        makeTask({
+          id: 'test-fail',
+          description: 'Run build',
+          status: 'failed',
+          config: { workflowId: 'wf-1', command: 'pnpm build' },
+          execution: { exitCode: 1 },
+        }),
+      ];
+      const { executor } = createExecutorForSummary(tasks, { name: 'Workflow' });
+      (executor as any).gitDiffStat = vi.fn().mockResolvedValue(' src/foo.ts | 1 +');
+
+      const result = await executor.buildMergeSummary('wf-1');
+
+      expect(result).toContain('## Test Plan');
+      expect(result).toContain('- [x] `pnpm test`');
+      expect(result).toContain('- [ ] `pnpm build`');
+      expect(result).toContain('failed (exit 1)');
+    });
+
+    it('omits Test Plan when no command tasks', async () => {
+      const tasks = [
+        makeTask({
+          id: 'prompt-1',
+          description: 'Write implementation',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/prompt-1' },
+        }),
+        makeTask({
+          id: 'prompt-2',
+          description: 'Review changes',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/prompt-2' },
+        }),
+      ];
+      const { executor } = createExecutorForSummary(tasks, { name: 'Workflow' });
+      (executor as any).gitDiffStat = vi.fn().mockResolvedValue(' src/foo.ts | 1 +');
+
+      const result = await executor.buildMergeSummary('wf-1');
+
+      expect(result).not.toContain('## Test Plan');
+    });
+
+    it('includes Revert Plan for all workflows', async () => {
+      const tasks = [
+        makeTask({
+          id: 'task-1',
+          description: 'Implement feature',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/task-1' },
+        }),
+      ];
+      const { executor } = createExecutorForSummary(tasks, { name: 'Workflow' });
+      (executor as any).gitDiffStat = vi.fn().mockResolvedValue(' src/foo.ts | 1 +');
+
+      const result = await executor.buildMergeSummary('wf-1');
+
+      expect(result).toContain('## Revert Plan');
+      expect(result).toContain('Safe to revert?');
+      expect(result).toContain('Data migration?');
+    });
+
+    it('includes Architecture DAG for 3+ tasks', async () => {
+      const tasks = [
+        makeTask({
+          id: 'taskA',
+          description: 'Build API',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/taskA' },
+        }),
+        makeTask({
+          id: 'taskB',
+          description: 'Build UI',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/taskB' },
+        }),
+        makeTask({
+          id: 'taskC',
+          description: 'Integrate API and UI',
+          status: 'completed',
+          dependencies: ['taskA', 'taskB'],
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/taskC' },
+        }),
+      ];
+      const { executor } = createExecutorForSummary(tasks, { name: 'Workflow' });
+      (executor as any).gitDiffStat = vi.fn().mockResolvedValue(' src/foo.ts | 1 +');
+
+      const result = await executor.buildMergeSummary('wf-1');
+
+      expect(result).toContain('## Architecture');
+      expect(result).toContain('graph TD');
+      expect(result).toContain('-->');
+    });
+
+    it('omits Architecture for fewer than 3 tasks', async () => {
+      const tasks = [
+        makeTask({
+          id: 'task-1',
+          description: 'Implement feature',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/task-1' },
+        }),
+        makeTask({
+          id: 'task-2',
+          description: 'Verify feature',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/task-2' },
+        }),
+      ];
+      const { executor } = createExecutorForSummary(tasks, { name: 'Workflow' });
+      (executor as any).gitDiffStat = vi.fn().mockResolvedValue(' src/foo.ts | 1 +');
+
+      const result = await executor.buildMergeSummary('wf-1');
+
+      expect(result).not.toContain('## Architecture');
+    });
+
+    it('references Summary when description has mermaid', async () => {
+      const tasks = [
+        makeTask({
+          id: 'task-1',
+          description: 'Implement feature',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/task-1' },
+        }),
+      ];
+      const { executor } = createExecutorForSummary(tasks, {
+        name: 'Workflow',
+        description: [
+          'Workflow overview.',
+          '',
+          '```mermaid',
+          'graph TD',
+          '  A --> B',
+          '```',
+        ].join('\n'),
+      });
+      (executor as any).gitDiffStat = vi.fn().mockResolvedValue(' src/foo.ts | 1 +');
+
+      const result = await executor.buildMergeSummary('wf-1');
+
+      expect(result).toContain('## Architecture');
+      expect(result).toContain('included in the Summary section above');
+    });
+
+    it('sanitizes task IDs with special chars in Mermaid', async () => {
+      const tasks = [
+        makeTask({
+          id: 'wf-123/my-task',
+          description: 'Implement feature',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/wf-123-my-task' },
+        }),
+        makeTask({
+          id: 'task-b',
+          description: 'Verify feature',
+          status: 'completed',
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/task-b' },
+        }),
+        makeTask({
+          id: 'task-c',
+          description: 'Integrate changes',
+          status: 'completed',
+          dependencies: ['wf-123/my-task', 'task-b'],
+          config: { workflowId: 'wf-1' },
+          execution: { branch: 'experiment/task-c' },
+        }),
+      ];
+      const { executor } = createExecutorForSummary(tasks, { name: 'Workflow' });
+      (executor as any).gitDiffStat = vi.fn().mockResolvedValue(' src/foo.ts | 1 +');
+
+      const result = await executor.buildMergeSummary('wf-1');
+      const mermaidMatch = result.match(/```mermaid\n([\s\S]*?)\n```/);
+
+      expect(mermaidMatch).not.toBeNull();
+      expect(mermaidMatch?.[1]).toContain('wf_123_my_task');
+      expect(mermaidMatch?.[1]).not.toContain('wf-123/my-task');
+    });
+
     it('PROOF: logs full summary with description for visual inspection', async () => {
       const tasks = [
         makeTask({
