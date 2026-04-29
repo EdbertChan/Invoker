@@ -6,9 +6,14 @@
  * (out-of-order delta — the `created` delta was missed).
  */
 import type { TaskDelta, TaskState } from '@invoker/workflow-core';
+import type { Logger } from '@invoker/contracts';
 
 export interface TaskLookup {
   getAllTasks(): TaskState[];
+}
+
+export interface DeltaMergeLogger {
+  debug: Logger['debug'];
 }
 
 /**
@@ -22,6 +27,7 @@ export function applyDelta(
   delta: TaskDelta,
   stateMap: Map<string, string>,
   taskLookup?: TaskLookup,
+  logger?: DeltaMergeLogger,
 ): void {
   if (delta.type === 'created') {
     stateMap.set(delta.task.id, JSON.stringify(delta.task));
@@ -30,6 +36,11 @@ export function applyDelta(
     if (!existing && taskLookup) {
       const task = taskLookup.getAllTasks().find(t => t.id === delta.taskId);
       if (task) {
+        logger?.debug(`task delta fallback seeded missing task from orchestrator: ${delta.taskId}`, {
+          module: 'ui',
+          taskId: delta.taskId,
+          deltaType: delta.type,
+        });
         existing = JSON.stringify(task);
         stateMap.set(delta.taskId, existing);
       }

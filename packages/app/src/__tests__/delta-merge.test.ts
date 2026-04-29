@@ -6,9 +6,10 @@
  * The fix fetches the task from the orchestrator fallback so the
  * update is not silently dropped.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { applyDelta, type TaskLookup } from '../delta-merge.js';
 import type { TaskState, TaskDelta } from '@invoker/workflow-core';
+import type { DeltaMergeLogger } from '../delta-merge.js';
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -88,6 +89,30 @@ describe('applyDelta', () => {
       expect(stored.id).toBe('t1');
       expect(stored.status).toBe('completed');
       expect(stored.execution.exitCode).toBe(0);
+    });
+
+    it('logs when the orchestrator fallback seeds a missing task', () => {
+      const stateMap = new Map<string, string>();
+      const knownTask = makeTask('t1', { status: 'running' });
+      const lookup = makeLookup([knownTask]);
+      const logger: DeltaMergeLogger = { debug: vi.fn() };
+
+      const delta: TaskDelta = {
+        type: 'updated',
+        taskId: 't1',
+        changes: { status: 'completed' },
+      };
+
+      applyDelta(delta, stateMap, lookup, logger);
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        'task delta fallback seeded missing task from orchestrator: t1',
+        expect.objectContaining({
+          module: 'ui',
+          taskId: 't1',
+          deltaType: 'updated',
+        }),
+      );
     });
 
     it('applies a second updated delta on top of the first', () => {
