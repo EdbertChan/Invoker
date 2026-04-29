@@ -15,7 +15,6 @@ export default defineConfig({
     '@invoker/contracts',
     '@invoker/data-store',
     '@invoker/transport',
-    '@invoker/execution-engine',
     'yaml',
   ],
   clean: true,
