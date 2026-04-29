@@ -7,34 +7,39 @@
  * this interface live in other packages.
  *
  * Every method corresponds 1-to-1 with a `this.persistence.*` write call
- * inside orchestrator.ts.
+ * inside orchestrator.ts. Wrappers (logging / metrics decorators) can
+ * replace any concrete implementation without orchestrator changes.
  */
 
 import type { TaskState, TaskStateChanges, Attempt } from '@invoker/workflow-graph';
 
-// ── Workflow value types (inline in OrchestratorPersistence today) ────
+// ── Workflow value types (mirror PersistenceAdapter literal unions) ────
+
+export type WorkflowStatus = 'running' | 'completed' | 'failed';
+export type WorkflowMergeMode = 'manual' | 'automatic' | 'external_review';
+export type WorkflowOnFinish = 'none' | 'merge' | 'pull_request';
 
 export interface WorkflowRecord {
   id: string;
   name: string;
   description?: string;
   visualProof?: boolean;
-  status: 'running' | 'completed' | 'failed';
+  status: WorkflowStatus;
   createdAt: string;
   updatedAt: string;
   repoUrl?: string;
-  onFinish?: string;
+  onFinish?: WorkflowOnFinish;
   baseBranch?: string;
   featureBranch?: string;
-  mergeMode?: 'manual' | 'automatic' | 'external_review';
+  mergeMode?: WorkflowMergeMode;
 }
 
 export interface WorkflowChanges {
-  status?: string;
+  status?: WorkflowStatus;
   updatedAt?: string;
   baseBranch?: string;
   generation?: number;
-  mergeMode?: 'manual' | 'automatic' | 'external_review';
+  mergeMode?: WorkflowMergeMode;
 }
 
 export type AttemptChanges = Partial<

@@ -10,7 +10,18 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from '
 import { dirname } from 'node:path';
 import type { TaskState, TaskStateChanges, Attempt, TaskStatus } from '@invoker/workflow-core';
 import { normalizeExecutorType } from '@invoker/workflow-core';
-import type { PersistenceAdapter, Workflow, TaskEvent, ActivityLogEntry, Conversation, ConversationMessage } from './adapter.js';
+import type {
+  PersistenceAdapter,
+  Workflow,
+  TaskEvent,
+  ActivityLogEntry,
+  Conversation,
+  ConversationMessage,
+  OutputChunk,
+  WorkflowMutationIntent,
+  WorkflowMutationIntentStatus,
+  WorkflowMutationPriority,
+} from './adapter.js';
 
 /**
  * Rewrite `pnpm test packages/<pkg>/...` (incorrect root-level invocation)
@@ -33,28 +44,14 @@ function rewritePnpmTestCommand(cmd: string): string {
 /** Cached sql.js init promise — WASM is loaded only once per process. */
 let sqlJsPromise: ReturnType<typeof initSqlJs> | null = null;
 
-export interface OutputChunk {
-  offset: number;
-  data: string;
-}
+export type {
+  OutputChunk,
+  WorkflowMutationPriority,
+  WorkflowMutationIntentStatus,
+  WorkflowMutationIntent,
+} from './adapter.js';
 
-export type WorkflowMutationPriority = 'high' | 'normal';
-export type WorkflowMutationIntentStatus = 'queued' | 'running' | 'completed' | 'failed';
 export const WORKFLOW_MUTATION_LEASE_MS = 30_000;
-
-export interface WorkflowMutationIntent {
-  id: number;
-  workflowId: string;
-  channel: string;
-  args: unknown[];
-  priority: WorkflowMutationPriority;
-  status: WorkflowMutationIntentStatus;
-  ownerId?: string;
-  error?: string;
-  createdAt: string;
-  startedAt?: string;
-  completedAt?: string;
-}
 
 export interface WorkflowMutationLease {
   workflowId: string;
