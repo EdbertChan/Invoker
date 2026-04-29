@@ -13,17 +13,23 @@ import type { TaskState } from '@invoker/workflow-graph';
 
 export type CancelResult = { cancelled: string[]; runningCancelled: string[] };
 
+export interface CommandServiceHooks {
+  beforeRecreateWorkflow?: (workflowId: string) => void | Promise<void>;
+}
+
 // ── CommandService ──────────────────────────────────────────
 
 export class CommandService {
   private readonly orchestrator: Orchestrator;
+  private readonly hooks: CommandServiceHooks;
 
   // Promise-chain mutexes: workflow-local by default, global fallback when no workflow can be resolved.
   private readonly workflowMutexTails = new Map<string, Promise<void>>();
   private globalMutexTail: Promise<void> = Promise.resolve();
 
-  constructor(orchestrator: Orchestrator) {
+  constructor(orchestrator: Orchestrator, hooks: CommandServiceHooks = {}) {
     this.orchestrator = orchestrator;
+    this.hooks = hooks;
   }
 
   // ── Mutex ────────────────────────────────────────────────
@@ -421,7 +427,10 @@ export class CommandService {
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
       'RECREATE_WORKFLOW_FAILED',
-      () => this.orchestrator.recreateWorkflow(envelope.payload.workflowId),
+      async () => {
+        await this.hooks.beforeRecreateWorkflow?.(envelope.payload.workflowId);
+        return this.orchestrator.recreateWorkflow(envelope.payload.workflowId);
+      },
       envelope.payload.workflowId,
     );
   }

@@ -109,8 +109,6 @@ import {
 import {
   approveTask as sharedApproveTask,
   rebaseAndRetry,
-  recreateWorkflow as sharedRecreateWorkflow,
-  recreateTask as sharedRecreateTask,
   resolveConflictAction,
   selectExperiments as sharedSelectExperiments,
   setWorkflowMergeMode,
@@ -245,6 +243,21 @@ let logger: Logger = new FileAndDbLogger({ module: 'main' });
 const buildSha = typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev';
 const buildVersion = typeof __BUILD_VERSION__ !== 'undefined' ? __BUILD_VERSION__ : 'dev';
 logger.info(`Invoker ${buildVersion} (${buildSha})`, { module: 'startup' });
+
+function createCommandService(orchestratorInstance: Orchestrator): CommandService {
+  return new CommandService(orchestratorInstance, {
+    beforeRecreateWorkflow: (workflowId: string) => {
+      const workflow = persistence.loadWorkflow(workflowId);
+      if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
+      const nextGen = (workflow.generation ?? 0) + 1;
+      persistence.updateWorkflow(workflowId, { generation: nextGen });
+      logger.info(`bumped generation to ${nextGen} for ${workflowId}`, { module: 'workflow' });
+      logger.info(`commandService.recreateWorkflow(${workflowId}) after generation bump`, {
+        module: 'agent-session-trace',
+      });
+    },
+  });
+}
 
 process.on('uncaughtException', (err) => {
   try {
@@ -403,7 +416,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     deferRunningUntilLaunch: true,
     taskDispatcher: dispatchStartedTasks,
   });
-  commandService = new CommandService(orchestrator);
+  commandService = createCommandService(orchestrator);
 
   const startupSyncMode = options?.startupSyncMode ?? 'all';
   const initLog = isHeadless
@@ -2622,7 +2635,7 @@ if (isHeadless) {
         deferRunningUntilLaunch: true,
         taskDispatcher: dispatchStartedTasks,
       });
-      commandService = new CommandService(orchestrator);
+      commandService = createCommandService(orchestrator);
       rebuildTaskRunner();
       taskHandles.clear();
     });
@@ -2961,7 +2974,9 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-workflow',
         });
-        const started = sharedRecreateWorkflow(workflowId, { persistence, orchestrator });
+        const envelope = makeEnvelope('recreate-workflow', 'ui', 'workflow', { workflowId });
+        const result = await commandService.recreateWorkflow(envelope);
+        if (!result.ok) throw new Error(result.error.message);
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
@@ -2969,7 +2984,7 @@ if (isHeadless) {
             taskExecutor: requireTaskExecutor(),
             logger,
             context: 'ipc.recreate-workflow',
-            started,
+            started: result.data,
           });
         } finally {
           remoteFetchForPool.enabled = true;
@@ -2990,7 +3005,9 @@ if (isHeadless) {
       logger.info(`recreate-task: "${taskId}"`, { module: 'ipc' });
       try {
         await preemptTaskSubgraph(taskId);
-        const started = sharedRecreateTask(taskId, { persistence, orchestrator });
+        const envelope = makeEnvelope('recreate-task', 'ui', 'task', { taskId });
+        const result = await commandService.recreateTask(envelope);
+        if (!result.ok) throw new Error(result.error.message);
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
@@ -2998,7 +3015,7 @@ if (isHeadless) {
             taskExecutor: requireTaskExecutor(),
             logger,
             context: 'ipc.recreate-task',
-            started,
+            started: result.data,
           });
         } finally {
           remoteFetchForPool.enabled = true;

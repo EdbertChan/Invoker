@@ -382,6 +382,26 @@ describe('CommandService', () => {
       expect(orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
     });
 
+    it('runs the recreate hook before the orchestrator mutation', async () => {
+      const order: string[] = [];
+      const beforeRecreateWorkflow = vi.fn(async () => {
+        order.push('hook');
+      });
+      orchestrator = stubOrchestrator({
+        recreateWorkflow: vi.fn(() => {
+          order.push('orchestrator');
+          return [];
+        }),
+      });
+      service = new CommandService(orchestrator, { beforeRecreateWorkflow });
+
+      const result = await service.recreateWorkflow(makeEnvelope({ workflowId: 'wf-1' }));
+
+      expect(result).toEqual({ ok: true, data: [] });
+      expect(beforeRecreateWorkflow).toHaveBeenCalledWith('wf-1');
+      expect(order).toEqual(['hook', 'orchestrator']);
+    });
+
     it('returns error on exception', async () => {
       (orchestrator.recreateWorkflow as ReturnType<typeof vi.fn>).mockImplementation(() => {
         throw new Error('wf not found');
@@ -420,11 +440,10 @@ describe('CommandService', () => {
   // Direction") locks in: `CommandService` exposes the full
   // `{retry, recreate} × {task, workflow}` matrix plus the
   // strictly-stronger `recreateWorkflowFromFreshBase` (rebase
-  // and retry). All five route as **thin orchestrator delegates**
-  // — no command-service-side gen bumping, no pool prep, no
-  // legacy `restartTask` invocation. Production callers that
-  // need composite behavior compose them at the app layer
-  // (`packages/app/src/workflow-actions.ts`).
+  // and retry). The recreate-workflow cell may compose a
+  // pre-mutation hook, but the observable lifecycle primitive
+  // still lands on `orchestrator.recreateWorkflow`; no legacy
+  // `restartTask` invocation.
 
   describe('Step 17: 5-method canonical lifecycle matrix', () => {
     it('exposes all five canonical lifecycle methods on the service surface', () => {
