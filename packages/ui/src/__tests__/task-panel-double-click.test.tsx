@@ -1123,7 +1123,7 @@ describe('TaskPanel double-click editing', () => {
       );
 
       fireEvent.click(screen.getByTestId('gate-policy-edit-btn'));
-      fireEvent.change(screen.getByTestId('gate-policy-select-0'), { target: { value: 'review_ready' } });
+      fireEvent.change(screen.getByTestId('gate-policy-select-wf-1::__merge__'), { target: { value: 'review_ready' } });
       fireEvent.click(screen.getByTestId('gate-policy-apply-btn'));
 
       expect(confirmSpy).toHaveBeenCalled();
@@ -1163,7 +1163,7 @@ describe('TaskPanel double-click editing', () => {
       expect(screen.getByText('Gate Policy')).toBeInTheDocument();
       const summary = screen.getByTestId('gate-policy-summary');
       expect(summary).toHaveTextContent('All 1 gate satisfied');
-      expect(screen.queryByTestId(/^gate-policy-offender-\d+$/)).not.toBeInTheDocument();
+      expect(screen.queryByTestId('gate-policy-offender-wf-1::__merge__')).not.toBeInTheDocument();
       const satisfiedToggle = screen.getByTestId('gate-policy-satisfied-toggle');
       expect(satisfiedToggle).toHaveTextContent('1 satisfied gate');
     });
@@ -1194,7 +1194,7 @@ describe('TaskPanel double-click editing', () => {
 
       const summary = screen.getByTestId('gate-policy-summary');
       expect(summary).toHaveTextContent('1 gate blocking');
-      const offenderRow = screen.getByTestId('gate-policy-offender-0');
+      const offenderRow = screen.getByTestId('gate-policy-offender-wf-1::__merge__');
       expect(offenderRow).toBeInTheDocument();
       const workflowName = offenderRow.querySelector('.text-red-300');
       expect(workflowName).toBeInTheDocument();
@@ -1310,12 +1310,13 @@ describe('TaskPanel double-click editing', () => {
         />,
       );
 
-      const offenderRows = screen.getAllByTestId(/^gate-policy-offender-\d+$/);
-      expect(offenderRows.length).toBeGreaterThan(0);
-      const mixedThresholdEls = screen.getAllByTestId(/^gate-policy-offender-\d+-mixed-threshold$/);
-      expect(mixedThresholdEls.length).toBeGreaterThan(0);
-      expect(mixedThresholdEls[0]).toHaveTextContent('Mixed thresholds');
-      const workflowName = offenderRows[0].querySelector('.text-red-300');
+      const offenderRowA = screen.getByTestId('gate-policy-offender-wf-1::task-a');
+      const offenderRowB = screen.getByTestId('gate-policy-offender-wf-1::task-b');
+      expect(offenderRowA).toBeInTheDocument();
+      expect(offenderRowB).toBeInTheDocument();
+      const mixedA = screen.getByTestId('gate-policy-offender-wf-1::task-a-mixed-threshold');
+      expect(mixedA).toHaveTextContent('Mixed thresholds');
+      const workflowName = offenderRowA.querySelector('.text-red-300');
       expect(workflowName).toBeInTheDocument();
     });
 
@@ -1349,11 +1350,11 @@ describe('TaskPanel double-click editing', () => {
       fireEvent.click(screen.getByTestId('gate-policy-edit-btn'));
 
       // Change picker to review_ready
-      fireEvent.change(screen.getByTestId('gate-policy-select-0'), { target: { value: 'review_ready' } });
+      fireEvent.change(screen.getByTestId('gate-policy-select-wf-1::__merge__'), { target: { value: 'review_ready' } });
 
       // Check for impact text
       await waitFor(() => {
-        const impact = screen.getByTestId('gate-policy-offender-0-impact');
+        const impact = screen.getByTestId('gate-policy-offender-wf-1::__merge__-impact');
         expect(impact).toHaveTextContent('would unblock now');
       });
     });
