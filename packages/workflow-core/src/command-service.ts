@@ -20,8 +20,8 @@ export interface CommandServiceHooks {
 // ── CommandService ──────────────────────────────────────────
 
 export class CommandService {
-  private readonly orchestrator: Orchestrator;
-  private readonly hooks: CommandServiceHooks;
+  protected readonly orchestrator: Orchestrator;
+  protected readonly hooks: CommandServiceHooks;
 
   // Promise-chain mutexes: workflow-local by default, global fallback when no workflow can be resolved.
   private readonly workflowMutexTails = new Map<string, Promise<void>>();
@@ -34,7 +34,7 @@ export class CommandService {
 
   // ── Mutex ────────────────────────────────────────────────
 
-  private async serializeGlobal<T>(fn: () => T | Promise<T>): Promise<T> {
+  protected async serializeGlobal<T>(fn: () => T | Promise<T>): Promise<T> {
     const prev = this.globalMutexTail;
     let release!: () => void;
     this.globalMutexTail = new Promise<void>(r => { release = r; });
@@ -46,7 +46,7 @@ export class CommandService {
     }
   }
 
-  private async serializeForWorkflow<T>(
+  protected async serializeForWorkflow<T>(
     workflowId: string | undefined,
     fn: () => T | Promise<T>,
   ): Promise<T> {
@@ -68,8 +68,12 @@ export class CommandService {
     }
   }
 
-  private workflowIdForTask(taskId: string): string | undefined {
+  protected workflowIdForTask(taskId: string): string | undefined {
     return this.orchestrator.getTask(taskId)?.config?.workflowId;
+  }
+
+  protected async runBeforeRecreateWorkflow(workflowId: string): Promise<void> {
+    await this.hooks.beforeRecreateWorkflow?.(workflowId);
   }
 
   // ── Public Commands ─────────────────────────────────────
@@ -428,7 +432,7 @@ export class CommandService {
     return this.executeCommand<TaskState[]>(
       'RECREATE_WORKFLOW_FAILED',
       async () => {
-        await this.hooks.beforeRecreateWorkflow?.(envelope.payload.workflowId);
+        await this.runBeforeRecreateWorkflow(envelope.payload.workflowId);
         return this.orchestrator.recreateWorkflow(envelope.payload.workflowId);
       },
       envelope.payload.workflowId,
@@ -460,7 +464,7 @@ export class CommandService {
 
   // ── Private Helpers ────────────────────────────────────
 
-  private async executeCommand<T>(
+  protected async executeCommand<T>(
     errorCode: string,
     fn: () => T | Promise<T>,
     workflowId?: string,

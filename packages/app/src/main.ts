@@ -50,7 +50,7 @@ if (process.platform === 'linux' && !enableTestCompositor) {
   app.commandLine.appendSwitch('disable-software-rasterizer');
 }
 
-import { Orchestrator, CommandService } from '@invoker/workflow-core';
+import { Orchestrator, CommandService, InstrumentedCommandService } from '@invoker/workflow-core';
 import type {
   PlanDefinition,
   TaskDelta,
@@ -245,7 +245,7 @@ const buildVersion = typeof __BUILD_VERSION__ !== 'undefined' ? __BUILD_VERSION_
 logger.info(`Invoker ${buildVersion} (${buildSha})`, { module: 'startup' });
 
 function createCommandService(orchestratorInstance: Orchestrator): CommandService {
-  return new CommandService(orchestratorInstance, {
+  return new InstrumentedCommandService(orchestratorInstance, {
     beforeRecreateWorkflow: (workflowId: string) => {
       const workflow = persistence.loadWorkflow(workflowId);
       if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
@@ -255,6 +255,19 @@ function createCommandService(orchestratorInstance: Orchestrator): CommandServic
       logger.info(`commandService.recreateWorkflow(${workflowId}) after generation bump`, {
         module: 'agent-session-trace',
       });
+    },
+    emitLifecycleEvent: (event) => {
+      if (event.phase === 'success') {
+        logger.info(
+          `command-service lifecycle success command=${event.commandName} workflowId=${event.workflowId ?? 'none'} taskId=${event.taskId ?? 'none'} durationMs=${event.durationMs}`,
+          { module: 'workflow-lifecycle' },
+        );
+        return;
+      }
+      logger.error(
+        `command-service lifecycle failure command=${event.commandName} workflowId=${event.workflowId ?? 'none'} taskId=${event.taskId ?? 'none'} durationMs=${event.durationMs} code=${event.errorCode ?? 'unknown'} message=${event.errorMessage ?? 'unknown'}`,
+        { module: 'workflow-lifecycle' },
+      );
     },
   });
 }
