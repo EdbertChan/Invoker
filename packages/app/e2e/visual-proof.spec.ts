@@ -13,6 +13,8 @@ import {
   expect,
   TEST_PLAN,
   loadPlan,
+  startPlan,
+  waitForTaskStarted,
   injectTaskStates,
   captureScreenshot,
   assertPageScreenshot,
@@ -75,6 +77,22 @@ const MERGE_GATE_TEXT_VISUAL_PLAN = {
       id: 'mg-visual-work',
       description: 'Sole task before merge gate',
       command: 'echo ok',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
+/** Minimal prompt task for verifying the prompt editing UI state. */
+const PROMPT_EDIT_VISUAL_PLAN = {
+  name: 'Prompt Edit Visual Proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'prompt-edit-task',
+      description: 'Prompt-based Claude task',
+      prompt: 'Implement feature X',
+      executionAgent: 'claude',
       dependencies: [] as string[],
     },
   ],
@@ -163,6 +181,37 @@ test.describe('Visual proof capture', () => {
     await expect(panel.locator('text=task-alpha')).toBeVisible();
     await captureScreenshot(page, 'task-panel');
     await assertPageScreenshot(page, 'task-panel');
+  });
+
+  test('prompt editing UI state', async ({ page }) => {
+    await loadPlan(page, PROMPT_EDIT_VISUAL_PLAN);
+    await startPlan(page);
+    await waitForTaskStarted(page, 'prompt-edit-task');
+
+    await page.locator('.react-flow__node[data-testid$="prompt-edit-task"]').click();
+    await expect(page.getByRole('heading', { name: 'Prompt-based Claude task' })).toBeVisible();
+
+    const earlier = new Date(Date.now() - 5000);
+    const now = new Date();
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-edit-task',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: earlier, completedAt: now },
+        },
+      },
+    ]);
+
+    const commandDisplay = page.getByTestId('command-display');
+    await expect(commandDisplay).toBeVisible();
+    await expect(commandDisplay).toContainText('Implement feature X');
+
+    await commandDisplay.dblclick();
+    await expect(page.getByTestId('edit-prompt-input')).toBeVisible();
+
+    await captureScreenshot(page, 'edit-prompt-double-click');
+    await assertPageScreenshot(page, 'edit-prompt-double-click');
   });
 
   test('dag before and after task selection', async ({ page }) => {
