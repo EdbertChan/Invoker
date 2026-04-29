@@ -7,6 +7,7 @@
  */
 import { execSync } from 'child_process';
 import { existsSync, rmSync } from 'fs';
+import * as path from 'node:path';
 
 export const E2E_BARE_REPO = process.env.INVOKER_E2E_BARE_REPO ?? '/tmp/invoker-e2e-repo.git';
 
@@ -19,6 +20,21 @@ const gitEnv = {
 };
 
 export default function globalSetup(): void {
+  // Build the packages needed for E2E: UI renderer, surfaces (external), and the app itself
+  const appDir = path.resolve(__dirname, '..');
+  const repoRoot = path.resolve(appDir, '..', '..');
+  const uiDistIndex = path.resolve(repoRoot, 'packages', 'ui', 'dist', 'index.html');
+  if (!existsSync(uiDistIndex)) {
+    execSync('pnpm --filter @invoker/ui build', { cwd: repoRoot, stdio: 'inherit' });
+  }
+  const surfacesDist = path.resolve(repoRoot, 'packages', 'surfaces', 'dist', 'index.js');
+  if (!existsSync(surfacesDist)) {
+    execSync('pnpm --filter @invoker/surfaces build', { cwd: repoRoot, stdio: 'inherit' });
+  }
+  if (!existsSync(path.join(appDir, 'dist', 'main.js'))) {
+    execSync('pnpm run build', { cwd: appDir, stdio: 'inherit' });
+  }
+
   if (existsSync(E2E_BARE_REPO)) rmSync(E2E_BARE_REPO, { recursive: true });
 
   const tmpClone = `${E2E_BARE_REPO}.setup`;
