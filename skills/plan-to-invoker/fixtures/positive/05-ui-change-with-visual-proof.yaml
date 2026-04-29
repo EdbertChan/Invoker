@@ -1,5 +1,5 @@
 # UI Change Plan with Visual Proof
-# Description: Demonstrates the required pattern for UI change plans that modify packages/ui/.
+# Description: This fixture demonstrates the required pattern for UI change plans that modify packages/ui/.
 # When visualProof is true, the plan must include: (1) a prompt task that adds an E2E test case
 # to visual-proof.spec.ts using captureScreenshot, (2) a command task that builds and captures
 # after-state screenshots via ui-visual-proof.sh, and (3) at least one task referencing packages/ui/.
