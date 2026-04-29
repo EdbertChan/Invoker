@@ -62,6 +62,17 @@ export interface ClaudeMessage {
   timestamp: string;
 }
 
+export type AgentSessionState = 'running' | 'finished' | 'error';
+
+export interface AgentSessionData {
+  agentName: string;
+  sessionId: string;
+  state: AgentSessionState;
+  messages: ClaudeMessage[];
+  reason?: string;
+  source?: 'local' | 'remote';
+}
+
 export interface ExternalGatePolicyUpdate {
   workflowId: string;
   taskId?: string;
@@ -111,6 +122,47 @@ export interface CancelResult {
 export interface CleanupWorktreesResult {
   removed: string[];
   errors: string[];
+}
+
+export interface SystemToolStatus {
+  id: string;
+  name: string;
+  required: boolean;
+  installed: boolean;
+  version?: string;
+  installHint: string;
+}
+
+export interface BundledSkillTargetStatus {
+  id: string;
+  name: string;
+  path: string;
+  available: boolean;
+  installed: boolean;
+  upToDate: boolean;
+  installedSkillNames: string[];
+}
+
+export interface BundledSkillsStatus {
+  available: boolean;
+  promptRecommended: boolean;
+  sourcePath?: string;
+  managedPrefix: string;
+  bundledSkillNames: string[];
+  lastInstallAt?: string;
+  lastInstallError?: string;
+  targets: BundledSkillTargetStatus[];
+}
+
+export type BundledSkillsInstallMode = 'install' | 'update' | 'reinstall';
+
+export interface SystemDiagnostics {
+  platform: string;
+  arch: string;
+  appVersion: string;
+  isPackaged: boolean;
+  tools: SystemToolStatus[];
+  bundledSkills?: BundledSkillsStatus;
 }
 
 // ── Invoke Channel Registry ─────────────────────────────────
@@ -246,11 +298,11 @@ export const IpcChannels = {
   // Session & Agent Access
   'invoker:get-claude-session': {} as {
     request: [sessionId: string];
-    response: ClaudeMessage[] | null;
+    response: AgentSessionData | null;
   },
   'invoker:get-agent-session': {} as {
     request: [sessionId: string, agentName?: string];
-    response: ClaudeMessage[] | null;
+    response: AgentSessionData | null;
   },
 
   // Workflow Mutation & Merge
@@ -339,6 +391,18 @@ export const IpcChannels = {
   'invoker:cleanup-worktrees': {} as {
     request: [];
     response: CleanupWorktreesResult;
+  },
+  'invoker:get-system-diagnostics': {} as {
+    request: [];
+    response: SystemDiagnostics;
+  },
+  'invoker:get-bundled-skills-status': {} as {
+    request: [];
+    response: BundledSkillsStatus;
+  },
+  'invoker:install-bundled-skills': {} as {
+    request: [mode?: BundledSkillsInstallMode];
+    response: BundledSkillsStatus;
   },
 
 } as const;

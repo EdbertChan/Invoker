@@ -3,6 +3,10 @@ import { resolve as resolvePath } from 'node:path';
 import type { MessageBus } from '@invoker/transport';
 import type { TaskState } from '@invoker/workflow-core';
 
+import {
+  resolveHeadlessTarget,
+  type HeadlessTargetLookup,
+} from './headless-command-classification.js';
 import { createDelegatedTaskFeed, trackWorkflow } from './headless-watch.js';
 
 type DelegateTrackingOptions = {
@@ -16,12 +20,13 @@ export async function tryDelegateRun(
   messageBus: MessageBus,
   waitForApproval?: boolean,
   noTrack?: boolean,
+  timeoutMs?: number,
 ): Promise<boolean> {
   return tryDelegate(
     'headless.run',
     { planPath: resolvePath(planPath) },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs: 5_000 },
+    { waitForApproval, noTrack, timeoutMs: timeoutMs ?? 5_000 },
   );
 }
 
@@ -30,21 +35,46 @@ export async function tryDelegateResume(
   messageBus: MessageBus,
   waitForApproval?: boolean,
   noTrack?: boolean,
+  timeoutMs?: number,
 ): Promise<boolean> {
   return tryDelegate(
     'headless.resume',
     { workflowId },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs: 5_000 },
+    { waitForApproval, noTrack, timeoutMs: timeoutMs ?? 5_000 },
   );
 }
 
-export function delegationTimeoutMs(args: string[]): number {
+function usesExtendedDelegationTimeout(command: string): boolean {
+  return command === 'rebase' || command === 'rebase-and-retry' || command === 'restart';
+}
+
+function looksLikeWorkflowId(target: unknown): boolean {
+  return /^wf-[^/]+$/.test(String(target ?? ''));
+}
+
+export function delegationTimeoutMs(
+  args: string[],
+  targetLookup: HeadlessTargetLookup,
+): number {
   const command = args[0] ?? '';
-  if (command) {
-    return 900_000;
+  if (!usesExtendedDelegationTimeout(command)) {
+    return 5_000;
   }
-  return 15_000;
+
+  const resolvedTarget = resolveHeadlessTarget(args[1], targetLookup);
+  if (resolvedTarget.kind === 'workflow') {
+    return 60_000;
+  }
+  return 5_000;
+}
+
+export async function resolveDelegationTimeoutMs(args: string[]): Promise<number> {
+  const command = args[0] ?? '';
+  if (!usesExtendedDelegationTimeout(command)) {
+    return 5_000;
+  }
+  return looksLikeWorkflowId(args[1]) ? 60_000 : 5_000;
 }
 
 export async function tryDelegateExec(
@@ -52,13 +82,14 @@ export async function tryDelegateExec(
   messageBus: MessageBus,
   waitForApproval?: boolean,
   noTrack?: boolean,
-  timeoutMs: number = delegationTimeoutMs(args),
+  timeoutMs?: number,
 ): Promise<boolean> {
+  const resolvedTimeoutMs = timeoutMs ?? await resolveDelegationTimeoutMs(args);
   return tryDelegate(
     'headless.exec',
     { args, waitForApproval, noTrack },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs },
+    { waitForApproval, noTrack, timeoutMs: resolvedTimeoutMs },
   );
 }
 
@@ -67,8 +98,10 @@ export async function tryPingHeadlessOwner(
   timeoutMs = 1_000,
 ): Promise<{ ownerId?: string; mode?: string } | null> {
   const DELEGATION_TIMEOUT = Symbol('delegation-timeout');
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<typeof DELEGATION_TIMEOUT>((_, reject) => {
-    setTimeout(() => reject(DELEGATION_TIMEOUT), timeoutMs);
+    timeoutHandle = setTimeout(() => reject(DELEGATION_TIMEOUT), timeoutMs);
+    timeoutHandle.unref?.();
   });
 
   try {
@@ -83,6 +116,8 @@ export async function tryPingHeadlessOwner(
       return null;
     }
     throw err;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 }
 
@@ -100,8 +135,10 @@ export async function tryDelegateQuery(
   timeoutMs = 5_000,
 ): Promise<Record<string, unknown> | null> {
   const DELEGATION_TIMEOUT = Symbol('delegation-timeout');
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<typeof DELEGATION_TIMEOUT>((_, reject) => {
-    setTimeout(() => reject(DELEGATION_TIMEOUT), timeoutMs);
+    timeoutHandle = setTimeout(() => reject(DELEGATION_TIMEOUT), timeoutMs);
+    timeoutHandle.unref?.();
   });
 
   try {
@@ -116,6 +153,8 @@ export async function tryDelegateQuery(
       return null;
     }
     throw err;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 }
 
@@ -127,8 +166,10 @@ async function tryDelegate(
 ): Promise<boolean> {
   let targetWorkflowId: string | undefined;
   const DELEGATION_TIMEOUT = Symbol('delegation-timeout');
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<typeof DELEGATION_TIMEOUT>((_, reject) => {
-    setTimeout(() => reject(DELEGATION_TIMEOUT), options.timeoutMs ?? 5_000);
+    timeoutHandle = setTimeout(() => reject(DELEGATION_TIMEOUT), options.timeoutMs ?? 5_000);
+    timeoutHandle.unref?.();
   });
 
   let response: { workflowId: string; tasks: TaskState[] } | { ok: true };
@@ -145,6 +186,8 @@ async function tryDelegate(
       return false;
     }
     throw err;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 
   if ('workflowId' in response) {

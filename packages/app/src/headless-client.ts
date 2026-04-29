@@ -7,7 +7,7 @@ import type { MessageBus } from '@invoker/transport';
 import { resolveInvokerHomeRoot } from './delete-all-snapshot.js';
 import { isHeadlessMutatingCommand } from './headless-command-classification.js';
 import {
-  delegationTimeoutMs,
+  resolveDelegationTimeoutMs,
   tryDelegateExec,
   tryDelegateQuery,
   tryDelegateQueryUiPerf,
@@ -56,15 +56,34 @@ async function runElectronHeadless(args: string[]): Promise<number> {
   });
 }
 
-const DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS = 8_000;
+async function flushOutputStream(stream: NodeJS.WriteStream): Promise<void> {
+  await new Promise<void>((resolve) => {
+    stream.write('', () => resolve());
+  });
+}
+
+const DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS = 30_000;
 const POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS = 90_000;
 const POST_BOOTSTRAP_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 8_000;
 const POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS = 3;
+const DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS = 60_000;
+type HeadlessOwnerInfo = { ownerId?: string; mode?: string };
+
+function isStandaloneOwner(owner: HeadlessOwnerInfo | null | undefined): owner is HeadlessOwnerInfo & { mode: 'standalone' } {
+  return owner?.mode === 'standalone';
+}
+
+function standaloneOwnerBootstrapTimeoutMs(): number {
+  const raw = process.env.INVOKER_HEADLESS_OWNER_BOOTSTRAP_TIMEOUT_MS;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS;
+}
 
 export class SharedMutationOwnerTimeoutError extends Error {
-  constructor(message: string = 'Timed out waiting for a shared mutation owner to become available') {
+  constructor(message: string = 'Timed out waiting for a standalone shared mutation owner to become available') {
     super(message);
     this.name = 'SharedMutationOwnerTimeoutError';
   }
@@ -82,17 +101,21 @@ async function delegateMutation(
   noTrackTimeoutMs: number = DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS,
 ): Promise<boolean> {
   const command = args[0];
+  const timeoutMs = noTrack
+    ? noTrackTimeoutMs
+    : command === 'run' || command === 'resume'
+      ? 5_000
+      : await resolveDelegationTimeoutMs(args);
   if (command === 'run') {
     const planPath = args[1];
     if (!planPath) throw new Error('Missing plan file. Usage: --headless run <plan.yaml>');
-    return tryDelegateRun(planPath, bus, waitForApproval, noTrack);
+    return tryDelegateRun(planPath, bus, waitForApproval, noTrack, timeoutMs);
   }
   if (command === 'resume') {
     const workflowId = args[1];
     if (!workflowId) throw new Error('Missing workflowId. Usage: --headless resume <id>');
-    return tryDelegateResume(workflowId, bus, waitForApproval, noTrack);
+    return tryDelegateResume(workflowId, bus, waitForApproval, noTrack, timeoutMs);
   }
-  const timeoutMs = noTrack ? noTrackTimeoutMs : delegationTimeoutMs(args);
   return tryDelegateExec(args, bus, waitForApproval, noTrack, timeoutMs);
 }
 
@@ -108,7 +131,7 @@ async function delegateReadOnlyQuery(
   }
   const deadline = Date.now() + READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS;
   let messageBus = bus;
-  let owner: { ownerId?: string; mode?: string } | null = null;
+  let owner: HeadlessOwnerInfo | null = null;
   while (Date.now() < deadline) {
     owner = await tryPingHeadlessOwner(messageBus, 2_000);
     if (owner) break;
@@ -180,7 +203,7 @@ async function delegateAfterBootstrap(
   let messageBus = bus;
   while (Date.now() < deadline) {
     const owner = await tryPingHeadlessOwner(messageBus, 1_000);
-    if (owner && await delegateMutation(
+    if (isStandaloneOwner(owner) && await delegateMutation(
       args,
       messageBus,
       waitForApproval,
@@ -211,10 +234,10 @@ async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void>
     if (bootstrapLock) {
       spawnDetachedStandaloneOwner(resolve(__dirname, '..', '..', '..'));
     }
-    const deadline = Date.now() + 20_000;
+    const deadline = Date.now() + standaloneOwnerBootstrapTimeoutMs();
     while (Date.now() < deadline) {
       const owner = await tryPingHeadlessOwner(bus, 500);
-      if (owner) return;
+      if (isStandaloneOwner(owner)) return;
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
     }
     throw new SharedMutationOwnerTimeoutError();
@@ -265,7 +288,7 @@ export async function runHeadlessClientCommand(
   }
 
   const owner = await tryPingHeadlessOwner(messageBus, 3_000);
-  if (owner) {
+  if (isStandaloneOwner(owner)) {
     if (await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
       return resolvedExitCode();
     }
@@ -273,7 +296,7 @@ export async function runHeadlessClientCommand(
   if (owner && deps.refreshMessageBus) {
     messageBus = await deps.refreshMessageBus();
     const refreshedOwner = await tryPingHeadlessOwner(messageBus, 1_000);
-    if (refreshedOwner && await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
+    if (isStandaloneOwner(refreshedOwner) && await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
       return resolvedExitCode();
     }
   }
@@ -311,7 +334,7 @@ export async function runHeadlessClientCommand(
     messageBus = await deps.refreshMessageBus();
   }
   process.stderr.write(
-    `${RED}Error:${RESET} Mutation command "${args[0] ?? ''}" could not reach a shared owner after bootstrap.\n`,
+    `${RED}Error:${RESET} Mutation command "${args[0] ?? ''}" could not reach a standalone shared owner after bootstrap.\n`,
   );
   return 1;
 }
@@ -328,7 +351,7 @@ export async function runHeadlessClient(argv: string[]): Promise<number> {
     await bus.ready();
     return await runHeadlessClientCommand(argv, {
       messageBus: bus,
-      ensureStandaloneOwner: () => ensureStandaloneOwnerViaBootstrap(bus),
+      ensureStandaloneOwner: (currentBus) => ensureStandaloneOwnerViaBootstrap(currentBus ?? bus),
       refreshMessageBus,
       runElectronHeadless,
     });
@@ -339,11 +362,19 @@ export async function runHeadlessClient(argv: string[]): Promise<number> {
 
 if (require.main === module) {
   runHeadlessClient(process.argv.slice(2))
-    .then((code) => {
-      process.exit(code);
+    .then(async (code) => {
+      await Promise.all([
+        flushOutputStream(process.stdout),
+        flushOutputStream(process.stderr),
+      ]);
+      process.exitCode = code;
     })
-    .catch((err) => {
+    .catch(async (err) => {
       process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
+      await Promise.all([
+        flushOutputStream(process.stdout),
+        flushOutputStream(process.stderr),
+      ]);
+      process.exitCode = 1;
     });
 }

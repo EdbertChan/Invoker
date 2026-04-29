@@ -126,6 +126,7 @@ export interface TaskState {
   readonly createdAt: Date;
   readonly config: TaskConfig;
   readonly execution: TaskExecution;
+  readonly taskStateVersion: number;
 }
 
 // ── Task State Changes ──────────────────────────────────────
@@ -142,8 +143,8 @@ export interface TaskStateChanges {
 
 export type TaskDelta =
   | { readonly type: 'created'; readonly task: TaskState }
-  | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges }
-  | { readonly type: 'removed'; readonly taskId: string };
+  | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges; readonly taskStateVersion: number; readonly previousTaskStateVersion: number }
+  | { readonly type: 'removed'; readonly taskId: string; readonly previousTaskStateVersion: number };
 
 // ── Workflow Metadata ────────────────────────────────────────
 
@@ -222,7 +223,7 @@ export interface TaskReplacementDef {
 // ── IPC Bridge API ──────────────────────────────────────────
 // InvokerAPI is derived from the IPC channel registry in @invoker/contracts.
 
-export type { InvokerAPI, ClaudeMessage } from '@invoker/contracts';
+export type { InvokerAPI, ClaudeMessage, AgentSessionData } from '@invoker/contracts';
 
 import type { InvokerAPI } from '@invoker/contracts';
 

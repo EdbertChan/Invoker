@@ -9,9 +9,10 @@
  * This file handles CLI parsing, TaskRunner lifecycle, and output formatting.
  */
 
-import type { Logger } from '@invoker/contracts';
+import type { BundledSkillsInstallMode, BundledSkillsStatus, Logger } from '@invoker/contracts';
 import { makeEnvelope } from '@invoker/contracts';
-import type { Orchestrator, CommandService, TaskDelta, TaskReplacementDef, TaskState } from '@invoker/workflow-core';
+import type { AgentSessionData } from '@invoker/contracts';
+import type { Orchestrator, CommandService, TaskDelta, TaskState } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import { createDeleteAllSnapshot } from './delete-all-snapshot.js';
 import { Channels } from '@invoker/transport';
@@ -44,6 +45,7 @@ import { openExternalTerminalForTask } from './open-terminal-for-task.js';
 import { dispatchStartedTasksWithGlobalTopup, executeGlobalTopup, finalizeMutationWithGlobalTopup } from './global-topup.js';
 import {
   delegationTimeoutMs,
+  resolveDelegationTimeoutMs,
   tryDelegateExec,
   tryDelegateQuery,
   tryDelegateResume,
@@ -56,6 +58,7 @@ import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 export { bumpGenerationAndRecreate } from './workflow-actions.js';
 export {
   delegationTimeoutMs,
+  resolveDelegationTimeoutMs,
   tryDelegateExec,
   tryDelegateQuery,
   tryDelegateResume,
@@ -92,6 +95,8 @@ export interface HeadlessDeps {
   waitForApproval?: boolean;
   noTrack?: boolean;
   isStandaloneOwnerIdle?: () => boolean;
+  getBundledSkillsStatus?: () => BundledSkillsStatus;
+  installBundledSkills?: (mode?: BundledSkillsInstallMode) => BundledSkillsStatus;
 }
 
 // ── ANSI Helpers ─────────────────────────────────────────────
@@ -565,6 +570,23 @@ async function headlessMigrateCompatibility(deps: HeadlessDeps): Promise<void> {
   process.stdout.write(`  staleAutoFixExperimentTasks: ${report.staleAutoFixExperimentTasks}\n`);
 }
 
+async function headlessInstallSkills(
+  mode: BundledSkillsInstallMode | undefined,
+  deps: Pick<HeadlessDeps, 'installBundledSkills'>,
+): Promise<void> {
+  if (!deps.installBundledSkills) {
+    throw new Error('Bundled skill installation is not available in this runtime.');
+  }
+  const status = deps.installBundledSkills(mode ?? 'install');
+  process.stdout.write(`Installed ${status.bundledSkillNames.length} bundled skills with prefix "${status.managedPrefix}".\n`);
+  for (const target of status.targets) {
+    process.stdout.write(`Target (${target.name}): ${target.path}\n`);
+  }
+  for (const skillName of status.bundledSkillNames) {
+    process.stdout.write(`- ${status.managedPrefix}${skillName}\n`);
+  }
+}
+
 // ── Headless Command Router ──────────────────────────────────
 
 export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<void> {
@@ -583,6 +605,12 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       break;
     case 'migrate-compat':
       await headlessMigrateCompatibility(deps);
+      break;
+    case 'install-skills':
+      await headlessInstallSkills(
+        args[1] === 'reinstall' || args[1] === 'update' ? args[1] : 'install',
+        deps,
+      );
       break;
     case 'watch':
       await headlessWatch(args[1], deps);
@@ -608,8 +636,10 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       await headlessRecreateTask(args[1], deps);
       break;
     case 'replace-task':
-      await headlessReplaceTask(args[1], args[2], deps);
-      break;
+      throw new Error(
+        'Headless replace-task is disabled because it is not a safe supported CLI flow. ' +
+        'Use the UI replace-task flow instead.',
+      );
     case 'fork-workflow':
       await headlessForkWorkflow(args[1], deps);
       break;
@@ -775,7 +805,6 @@ ${BOLD}Execute:${RESET}
   retry-task <taskId>                                 Retry a single failed/stuck task
   recreate <workflowId>                                Recreate workflow: wipe all state, new generation
   recreate-task <taskId>                               Recreate task + downstream (task-scoped reset)
-  replace-task <taskId> <replacementTasksJson>        Replace a task with new task definitions
   fork-workflow <workflowId>                          Fork a live workflow into a new branched workflow (Step 14)
   rebase <taskId>                                     Refresh pool base + nuclear restart
   fix <taskId> [claude|codex]                         Fix a failed task (default: claude)
@@ -788,6 +817,7 @@ ${BOLD}Respond:${RESET}
   select <taskId> <experimentId>                      Select winning experiment
 
 ${BOLD}Configure:${RESET}
+  install-skills [install|update|reinstall]          Install bundled Invoker skills into Codex
   set command <taskId> <cmd>                          Edit task command and re-run
   set prompt <taskId> <text>                          Edit task prompt and re-run
   set executor <taskId> <type>                        Change executor type (worktree|docker|ssh)
@@ -1400,60 +1430,6 @@ async function headlessRecreateTask(taskId: string, deps: HeadlessDeps): Promise
   autoFix.unsubscribe();
 }
 
-async function headlessReplaceTask(
-  taskId: string,
-  replacementTasksJson: string | undefined,
-  deps: HeadlessDeps,
-): Promise<void> {
-  if (!taskId || !replacementTasksJson) {
-    throw new Error('Missing arguments. Usage: --headless replace-task <taskId> <replacementTasksJson>');
-  }
-  let replacementTasks: TaskReplacementDef[];
-  try {
-    const parsed = JSON.parse(replacementTasksJson) as unknown;
-    if (!Array.isArray(parsed)) throw new Error('Replacement tasks must be a JSON array');
-    replacementTasks = parsed as TaskReplacementDef[];
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid replacementTasks JSON: ${reason}`);
-  }
-
-  // Step 14 (`docs/architecture/task-invalidation-roadmap.md`,
-  // chart "Topology inconsistency"): for *live* workflows
-  // `Orchestrator.replaceTask` now routes the topology mutation
-  // through `forkWorkflow` and lands the replacement on a brand-new
-  // workflow id. We snapshot the source workflow id BEFORE issuing
-  // the command so we can detect the redirect and report the new id
-  // to the caller. Terminal workflows still mutate in place, so the
-  // pre-/post- ids match and we report the in-place result.
-  const sourceWorkflowId = deps.orchestrator.getTask?.(taskId)?.config.workflowId;
-  const envelope = makeEnvelope('replace-task', 'headless', 'task', { taskId, replacementTasks });
-  const result = await deps.commandService.replaceTask(envelope);
-  if (!result.ok) throw new Error(result.error.message);
-
-  const taskExecutor = createHeadlessExecutor(deps);
-  const { runnable } = await dispatchStartedTasksWithGlobalTopup({
-    orchestrator: deps.orchestrator,
-    taskExecutor,
-    logger: deps.logger,
-    context: 'headless.replace-task',
-    started: result.data,
-  });
-
-  const landedWorkflowId = result.data[0]?.config.workflowId;
-  if (sourceWorkflowId && landedWorkflowId && landedWorkflowId !== sourceWorkflowId) {
-    process.stdout.write(
-      `Live-workflow topology mutation: forked ${sourceWorkflowId} → ${landedWorkflowId}; ` +
-        `replaced task ${taskId} with ${replacementTasks.length} task(s) in the fork; ` +
-        `launched ${runnable.length} task(s)\n`,
-    );
-  } else {
-    process.stdout.write(
-      `Replaced task ${taskId} with ${replacementTasks.length} task(s); launched ${runnable.length} task(s)\n`,
-    );
-  }
-}
-
 async function headlessForkWorkflow(
   workflowId: string,
   deps: HeadlessDeps,
@@ -1789,13 +1765,31 @@ export async function resolveAgentSession(
   agentName: string,
   registry?: AgentRegistry,
   allTasks?: import('@invoker/workflow-core').TaskState[],
-): Promise<import('@invoker/execution-engine').AgentMessage[] | null> {
+): Promise<AgentSessionData | null> {
   const driver = registry?.getSessionDriver(agentName);
-  if (!driver) return null;
+  if (!driver) {
+    return {
+      agentName,
+      sessionId,
+      state: 'error',
+      messages: [],
+      reason: `No session driver registered for agent "${agentName}"`,
+    };
+  }
 
   // 1. Try local
   const raw = driver.loadSession(sessionId);
-  if (raw) return driver.parseSession(raw);
+  if (raw) {
+    const inspection = driver.inspectSession(raw);
+    return {
+      agentName,
+      sessionId,
+      state: inspection.state,
+      reason: inspection.reason,
+      messages: driver.parseSession(raw),
+      source: 'local',
+    };
+  }
 
   // 2. Try remote (SSH tasks)
   if (driver.fetchRemoteSession && allTasks) {
@@ -1812,12 +1806,28 @@ export async function resolveAgentSession(
         : Object.values(targets)[0];
       if (target) {
         const remoteRaw = await driver.fetchRemoteSession(sessionId, target);
-        if (remoteRaw) return driver.parseSession(remoteRaw);
+        if (remoteRaw) {
+          const inspection = driver.inspectSession(remoteRaw);
+          return {
+            agentName,
+            sessionId,
+            state: inspection.state,
+            reason: inspection.reason,
+            messages: driver.parseSession(remoteRaw),
+            source: 'remote',
+          };
+        }
       }
     }
   }
 
-  return null;
+  return {
+    agentName,
+    sessionId,
+    state: 'error',
+    messages: [],
+    reason: 'Session file not found',
+  };
 }
 
 async function headlessSession(taskId: string | undefined, deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence' | 'executionAgentRegistry'>): Promise<void> {
@@ -1861,12 +1871,16 @@ async function headlessSession(taskId: string | undefined, deps: Pick<HeadlessDe
   process.stdout.write(`agent=${agentName} sessionId=${sessionId}\n`);
 
   const allTasks = deps.orchestrator.getAllTasks();
-  const messages = await resolveAgentSession(sessionId, agentName, deps.executionAgentRegistry, allTasks);
-  if (!messages) {
-    process.stdout.write('Session file not found\n');
+  const result = await resolveAgentSession(sessionId, agentName, deps.executionAgentRegistry, allTasks);
+  if (!result) {
+    process.stdout.write('Session lookup failed\n');
     return;
   }
-  for (const msg of messages) {
+  process.stdout.write(`state=${result.state}${result.source ? ` source=${result.source}` : ''}\n`);
+  if (result.reason) {
+    process.stdout.write(`${result.reason}\n`);
+  }
+  for (const msg of result.messages) {
     process.stdout.write(`[${msg.role}] ${msg.content}\n`);
   }
 }

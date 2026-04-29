@@ -36,7 +36,7 @@ describe('App launch (component)', () => {
     expect(screen.getByText('Load a plan to get started')).toBeInTheDocument();
   });
 
-  it('renders Open File and utility dropdown with Refresh, Clear Session, and Delete DB', () => {
+  it('renders Open File and utility dropdown with Refresh, Clear Session, Delete DB, and System Setup', () => {
     render(<App />);
 
     // Open File is always visible
@@ -58,7 +58,7 @@ describe('App launch (component)', () => {
 
     // Also check for disabled placeholder items
     expect(screen.getByText('Export Logs...')).toBeInTheDocument();
-    expect(screen.getByText('Settings...')).toBeInTheDocument();
+    expect(screen.getByText('System Setup...')).toBeInTheDocument();
   });
 
   it('does not show Start or Stop before a plan is loaded', () => {
@@ -75,5 +75,57 @@ describe('App launch (component)', () => {
   it('TaskPanel shows selection prompt', () => {
     render(<App />);
     expect(screen.getByText('Select a task from the graph to view details')).toBeInTheDocument();
+  });
+
+  it('opens System Setup automatically when packaged bundled skills need installation', async () => {
+    mock.api.getSystemDiagnostics = vi.fn(async () => ({
+      platform: 'linux',
+      arch: 'x64',
+      appVersion: '0.0.1',
+      isPackaged: true,
+      tools: [],
+      bundledSkills: {
+        available: true,
+        promptRecommended: true,
+        managedPrefix: 'invoker-',
+        bundledSkillNames: ['plan-to-invoker'],
+        targets: [
+          {
+            id: 'codex',
+            name: 'Codex',
+            path: '/tmp/.codex/skills',
+            available: true,
+            installed: false,
+            upToDate: false,
+            installedSkillNames: [],
+          },
+          {
+            id: 'claude',
+            name: 'Claude',
+            path: '/tmp/.claude/skills',
+            available: true,
+            installed: false,
+            upToDate: false,
+            installedSkillNames: [],
+          },
+          {
+            id: 'cursor',
+            name: 'Cursor',
+            path: '/tmp/.cursor/skills-cursor',
+            available: true,
+            installed: false,
+            upToDate: false,
+            installedSkillNames: [],
+          },
+        ],
+      },
+    }));
+
+    render(<App />);
+    expect(await screen.findByText('System Setup')).toBeInTheDocument();
+    expect(screen.getByText('Bundled Invoker Skills')).toBeInTheDocument();
+    expect(screen.getByText('Install Skills')).toBeInTheDocument();
+    expect(screen.getByText('Claude')).toBeInTheDocument();
+    expect(screen.getByText('Cursor')).toBeInTheDocument();
   });
 });

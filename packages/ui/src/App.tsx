@@ -26,10 +26,12 @@ import { ExperimentModal } from './components/ExperimentModal.js';
 import { ContextMenu } from './components/ContextMenu.js';
 import { QueueView } from './components/QueueView.js';
 import { ReplaceTaskModal } from './components/ReplaceTaskModal.js';
+import { SystemSetupModal } from './components/SystemSetupModal.js';
 import {
   isExperimentSpawnPivotTask,
   EXPERIMENT_SPAWN_PIVOT_OPEN_TERMINAL_MESSAGE,
 } from './isExperimentSpawnPivot.js';
+import type { SystemDiagnostics } from '@invoker/contracts';
 
 type ModalState =
   | { type: 'none' }
@@ -65,12 +67,33 @@ export function App() {
   const [remoteTargets, setRemoteTargets] = useState<string[]>([]);
   const [executionAgents, setExecutionAgents] = useState<string[]>([]);
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
+  const [systemDiagnostics, setSystemDiagnostics] = useState<SystemDiagnostics | null>(null);
+  const [showSystemSetup, setShowSystemSetup] = useState(false);
+  const [showSystemBanner, setShowSystemBanner] = useState(false);
+  const [installSkillsPending, setInstallSkillsPending] = useState(false);
+  const [installSkillsError, setInstallSkillsError] = useState<string | null>(null);
   const uiPerfThrottleRef = useRef<Record<string, number>>({});
+
+  const refreshSystemDiagnostics = useCallback(() => {
+    window.invoker?.getSystemDiagnostics?.().then((diagnostics) => {
+      setSystemDiagnostics(diagnostics);
+      const missingRequired = diagnostics.tools.some((tool) => tool.required && !tool.installed);
+      const hasAgent = diagnostics.tools.some((tool) => (tool.id === 'claude' || tool.id === 'codex') && tool.installed);
+      const needsBundledPrompt = Boolean(diagnostics.isPackaged && diagnostics.bundledSkills?.promptRecommended);
+      if (missingRequired || !hasAgent || needsBundledPrompt) {
+        setShowSystemBanner(true);
+      }
+      if (needsBundledPrompt) {
+        setShowSystemSetup(true);
+      }
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     window.invoker?.getRemoteTargets?.().then(setRemoteTargets).catch(() => {});
     window.invoker?.getExecutionAgents?.().then(setExecutionAgents).catch(() => {});
-  }, []);
+    refreshSystemDiagnostics();
+  }, [refreshSystemDiagnostics]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.invoker) return;
@@ -144,6 +167,9 @@ export function App() {
   }, []);
 
   const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) ?? null : null;
+  const missingRequiredTool = systemDiagnostics?.tools.find((tool) => tool.required && !tool.installed) ?? null;
+  const installedAgentCount = systemDiagnostics?.tools.filter((tool) => (tool.id === 'claude' || tool.id === 'codex') && tool.installed).length ?? 0;
+  const needsBundledSkillsPrompt = Boolean(systemDiagnostics?.isPackaged && systemDiagnostics?.bundledSkills?.promptRecommended);
 
   // ── DAG interaction ───────────────────────────────────────
   const handleTaskClick = useCallback((task: TaskState) => {
@@ -286,7 +312,7 @@ export function App() {
   const handleCancelTask = useCallback(async (taskId: string) => {
     setContextMenu(null);
     const confirmed = window.confirm(
-      `Cancel task "${taskId}" and all downstream dependents?`
+      `Terminate task "${taskId}" and all downstream dependents?`
     );
     if (!confirmed) return;
     try {
@@ -449,6 +475,18 @@ export function App() {
     [invoker],
   );
 
+  const handleEditPrompt = useCallback(
+    async (taskId: string, newPrompt: string) => {
+      if (!invoker) return;
+      try {
+        await invoker.editTaskPrompt(taskId, newPrompt);
+      } catch (err) {
+        console.error('Failed to edit task prompt:', err);
+      }
+    },
+    [invoker],
+  );
+
   // ── Edit task executor type ───────────────────────────────
   const handleEditType = useCallback(
     async (taskId: string, executorType: string, remoteTargetId?: string) => {
@@ -505,6 +543,22 @@ export function App() {
     setModal({ type: 'none' });
   }, []);
 
+  const handleInstallBundledSkills = useCallback(async (mode: 'install' | 'update' | 'reinstall' = 'install') => {
+    try {
+      setInstallSkillsPending(true);
+      setInstallSkillsError(null);
+      const diagnostics = await window.invoker?.installBundledSkills?.(mode);
+      if (diagnostics) {
+        setSystemDiagnostics((prev) => prev ? { ...prev, bundledSkills: diagnostics } : prev);
+      }
+      refreshSystemDiagnostics();
+    } catch (err) {
+      setInstallSkillsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setInstallSkillsPending(false);
+    }
+  }, [refreshSystemDiagnostics]);
+
   return (
     <div className="h-screen flex flex-col bg-gray-900 text-gray-100">
       {/* Top bar */}
@@ -519,9 +573,38 @@ export function App() {
         onClear={handleClear}
         onDeleteDB={handleDeleteDB}
         onRefresh={handleRefresh}
+        onOpenSystemSetup={() => setShowSystemSetup(true)}
         viewMode={viewMode}
         onToggleView={setViewMode}
       />
+
+      {showSystemBanner && (
+        <div className="px-4 py-3 border-b border-amber-700 bg-amber-950/50 flex items-center justify-between gap-4">
+          <div className="text-sm text-amber-100">
+            {missingRequiredTool
+              ? `${missingRequiredTool.name} is missing. Invoker needs it for local workflows.`
+              : needsBundledSkillsPrompt
+                ? 'Bundled Invoker skills are ready to install into Codex. Install them before using packaged skill-driven flows.'
+              : installedAgentCount === 0
+                ? 'No Claude or Codex CLI detected yet. Install one before running agent-backed tasks.'
+                : 'Review local prerequisites before running packaged workflows.'}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setShowSystemSetup(true)}
+              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-xs font-medium transition-colors"
+            >
+              Open Setup
+            </button>
+            <button
+              onClick={() => setShowSystemBanner(false)}
+              className="px-2 py-1 text-amber-200 hover:text-white text-xs"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
@@ -580,6 +663,7 @@ export function App() {
               }}
               onSelectExperiment={openExperimentModal}
               onEditCommand={handleEditCommand}
+              onEditPrompt={handleEditPrompt}
               onEditType={handleEditType}
               onEditAgent={handleEditAgent}
               onSetExternalGatePolicies={handleSetExternalGatePolicies}
@@ -626,6 +710,16 @@ export function App() {
           task={modal.task}
           onSubmit={handleReplaceSubmit}
           onClose={closeModal}
+        />
+      )}
+
+      {showSystemSetup && (
+        <SystemSetupModal
+          diagnostics={systemDiagnostics}
+          installPending={installSkillsPending}
+          installError={installSkillsError}
+          onInstallBundledSkills={handleInstallBundledSkills}
+          onClose={() => setShowSystemSetup(false)}
         />
       )}
 
