@@ -61,6 +61,7 @@ import type {
 import { makeEnvelope } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
+import type { PersistenceAdapter } from '@invoker/data-store';
 import { IpcBus, Channels } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
 import {
@@ -177,7 +178,12 @@ if (process.platform === 'linux') {
 // ── Shared state ─────────────────────────────────────────────
 
 let messageBus: MessageBus;
-let persistence: SQLiteAdapter;
+// Typed against the PersistenceAdapter seam so wrappers (logging, metrics)
+// can be slotted in without touching call sites. The concrete SQLiteAdapter
+// instance is held in `sqlitePersistence` for subsystems (workflow-mutation
+// queue, lease recovery) that depend on SQLite-only methods.
+let persistence: PersistenceAdapter;
+let sqlitePersistence: SQLiteAdapter;
 let executorRegistry: ExecutorRegistry;
 let orchestrator: Orchestrator;
 let commandService: CommandService;
@@ -347,11 +353,12 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   if (!readOnly) {
     writerLock = acquireDbWriterLock(dbPath);
   }
-  persistence = await SQLiteAdapter.create(dbPath, {
+  sqlitePersistence = await SQLiteAdapter.create(dbPath, {
     readOnly,
     ownerCapability: !readOnly, // writable mode requires owner capability
   });
-  // Upgrade root logger with DB persistence now that SQLiteAdapter is ready.
+  persistence = sqlitePersistence;
+  // Upgrade root logger with DB persistence now that the adapter is ready.
   logger = new FileAndDbLogger({ module: 'main' }, { persistence });
   const shellEnv = await initializeShellEnvironment();
   if (process.platform === 'darwin') {
@@ -697,7 +704,10 @@ if (isHeadless) {
 
       const headlessDeps: HeadlessDeps = {
         logger,
-        orchestrator, persistence, executorRegistry, messageBus,
+        orchestrator,
+        persistence: sqlitePersistence,
+        executorRegistry,
+        messageBus,
         repoRoot, invokerConfig, initServices, wireSlackBot,
         commandService,
         setTaskDispatcherExecutor: setDispatcherTaskExecutor,
@@ -1399,7 +1409,7 @@ if (isHeadless) {
   function rebuildTaskRunner(): void {
     taskExecutor = new TaskRunner({
       orchestrator,
-      persistence,
+      persistence: sqlitePersistence,
       executorRegistry,
       executionAgentRegistry: agentRegistry,
       cwd: repoRoot,
@@ -1590,7 +1600,7 @@ if (isHeadless) {
     });
     const headlessCommand = String(payload.args[0] ?? '');
     const headlessTarget = String(payload.args[1] ?? '');
-    const resolvedHeadlessTarget = resolveHeadlessTarget(headlessTarget, persistence);
+    const resolvedHeadlessTarget = resolveHeadlessTarget(headlessTarget, sqlitePersistence);
     if (
       (headlessCommand === 'recreate' || headlessCommand === 'retry')
       && resolvedHeadlessTarget.kind === 'workflow'
@@ -1599,7 +1609,10 @@ if (isHeadless) {
     }
     await runHeadless(payload.args, {
       logger,
-      orchestrator, persistence, executorRegistry, messageBus,
+      orchestrator,
+      persistence: sqlitePersistence,
+      executorRegistry,
+      messageBus,
       commandService,
       repoRoot, invokerConfig, initServices, wireSlackBot,
       setTaskDispatcherExecutor: setDispatcherTaskExecutor,
@@ -2171,7 +2184,7 @@ if (isHeadless) {
       apiServer = startApiServer({
         logger,
         orchestrator,
-        persistence,
+        persistence: sqlitePersistence,
         executorRegistry,
         taskExecutor: requireTaskExecutor(),
         autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
@@ -2197,7 +2210,7 @@ if (isHeadless) {
 
       void recoverWorkflowMutationsOnStartup({
         ownerMode,
-        persistence,
+        persistence: sqlitePersistence,
         workflowMutationCoordinator: workflowMutationCoordinator ?? undefined,
         logger,
         maybeDelayResume: maybeDelayWorkflowResumeForTest,
@@ -2351,7 +2364,7 @@ if (isHeadless) {
     if (ownerMode) {
       rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
-        persistence,
+        sqlitePersistence,
         workflowMutationOwnerId,
         async (channel: string, args: unknown[]) => {
           const handler = workflowMutationDispatcher.get(channel);
@@ -2961,7 +2974,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-workflow',
         });
-        const started = sharedRecreateWorkflow(workflowId, { persistence, orchestrator });
+        const started = sharedRecreateWorkflow(workflowId, { persistence: sqlitePersistence, orchestrator });
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
@@ -2990,7 +3003,7 @@ if (isHeadless) {
       logger.info(`recreate-task: "${taskId}"`, { module: 'ipc' });
       try {
         await preemptTaskSubgraph(taskId);
-        const started = sharedRecreateTask(taskId, { persistence, orchestrator });
+        const started = sharedRecreateTask(taskId, { persistence: sqlitePersistence, orchestrator });
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
@@ -3064,7 +3077,7 @@ if (isHeadless) {
         }
         const started = await rebaseAndRetry(taskId, {
           orchestrator,
-          persistence,
+          persistence: sqlitePersistence,
           repoRoot,
           taskExecutor: requireTaskExecutor(),
         });
@@ -3114,7 +3127,7 @@ if (isHeadless) {
       try {
         await setWorkflowMergeMode(workflowId, mergeMode, {
           orchestrator,
-          persistence,
+          persistence: sqlitePersistence,
           taskExecutor: requireTaskExecutor(),
         });
       } catch (err) {
@@ -3181,7 +3194,7 @@ if (isHeadless) {
       try {
         const result = await resolveConflictAction(taskId, {
           orchestrator,
-          persistence,
+          persistence: sqlitePersistence,
           taskExecutor: requireTaskExecutor(),
           autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
         }, agentName);
@@ -3383,7 +3396,7 @@ if (isHeadless) {
       logger.info(`invoked for task="${taskId}"`, { module: 'open-terminal' });
       return openExternalTerminalForTask({
         taskId,
-        persistence,
+        persistence: sqlitePersistence,
         executorRegistry,
         executionAgentRegistry: agentRegistry,
         repoRoot,
