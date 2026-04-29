@@ -368,7 +368,10 @@ export function editTaskPrompt(
   newPrompt: string,
   deps: Pick<ActionDeps, 'orchestrator'>,
 ): TaskState[] {
-  return deps.orchestrator.editTaskPrompt(taskId, newPrompt);
+  return deps.orchestrator.editTaskPrompt(
+    taskId,
+    newPrompt,
+  );
 }
 
 export function editTaskType(
