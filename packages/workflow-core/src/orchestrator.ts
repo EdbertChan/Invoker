@@ -2523,7 +2523,10 @@ export class Orchestrator {
     return this.recreateTask(taskId);
   }
 
-    editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
+  /**
+   * Edit a task's prompt, fork its downstream subtree, and restart it.
+   */
+  editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
@@ -2542,7 +2545,7 @@ export class Orchestrator {
     return this.recreateTask(taskId);
   }
 
-    editTaskType(taskId: string, executorType: string, remoteTargetId?: string): TaskState[] {
+  editTaskType(taskId: string, executorType: string, remoteTargetId?: string): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new Error(`Task ${taskId} not found`);
