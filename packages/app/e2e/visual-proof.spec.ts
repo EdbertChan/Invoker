@@ -561,15 +561,58 @@ test.describe('Visual proof capture', () => {
     // Assert downstream dependent is rendered in Backlog with its dep reference
     await expect(page.getByText('deps: qr-middle')).toBeVisible();
 
-    // Click the middle task row to expand its relationship context in the task panel
-    await page.getByText('qr-middle').click();
+    // Expand the action-row relationship tray from the left-side triangle
+    const middleRow = page.locator('[data-row-id$="qr-middle"]');
+    await expect(middleRow).toBeVisible();
+    await middleRow.getByRole('button', { name: 'Expand relationships' }).click();
 
-    // Assert the expanded relationship headings are visible in the task panel
-    await expect(page.getByRole('heading', { name: 'Actionable task with relationships' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Dependencies' })).toBeVisible();
+    // Assert the expanded relationship section is visible inline
+    const middleRels = page.locator('[data-testid$="qr-middle"]');
+    await expect(middleRels).toBeVisible();
+    await expect(page.getByText('upstream:')).toBeVisible();
+    await expect(page.getByText('downstream:')).toBeVisible();
 
     await captureScreenshot(page, 'queue-relationships-expanded-context');
     await assertPageScreenshot(page, 'queue-relationships-expanded-context');
+  });
+
+  test('queue-relationships — navigating from relationship chip selects the related task', async ({ page }) => {
+    await loadPlan(page, QUEUE_RELATIONSHIPS_PLAN);
+    const now = new Date();
+    const earlier = new Date(Date.now() - 5000);
+    await injectTaskStates(page, [
+      {
+        taskId: 'qr-upstream',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: earlier, completedAt: now },
+        },
+      },
+      {
+        taskId: 'qr-middle',
+        changes: {
+          status: 'running',
+          execution: { startedAt: now },
+        },
+      },
+    ]);
+
+    await page.getByRole('button', { name: 'Queue' }).click();
+    await expect(page.getByRole('heading', { name: /Action Queue/ })).toBeVisible();
+
+    const middleRow = page.locator('[data-row-id$="qr-middle"]');
+    await middleRow.getByRole('button', { name: 'Expand relationships' }).click();
+    const middleRels = page.locator('[data-testid$="qr-middle"]');
+    await expect(middleRels).toBeVisible();
+
+    // Navigate to the downstream dependent from the expanded relationship tray.
+    await middleRels.getByRole('button', { name: 'qr-downstream' }).click();
+
+    // The related task should become the active task in the details panel.
+    await expect(page.getByRole('heading', { name: 'Downstream dependent (blocked)' })).toBeVisible();
+
+    await captureScreenshot(page, 'queue-relationships-navigate-related-task');
+    await assertPageScreenshot(page, 'queue-relationships-navigate-related-task');
   });
 
   test('gate-policy-side-panel — blocked task with satisfied and offender gates', async ({ page }) => {
@@ -705,14 +748,7 @@ test.describe('Visual proof capture', () => {
       { taskId: 'task-alpha', changes: { status: 'running', execution: { startedAt: now } } },
     ]);
 
-    // Switch to queue view to verify "Terminate" button text on task rows
-    await page.getByRole('button', { name: 'Queue' }).click();
-    await expect(page.getByRole('heading', { name: /Action Queue/ })).toBeVisible();
-    const terminateButton = page.getByRole('button', { name: 'Terminate' }).first();
-    await expect(terminateButton).toBeVisible();
-
     // Switch back to DAG view and right-click the running task for context menu
-    await page.getByRole('button', { name: 'DAG' }).click();
     await page.locator('.react-flow__node[data-testid$="task-alpha"]').click({ button: 'right' });
     const menu = page.getByRole('menu');
     await expect(menu).toBeVisible();
@@ -742,11 +778,11 @@ test.describe('Visual proof capture', () => {
     await page.getByRole('button', { name: 'Queue' }).click();
     await expect(page.getByRole('heading', { name: /Action Queue/ })).toBeVisible();
 
-    // Assert the action queue row renders the compact Terminate button (cancel affordance)
+    // Assert the action queue row renders the compact cancel affordance
     const actionRow = page.locator('[data-row-id$="task-alpha"]');
     await expect(actionRow).toBeVisible();
-    const terminateButton = actionRow.getByRole('button', { name: 'Terminate' });
-    await expect(terminateButton).toBeVisible();
+    const cancelButton = actionRow.getByRole('button', { name: 'Cancel task-alpha' });
+    await expect(cancelButton).toBeVisible();
 
     // Assert no visible priority metadata line on the row
     await expect(actionRow.locator('text=priority:')).not.toBeVisible();
@@ -755,7 +791,7 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'queue-cancel-control');
   });
 
-  test('queue-action-surface-hardening — composed queue UX with labels, relationships, and terminate', async ({ page }) => {
+  test('queue-action-surface-hardening — composed queue UX with labels, relationships, and cancel', async ({ page }) => {
     await loadPlan(page, QUEUE_HARDENING_PLAN);
     const now = new Date();
     await injectTaskStates(page, [
@@ -776,17 +812,17 @@ test.describe('Visual proof capture', () => {
     // Assert canonical action queue labels are present
     await expect(page.locator('text=running').first()).toBeVisible();
 
-    // Assert task-level Terminate wording on running task row
-    const terminateButton = page.getByRole('button', { name: 'Terminate' }).first();
-    await expect(terminateButton).toBeVisible();
+    // Assert task-level compact cancel affordance on running task row
+    const runningRow = page.locator('[data-row-id$="qh-running"]');
+    await expect(runningRow.getByRole('button', { name: 'Cancel qh-running' })).toBeVisible();
 
     // Assert downstream dependent shows its dependency in Backlog
     await expect(page.getByText('deps: qh-running')).toBeVisible();
 
-    // Expand relationship section: click the running task row to open task panel
-    await page.getByText('qh-running').click();
-    await expect(page.getByRole('heading', { name: 'Running task with downstream' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Dependencies' })).toBeVisible();
+    // Expand relationship section from the row triangle
+    await runningRow.getByRole('button', { name: 'Expand relationships' }).click();
+    await expect(page.locator('[data-testid$="qh-running"]')).toBeVisible();
+    await expect(page.getByText('downstream:')).toBeVisible();
 
     await captureScreenshot(page, 'queue-action-surface-hardening');
     await assertPageScreenshot(page, 'queue-action-surface-hardening');

@@ -67,6 +67,8 @@ describe('QueueView', () => {
     // Canonical status labels instead of raw "running"/"queued"
     expect(screen.getByText('Running')).toBeInTheDocument();
     expect(screen.getByText('Pending')).toBeInTheDocument();
+    expect(screen.getByText('Running').closest('span')?.className).toContain('border-');
+    expect(screen.getByText('Pending').closest('span')?.className).toContain('border-');
     expect(screen.getByText('phase: Executing')).toBeInTheDocument();
     expect(screen.queryByText(/priority:/)).not.toBeInTheDocument();
     expect(screen.getByText('deps: running-task')).toBeInTheDocument();
@@ -312,8 +314,8 @@ describe('QueueView', () => {
 
       await waitFor(() => expect(getQueueStatus).toHaveBeenCalled());
 
-      // The rels toggle buttons should be present (tasks have relationships)
-      const relButtons = screen.getAllByText(/rels/);
+      // Relationship toggles should be present for rows with deps/dependents
+      const relButtons = screen.getAllByLabelText('Expand relationships');
       expect(relButtons.length).toBeGreaterThan(0);
 
       // But no upstream/downstream labels should be visible (collapsed)
@@ -441,7 +443,7 @@ describe('QueueView', () => {
       );
 
       await waitFor(() => expect(getQueueStatus).toHaveBeenCalled());
-      expect(screen.queryByText(/rels/)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Expand relationships')).not.toBeInTheDocument();
     });
   });
 
