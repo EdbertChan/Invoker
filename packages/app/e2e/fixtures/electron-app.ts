@@ -133,8 +133,12 @@ export const TEST_PLAN = {
   ],
 };
 
+type LoadablePlan = {
+  tasks: Array<{ id: string }>;
+};
+
 /** Load a plan into the running app via the IPC bridge and wait for DAG to render. */
-export async function loadPlan(page: Page, plan: typeof TEST_PLAN): Promise<void> {
+export async function loadPlan<T extends LoadablePlan>(page: Page, plan: T): Promise<void> {
   const planYaml = yamlStringify(plan);
   await page.evaluate((p) => window.invoker.loadPlan(p), planYaml);
   await page.locator(`.react-flow__node[data-testid$="${plan.tasks[0].id}"]`).first().waitFor({ state: 'visible', timeout: 10000 });
