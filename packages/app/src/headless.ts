@@ -738,6 +738,10 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       warnDeprecated('edit', 'set command');
       await headlessSet(['command', ...args.slice(1)], deps);
       break;
+    case 'edit-prompt':
+      warnDeprecated('edit-prompt', 'set prompt');
+      await headlessSet(['prompt', ...args.slice(1)], deps);
+      break;
     case 'edit-executor':
     case 'edit-type':
       warnDeprecated(command, 'set executor');
