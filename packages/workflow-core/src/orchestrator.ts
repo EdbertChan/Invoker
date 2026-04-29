@@ -2552,7 +2552,7 @@ export class Orchestrator {
     if (!task) throw new Error(`Task ${taskId} not found`);
     if (task.config.isMergeNode) throw new Error(`Cannot edit merge node ${taskId}`);
     if (task.status === 'running' || task.status === 'fixing_with_ai') {
-      throw new Error(`Cannot edit running task ${taskId}`);
+      this.cancelTask(taskId);
     }
     const changes: TaskStateChanges = { config: { prompt: newPrompt } };
     const before = this.stateGetTask(taskId)!;
@@ -2571,7 +2571,7 @@ export class Orchestrator {
       });
       this.taskRepository.saveAttempt(freshAttempt);
     } catch { /* best effort */ }
-    return this.restartTask(taskId);
+    return this.recreateTask(taskId);
   }
 
   editTaskType(taskId: string, executorType: string, remoteTargetId?: string): TaskState[] {
