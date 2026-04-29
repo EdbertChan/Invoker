@@ -13,7 +13,9 @@ import {
   expect,
   TEST_PLAN,
   loadPlan,
+  startPlan,
   injectTaskStates,
+  waitForTaskStarted,
   captureScreenshot,
   assertPageScreenshot,
   E2E_REPO_URL,
@@ -75,6 +77,21 @@ const MERGE_GATE_TEXT_VISUAL_PLAN = {
       id: 'mg-visual-work',
       description: 'Sole task before merge gate',
       command: 'echo ok',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
+/** Minimal prompt-based Claude task for prompt editing visual proof. */
+const PROMPT_EDIT_VISUAL_PLAN = {
+  name: 'Prompt Edit Visual Proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'prompt-edit-task',
+      description: 'Prompt task for editing UI state',
+      prompt: 'Implement feature X',
       dependencies: [] as string[],
     },
   ],
@@ -163,6 +180,34 @@ test.describe('Visual proof capture', () => {
     await expect(panel.locator('text=task-alpha')).toBeVisible();
     await captureScreenshot(page, 'task-panel');
     await assertPageScreenshot(page, 'task-panel');
+  });
+
+  test('prompt editing UI state', async ({ page }) => {
+    await loadPlan(page, PROMPT_EDIT_VISUAL_PLAN);
+    await startPlan(page);
+    await waitForTaskStarted(page, 'prompt-edit-task');
+
+    await page.locator('.react-flow__node[data-testid$="prompt-edit-task"]').click();
+    await expect(page.locator('[data-testid="command-display"]')).toBeVisible();
+
+    const now = new Date();
+    const earlier = new Date(Date.now() - 5000);
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-edit-task',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: earlier, completedAt: now },
+        },
+      },
+    ]);
+
+    const commandDisplay = page.locator('[data-testid="command-display"]');
+    await commandDisplay.dblclick();
+
+    await expect(page.locator('[data-testid="edit-prompt-input"]')).toBeVisible();
+    await captureScreenshot(page, 'edit-prompt-double-click');
+    await assertPageScreenshot(page, 'edit-prompt-double-click');
   });
 
   test('dag before and after task selection', async ({ page }) => {
