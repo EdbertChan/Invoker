@@ -1,0 +1,45 @@
+# Edge case: UI plan modifying packages/ui/ without visualProof flag
+# Expected error: missing_visual_proof_flag (field: visualProof)
+#
+# Plans that modify packages/ui/ must set visualProof: true at the plan level so the
+# merge gate captures before/after screenshots. This fixture references packages/ui/
+# in a task prompt and runs the UI package tests, but omits visualProof, which the
+# validator must reject. All other fields are intentionally well-formed so the
+# failure is isolated to the missing visualProof flag.
+
+name: "Tweak primary button hover state"
+description: |
+  Updates the primary button hover styles in packages/ui/src/components/Button.tsx so the
+  hover background uses the design-system token instead of a hard-coded hex value. The
+  current implementation drifts from the token palette and produces a slightly different
+  shade than every other interactive surface, which reviewers have flagged repeatedly.
+
+  Architecture: only the Button component's style block changes. No prop interface, no
+  exported types, no consumers touched. The hover token already exists in the theme
+  module, so the change is a single-token swap plus a snapshot update inside packages/ui.
+
+  Tradeoffs: this plan deliberately ships without visual proof wiring to demonstrate the
+  validator rejection. In real usage, any change under packages/ui/ must declare
+  visualProof: true and add the corresponding capture tasks.
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: master
+featureBranch: fix/button-hover-token
+
+tasks:
+  - id: update-button-hover-token
+    description: "Replace hard-coded hover hex with design-system token in Button component"
+    prompt: |
+      In packages/ui/src/components/Button.tsx, replace the hard-coded hover background hex
+      value with the existing hoverPrimary token imported from packages/ui/src/theme/tokens.ts.
+      You must keep the component's prop interface unchanged and ensure no other style rules
+      are touched. Verify the hover state still applies only when the button is enabled and
+      not in a loading state, and ensure the existing snapshot test in packages/ui/src/components/
+      is updated in the same task so the unit suite stays green.
+    dependencies: []
+
+  - id: run-ui-package-tests
+    description: "Run UI package unit tests to confirm hover change is green"
+    command: "cd packages/ui && pnpm test"
+    dependencies: [update-button-hover-token]
