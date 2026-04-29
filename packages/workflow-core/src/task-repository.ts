@@ -63,6 +63,14 @@ export type AttemptFailPatch = Partial<
   Pick<Attempt, 'status' | 'exitCode' | 'error' | 'completedAt'>
 >;
 
+export interface WorkflowLifecyclePort {
+  syncAllFromDb(): void;
+  syncFromDb(workflowId: string): void;
+  hydrateWorkflowFromDb(workflowId: string): void;
+  deleteWorkflow(workflowId: string): void;
+  deleteAllWorkflows(): void;
+}
+
 // ── Port interface ───────────────────────────────────────────
 
 export interface TaskRepository {

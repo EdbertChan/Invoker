@@ -57,10 +57,20 @@ import type {
   TaskReplacementDef,
   TaskState,
   TaskStateChanges,
+  WorkflowLifecyclePort,
 } from '@invoker/workflow-core';
 import { makeEnvelope } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
-import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
+import {
+  SQLiteAdapter,
+  ConversationRepository,
+  SqliteTaskRepository,
+} from '@invoker/data-store';
+import type {
+  ActivityLogPersistence,
+  PersistenceAdapter,
+  WorkflowMutationPersistence,
+} from '@invoker/data-store';
 import { IpcBus, Channels } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
 import {
@@ -177,9 +187,15 @@ if (process.platform === 'linux') {
 // ── Shared state ─────────────────────────────────────────────
 
 let messageBus: MessageBus;
+type WorkflowStore = PersistenceAdapter
+  & ActivityLogPersistence
+  & WorkflowMutationPersistence;
+
 let persistence: SQLiteAdapter;
+let workflowStore: WorkflowStore;
 let executorRegistry: ExecutorRegistry;
 let orchestrator: Orchestrator;
+let workflowLifecycle: WorkflowLifecyclePort;
 let commandService: CommandService;
 let dispatcherTaskExecutor: Pick<TaskRunner, 'executeTasks'> | null = null;
 
@@ -347,10 +363,12 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   if (!readOnly) {
     writerLock = acquireDbWriterLock(dbPath);
   }
-  persistence = await SQLiteAdapter.create(dbPath, {
+  const sqlitePersistence = await SQLiteAdapter.create(dbPath, {
     readOnly,
     ownerCapability: !readOnly, // writable mode requires owner capability
   });
+  persistence = sqlitePersistence;
+  workflowStore = sqlitePersistence;
   // Upgrade root logger with DB persistence now that SQLiteAdapter is ready.
   logger = new FileAndDbLogger({ module: 'main' }, { persistence });
   const shellEnv = await initializeShellEnvironment();
@@ -403,6 +421,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     deferRunningUntilLaunch: true,
     taskDispatcher: dispatchStartedTasks,
   });
+  workflowLifecycle = orchestrator;
   commandService = new CommandService(orchestrator);
 
   const startupSyncMode = options?.startupSyncMode ?? 'all';
@@ -412,10 +431,10 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     }
     : (msg: string, meta?: Record<string, unknown>) => { logger.info(msg, { ...meta, module: 'init' }); };
   initLog('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig) });
-  const workflows = persistence.listWorkflows();
+  const workflows = workflowStore.listWorkflows();
   if (startupSyncMode === 'all') {
     try {
-      orchestrator.syncAllFromDb();
+      workflowLifecycle.syncAllFromDb();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error(`workflow invariant violation during startup sync: ${message}`, {
@@ -2014,7 +2033,7 @@ if (isHeadless) {
   }
 
   function listWorkflowsByStartupRecency() {
-    return [...persistence.listWorkflows()].sort((left, right) => {
+    return [...workflowStore.listWorkflows()].sort((left, right) => {
       const rightTs = Date.parse(right.updatedAt ?? '') || 0;
       const leftTs = Date.parse(left.updatedAt ?? '') || 0;
       if (rightTs !== leftTs) {
@@ -2034,7 +2053,7 @@ if (isHeadless) {
       return;
     }
     try {
-      orchestrator.syncFromDb(startupWorkflowId);
+      workflowLifecycle.syncFromDb(startupWorkflowId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error(`workflow invariant violation during initial workflow bootstrap: ${message}`, {
@@ -2056,7 +2075,7 @@ if (isHeadless) {
   }
 
   function publishOrchestratorSnapshotToRenderer(): void {
-    const workflows = persistence.listWorkflows();
+    const workflows = workflowStore.listWorkflows();
     const tasks = orchestrator.getAllTasks();
     const previousTaskIds = new Set(lastKnownTaskStates.keys());
     lastKnownTaskStates.clear();
@@ -2137,7 +2156,7 @@ if (isHeadless) {
 
         const workflowId = remainingWorkflowIds[index];
         try {
-          orchestrator.hydrateWorkflowFromDb(workflowId);
+          workflowLifecycle.hydrateWorkflowFromDb(workflowId);
           recordStartupMark('background-hydration.workflow', {
             workflowId,
             index: index + 1,
@@ -2558,7 +2577,7 @@ if (isHeadless) {
     });
 
     registerGuiMutationHandler('invoker:resume-workflow', async () => {
-      const workflows = persistence.listWorkflows();
+      const workflows = workflowStore.listWorkflows();
       if (workflows.length === 0) {
         logger.info('resume-workflow: no workflows found', { module: 'ipc' });
         return null;
@@ -2627,7 +2646,7 @@ if (isHeadless) {
       taskHandles.clear();
     });
 
-    ipcMain.handle('invoker:list-workflows', () => persistence.listWorkflows());
+    ipcMain.handle('invoker:list-workflows', () => workflowStore.listWorkflows());
 
     registerGuiMutationHandler('invoker:delete-all-workflows', async () => {
       logger.info('delete-all-workflows', { module: 'ipc' });
@@ -2638,7 +2657,7 @@ if (isHeadless) {
       } else {
         logger.info('delete-all-workflows snapshot skipped: DB file does not exist yet', { module: 'ipc' });
       }
-      orchestrator.deleteAllWorkflows();
+      workflowLifecycle.deleteAllWorkflows();
       taskHandles.clear();
       lastKnownTaskStates.clear();
       lastKnownWorkflowCount = 0;
@@ -2668,7 +2687,7 @@ if (isHeadless) {
         if (!result.ok) throw new Error(result.error.message);
 
         // Update workflow count and send workflows-changed
-        const workflows = persistence.listWorkflows();
+        const workflows = workflowStore.listWorkflows();
         lastKnownWorkflowCount = workflows.length;
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('invoker:workflows-changed', workflows);
@@ -2683,8 +2702,8 @@ if (isHeadless) {
       logger.info(`load-workflow: "${workflowId}"`, { module: 'ipc' });
       // Sync orchestrator so mutations (restart, approve, etc.) work on this workflow
       orchestrator.syncFromDb(workflowId);
-      const tasks = persistence.loadTasks(workflowId);
-      const workflow = persistence.loadWorkflow(workflowId);
+      const tasks = workflowStore.loadTasks(workflowId);
+      const workflow = workflowStore.loadWorkflow(workflowId);
       logger.info(`load-workflow: found ${tasks.length} tasks for "${workflow?.name ?? workflowId}"`, { module: 'ipc' });
       for (const task of tasks) {
         lastKnownTaskStates.set(task.id, JSON.stringify(task));

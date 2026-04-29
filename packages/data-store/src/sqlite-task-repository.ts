@@ -13,10 +13,10 @@ import type {
   AttemptFailPatch,
 } from '@invoker/workflow-core';
 import type { TaskState, TaskStateChanges, Attempt } from '@invoker/workflow-core';
-import type { SQLiteAdapter } from './sqlite-adapter.js';
+import type { TaskRepositoryBackingStore } from './adapter.js';
 
 export class SqliteTaskRepository implements TaskRepository {
-  constructor(private adapter: SQLiteAdapter) {}
+  constructor(private adapter: TaskRepositoryBackingStore) {}
 
   runInTransaction<T>(work: () => T): T {
     return this.adapter.runInTransaction(work);

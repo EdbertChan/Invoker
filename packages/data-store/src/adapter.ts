@@ -65,6 +65,134 @@ export interface ActivityLogEntry {
   message: string;
 }
 
+export interface TransactionalPersistenceAdapter {
+  runInTransaction<T>(work: () => T): T;
+}
+
+export interface ActivityLogPersistence {
+  writeActivityLog(source: string, level: string, message: string): void;
+}
+
+export interface WorkflowMutationPersistence {
+  enqueueWorkflowMutationIntent(
+    workflowId: string,
+    channel: string,
+    args: unknown[],
+    priority: 'high' | 'normal',
+  ): number;
+  claimWorkflowMutationLease(workflowId: string, ownerId: string): boolean;
+  claimNextWorkflowMutationIntent(
+    workflowId: string,
+    ownerId: string,
+  ): {
+    id: number;
+    workflowId: string;
+    channel: string;
+    args: unknown[];
+    priority: 'high' | 'normal';
+    status: 'queued' | 'running' | 'completed' | 'failed';
+    ownerId?: string;
+    error?: string;
+    createdAt: string;
+    startedAt?: string;
+    completedAt?: string;
+  } | undefined;
+  renewWorkflowMutationLease(
+    workflowId: string,
+    ownerId: string,
+    patch?: {
+      activeIntentId?: number;
+      activeMutationKind?: string;
+    },
+  ): void;
+  releaseWorkflowMutationLease(workflowId: string, ownerId: string): void;
+  requeueExpiredWorkflowMutationLeases(): number;
+  listWorkflowMutationIntents(
+    workflowId?: string,
+    statuses?: Array<'queued' | 'running' | 'completed' | 'failed'>,
+  ): Array<{
+    id: number;
+    workflowId: string;
+    channel: string;
+    args: unknown[];
+    priority: 'high' | 'normal';
+    status: 'queued' | 'running' | 'completed' | 'failed';
+    ownerId?: string;
+    error?: string;
+    createdAt: string;
+    startedAt?: string;
+    completedAt?: string;
+  }>;
+  loadWorkflowMutationIntent(id: number): {
+    id: number;
+    workflowId: string;
+    channel: string;
+    args: unknown[];
+    priority: 'high' | 'normal';
+    status: 'queued' | 'running' | 'completed' | 'failed';
+    ownerId?: string;
+    error?: string;
+    createdAt: string;
+    startedAt?: string;
+    completedAt?: string;
+  } | undefined;
+  completeWorkflowMutationIntent(id: number): void;
+  failWorkflowMutationIntent(id: number, error: string): void;
+  evictQueuedWorkflowMutationIntentsBefore(workflowId: string, beforeId: number, reason: string): number[];
+  listWorkflowMutationLeases(): Array<{
+    workflowId: string;
+    ownerId: string;
+    activeIntentId?: number;
+    activeMutationKind?: string;
+    leasedAt: string;
+    lastHeartbeatAt: string;
+    leaseExpiresAt: string;
+  }>;
+}
+
+export interface TaskRepositoryBackingStore extends TransactionalPersistenceAdapter {
+  saveWorkflow(workflow: Workflow): void;
+  updateWorkflow(
+    workflowId: string,
+    changes: Partial<Pick<Workflow, 'status' | 'updatedAt' | 'baseBranch' | 'generation' | 'mergeMode'>>,
+  ): void;
+  deleteWorkflow(workflowId: string): void;
+  deleteAllWorkflows(): void;
+  saveTask(workflowId: string, task: TaskState): void;
+  updateTask(taskId: string, changes: TaskStateChanges): void;
+  logEvent(taskId: string, eventType: string, payload?: unknown): void;
+  saveAttempt(attempt: Attempt): void;
+  updateAttempt(
+    attemptId: string,
+    changes: Partial<
+      Pick<
+        Attempt,
+        | 'status'
+        | 'claimedAt'
+        | 'startedAt'
+        | 'completedAt'
+        | 'exitCode'
+        | 'error'
+        | 'lastHeartbeatAt'
+        | 'leaseExpiresAt'
+        | 'branch'
+        | 'commit'
+        | 'summary'
+        | 'queuePriority'
+        | 'workspacePath'
+        | 'agentSessionId'
+        | 'containerId'
+        | 'mergeConflict'
+      >
+    >,
+  ): void;
+  failTaskAndAttempt(
+    taskId: string,
+    taskChanges: TaskStateChanges,
+    attemptPatch: Partial<Pick<Attempt, 'status' | 'exitCode' | 'error' | 'completedAt'>>,
+  ): void;
+}
+
 export interface PersistenceAdapter {
   // Workflows
   saveWorkflow(workflow: Workflow): void;
