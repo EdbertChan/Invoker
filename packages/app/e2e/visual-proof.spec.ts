@@ -383,7 +383,7 @@ test.describe('Visual proof capture', () => {
     ]);
 
     // Click the "Pending:" status label to filter
-    await page.getByText(/Pending:/).click();
+    await page.getByTestId('status-bar-pill-pending').click();
 
     // No debounce — effect is immediate, but allow React render
     await page.waitForTimeout(100);
@@ -418,7 +418,7 @@ test.describe('Visual proof capture', () => {
     ]);
 
     // 1. Click "Pending:" to isolate — completed node should dim
-    await page.getByText(/Pending:/).click();
+    await page.getByTestId('status-bar-pill-pending').click();
     // No debounce — effect is immediate, but allow React render
     await page.waitForTimeout(100);
 
@@ -428,7 +428,7 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'statusbar-click-isolate-pending');
 
     // 2. Ctrl-click "Completed:" to add it to the active set
-    await page.getByText(/Completed:/).click({ modifiers: ['ControlOrMeta'] });
+    await page.getByTestId('status-bar-pill-completed').click({ modifiers: ['ControlOrMeta'] });
     await page.waitForTimeout(100);
 
     // Now both pending and completed are active — neither should be dimmed
@@ -440,9 +440,9 @@ test.describe('Visual proof capture', () => {
 
     // 3. Click sole active filter to clear — click "Completed:" (plain click = isolate to completed)
     //    then click it again (sole active = clear all)
-    await page.getByText(/Completed:/).click();
+    await page.getByTestId('status-bar-pill-completed').click();
     await page.waitForTimeout(100);
-    await page.getByText(/Completed:/).click();
+    await page.getByTestId('status-bar-pill-completed').click();
     await page.waitForTimeout(100);
 
     // All filters cleared — nothing dimmed
