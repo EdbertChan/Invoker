@@ -13,10 +13,12 @@ import {
   expect,
   TEST_PLAN,
   loadPlan,
+  startPlan,
   injectTaskStates,
   captureScreenshot,
   assertPageScreenshot,
   E2E_REPO_URL,
+  waitForTaskStarted,
 } from './fixtures/electron-app.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -94,6 +96,21 @@ const QUEUE_HARDENING_PLAN = {
   ],
 };
 
+const PROMPT_EDIT_VISUAL_PLAN = {
+  name: 'Prompt Edit Visual Proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'prompt-task',
+      description: 'Prompt-based Claude task',
+      prompt: 'Implement feature X',
+      executionAgent: 'claude',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
 function taskNodeCard(page: import('@playwright/test').Page, taskIdSuffix: string) {
   return page.locator(`.react-flow__node[data-testid$="${taskIdSuffix}"] > div`).first();
 }
@@ -163,6 +180,35 @@ test.describe('Visual proof capture', () => {
     await expect(panel.locator('text=task-alpha')).toBeVisible();
     await captureScreenshot(page, 'task-panel');
     await assertPageScreenshot(page, 'task-panel');
+  });
+
+  test('prompt edit mode opens on double-click for completed Claude task', async ({ page }) => {
+    await loadPlan(page, PROMPT_EDIT_VISUAL_PLAN);
+    await startPlan(page);
+    await waitForTaskStarted(page, 'prompt-task');
+
+    await page.locator('.react-flow__node[data-testid$="prompt-task"]').click();
+    await expect(page.getByRole('heading', { name: 'Prompt-based Claude task' })).toBeVisible();
+
+    await injectTaskStates(page, [
+      {
+        taskId: 'prompt-task',
+        changes: {
+          status: 'completed',
+          execution: {
+            startedAt: new Date(Date.now() - 5000),
+            completedAt: new Date(),
+          },
+        },
+      },
+    ]);
+
+    const commandDisplay = page.getByTestId('command-display');
+    await expect(commandDisplay).toBeVisible();
+    await commandDisplay.dblclick();
+
+    await expect(page.getByTestId('edit-prompt-input')).toBeVisible();
+    await captureScreenshot(page, 'edit-prompt-double-click');
   });
 
   test('dag before and after task selection', async ({ page }) => {
