@@ -1,0 +1,622 @@
+{
+  "taskId": "rebuild-financials-with-attribution",
+  "artifactStatus": "draft",
+  "ticker": "SENEA",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "upstreamArtifacts": [
+    "research/senea/claims-source-pack.md",
+    "research/senea/claims-source-pack.json",
+    "research/senea/source-register.csv"
+  ],
+  "fiscalYear": "FY2025",
+  "fiscalYearEnd": "2025-03-31",
+  "rebuildReferenceDate": "2026-04-30",
+  "generatedOn": "2026-04-30",
+  "currency": "USD",
+  "unitsForMonetaryFigures": "USD millions unless otherwise noted",
+  "scope": "Rebuilds Seneca Foods FY2025 reported, FIFO-adjusted pre-tax, and FIFO-adjusted after-tax financials from the upstream claims source pack. The single anchored numeric input is the $359.3m FY2025 LIFO reserve (S-001). All other line items are flagged 'pending' with the exact filing, item, and computation needed to resolve them; no synthetic numbers are emitted.",
+  "sourceIdsUsed": [
+    "S-001",
+    "S-005",
+    "S-007",
+    "S-009",
+    "S-010",
+    "S-011"
+  ],
+  "newSourcesIntroduced": [
+    {
+      "sourceId": "S-009",
+      "title": "SENEA Class A common stock closing price as of the rebuild reference date",
+      "publisher": "NYSE / consolidated market data vendor",
+      "urlOrCitation": "SENEA Class A closing price on or near 2026-04-30 (to be retrieved from a consolidated market data feed; archive snapshot required)",
+      "sourceType": "market-data",
+      "usedFor": ["price-to-book comparison", "price-to-NCAV comparison"],
+      "confidence": "medium"
+    },
+    {
+      "sourceId": "S-010",
+      "title": "U.S. federal corporate statutory income tax rate (21%) and SENEA's most recent effective tax rate per FY2025 10-K",
+      "publisher": "Internal Revenue Code Section 11 / Seneca Foods FY2025 10-K (cross-reference to S-001)",
+      "urlOrCitation": "26 U.S.C. Section 11 (https://www.law.cornell.edu/uscode/text/26/11) and SENEA FY2025 10-K Income Taxes note effective-rate reconciliation",
+      "sourceType": "statute / primary-filing",
+      "usedFor": ["after-tax LIFO charge add-back", "deferred-tax offset on LIFO reserve add-back to equity"],
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-011",
+      "title": "SENEA Class A and Class B shares outstanding per the FY2025 10-K cover page and most recent 10-Q",
+      "publisher": "Seneca Foods Corporation / U.S. SEC (subset of S-001 and S-007)",
+      "urlOrCitation": "FY2025 10-K cover page share counts and most recent 10-Q cover page (https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948)",
+      "sourceType": "primary-filing",
+      "usedFor": ["per-share denominators across asset-value, earnings-power, and per-share-compounding bridges"],
+      "confidence": "high"
+    }
+  ],
+  "reportedMetrics": [
+    {
+      "metric": "lifo_reserve",
+      "label": "LIFO reserve, year-end",
+      "period": "FY2025",
+      "value": 359.3,
+      "units": "USD millions",
+      "status": "anchored",
+      "sourceIds": ["S-001"],
+      "notes": "Anchored verbatim in plan Quick Source Anchors and upstream claims pack (claim C-003)."
+    },
+    {
+      "metric": "lifo_reserve_prior_year",
+      "label": "LIFO reserve, prior year-end",
+      "period": "FY2024",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "Comparative-year value from the FY2025 10-K LIFO note required to compute the FY2025 LIFO charge."
+    },
+    {
+      "metric": "lifo_charge",
+      "label": "LIFO charge (period change in LIFO reserve)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "Computed as lifo_reserve_FY2025 - lifo_reserve_FY2024."
+    },
+    {
+      "metric": "effective_tax_rate",
+      "label": "Effective income tax rate",
+      "period": "FY2025",
+      "value": null,
+      "units": "percent",
+      "status": "pending",
+      "sourceIds": ["S-001", "S-010"],
+      "notes": "From FY2025 10-K Income Taxes note effective-rate reconciliation; floor is 21% federal statutory per S-010."
+    },
+    {
+      "metric": "reported_pretax_income",
+      "label": "Reported pre-tax income (LIFO basis)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated income statement of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_net_earnings",
+      "label": "Reported net earnings (LIFO basis)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated income statement of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_operating_income",
+      "label": "Reported operating income",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "Used as the EBITDA starting point before D&A add-back."
+    },
+    {
+      "metric": "reported_depreciation_amortization",
+      "label": "Depreciation and amortization",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated cash-flow statement of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_ebitda",
+      "label": "Reported EBITDA",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "Operating income + D&A; LIFO basis (will be bridged to FIFO under adjustedMetrics)."
+    },
+    {
+      "metric": "reported_inventory",
+      "label": "Inventories, net (LIFO basis)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated balance sheet of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_total_current_assets",
+      "label": "Total current assets",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated balance sheet of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_total_liabilities",
+      "label": "Total liabilities",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "Sum of current and long-term liabilities from the FY2025 balance sheet."
+    },
+    {
+      "metric": "reported_stockholders_equity",
+      "label": "Total stockholders' equity",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated balance sheet of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_goodwill",
+      "label": "Goodwill",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated balance sheet of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_other_intangibles",
+      "label": "Other intangible assets, net",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated balance sheet of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_short_term_debt",
+      "label": "Short-term debt and current portion of long-term debt",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated balance sheet of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_long_term_debt",
+      "label": "Long-term debt and finance leases",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated balance sheet and long-term debt footnote of the FY2025 10-K."
+    },
+    {
+      "metric": "reported_cash_and_securities",
+      "label": "Cash, cash equivalents, and marketable securities",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From the consolidated balance sheet of the FY2025 10-K."
+    },
+    {
+      "metric": "net_debt",
+      "label": "Net debt",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "(Short-term debt + Long-term debt) - (Cash + Marketable securities)."
+    },
+    {
+      "metric": "shares_outstanding_class_a",
+      "label": "Class A common stock outstanding",
+      "period": "FY2025",
+      "value": null,
+      "units": "shares (millions)",
+      "status": "pending",
+      "sourceIds": ["S-001", "S-011"],
+      "notes": "From the FY2025 10-K cover page."
+    },
+    {
+      "metric": "shares_outstanding_class_b",
+      "label": "Class B common stock outstanding",
+      "period": "FY2025",
+      "value": null,
+      "units": "shares (millions)",
+      "status": "pending",
+      "sourceIds": ["S-001", "S-011"],
+      "notes": "From the FY2025 10-K cover page."
+    },
+    {
+      "metric": "buyback_authorization",
+      "label": "Cumulative buyback authorization (active program)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "sourceIds": ["S-001", "S-005"],
+      "notes": "From 10-K Item 5 / Item 7 disclosures and the FY2025 proxy."
+    },
+    {
+      "metric": "buyback_executed_fy2025",
+      "label": "Shares repurchased in FY2025",
+      "period": "FY2025",
+      "value": null,
+      "units": "shares",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From 10-K Item 5 monthly repurchase table and consolidated cash-flow statement."
+    },
+    {
+      "metric": "buyback_avg_price_fy2025",
+      "label": "Average price paid per share repurchased",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD per share",
+      "status": "pending",
+      "sourceIds": ["S-001"],
+      "notes": "From 10-K Item 5 monthly repurchase table."
+    },
+    {
+      "metric": "net_buyback_pct_beginning_shares",
+      "label": "Net buyback as percent of beginning shares outstanding",
+      "period": "FY2025",
+      "value": null,
+      "units": "percent",
+      "status": "pending",
+      "sourceIds": ["S-001", "S-005"],
+      "notes": "(Shares repurchased - Shares issued for compensation) / Shares outstanding at start of fiscal year."
+    },
+    {
+      "metric": "market_price_class_a",
+      "label": "SENEA Class A closing price on rebuild reference date",
+      "period": "2026-04-30",
+      "value": null,
+      "units": "USD per share",
+      "status": "pending",
+      "sourceIds": ["S-009"],
+      "notes": "Archive snapshot required for reproducibility."
+    }
+  ],
+  "adjustedMetrics": [
+    {
+      "metric": "fifo_inventory_adjustment_gross",
+      "label": "FIFO inventory adjustment (gross, equal to LIFO reserve)",
+      "period": "FY2025",
+      "value": 359.3,
+      "units": "USD millions",
+      "status": "anchored",
+      "basis": "fifo_adjusted_pretax",
+      "sourceIds": ["S-001"],
+      "notes": "Identically the FY2025 LIFO reserve; anchored in plan Quick Source Anchors."
+    },
+    {
+      "metric": "fifo_inventory_adjustment_after_tax",
+      "label": "FIFO inventory adjustment (after deferred-tax offset)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "fifo_adjusted_aftertax",
+      "sourceIds": ["S-001", "S-010"],
+      "notes": "359.3 * (1 - effective_tax_rate); resolves once tax rate retrieved."
+    },
+    {
+      "metric": "fifo_pretax_income",
+      "label": "FIFO-adjusted pre-tax income",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "fifo_adjusted_pretax",
+      "sourceIds": ["S-001"],
+      "notes": "reported_pretax_income + lifo_charge."
+    },
+    {
+      "metric": "fifo_net_earnings",
+      "label": "FIFO-adjusted net earnings (after-tax)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "fifo_adjusted_aftertax",
+      "sourceIds": ["S-001", "S-010"],
+      "notes": "reported_net_earnings + lifo_charge * (1 - effective_tax_rate)."
+    },
+    {
+      "metric": "fifo_ebitda",
+      "label": "FIFO-adjusted EBITDA",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "fifo_adjusted_pretax",
+      "sourceIds": ["S-001"],
+      "notes": "reported_ebitda + lifo_charge. Pre-tax bridge by definition."
+    },
+    {
+      "metric": "fifo_eps",
+      "label": "FIFO-adjusted diluted EPS",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD per share",
+      "status": "pending",
+      "basis": "fifo_adjusted_aftertax",
+      "sourceIds": ["S-001", "S-010", "S-011"],
+      "notes": "fifo_net_earnings / (Class A + Class B diluted shares)."
+    },
+    {
+      "metric": "tangible_book_reported",
+      "label": "Tangible book value (reported, LIFO basis)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "reported",
+      "sourceIds": ["S-001"],
+      "notes": "reported_stockholders_equity - reported_goodwill - reported_other_intangibles."
+    },
+    {
+      "metric": "tangible_book_fifo_pretax",
+      "label": "Tangible book value, FIFO-adjusted (pre-tax)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "fifo_adjusted_pretax",
+      "sourceIds": ["S-001"],
+      "notes": "tangible_book_reported + 359.3 (gross LIFO reserve add-back). Upper bound."
+    },
+    {
+      "metric": "tangible_book_fifo_aftertax",
+      "label": "Tangible book value, FIFO-adjusted (after deferred tax)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "fifo_adjusted_aftertax",
+      "sourceIds": ["S-001", "S-010"],
+      "notes": "tangible_book_reported + 359.3 * (1 - effective_tax_rate). Conservative FIFO equity benchmark."
+    },
+    {
+      "metric": "tangible_book_per_share_fifo_aftertax",
+      "label": "FIFO-adjusted tangible book per share",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD per share",
+      "status": "pending",
+      "basis": "fifo_adjusted_aftertax",
+      "sourceIds": ["S-001", "S-010", "S-011"],
+      "notes": "tangible_book_fifo_aftertax / (Class A + Class B shares)."
+    },
+    {
+      "metric": "ncav_reported",
+      "label": "NCAV (reported, LIFO basis)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "reported",
+      "sourceIds": ["S-001"],
+      "notes": "reported_total_current_assets - reported_total_liabilities."
+    },
+    {
+      "metric": "ncav_fifo_pretax",
+      "label": "NCAV, FIFO-adjusted (pre-tax)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "fifo_adjusted_pretax",
+      "sourceIds": ["S-001"],
+      "notes": "ncav_reported + 359.3 (gross LIFO reserve add-back to inventory inside current assets)."
+    },
+    {
+      "metric": "ncav_fifo_aftertax",
+      "label": "NCAV, FIFO-adjusted (after deferred tax)",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD millions",
+      "status": "pending",
+      "basis": "fifo_adjusted_aftertax",
+      "sourceIds": ["S-001", "S-010"],
+      "notes": "ncav_reported + 359.3 * (1 - effective_tax_rate)."
+    },
+    {
+      "metric": "ncav_per_share_fifo_aftertax",
+      "label": "FIFO-adjusted NCAV per share",
+      "period": "FY2025",
+      "value": null,
+      "units": "USD per share",
+      "status": "pending",
+      "basis": "fifo_adjusted_aftertax",
+      "sourceIds": ["S-001", "S-010", "S-011"],
+      "notes": "ncav_fifo_aftertax / (Class A + Class B shares)."
+    },
+    {
+      "metric": "book_value_per_share_cagr_20yr",
+      "label": "Book value per share CAGR, FY2005-FY2025",
+      "period": "FY2005-FY2025",
+      "value": null,
+      "units": "percent per annum",
+      "status": "pending",
+      "basis": "fifo_adjusted_aftertax",
+      "sourceIds": ["S-007", "S-001", "S-010", "S-011"],
+      "notes": "Endpoint values come from reconstructed balance sheets across the 20-year window. Both reported (LIFO) and FIFO-adjusted CAGRs are computed."
+    }
+  ],
+  "valuationBridge": {
+    "tangibleBookBridge": {
+      "method": "Reported equity minus goodwill and intangibles, then add LIFO reserve net of deferred tax, then divide by Class A + Class B shares outstanding.",
+      "fifoAddBackGross": 359.3,
+      "fifoAddBackGrossUnits": "USD millions",
+      "fifoAddBackGrossSourceIds": ["S-001"],
+      "deferredTaxRateSourceIds": ["S-001", "S-010"],
+      "perShareDenominatorSourceIds": ["S-011"],
+      "marketPriceComparisonSourceIds": ["S-009"],
+      "claimsTested": ["C-001"]
+    },
+    "ncavBridge": {
+      "method": "Total current assets minus total liabilities, then add LIFO reserve net of deferred tax (the reserve sits inside current assets via inventory).",
+      "fifoAddBackGross": 359.3,
+      "fifoAddBackGrossUnits": "USD millions",
+      "fifoAddBackGrossSourceIds": ["S-001"],
+      "deferredTaxRateSourceIds": ["S-001", "S-010"],
+      "perShareDenominatorSourceIds": ["S-011"],
+      "marketPriceComparisonSourceIds": ["S-009"],
+      "claimsTested": ["C-002"]
+    },
+    "earningsPowerBridge": {
+      "method": "Add the FY2025 LIFO charge to reported pre-tax income to obtain FIFO-adjusted pre-tax income; multiply by (1 - effective tax rate) to obtain FIFO-adjusted net earnings.",
+      "lifoChargeSourceIds": ["S-001"],
+      "effectiveTaxRateSourceIds": ["S-001", "S-010"],
+      "ebitdaBridgeSourceIds": ["S-001"],
+      "claimsTested": ["C-003", "C-011"]
+    },
+    "perShareCompoundingBridge": {
+      "method": "Reconstruct per-share book value from FY2005 to FY2025 using both LIFO-basis and FIFO-adjusted equity; compute CAGR.",
+      "historicalFilingsSourceIds": ["S-007"],
+      "endpointSourceIds": ["S-001"],
+      "perShareDenominatorSourceIds": ["S-011"],
+      "claimsTested": ["C-004", "C-008"]
+    }
+  },
+  "financialClaims": [
+    {
+      "claimId": "C-001",
+      "claimText": "Seneca trades below tangible book value on a FIFO-adjusted basis.",
+      "rebuildStatus": "pending",
+      "rebuildReason": "Tangible book bridge is methodologically defined and the LIFO add-back is anchored at $359.3m, but reported equity, goodwill, intangibles, share count, and a market-price snapshot are still required.",
+      "sourceIds": ["S-001", "S-007", "S-009", "S-010", "S-011"],
+      "outputs": ["tangible_book_reported", "tangible_book_fifo_pretax", "tangible_book_fifo_aftertax", "tangible_book_per_share_fifo_aftertax"]
+    },
+    {
+      "claimId": "C-002",
+      "claimText": "Seneca trades at or below NCAV when inventory is restated to FIFO.",
+      "rebuildStatus": "pending",
+      "rebuildReason": "NCAV bridge is methodologically defined and the FIFO add-back is anchored at $359.3m, but total current assets, total liabilities, share count, and a market-price snapshot are still required.",
+      "sourceIds": ["S-001", "S-007", "S-009", "S-010", "S-011"],
+      "outputs": ["ncav_reported", "ncav_fifo_pretax", "ncav_fifo_aftertax", "ncav_per_share_fifo_aftertax"]
+    },
+    {
+      "claimId": "C-003",
+      "claimText": "Reported earnings materially understate FIFO earnings power because of a $359.3m LIFO reserve.",
+      "rebuildStatus": "partial",
+      "rebuildReason": "FY2025 LIFO reserve of $359.3m is anchored. The FY2025 LIFO charge (period change in reserve), reported pre-tax income, reported EBITDA, and effective tax rate are still required to complete pre-tax and after-tax FIFO bridges.",
+      "sourceIds": ["S-001", "S-010"],
+      "outputs": ["lifo_reserve", "lifo_charge", "fifo_pretax_income", "fifo_net_earnings", "fifo_ebitda", "fifo_eps"]
+    },
+    {
+      "claimId": "C-004",
+      "claimText": "Seneca has compounded book value per share over a 20-year window despite minimal sell-side coverage.",
+      "rebuildStatus": "pending",
+      "rebuildReason": "20-year CAGR requires retrieving FY2005-FY2024 10-K filings via S-007 and the FY2025 endpoint via S-001.",
+      "sourceIds": ["S-001", "S-007", "S-010", "S-011"],
+      "outputs": ["book_value_per_share_cagr_20yr"]
+    },
+    {
+      "claimId": "C-008",
+      "claimText": "Seneca has executed material share repurchases relative to float, supporting per-share compounding.",
+      "rebuildStatus": "pending",
+      "rebuildReason": "Buyback authorization, executions, average price, and net-of-issuance figures require retrieving FY2025 10-K Item 5 / Item 7 disclosures and the FY2025 DEF 14A.",
+      "sourceIds": ["S-001", "S-005", "S-011"],
+      "outputs": ["buyback_authorization", "buyback_executed_fy2025", "buyback_avg_price_fy2025", "net_buyback_pct_beginning_shares"]
+    },
+    {
+      "claimId": "C-011",
+      "claimText": "Seneca has demonstrated pricing-cost recovery across crop, steel/tinplate, freight, and labor cycles.",
+      "rebuildStatus": "deferred",
+      "rebuildReason": "Multi-year FIFO-adjusted EBITDA series and a maintenance-capex proxy require historical 10-K retrieval; not blocking C-001/C-002/C-003 bridges but tracked here for completeness.",
+      "sourceIds": ["S-001", "S-007"],
+      "outputs": ["fifo_ebitda", "book_value_per_share_cagr_20yr"]
+    }
+  ],
+  "openQuestions": [
+    {
+      "id": "F-001",
+      "question": "Retrieve the FY2025 10-K LIFO note to obtain the prior-year LIFO reserve so the FY2025 LIFO charge can be computed.",
+      "blocks": ["C-003"],
+      "sourceIds": ["S-001"],
+      "carryForwardFrom": "Q-005"
+    },
+    {
+      "id": "F-002",
+      "question": "Retrieve the FY2025 10-K Income Taxes note for the effective tax rate used in after-tax conversions.",
+      "blocks": ["C-001", "C-002", "C-003", "C-004"],
+      "sourceIds": ["S-001", "S-010"]
+    },
+    {
+      "id": "F-003",
+      "question": "Retrieve the FY2025 consolidated balance sheet for reported equity, goodwill, intangibles, total current assets, total liabilities, debt components, and cash/marketable securities.",
+      "blocks": ["C-001", "C-002"],
+      "sourceIds": ["S-001"]
+    },
+    {
+      "id": "F-004",
+      "question": "Retrieve FY2025 Item 5 and the FY2025 DEF 14A for the buyback / equity-issuance reconciliation.",
+      "blocks": ["C-008"],
+      "sourceIds": ["S-001", "S-005"]
+    },
+    {
+      "id": "F-005",
+      "question": "Retrieve FY2005-FY2024 10-K filings for the 20-year per-share compounding rebuild.",
+      "blocks": ["C-004"],
+      "sourceIds": ["S-007"]
+    },
+    {
+      "id": "F-006",
+      "question": "Capture an archived SENEA Class A closing-price datapoint on or near 2026-04-30 for per-share market comparisons.",
+      "blocks": ["C-001", "C-002"],
+      "sourceIds": ["S-009"]
+    },
+    {
+      "id": "F-007",
+      "question": "Confirm the cover-page share counts on the FY2025 10-K and the most recent 10-Q so per-share denominators reconcile across all bridges.",
+      "blocks": ["C-001", "C-002", "C-003", "C-004", "C-008"],
+      "sourceIds": ["S-011"]
+    },
+    {
+      "id": "F-008",
+      "question": "Carry-forward upstream Q-002: does the FY2025 10-K disclose a maintenance-capex figure or proxy, or must the rebuild derive it from the PP&E roll-forward?",
+      "blocks": ["C-003", "C-011"],
+      "sourceIds": ["S-001"],
+      "carryForwardFrom": "Q-002"
+    }
+  ]
+}
