@@ -1,0 +1,391 @@
+{
+  "taskId": "test-valuation-claims",
+  "artifactStatus": "draft",
+  "ticker": "SENEA",
+  "cik": "0000088948",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "upstreamPack": "research/senea/claims-source-pack.json",
+  "sourceRegister": "research/senea/source-register.csv",
+  "generatedOn": "2026-04-30",
+  "claimFamily": {
+    "id": "valuation-accounting",
+    "name": "SENEA Valuation & Accounting",
+    "scope": "Tangible book, NCAV, LIFO reserve, FIFO earnings power, adjusted book value, buyback-adjusted per-share compounding, and LIFO tax recapture for Seneca Foods.",
+    "outOfScope": ["C-005", "C-006", "C-007", "C-009", "C-010", "C-011"]
+  },
+  "verdict": "unresolved",
+  "confidence": "medium",
+  "verdictRationale": "The upstream source pack is a draft that defers primary-source retrieval to downstream tasks. The $359.3m FY2025 LIFO reserve and the implied ~$89.5m deferred-tax / LIFO-recapture amount at a 24.9% statutory rate are independently corroborated against the FY2025 10-K text via WebSearch results, and FY2025 balance-sheet aggregates are corroborated via a financial aggregator that summarizes the same filing. However, the comparison-to-market computations (price-to-tangible-book, price-to-NCAV, 20-year per-share book CAGR, year-by-year buyback ledger) require primary share-count, market-price, and time-series data that have not been retrieved from filings into this repository, and aggregator market-cap signals conflict with each other. Decision Gate 2 in the plan ('Seneca valuation only passes if both reported and FIFO-adjusted calculations reconcile to filings') is unmet, so the family verdict is unresolved.",
+  "claimsTested": [
+    {
+      "claimId": "C-001",
+      "label": "Discount to tangible book (FIFO-adjusted)",
+      "claimText": "Seneca Foods (SENEA) trades below tangible book value on a FIFO-adjusted basis.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "FY2025 stockholders' equity (~$633m) and LIFO reserve ($359.3m) are corroborated via aggregator and WebSearch, yielding an estimated FIFO-adjusted equity of ~$903m before goodwill/intangible deductions. Goodwill/intangible balances were not retrieved from the 10-K, and the contemporaneous market cap to compare against is unreliable across aggregator sources (a current SENEA-only ~$911.6m figure conflicts with a separate ~5.33m total share count and with combined Class A+B market values of ~$1.8-1.9b). Without a reconciled per-share market price and share count, the discount cannot be confirmed or refuted.",
+      "sourceIds": ["S-001", "S-007"],
+      "evidenceIds": ["E-04", "E-06", "E-10"],
+      "contraryEvidenceIds": ["CE-01", "CE-02"]
+    },
+    {
+      "claimId": "C-002",
+      "label": "Discount to NCAV (FIFO-adjusted)",
+      "claimText": "Seneca trades at or below net current asset value (NCAV) when inventory is restated to FIFO.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "Reported NCAV (~$207m) and FIFO-adjusted NCAV (~$566m gross of LIFO deferred tax, ~$477m net) are computable from aggregator-reported FY2025 balance-sheet totals, but the comparison-to-market step requires a precise share count and price that have not been retrieved from primary filings.",
+      "sourceIds": ["S-001", "S-007"],
+      "evidenceIds": ["E-04", "E-05"],
+      "contraryEvidenceIds": ["CE-01", "CE-02"]
+    },
+    {
+      "claimId": "C-003a",
+      "label": "LIFO reserve magnitude",
+      "claimText": "Seneca's FY2025 10-K discloses a $359.3m LIFO reserve.",
+      "verdict": "supported",
+      "confidence": "high",
+      "rationale": "Plan Quick Source Anchors and the 10-K text agree on $359.3m as of March 31, 2025, with the filing language corroborated via WebSearch quoting the filing.",
+      "sourceIds": ["S-001"],
+      "evidenceIds": ["E-01", "E-02"],
+      "contraryEvidenceIds": []
+    },
+    {
+      "claimId": "C-003b",
+      "label": "FIFO earnings power",
+      "claimText": "Seneca's reported earnings materially understate FIFO earnings power; management discloses FIFO-adjusted earnings and FIFO EBITDA.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "The plan and source pack assert that FIFO-adjusted earnings/EBITDA are disclosed somewhere in Seneca's FY2025 disclosure set, but whether the reconciliation is in the 10-K itself or only in supplemental investor materials is open question Q-005 in the source pack and the reconciliation table has not been retrieved into the repo. FY2025 reported net income (~$41.2m, down ~35% YoY) and the aggregator commentary that working-capital release rather than earnings drove FY2025 cash flow weakens the FY2025-specific claim, although it does not address cycle-level FIFO earnings power.",
+      "sourceIds": ["S-001"],
+      "evidenceIds": ["E-07"],
+      "contraryEvidenceIds": ["CE-03"]
+    },
+    {
+      "claimId": "C-001b",
+      "label": "Adjusted book value (FIFO + tax-adjusted, ex-goodwill)",
+      "claimText": "Seneca's adjusted book value is materially higher than reported book equity once the LIFO reserve net of deferred tax is added back and goodwill/intangibles are removed.",
+      "verdict": "unresolved",
+      "confidence": "medium",
+      "rationale": "Arithmetic from corroborated inputs gives reported equity ~$633m + LIFO reserve net of 24.9% tax (~$269.8m) = ~$902.8m before goodwill/intangible deductions. Goodwill/intangibles have not been retrieved from the filing, so the final adjusted figure cannot be locked.",
+      "sourceIds": ["S-001"],
+      "evidenceIds": ["E-04", "E-06", "E-10"],
+      "contraryEvidenceIds": []
+    },
+    {
+      "claimId": "C-008",
+      "label": "Buyback-adjusted per-share compounding",
+      "claimText": "Seneca has executed material share repurchases relative to float and has compounded book value per share over a long window.",
+      "verdict": "unresolved",
+      "confidence": "medium",
+      "rationale": "At least one large buyback (March 2021 modified Dutch auction, ~1.45m Class A shares for ~$74.8m, ~17% of the relevant float at $51.62 clearing) is corroborated by issuer press releases and a tranche update; aggregator data show book value per share of $77.16 in December 2022 with positive 5- and 10-year CAGRs (10.9% and 7.4% respectively). The full FY2005-FY2025 buyback ledger and per-share book value series have not been rebuilt from primary filings, so the 20-year compounding claim cannot be confirmed end-to-end.",
+      "sourceIds": ["S-001", "S-005", "S-007"],
+      "evidenceIds": ["E-08", "E-09"],
+      "contraryEvidenceIds": ["CE-04"]
+    },
+    {
+      "claimId": "C-tax-recapture",
+      "label": "LIFO tax recapture",
+      "claimText": "If Seneca were to switch from LIFO to FIFO or fully liquidate the LIFO inventory layer, the implied deferred-tax exposure on the LIFO reserve would be approximately $89.5m at the 24.9% statutory rate.",
+      "verdict": "supported",
+      "confidence": "high",
+      "rationale": "The FY2025 10-K text states that the $359.3m LIFO reserve at the 24.9% statutory rate represents approximately $89.5m of income taxes 'payment of which is delayed to future dates based upon changes in inventory costs.' Aggregator data show inventory falling ~$268.7m YoY in FY2025 without commentary on a corresponding tax cash payment, so the $89.5m should be read as a maximum exposure rather than an imminent cash payment.",
+      "sourceIds": ["S-001"],
+      "evidenceIds": ["E-03"],
+      "contraryEvidenceIds": ["CE-05"]
+    },
+    {
+      "claimId": "C-004",
+      "label": "20-year book value per share compounding",
+      "claimText": "Seneca has compounded book value per share over a 20-year window.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "Third-party time series gives BVPS of $77.16 in December 2022 with a 10-year average BVPS growth rate of 7.40% and a 5-year rate of 10.90%, which is directionally supportive but does not span FY2005-FY2025 end to end. The full primary-source rebuild has not been performed.",
+      "sourceIds": ["S-001", "S-007"],
+      "evidenceIds": ["E-09"],
+      "contraryEvidenceIds": []
+    }
+  ],
+  "sourcesUsed": [
+    {
+      "sourceId": "S-001",
+      "title": "Seneca Foods Corporation FY2025 Annual Report on Form 10-K",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "https://www.sec.gov/Archives/edgar/data/88948/000143774925020197/senea20250331_10k.htm (filing index https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10-K)",
+      "sourceType": "primary-filing",
+      "confidence": "high",
+      "directAccess": "blocked (HTTP 403 from this environment); content corroborated via WebSearch results that quote the filing"
+    },
+    {
+      "sourceId": "S-005",
+      "title": "Seneca Foods Corporation FY2025 proxy statement (DEF 14A)",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=DEF+14A",
+      "sourceType": "primary-filing",
+      "confidence": "high",
+      "directAccess": "not retrieved; referenced for buyback authorization context"
+    },
+    {
+      "sourceId": "S-007",
+      "title": "Seneca Foods historical 10-K and 10-Q filings (FY2005-FY2025)",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10",
+      "sourceType": "primary-filing",
+      "confidence": "high",
+      "directAccess": "not retrieved; referenced for time-series rebuild requirement"
+    }
+  ],
+  "tertiaryReferences": [
+    {
+      "id": "T-001",
+      "title": "StockTitan SENEA financials page (aggregator summary of FY2025 10-K balance sheet)",
+      "url": "https://www.stocktitan.net/financials/SENEA/",
+      "usedFor": ["E-04", "E-06", "CE-03"]
+    },
+    {
+      "id": "T-002",
+      "title": "GuruFocus Seneca Foods Book Value per Share page",
+      "url": "https://www.gurufocus.com/term/Book+Value+Per+Share/SENEB/Book-Value-per-Share/Seneca-Foods",
+      "usedFor": ["E-09"]
+    },
+    {
+      "id": "T-003",
+      "title": "Seneca Foods press release - expanded share repurchase program",
+      "url": "https://www.senecafoods.com/press-release/seneca-foods-announces-expanded-share-repurchase-program",
+      "usedFor": ["E-08"]
+    },
+    {
+      "id": "T-004",
+      "title": "Seneca Foods press release - results of modified Dutch auction tender offer",
+      "url": "https://www.senecafoods.com/press-release/results-modified-dutch-auction-tender-offer",
+      "usedFor": ["E-08"]
+    },
+    {
+      "id": "T-005",
+      "title": "GlobeNewswire - Seneca Foods final results of modified Dutch auction tender offer",
+      "url": "https://www.globenewswire.com/en/news-release/2021/03/10/2190435/32471/en/Seneca-Foods-Announces-Final-Results-of-Modified-Dutch-Auction-Tender-Offer.html",
+      "usedFor": ["E-08"]
+    },
+    {
+      "id": "T-006",
+      "title": "MarketScreener tranche update on Seneca Foods June 11, 2021 buyback plan",
+      "url": "https://www.marketscreener.com/quote/stock/SENECA-FOODS-CORPORATION-10795/news/Tranche-Update-on-Seneca-Foods-Corporation-NasdaqGS-SENE-A-s-Equity-Buyback-Plan-announced-on-June-44148125/",
+      "usedFor": ["E-08"]
+    },
+    {
+      "id": "T-007",
+      "title": "Investing.com SENEA Class A quote page",
+      "url": "https://www.investing.com/equities/seneca-foods-corp-(a)",
+      "usedFor": ["CE-01"]
+    },
+    {
+      "id": "T-008",
+      "title": "StockTitan SENEB overview page",
+      "url": "https://www.stocktitan.net/overview/SENEB/",
+      "usedFor": ["CE-01"]
+    },
+    {
+      "id": "T-009",
+      "title": "CompaniesMarketCap Seneca Foods shares outstanding",
+      "url": "https://companiesmarketcap.com/seneca-foods/shares-outstanding/",
+      "usedFor": ["CE-01"]
+    },
+    {
+      "id": "T-010",
+      "title": "Overlooked Alpha - Seneca Foods stock analysis",
+      "url": "https://www.overlookedalpha.com/p/seneca-foods-stock",
+      "usedFor": ["CE-02"]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "E-01",
+      "claimIds": ["C-003a"],
+      "summary": "Plan Quick Source Anchors state Seneca FY2025 10-K discloses a $359.3m LIFO reserve.",
+      "sourceIds": ["S-001"],
+      "citation": "https://www.sec.gov/Archives/edgar/data/88948/000143774925020197/senea20250331_10k.htm",
+      "direction": "supports"
+    },
+    {
+      "id": "E-02",
+      "claimIds": ["C-003a"],
+      "summary": "Quoted 10-K text via WebSearch: 'As of March 31, 2025, Seneca Foods had a LIFO reserve of $359.3 million which, at the statutory tax rate of 24.9%, represents approximately $89.5 million of income taxes, payment of which is delayed to future dates based upon changes in inventory costs.'",
+      "sourceIds": ["S-001"],
+      "citation": "https://www.sec.gov/Archives/edgar/data/88948/000143774925020197/senea20250331_10k.htm",
+      "direction": "supports"
+    },
+    {
+      "id": "E-03",
+      "claimIds": ["C-tax-recapture"],
+      "summary": "FY2025 10-K text quoted in E-02 implies $89.5m of deferred income tax tied to the LIFO reserve at the 24.9% statutory rate.",
+      "sourceIds": ["S-001"],
+      "citation": "https://www.sec.gov/Archives/edgar/data/88948/000143774925020197/senea20250331_10k.htm",
+      "direction": "supports"
+    },
+    {
+      "id": "E-04",
+      "claimIds": ["C-002", "C-001b"],
+      "summary": "Aggregator summary of FY2025 10-K balance sheet: total current assets $755.7m, total current liabilities $214.6m, total liabilities $548.4m, stockholders' equity $633.0m, inventory $604.0m, cash $42.7m, accounts receivable $96.3m, long-term debt $369.9m, FY2025 net income $41.2m, FY2025 revenue ~$1.6b. Implied reported NCAV ≈ $755.7m − $548.4m = $207.3m.",
+      "sourceIds": ["S-001"],
+      "tertiaryRefs": ["T-001"],
+      "citation": "https://www.stocktitan.net/financials/SENEA/",
+      "direction": "partial-support"
+    },
+    {
+      "id": "E-05",
+      "claimIds": ["C-002"],
+      "summary": "FIFO-adjusted NCAV: $207.3m + $359.3m gross = $566.6m; net of 24.9% deferred tax on LIFO reserve, ≈ $477m.",
+      "sourceIds": ["S-001"],
+      "citation": "Derived from E-02 + E-04",
+      "direction": "partial-support"
+    },
+    {
+      "id": "E-06",
+      "claimIds": ["C-001", "C-001b"],
+      "summary": "FIFO-adjusted equity: reported equity $633.0m + LIFO reserve net of 24.9% deferred tax (~$269.8m) ≈ $902.8m before goodwill/intangible deductions. Goodwill/intangibles not separately retrieved from the filing.",
+      "sourceIds": ["S-001"],
+      "tertiaryRefs": ["T-001"],
+      "citation": "Derived from E-02 + E-04",
+      "direction": "partial-support"
+    },
+    {
+      "id": "E-07",
+      "claimIds": ["C-003b"],
+      "summary": "Plan and source pack assert FY2025 disclosure of FIFO-adjusted earnings and FIFO EBITDA. Whether the reconciliation appears in the 10-K itself or only in supplemental materials is open question Q-005.",
+      "sourceIds": ["S-001"],
+      "citation": "https://www.sec.gov/Archives/edgar/data/88948/000143774925020197/senea20250331_10k.htm",
+      "direction": "indirect-support"
+    },
+    {
+      "id": "E-08",
+      "claimIds": ["C-008"],
+      "summary": "March 2021 Modified Dutch Auction tender: 1,449,339 Class A shares repurchased at $51.62 for ~$74.81m, representing ~17.07% of the relevant float, under the buyback plan announced June 11, 2021.",
+      "sourceIds": ["S-001", "S-005"],
+      "tertiaryRefs": ["T-003", "T-004", "T-005", "T-006"],
+      "citation": "https://www.globenewswire.com/en/news-release/2021/03/10/2190435/32471/en/Seneca-Foods-Announces-Final-Results-of-Modified-Dutch-Auction-Tender-Offer.html",
+      "direction": "supports"
+    },
+    {
+      "id": "E-09",
+      "claimIds": ["C-004", "C-008"],
+      "summary": "Third-party tabulation: Seneca BVPS $77.16 as of Dec 2022, with 10-year average BVPS growth rate of 7.40% per year and 5-year rate of 10.90%. Does not span the full FY2005-FY2025 window.",
+      "sourceIds": ["S-001", "S-007"],
+      "tertiaryRefs": ["T-002"],
+      "citation": "https://www.gurufocus.com/term/Book+Value+Per+Share/SENEB/Book-Value-per-Share/Seneca-Foods",
+      "direction": "indirect-support"
+    },
+    {
+      "id": "E-10",
+      "claimIds": ["C-001", "C-001b"],
+      "summary": "Internal arithmetic check: E-04, E-05, and E-06 are mutually consistent with the source pack's anchor numbers but have not been reconciled to a 10-K-disclosed tangible-book or FIFO-adjusted-equity line.",
+      "sourceIds": ["S-001"],
+      "citation": "Derived",
+      "direction": "indirect-support"
+    }
+  ],
+  "contraryEvidence": [
+    {
+      "id": "CE-01",
+      "claimIds": ["C-001", "C-002"],
+      "summary": "Aggregator market data (April 2026): SENEA Class A ~$134.71 with class market cap ~$911.6m; SENEB Class B ~$164.79 with class market cap ~$931.8m. Combined equity market value (~$1.8-1.9b) would be above both reported book (~$633m) and FIFO-adjusted equity (~$903m), suggesting Seneca currently trades above tangible book and above NCAV. However, the aggregator share counts are mutually inconsistent (one source reports total shares 5,330,247) and cannot be treated as authoritative without primary share-count disclosure.",
+      "sourceIds": [],
+      "tertiaryRefs": ["T-007", "T-008", "T-009"],
+      "citation": "https://www.investing.com/equities/seneca-foods-corp-(a) and https://www.stocktitan.net/overview/SENEB/",
+      "direction": "weakens",
+      "qualifier": "share-count discrepancy across aggregators is itself unresolved"
+    },
+    {
+      "id": "CE-02",
+      "claimIds": ["C-001", "C-002"],
+      "summary": "A prior third-party write-up characterized Seneca as a '$276m company...trading below liquidation value.' That market cap is roughly an order of magnitude below current SENEA-only aggregator figures, consistent with substantial re-rating between the write-up date and April 2026.",
+      "sourceIds": [],
+      "tertiaryRefs": ["T-010"],
+      "citation": "https://www.overlookedalpha.com/p/seneca-foods-stock",
+      "direction": "weakens"
+    },
+    {
+      "id": "CE-03",
+      "claimIds": ["C-003b"],
+      "summary": "FY2025 reported net income (~$41.2m, down ~35% YoY) and aggregator commentary describe FY2025 cash flow as driven by a working-capital reversal (inventory down ~$268.7m), not by a profit surge. This pushes against the FY2025-specific FIFO earnings power frame, though it does not address cycle-level FIFO earnings power.",
+      "sourceIds": [],
+      "tertiaryRefs": ["T-001"],
+      "citation": "https://www.stocktitan.net/financials/SENEA/",
+      "direction": "weakens"
+    },
+    {
+      "id": "CE-04",
+      "claimIds": ["C-008"],
+      "summary": "The 2021 Dutch tender clearing price of $51.62 is materially below current (April 2026) trading prices of ~$134.71 (Class A) and ~$164.79 (Class B), which is supportive of the buyback being accretive on a forward basis but means a single-event buyback cannot substantiate a 20-year per-share compounding claim by itself.",
+      "sourceIds": ["S-001", "S-005"],
+      "tertiaryRefs": ["T-007", "T-008"],
+      "citation": "Cross-reference of E-08 and CE-01 sources",
+      "direction": "weakens-generality"
+    },
+    {
+      "id": "CE-05",
+      "claimIds": ["C-tax-recapture"],
+      "summary": "The $89.5m deferred LIFO tax is contingent on a method change or layer liquidation; working-capital release that reduces inventory dollars without liquidating a LIFO layer in tax terms does not necessarily trigger cash payment. The figure should be read as maximum exposure rather than imminent obligation.",
+      "sourceIds": ["S-001"],
+      "tertiaryRefs": [],
+      "citation": "Same as E-02",
+      "direction": "qualifies"
+    }
+  ],
+  "openQuestions": [
+    {
+      "id": "QV-001",
+      "question": "What are the goodwill and intangible-asset balances on the FY2025 10-K balance sheet (or are they zero)?",
+      "blocks": ["C-001", "C-001b"],
+      "inheritsFrom": []
+    },
+    {
+      "id": "QV-002",
+      "question": "What is the precise FY2025 share count by class (Class A common, Class B common, treasury) at the 10-K reporting date, and what is the contemporaneous market price for each class?",
+      "blocks": ["C-001", "C-002"],
+      "inheritsFrom": []
+    },
+    {
+      "id": "QV-003",
+      "question": "Does the FY2025 10-K (or the FY2025 proxy / supplemental investor materials) contain a management-prepared FIFO-adjusted earnings or FIFO EBITDA reconciliation table?",
+      "blocks": ["C-003b"],
+      "inheritsFrom": ["Q-005"]
+    },
+    {
+      "id": "QV-004",
+      "question": "What is the year-by-year buyback ledger from FY2005 through FY2025 (shares repurchased, dollar amount, average price)?",
+      "blocks": ["C-004", "C-008"],
+      "inheritsFrom": []
+    },
+    {
+      "id": "QV-005",
+      "question": "What is Seneca's 20-year time series of book value per share (FY2005-FY2025) for a clean CAGR computation?",
+      "blocks": ["C-004"],
+      "inheritsFrom": []
+    },
+    {
+      "id": "QV-006",
+      "question": "Is any portion of the $89.5m deferred LIFO tax already recognized as a deferred tax liability on the FY2025 balance sheet, versus an unrecognized contingent obligation?",
+      "blocks": ["C-tax-recapture"],
+      "inheritsFrom": []
+    },
+    {
+      "id": "QV-007",
+      "question": "What is the maintenance-capex figure or proxy in the FY2025 10-K?",
+      "blocks": ["C-003b"],
+      "inheritsFrom": ["Q-002"]
+    },
+    {
+      "id": "QV-008",
+      "question": "Does the dual-class voting structure or any preferred/restricted shares require exclusion from the tangible-book denominator?",
+      "blocks": ["C-001", "C-004"],
+      "inheritsFrom": ["Q-006"]
+    }
+  ],
+  "decisionGateCheck": {
+    "gate2": {
+      "description": "Seneca valuation only passes if both reported and FIFO-adjusted calculations reconcile to filings.",
+      "status": "unmet",
+      "reason": "FIFO-adjusted calculations are derived from aggregator-reported balance-sheet inputs and have not been reconciled to the 10-K's own tangible-book or FIFO-adjusted-equity disclosures."
+    }
+  }
+}
