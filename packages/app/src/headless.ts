@@ -52,6 +52,7 @@ import {
 import { trackWorkflow } from './headless-watch.js';
 import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './workflow-preemption.js';
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
+import { runRecreateWorkflowCommand } from './recreate-workflow-command.js';
 
 export { bumpGenerationAndRecreate } from './workflow-actions.js';
 export {
@@ -1340,18 +1341,14 @@ async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps):
     logger: deps.logger,
     context: 'headless.recreate-workflow',
   });
-  const envelope = makeEnvelope('recreate-workflow', 'headless', 'workflow', { workflowId });
-  const result = await deps.commandService.recreateWorkflow(envelope, {
-    beforeRecreate: () => {
-      const workflow = deps.persistence.loadWorkflow(workflowId);
-      if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
-      const nextGen = (workflow.generation ?? 0) + 1;
-      deps.persistence.updateWorkflow(workflowId, { generation: nextGen });
-      deps.logger.info(`bumped generation to ${nextGen} for ${workflowId}`, { module: 'workflow' });
+  const started = await runRecreateWorkflowCommand(
+    {
+      commandService: deps.commandService,
+      persistence: deps.persistence,
+      logger: deps.logger,
     },
-  });
-  if (!result.ok) throw new Error(result.error.message);
-  const started = result.data;
+    { workflowId, source: 'headless' },
+  );
   const runnable = started.filter(t => t.status === 'running');
   if (runnable.length > 0) {
     const te = createHeadlessExecutor(deps);

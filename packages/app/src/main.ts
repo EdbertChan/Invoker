@@ -134,6 +134,7 @@ import { computeDeferredLaunchTiming } from './deferred-runnable.js';
 import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './workflow-preemption.js';
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
+import { runRecreateWorkflowCommand } from './recreate-workflow-command.js';
 
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
@@ -2996,18 +2997,14 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-workflow',
         });
-        const envelope = makeEnvelope('recreate-workflow', 'ui', 'workflow', { workflowId });
-        const result = await commandService.recreateWorkflow(envelope, {
-          beforeRecreate: () => {
-            const workflow = sqlitePersistence.loadWorkflow(workflowId);
-            if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
-            const nextGen = (workflow.generation ?? 0) + 1;
-            sqlitePersistence.updateWorkflow(workflowId, { generation: nextGen });
-            logger.info(`bumped generation to ${nextGen} for ${workflowId}`, { module: 'workflow' });
+        const started = await runRecreateWorkflowCommand(
+          {
+            commandService,
+            persistence: sqlitePersistence,
+            logger,
           },
-        });
-        if (!result.ok) throw new Error(result.error.message);
-        const started = result.data;
+          { workflowId, source: 'ui' },
+        );
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
