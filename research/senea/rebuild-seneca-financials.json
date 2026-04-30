@@ -1,0 +1,53 @@
+{
+  "taskId": "rebuild-seneca-financials",
+  "artifactStatus": "smoke-test",
+  "ticker": "SENEA",
+  "note": "First-pass Invoker artifact-write/commit test, not final investment advice or a completed diligence model.",
+  "scope": "Reconstruct 20+ years of Seneca Foods financials from primary filings, on both reported (LIFO) and FIFO-adjusted bases, to feed downstream claim verification, bear-case, and attribution lanes.",
+  "requiredOutputs": [
+    "lifoReserve",
+    "fifoInventory",
+    "adjustedEquity",
+    "tangibleBookValue",
+    "ncav",
+    "netDebt",
+    "fifoEbitda",
+    "maintenanceCapexProxy",
+    "roeRoic",
+    "buybacks",
+    "perShareCompounding"
+  ],
+  "sourceAnchors": [
+    {
+      "id": "fy2025-lifo-reserve",
+      "description": "Seneca FY2025 10-K / annual report discloses a LIFO reserve of $359.3 million along with FIFO-adjusted earnings and FIFO EBITDA bridges.",
+      "metric": "lifoReserve",
+      "value": 359300000,
+      "unit": "USD",
+      "fiscalYear": "FY2025",
+      "source": "Seneca Foods FY2025 10-K / annual report (inventory footnote and non-GAAP reconciliations)"
+    },
+    {
+      "id": "sp-smallcap-600-deletion",
+      "description": "S&P Dow Jones Indices announced the July 2023 deletion of SENEA from the S&P SmallCap 600, anchoring the index-flow / forced-selling attribution analysis.",
+      "event": "indexDeletion",
+      "index": "S&P SmallCap 600",
+      "effectiveDate": "2023-07",
+      "source": "S&P Dow Jones Indices index rebalance notice (July 2023)"
+    },
+    {
+      "id": "reported-vs-fifo-reconciliation",
+      "description": "Per the source plan's Decision Gate 2, Seneca valuation only passes if both reported (LIFO) and FIFO-adjusted calculations reconcile to filings; every rebuilt metric must tie back to a filing reference and a management non-GAAP bridge where disclosed.",
+      "requirement": "reconcile reported and FIFO-adjusted views against primary filings",
+      "source": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md (Decision Gate 2)"
+    }
+  ],
+  "nextScripts": [
+    "scripts/research/fetch_sec_filings.py",
+    "scripts/research/extract_lifo_reserve.py",
+    "scripts/research/rebuild_senea_financials.py",
+    "scripts/research/reconcile_fifo_bridge.py",
+    "scripts/research/per_share_compounding.py",
+    "scripts/research/verify_claims.py"
+  ]
+}
