@@ -34,8 +34,6 @@ import {
   approveTask,
   rebaseAndRetry,
   resolveConflictAction,
-  recreateWorkflow as sharedRecreateWorkflow,
-  recreateTask as sharedRecreateTask,
   forkWorkflow as sharedForkWorkflow,
   setWorkflowMergeMode,
   finalizeAppliedFix,
@@ -1342,7 +1340,18 @@ async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps):
     logger: deps.logger,
     context: 'headless.recreate-workflow',
   });
-  const started = sharedRecreateWorkflow(workflowId, { persistence: deps.persistence, orchestrator: deps.orchestrator });
+  const envelope = makeEnvelope('recreate-workflow', 'headless', 'workflow', { workflowId });
+  const result = await deps.commandService.recreateWorkflow(envelope, {
+    beforeRecreate: () => {
+      const workflow = deps.persistence.loadWorkflow(workflowId);
+      if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
+      const nextGen = (workflow.generation ?? 0) + 1;
+      deps.persistence.updateWorkflow(workflowId, { generation: nextGen });
+      deps.logger.info(`bumped generation to ${nextGen} for ${workflowId}`, { module: 'workflow' });
+    },
+  });
+  if (!result.ok) throw new Error(result.error.message);
+  const started = result.data;
   const runnable = started.filter(t => t.status === 'running');
   if (runnable.length > 0) {
     const te = createHeadlessExecutor(deps);
@@ -1391,7 +1400,10 @@ async function headlessRecreateTask(taskId: string, deps: HeadlessDeps): Promise
   taskId = restored.resolvedTaskId;
   await preemptTaskSubgraph(taskId, deps);
 
-  const started = sharedRecreateTask(taskId, { persistence: deps.persistence, orchestrator: deps.orchestrator });
+  const envelope = makeEnvelope('recreate-task', 'headless', 'task', { taskId });
+  const result = await deps.commandService.recreateTask(envelope);
+  if (!result.ok) throw new Error(result.error.message);
+  const started = result.data;
   const runnable = started.filter(t => t.status === 'running');
   const workflowId = deps.orchestrator.getTask(taskId)?.config.workflowId;
   process.stdout.write(`Recreate task "${taskId}" (+ downstream) — ${runnable.length} task(s) to execute (pool fetch skipped)\n`);
