@@ -50,8 +50,10 @@ if (process.platform === 'linux' && !enableTestCompositor) {
   app.commandLine.appendSwitch('disable-software-rasterizer');
 }
 
-import { Orchestrator, CommandService } from '@invoker/workflow-core';
+import { Orchestrator, CommandService, InstrumentedCommandService } from '@invoker/workflow-core';
 import type {
+  CommandServiceInstrumentationEvent,
+  CommandServiceInstrumenter,
   PlanDefinition,
   TaskDelta,
   TaskReplacementDef,
@@ -199,6 +201,28 @@ function dispatchStartedTasks(tasks: TaskState[]): void {
     });
   });
 }
+
+const commandServiceInstrumenter: CommandServiceInstrumenter = (event: CommandServiceInstrumentationEvent) => {
+  const meta = {
+    module: 'command-service',
+    scope: event.scope,
+    method: event.method,
+    durationMs: event.durationMs,
+    success: event.success,
+    ...(event.error ? { error: event.error } : {}),
+  };
+  if (event.success) {
+    logger.debug(
+      `[command-service] ${event.method} ok ${event.durationMs}ms`,
+      meta,
+    );
+  } else {
+    logger.warn(
+      `[command-service] ${event.method} failed ${event.durationMs}ms: ${event.error ?? ''}`,
+      meta,
+    );
+  }
+};
 let workflowMutationCoordinator: PersistedWorkflowMutationCoordinator | null = null;
 const workflowMutationDispatcher = new Map<string, (...args: unknown[]) => Promise<unknown>>();
 let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
@@ -408,7 +432,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     deferRunningUntilLaunch: true,
     taskDispatcher: dispatchStartedTasks,
   });
-  commandService = new CommandService(orchestrator);
+  commandService = new InstrumentedCommandService(orchestrator, commandServiceInstrumenter);
 
   const startupSyncMode = options?.startupSyncMode ?? 'all';
   const initLog = isHeadless
@@ -2633,7 +2657,7 @@ if (isHeadless) {
         deferRunningUntilLaunch: true,
         taskDispatcher: dispatchStartedTasks,
       });
-      commandService = new CommandService(orchestrator);
+      commandService = new InstrumentedCommandService(orchestrator, commandServiceInstrumenter);
       rebuildTaskRunner();
       taskHandles.clear();
     });
