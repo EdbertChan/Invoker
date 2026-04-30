@@ -7,7 +7,8 @@
   "upstreamPack": "research/senea/claims-source-pack.json",
   "sourceRegister": "research/senea/source-register.csv",
   "generatedOn": "2026-04-30",
-  "claimFamily": {
+  "claimFamily": "valuation",
+  "claimFamilyDetails": {
     "id": "valuation-accounting",
     "name": "SENEA Valuation & Accounting",
     "scope": "Tangible book, NCAV, LIFO reserve, FIFO earnings power, adjusted book value, buyback-adjusted per-share compounding, and LIFO tax recapture for Seneca Foods.",
