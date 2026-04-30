@@ -1,0 +1,298 @@
+{
+  "ticker": "SENEA",
+  "claimFamily": "governance-and-capital-allocation",
+  "tester": "Claude (Opus 4.7)",
+  "testDate": "2026-04-30",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "sourcePackRef": "research/senea/claims-source-pack.json",
+  "sourceRegisterRef": "research/senea/source-register.csv",
+  "verdict": "unresolved",
+  "confidence": 0.2,
+  "verdictRationale": "The supplied source pack is an initial claim-to-source mapping in which every primary source is annotated 'to be retrieved from ...'. None of the FY2025 10-K, FY2025 DEF 14A, IR coverage page, or EDGAR tender-offer filings are present in the repository, so per the test's acceptance criteria each sub-claim that depends on filing-level confirmation is marked unresolved.",
+  "claimsTested": [
+    {
+      "subClaimId": "SC-G1",
+      "ledgerClaimId": "C-010",
+      "claim": "Seneca operates a dual-class (or multi-class) common share structure with differential voting rights.",
+      "verdict": "unresolved",
+      "confidence": 0.2,
+      "supportingSources": ["S-001", "S-005"],
+      "requiredEvidence": "FY2025 10-K cover page + Item 5; DEF 14A 'Description of Capital Stock' / 'Voting Securities and Principal Holders'.",
+      "reason": "Neither the FY2025 10-K nor the FY2025 DEF 14A has been retrieved into the repo; both citations in the source register are placeholders ('to be retrieved from ...')."
+    },
+    {
+      "subClaimId": "SC-G2",
+      "ledgerClaimId": "C-010",
+      "claim": "Founding-family / insider holders control voting power disproportionate to economic ownership.",
+      "verdict": "unresolved",
+      "confidence": 0.15,
+      "supportingSources": ["S-005"],
+      "requiredEvidence": "DEF 14A 'Security Ownership of Certain Beneficial Owners and Management' table plus Schedule 13D/13G filings.",
+      "reason": "Source pack open question Q-006 explicitly flags this quantification as unverified, and S-005 has not been retrieved."
+    },
+    {
+      "subClaimId": "SC-G3",
+      "ledgerClaimId": "C-009",
+      "claim": "Seneca runs a limited investor-relations / promotion program (no regular earnings calls, no investor day, sparse press releases).",
+      "verdict": "unresolved",
+      "confidence": 0.2,
+      "supportingSources": ["S-006"],
+      "requiredEvidence": "Snapshot of https://investor.senecafoods.com enumerating earnings-call cadence and FY2024-FY2025 press-release / 8-K Item 7.01 frequency.",
+      "reason": "S-006 has not been retrieved; source-register confidence on S-006 is 'medium'."
+    },
+    {
+      "subClaimId": "SC-G4",
+      "ledgerClaimId": "C-009",
+      "claim": "Seneca has no, or near-zero, active sell-side analyst coverage.",
+      "verdict": "unresolved",
+      "confidence": 0.2,
+      "supportingSources": ["S-006"],
+      "requiredEvidence": "IR site 'Analyst Coverage' page (or its absence) plus a consensus-estimate vendor query (Refinitiv / Bloomberg / Visible Alpha) showing the count of contributing analysts.",
+      "reason": "S-006 not retrieved; no consensus-vendor pull attached."
+    },
+    {
+      "subClaimId": "SC-G5",
+      "ledgerClaimId": "C-008",
+      "claim": "Seneca has used issuer tender offers (including potential Dutch auctions) to repurchase Class A and/or Class B shares.",
+      "verdict": "unresolved",
+      "confidence": 0.15,
+      "supportingSources": ["S-001", "S-005"],
+      "requiredEvidence": "EDGAR full-text search for SC TO-I / SC 13E / SC 13E3 filings under CIK 0000088948; press releases announcing tender offers; final SC TO-I results.",
+      "reason": "No tender-offer filings have been retrieved into the repo; S-001 and S-005 are placeholder citations."
+    },
+    {
+      "subClaimId": "SC-G6",
+      "ledgerClaimId": "C-008",
+      "claim": "Seneca has authorized and executed open-market repurchase programs.",
+      "verdict": "unresolved",
+      "confidence": 0.25,
+      "supportingSources": ["S-001", "S-007"],
+      "requiredEvidence": "FY2025 10-K Item 5 issuer purchases of equity securities table (Total Number of Shares Purchased, Average Price Paid, Total Number of Shares Purchased as Part of Publicly Announced Plan); 8-K announcements of any new authorization.",
+      "reason": "FY2025 10-K not retrieved; planned downstream artifact 'artifacts/senea_metrics.csv (buyback_history)' not produced."
+    },
+    {
+      "subClaimId": "SC-G7",
+      "ledgerClaimId": "C-010",
+      "claim": "Dual-class voting concentration creates governance risk (related-party transactions, weak independent-director oversight, restrictive change-of-control provisions, or entrenchment).",
+      "verdict": "unresolved",
+      "confidence": 0.2,
+      "supportingSources": ["S-005", "S-001"],
+      "requiredEvidence": "DEF 14A 'Certain Relationships and Related Transactions,' 'Director Independence,' and 'Compensation Discussion & Analysis' sections; 10-K Risk Factors disclosures on dual-class structure.",
+      "reason": "Neither S-005 nor S-001 retrieved; without filings, related-party flows and entrenchment provisions cannot be enumerated."
+    },
+    {
+      "subClaimId": "SC-G8",
+      "ledgerClaimId": "C-008",
+      "claim": "Management has accelerated repurchases when the public-market price moved further below tangible / FIFO book value (capital allocation is counter-cyclical to the discount).",
+      "verdict": "unresolved",
+      "confidence": 0.15,
+      "supportingSources": ["S-001", "S-007"],
+      "requiredEvidence": "Time series of (a) FY2010-FY2025 buyback dollars and shares from 10-K Item 5, (b) monthly SENEA closing prices, (c) quarter-end tangible-book and FIFO-adjusted book per share. Cross-correlate price discount with buyback intensity.",
+      "reason": "Underlying time-series artifact not produced; FY2025 10-K not retrieved; source-pack open question Q-002 (maintenance-capex) is also unresolved, weakening the FCF context for the buyback program."
+    }
+  ],
+  "sourcesUsed": [
+    {
+      "sourceId": "S-001",
+      "title": "Seneca Foods Corporation FY2025 Annual Report on Form 10-K",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10-K",
+      "sourceType": "primary-filing",
+      "retrievalStatus": "pending",
+      "registerConfidence": "high",
+      "supportsSubClaims": ["SC-G1", "SC-G5", "SC-G6", "SC-G7", "SC-G8"]
+    },
+    {
+      "sourceId": "S-005",
+      "title": "Seneca Foods Corporation FY2025 DEF 14A proxy statement",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=DEF+14A",
+      "sourceType": "primary-filing",
+      "retrievalStatus": "pending",
+      "registerConfidence": "high",
+      "supportsSubClaims": ["SC-G1", "SC-G2", "SC-G5", "SC-G7"]
+    },
+    {
+      "sourceId": "S-006",
+      "title": "Seneca Foods Investor Relations coverage page and consensus-estimate vendor records",
+      "publisher": "Seneca Foods Corporation Investor Relations / consensus-estimate vendor",
+      "urlOrCitation": "https://investor.senecafoods.com",
+      "sourceType": "issuer-disclosure",
+      "retrievalStatus": "pending",
+      "registerConfidence": "medium",
+      "supportsSubClaims": ["SC-G3", "SC-G4"]
+    },
+    {
+      "sourceId": "S-007",
+      "title": "Seneca Foods historical 10-K / 10-Q filings (FY2005-FY2025)",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10",
+      "sourceType": "primary-filing",
+      "retrievalStatus": "pending",
+      "registerConfidence": "high",
+      "supportsSubClaims": ["SC-G6", "SC-G8"]
+    }
+  ],
+  "evidence": [
+    {
+      "evidenceId": "E-G1",
+      "subClaimId": "SC-G1",
+      "type": "source-pack-anchor",
+      "polarity": "supporting",
+      "summary": "Source pack lists S-005 and S-001 as the verification sources for C-010 and describes S-005 as containing 'dual-class share, voting, and beneficial-ownership disclosures.' Anchor only — not yet a primary-source quote.",
+      "sourceIds": ["S-005", "S-001"],
+      "citation": "research/senea/claims-source-pack.json (claim C-010, source S-005)"
+    },
+    {
+      "evidenceId": "E-G2",
+      "subClaimId": "SC-G2",
+      "type": "open-question",
+      "polarity": "neutral",
+      "summary": "Source pack open question Q-006 explicitly asks whether the FY2025 proxy quantifies combined Class A/Class B voting power held by the founding family/insiders, signalling that the source pack itself has not yet confirmed family voting concentration.",
+      "sourceIds": ["S-005"],
+      "citation": "research/senea/claims-source-pack.json (openQuestions Q-006)"
+    },
+    {
+      "evidenceId": "E-G3",
+      "subClaimId": "SC-G3",
+      "type": "source-pack-anchor",
+      "polarity": "neutral",
+      "summary": "Plan section 1 lists 'lack of coverage' as one of the testable assertions; S-006 is the only source nominated for it, with confidence 'medium' and no archived snapshot of the IR site present in the repo.",
+      "sourceIds": ["S-006"],
+      "citation": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md (section 'Invoker Task Plan' item 1)"
+    },
+    {
+      "evidenceId": "E-G4",
+      "subClaimId": "SC-G4",
+      "type": "source-pack-anchor",
+      "polarity": "neutral",
+      "summary": "Source pack claim C-009 names 'consensus-estimate vendor coverage records' as the secondary input but does not specify which vendor. No vendor pull is attached.",
+      "sourceIds": ["S-006"],
+      "citation": "research/senea/claims-source-pack.json (claim C-009 verificationMethod)"
+    },
+    {
+      "evidenceId": "E-G5",
+      "subClaimId": "SC-G5",
+      "type": "missing-source",
+      "polarity": "neutral",
+      "summary": "No SC TO-I / SC 13E / SC 13E3 filings have been pulled from EDGAR for CIK 0000088948; tender-offer history therefore cannot be confirmed or refuted from materials currently in the repo.",
+      "sourceIds": [],
+      "citation": "EDGAR CIK 0000088948 (search not yet executed)"
+    },
+    {
+      "evidenceId": "E-G6",
+      "subClaimId": "SC-G6",
+      "type": "source-pack-anchor",
+      "polarity": "supporting",
+      "summary": "C-008 verification method identifies 10-K Item 5 / Item 7 disclosures and proxy statements as the canonical buyback record. The intended downstream artifact 'artifacts/senea_metrics.csv (buyback_history)' has not been produced.",
+      "sourceIds": ["S-001", "S-005"],
+      "citation": "research/senea/claims-source-pack.json (claim C-008 nextArtifact)"
+    },
+    {
+      "evidenceId": "E-G7",
+      "subClaimId": "SC-G7",
+      "type": "missing-source",
+      "polarity": "neutral",
+      "summary": "Without the DEF 14A and 10-K Risk Factors retrieved, related-party transactions, board-independence ratios, and change-of-control entrenchment provisions cannot be assessed.",
+      "sourceIds": ["S-005", "S-001"],
+      "citation": "research/senea/source-register.csv (S-001, S-005 marked 'to be retrieved')"
+    },
+    {
+      "evidenceId": "E-G8",
+      "subClaimId": "SC-G8",
+      "type": "missing-derived-artifact",
+      "polarity": "neutral",
+      "summary": "Counter-cyclical-buyback test requires a price + book-value + buyback-intensity time series, which lives in the unproduced 'artifacts/senea_metrics.csv (buyback_history)'. Source-pack open question Q-002 also leaves the maintenance-capex / FCF context unresolved.",
+      "sourceIds": ["S-001", "S-007"],
+      "citation": "research/senea/claims-source-pack.json (claim C-008 nextArtifact; openQuestions Q-002)"
+    }
+  ],
+  "contraryEvidence": [
+    {
+      "contraryId": "CE-1",
+      "subClaimId": "SC-G2",
+      "scenario": "DEF 14A may show founding-family combined Class A + Class B voting power below a 'control' threshold (for example, < 35%), which would weaken the dual-class control narrative.",
+      "status": "untested",
+      "wouldFalsify": ["SC-G2", "C-010"],
+      "sourceIds": ["S-005"]
+    },
+    {
+      "contraryId": "CE-2",
+      "subClaimId": "SC-G8",
+      "scenario": "10-K Item 5 monthly issuer-purchase tables may show repurchases concentrated near 52-week highs rather than near tangible-book / FIFO-book lows; that would falsify SC-G8 (counter-cyclical buybacks).",
+      "status": "untested",
+      "wouldFalsify": ["SC-G8"],
+      "sourceIds": ["S-001"]
+    },
+    {
+      "contraryId": "CE-3",
+      "subClaimId": "SC-G5",
+      "scenario": "An SC TO-I tender offer struck at a premium materially above tangible / FIFO book value would invert the family-friendly governance interpretation (insiders extracting value, not compounding for minority holders).",
+      "status": "untested",
+      "wouldFalsify": ["SC-G5", "SC-G7"],
+      "sourceIds": ["S-001", "S-005"]
+    },
+    {
+      "contraryId": "CE-4",
+      "subClaimId": "SC-G4",
+      "scenario": "If S-006 shows non-trivial active sell-side coverage, SC-G4 and the C-009 ledger claim fail.",
+      "status": "untested",
+      "wouldFalsify": ["SC-G4", "C-009"],
+      "sourceIds": ["S-006"]
+    },
+    {
+      "contraryId": "CE-5",
+      "subClaimId": "SC-G7",
+      "scenario": "DEF 14A Item 13 may disclose material related-party flows (family-owned suppliers, related leases) that flip the governance verdict from 'controlled but aligned' to 'controlled with risk.'",
+      "status": "untested",
+      "wouldFalsify": ["SC-G7"],
+      "sourceIds": ["S-005"]
+    }
+  ],
+  "openQuestions": [
+    {
+      "id": "OQ-G1",
+      "question": "Pull the SENEA FY2025 10-K cover page and Item 5 from EDGAR and quote (a) classes of stock outstanding and (b) the monthly issuer purchase table for the last fiscal year.",
+      "resolves": ["SC-G1", "SC-G6"],
+      "sourceIds": ["S-001"]
+    },
+    {
+      "id": "OQ-G2",
+      "question": "Pull the SENEA FY2025 DEF 14A 'Security Ownership of Certain Beneficial Owners and Management' table and quantify combined Class A + Class B voting power held by family / insiders.",
+      "resolves": ["SC-G2"],
+      "sourceIds": ["S-005"],
+      "inheritsFromSourcePack": "Q-006"
+    },
+    {
+      "id": "OQ-G3",
+      "question": "Snapshot https://investor.senecafoods.com and enumerate earnings-call cadence, presence of an 'Analyst Coverage' page, and FY2024-FY2025 press-release / 8-K Item 7.01 cadence.",
+      "resolves": ["SC-G3", "SC-G4"],
+      "sourceIds": ["S-006"]
+    },
+    {
+      "id": "OQ-G4",
+      "question": "Run an EDGAR full-text search for SC TO-I / SC 13E / SC 13E3 filings under CIK 0000088948 and tabulate any tender / Dutch-auction events with offer price, expiration, and final tendered amount.",
+      "resolves": ["SC-G5"],
+      "sourceIds": ["S-001"]
+    },
+    {
+      "id": "OQ-G5",
+      "question": "Build an FY2010-FY2025 buyback-vs-discount time series from 10-K Item 5 plus monthly price and quarter-end book / FIFO-book values, producing artifacts/senea_metrics.csv (buyback_history).",
+      "resolves": ["SC-G8"],
+      "sourceIds": ["S-001", "S-007"]
+    },
+    {
+      "id": "OQ-G6",
+      "question": "Pull DEF 14A Item 13 and 10-K Risk Factors and enumerate related-party transactions, family-owned suppliers, and dual-class entrenchment provisions (golden parachute, supermajority, change-of-control triggers).",
+      "resolves": ["SC-G7"],
+      "sourceIds": ["S-005", "S-001"]
+    },
+    {
+      "id": "OQ-G7",
+      "question": "Confirm whether the FY2025 10-K discloses maintenance capex or a usable proxy, since SC-G8 (whether buybacks were funded from real free cash flow rather than working-capital release) requires it.",
+      "resolves": ["SC-G8"],
+      "sourceIds": ["S-001"],
+      "inheritsFromSourcePack": "Q-002"
+    }
+  ]
+}
