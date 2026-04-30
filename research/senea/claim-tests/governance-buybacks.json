@@ -1,13 +1,13 @@
 {
   "ticker": "SENEA",
-  "claimFamily": "governance-and-capital-allocation",
+  "claimFamily": "governance-buybacks",
   "tester": "Claude (Opus 4.7)",
   "testDate": "2026-04-30",
   "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
   "sourcePackRef": "research/senea/claims-source-pack.json",
   "sourceRegisterRef": "research/senea/source-register.csv",
   "verdict": "unresolved",
-  "confidence": 0.2,
+  "confidence": "low",
   "verdictRationale": "The supplied source pack is an initial claim-to-source mapping in which every primary source is annotated 'to be retrieved from ...'. None of the FY2025 10-K, FY2025 DEF 14A, IR coverage page, or EDGAR tender-offer filings are present in the repository, so per the test's acceptance criteria each sub-claim that depends on filing-level confirmation is marked unresolved.",
   "claimsTested": [
     {
