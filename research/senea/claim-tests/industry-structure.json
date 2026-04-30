@@ -1,0 +1,272 @@
+{
+  "claimFamily": "industry-structure",
+  "ticker": "SENEA",
+  "generatedOn": "2026-04-30",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "sourcePackRef": "research/senea/claims-source-pack.json",
+  "sourceRegisterRef": "research/senea/source-register.csv",
+  "parentLedgerClaims": ["C-005", "C-006"],
+  "verdict": "unresolved",
+  "confidence": "low",
+  "verdictRationale": "Primary-source retrieval is explicitly deferred per claims-source-pack.json scope statement. Every sub-claim is conditional on filings (S-001, S-003, S-004, S-008) that are referenced by the source register but not yet archived in the repo. Per the task's acceptance criteria, claims that lack archived primary-source evidence are recorded as 'unresolved'.",
+  "claimsTested": [
+    {
+      "subClaimId": "IS-1",
+      "parentLedgerClaim": "C-005",
+      "topic": "seneca-market-position",
+      "statement": "Seneca Foods Corporation (SENEA) is one of the two top suppliers of U.S. private-label canned vegetables.",
+      "verificationMethod": "Read FY2025 10-K segment / business description and reconcile with the Lakeside quoted ~90% statement; confirm Seneca is the named co-leader.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "blockingOpenQuestions": ["Q-001"],
+      "supportingSourceIds": ["S-001", "S-004"]
+    },
+    {
+      "subClaimId": "IS-2",
+      "parentLedgerClaim": "C-005",
+      "topic": "lakeside-role",
+      "statement": "Lakeside Foods, Inc. is the second top supplier of U.S. private-label canned vegetables and is the source of the ~90% combined-share statement.",
+      "verificationMethod": "Retrieve the primary Lakeside material referenced in S-004 and confirm that Lakeside (a) names itself as one of the two firms and (b) names Seneca (not a third party) as the other firm.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "blockingOpenQuestions": ["Q-001"],
+      "supportingSourceIds": ["S-004"]
+    },
+    {
+      "subClaimId": "IS-3",
+      "parentLedgerClaim": "C-005",
+      "topic": "private-label-concentration",
+      "statement": "Seneca and Lakeside together account for approximately 90% of U.S. private-label canned-vegetable supply.",
+      "verificationMethod": "Cross-check Lakeside primary statement (S-004) against Seneca FY2025 10-K segment commentary (S-001) and any third-party industry data; confirm the ~90% figure and its measurement basis.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "blockingOpenQuestions": ["Q-001", "Q-IS-A"],
+      "supportingSourceIds": ["S-001", "S-004"]
+    },
+    {
+      "subClaimId": "IS-4",
+      "parentLedgerClaim": "C-005",
+      "topic": "facility-footprint",
+      "statement": "The Seneca, Lakeside, and post-deconsolidation Del Monte U.S. plant footprint is consistent with a two-or-three-firm private-label canned-vegetable structure.",
+      "verificationMethod": "Map Seneca facilities from S-001, Del Monte U.S. facility disposition from S-003 / S-008, and Lakeside facilities from S-004; produce a plant-by-category-by-region matrix.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "blockingOpenQuestions": ["Q-IS-B"],
+      "supportingSourceIds": ["S-001", "S-003", "S-004", "S-008"]
+    },
+    {
+      "subClaimId": "IS-5",
+      "parentLedgerClaim": "C-005",
+      "topic": "smaller-players",
+      "statement": "Residual U.S. private-label canned-vegetable supply (~10%) is fragmented among smaller players, with no third firm above ~5% share.",
+      "verificationMethod": "Enumerate residual U.S. private-label vegetable canners from S-004 and any third-party industry data; assess whether any third firm exceeds ~5% share.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "blockingOpenQuestions": ["Q-IS-C"],
+      "supportingSourceIds": ["S-004"]
+    },
+    {
+      "subClaimId": "IS-6",
+      "parentLedgerClaim": "C-006",
+      "topic": "rational-capacity-behavior",
+      "statement": "Del Monte Pacific deconsolidated U.S. Del Monte Foods effective May 2025 and the U.S. business filed Chapter 11, removing destructive private-label capacity.",
+      "verificationMethod": "Verify deconsolidation and discontinued-operations classification in Del Monte Pacific's FY2025 annual report (S-003); confirm the U.S. Chapter 11 filing in the PACER docket and Del Monte Foods press release (S-008); inspect any §363 sale orders or plan documents to determine whether capacity was exited or transferred.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "blockingOpenQuestions": ["Q-004", "Q-IS-D"],
+      "supportingSourceIds": ["S-003", "S-008"]
+    },
+    {
+      "subClaimId": "IS-7",
+      "parentLedgerClaim": "C-005",
+      "topic": "national-vs-regional-concentration",
+      "statement": "The ~90% concentration figure is a U.S.-national private-label vegetable-canning measure, not a regional or category-narrow measure.",
+      "verificationMethod": "Read the full Lakeside primary material in S-004 in context, including the question or topic that elicited the ~90% statement; cross-check against any third-party industry data on geographic or category-level share.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "blockingOpenQuestions": ["Q-001", "Q-IS-A"],
+      "supportingSourceIds": ["S-004"]
+    }
+  ],
+  "sourcesUsed": [
+    {
+      "sourceId": "S-001",
+      "title": "Seneca Foods Corporation FY2025 Annual Report on Form 10-K (LIFO accounting, $359.3m LIFO reserve, FIFO-adjusted earnings, FIFO EBITDA disclosures)",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "SEC EDGAR filing index for SENEA, Form 10-K covering fiscal year ended March 2025 (to be retrieved from https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10-K)",
+      "sourceType": "primary-filing",
+      "registerConfidence": "high",
+      "retrievalStatus": "not-yet-retrieved",
+      "usedForSubClaims": ["IS-1", "IS-3", "IS-4"]
+    },
+    {
+      "sourceId": "S-003",
+      "title": "Del Monte Pacific Limited FY2025 annual report and FY2025 results materials describing classification of the U.S. Del Monte Foods business as discontinued operations and deconsolidation effective May 2025",
+      "publisher": "Del Monte Pacific Limited (SGX/PSE listed)",
+      "urlOrCitation": "Del Monte Pacific FY2025 annual report and SGX/PSE disclosure filings (to be retrieved from https://www.delmontepacific.com/investors)",
+      "sourceType": "primary-filing",
+      "registerConfidence": "high",
+      "retrievalStatus": "not-yet-retrieved",
+      "usedForSubClaims": ["IS-4", "IS-6"]
+    },
+    {
+      "sourceId": "S-004",
+      "title": "Lakeside Foods public materials referencing the statement that Lakeside and one other competitor account for approximately 90% of U.S. private-label vegetable canning",
+      "publisher": "Lakeside Foods, Inc. (corporate communications / interview transcript)",
+      "urlOrCitation": "Lakeside Foods website and quoted industry interview material (to be archived as cited in the plan's Quick Source Anchors section)",
+      "sourceType": "industry-statement",
+      "registerConfidence": "medium",
+      "retrievalStatus": "not-yet-retrieved",
+      "usedForSubClaims": ["IS-1", "IS-2", "IS-3", "IS-4", "IS-5", "IS-7"]
+    },
+    {
+      "sourceId": "S-008",
+      "title": "Del Monte Foods (U.S.) Chapter 11 bankruptcy filing and supporting docket records",
+      "publisher": "U.S. Bankruptcy Court (PACER docket) / Del Monte Foods press release",
+      "urlOrCitation": "PACER bankruptcy docket for Del Monte Foods (U.S.) Chapter 11 case and corresponding press release (to be retrieved from PACER and the Del Monte Foods newsroom)",
+      "sourceType": "court-record",
+      "registerConfidence": "high",
+      "retrievalStatus": "not-yet-retrieved",
+      "usedForSubClaims": ["IS-4", "IS-6"]
+    }
+  ],
+  "evidence": [
+    {
+      "subClaimId": "IS-1",
+      "evidenceStatement": "Seneca Foods Corporation FY2025 10-K segment / business description is the primary disclosure that would corroborate Seneca's position as a top-two U.S. private-label canned-vegetable supplier. Filing not yet archived in repo.",
+      "sourceIds": ["S-001"],
+      "evidenceType": "primary-filing",
+      "status": "not-yet-retrieved"
+    },
+    {
+      "subClaimId": "IS-2",
+      "evidenceStatement": "Lakeside Foods public materials referenced by S-004 contain the quote that Lakeside and one other competitor account for ~90% of U.S. private-label vegetable canning; the underlying source has not been archived to the repo and the second-named firm is unconfirmed (open question Q-001).",
+      "sourceIds": ["S-004"],
+      "evidenceType": "industry-statement",
+      "status": "not-yet-retrieved"
+    },
+    {
+      "subClaimId": "IS-3",
+      "evidenceStatement": "The ~90% private-label concentration figure depends on the Lakeside primary statement (S-004) cross-checked against Seneca FY2025 10-K segment commentary (S-001). Neither is archived; no third-party industry-data cross-check is yet recorded in the source register.",
+      "sourceIds": ["S-001", "S-004"],
+      "evidenceType": "industry-statement + primary-filing",
+      "status": "not-yet-retrieved"
+    },
+    {
+      "subClaimId": "IS-4",
+      "evidenceStatement": "Plant-level disclosure from Seneca's FY2025 10-K (S-001), Del Monte Pacific's FY2025 annual report (S-003), Lakeside primary materials (S-004), and Del Monte Foods Chapter 11 docket (S-008) is required to map facility footprint by category and region. None archived.",
+      "sourceIds": ["S-001", "S-003", "S-004", "S-008"],
+      "evidenceType": "mixed",
+      "status": "not-yet-retrieved"
+    },
+    {
+      "subClaimId": "IS-5",
+      "evidenceStatement": "The source register does not currently identify any third U.S. private-label canned-vegetable supplier. The residual ~10% is asserted as fragmented but not enumerated; this remains open per Q-IS-C.",
+      "sourceIds": ["S-004"],
+      "evidenceType": "industry-statement",
+      "status": "not-yet-retrieved"
+    },
+    {
+      "subClaimId": "IS-6",
+      "evidenceStatement": "Del Monte Pacific FY2025 annual report (S-003) is the primary source for May 2025 deconsolidation and discontinued-operations classification; PACER docket and Del Monte Foods press release (S-008) document the Chapter 11 filing. Q-004 flags that the precise filing entity is unresolved. Whether capacity was exited or transferred via §363 sale is a downstream question (Q-IS-D).",
+      "sourceIds": ["S-003", "S-008"],
+      "evidenceType": "primary-filing + court-record",
+      "status": "not-yet-retrieved"
+    },
+    {
+      "subClaimId": "IS-7",
+      "evidenceStatement": "The geographic and category scope of the ~90% figure is unresolved pending retrieval of the full Lakeside primary material in context (S-004) plus, ideally, a third-party industry-data cross-check that is not currently in the source register.",
+      "sourceIds": ["S-004"],
+      "evidenceType": "industry-statement",
+      "status": "not-yet-retrieved"
+    }
+  ],
+  "contraryEvidence": [
+    {
+      "subClaimId": "IS-1",
+      "line": "Lakeside's ~90% statement is a self-interested marketing claim and may overstate Seneca's role; an independent industry-data provider could disagree.",
+      "wouldBeResolvedBy": "Third-party industry data on U.S. private-label vegetable canning that is not currently cited in the source register.",
+      "supportingSourceIds": []
+    },
+    {
+      "subClaimId": "IS-2",
+      "line": "Lakeside's quoted 'one other competitor' may not be Seneca; it may refer to Del Monte, Bonduelle USA, or another firm. Open question Q-001 flags this ambiguity.",
+      "wouldBeResolvedBy": "Direct retrieval of the primary Lakeside material in S-004 so the named counterpart can be read in context.",
+      "supportingSourceIds": ["S-004"]
+    },
+    {
+      "subClaimId": "IS-3",
+      "line": "The ~90% figure may be a one-time interview characterization rather than a measured market-share statistic; the basis (units, dollars, retailer panels, category cuts) is unspecified in the source register.",
+      "wouldBeResolvedBy": "Retrieval of S-004 in full plus a third-party industry-data cross-check.",
+      "supportingSourceIds": ["S-004"]
+    },
+    {
+      "subClaimId": "IS-4",
+      "line": "Even if combined private-label share is high, individual category lines (corn vs. green beans vs. peas) or retailer regions may be served by different plants, so the 'oligopoly' effect may not hold at the SKU or regional level.",
+      "wouldBeResolvedBy": "Plant-by-category-by-region disclosure from S-001, S-003, S-004.",
+      "supportingSourceIds": ["S-001", "S-003", "S-004"]
+    },
+    {
+      "subClaimId": "IS-5",
+      "line": "A non-trivial third firm (e.g., a regional canner or a co-pack arrangement supporting a major retailer) may push the residual above ~10% and weaken the duopoly framing.",
+      "wouldBeResolvedBy": "A primary or third-party enumeration of residual U.S. private-label vegetable canners.",
+      "supportingSourceIds": []
+    },
+    {
+      "subClaimId": "IS-6",
+      "line": "Chapter 11 is reorganization, not liquidation. Del Monte U.S. capacity may emerge under new ownership at similar or greater output, making the 'destructive capacity removed' framing premature.",
+      "wouldBeResolvedBy": "Chapter 11 plan / disclosure statement and any §363 asset-sale orders from the PACER docket under S-008.",
+      "supportingSourceIds": ["S-008"]
+    },
+    {
+      "subClaimId": "IS-7",
+      "line": "The ~90% figure may apply to a narrower category (e.g., canned corn or canned peas in private label) rather than the full U.S. private-label vegetable-canning market, which would materially weaken the 'national oligopoly' framing.",
+      "wouldBeResolvedBy": "Retrieval of S-004 in full, plus third-party data.",
+      "supportingSourceIds": ["S-004"]
+    }
+  ],
+  "openQuestions": [
+    {
+      "id": "Q-001",
+      "question": "Which specific competitor does Lakeside name alongside itself in the ~90% private-label vegetable-canning quote, and is that competitor Seneca or a third party?",
+      "blocksSubClaims": ["IS-2", "IS-3", "IS-5", "IS-7"],
+      "inheritedFrom": "claims-source-pack.json",
+      "resolvedBy": ["S-004"]
+    },
+    {
+      "id": "Q-004",
+      "question": "Which entity (Del Monte Foods Inc. or Del Monte Foods Holdings) filed Chapter 11, and how does that map to Del Monte Pacific's deconsolidated U.S. business?",
+      "blocksSubClaims": ["IS-6"],
+      "inheritedFrom": "claims-source-pack.json",
+      "resolvedBy": ["S-003", "S-008"]
+    },
+    {
+      "id": "Q-IS-A",
+      "question": "Is the 'approximately 90%' figure measured against the full U.S. private-label canned-vegetable category or a narrower sub-category (e.g., canned corn, canned green beans, canned peas), and against what time period and data source?",
+      "blocksSubClaims": ["IS-3", "IS-7"],
+      "inheritedFrom": "industry-structure.md",
+      "resolvedBy": ["S-004"]
+    },
+    {
+      "id": "Q-IS-B",
+      "question": "What is the plant-level facility list (location, categories, capacity) for Seneca, Lakeside, and the post-deconsolidation Del Monte U.S. business, and where do those footprints overlap by retailer or region?",
+      "blocksSubClaims": ["IS-4"],
+      "inheritedFrom": "industry-structure.md",
+      "resolvedBy": ["S-001", "S-003", "S-004", "S-008"]
+    },
+    {
+      "id": "Q-IS-C",
+      "question": "Does any third U.S. private-label canned-vegetable supplier (named or unnamed in S-004) exceed ~5% share, and if so, does its presence weaken the duopoly framing?",
+      "blocksSubClaims": ["IS-5"],
+      "inheritedFrom": "industry-structure.md",
+      "resolvedBy": ["S-004"]
+    },
+    {
+      "id": "Q-IS-D",
+      "question": "Does the Chapter 11 process result in capacity exit (plant closures, asset abandonment) or capacity transfer (going-concern sale, reorganized emergence)?",
+      "blocksSubClaims": ["IS-6"],
+      "inheritedFrom": "industry-structure.md",
+      "resolvedBy": ["S-008"]
+    }
+  ]
+}
