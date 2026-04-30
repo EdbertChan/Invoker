@@ -1,7 +1,7 @@
 {
   "taskId": "test-delmonte-change-claims",
   "ticker": "SENEA",
-  "claimFamily": "delmonte-conduct-change",
+  "claimFamily": "delmonte-change",
   "claimFamilyDescription": "Del Monte Foods (U.S.) conduct sequence: 2014 ownership change, price aggression, Sager Creek issues, restructuring, plant closures/sales, private-label retreat, May 2025 deconsolidation by Del Monte Pacific, and U.S. Chapter 11 filing.",
   "parentLedgerClaimId": "C-006",
   "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
