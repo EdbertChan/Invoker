@@ -1,0 +1,277 @@
+{
+  "taskId": "test-delmonte-change-claims",
+  "ticker": "SENEA",
+  "claimFamily": "delmonte-conduct-change",
+  "claimFamilyDescription": "Del Monte Foods (U.S.) conduct sequence: 2014 ownership change, price aggression, Sager Creek issues, restructuring, plant closures/sales, private-label retreat, May 2025 deconsolidation by Del Monte Pacific, and U.S. Chapter 11 filing.",
+  "parentLedgerClaimId": "C-006",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "inputs": [
+    "research/senea/claims-source-pack.json",
+    "research/senea/source-register.csv",
+    "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md"
+  ],
+  "generatedOn": "2026-04-30",
+  "verdict": "partially_supported",
+  "confidence": "medium",
+  "verdictRubric": {
+    "passed": "Sub-claim is supported by a retrieved primary-source artifact in this repo and meets the plan's Gate 1.",
+    "supported_by_anchor": "Sub-claim is asserted in the plan's Quick Source Anchors and has a primary source ID in claims-source-pack.json, but the underlying source has not yet been retrieved into the repo.",
+    "unresolved": "No source ID is available in claims-source-pack.json or source-register.csv for this sub-claim, or the only available evidence is indirect.",
+    "refuted": "A retrieved primary source contradicts the sub-claim.",
+    "failed": "A verification command produced a deterministic fail."
+  },
+  "claimsTested": [
+    {
+      "subClaimId": "DMC-01",
+      "claimText": "Del Monte Foods (U.S.) underwent a 2014 ownership change in which it was acquired from a U.S. parent by Del Monte Pacific Limited.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "No source ID is assigned in claims-source-pack.json for the 2014 ownership change. The plan's Quick Source Anchors block does not anchor a 2014 transaction. Per the acceptance rule that missing evidence forces unresolved, this sub-claim cannot be adjudicated from the existing pack.",
+      "sourceIds": [],
+      "citations": []
+    },
+    {
+      "subClaimId": "DMC-02",
+      "claimText": "Following the 2014 ownership change Del Monte Foods pursued aggressive private-label and branded price competition in U.S. canned vegetables.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "No primary or near-primary source for post-2014 price aggression is in the source register. S-003 (Del Monte Pacific FY2025) and S-008 (Chapter 11 docket) describe terminal events, not the pricing posture from 2014 onward.",
+      "sourceIds": [],
+      "citations": []
+    },
+    {
+      "subClaimId": "DMC-03",
+      "claimText": "Del Monte's acquisition of Sager Creek Vegetable Company produced operating, integration, or write-down issues.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "claims-source-pack.json does not include a Sager Creek transaction source. Without Del Monte Foods filings, Del Monte Pacific MD&A excerpts, or impairment disclosures, the Sager Creek sub-claim cannot be tested.",
+      "sourceIds": [],
+      "citations": []
+    },
+    {
+      "subClaimId": "DMC-04",
+      "claimText": "Del Monte Foods executed multi-year restructuring programs (cost reduction, write-downs, refinancings) prior to the May 2025 deconsolidation.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "No source ID in the pack is assigned to pre-2025 restructuring announcements. S-003 may discuss earlier restructurings once retrieved, but as scoped today the sub-claim has no direct source.",
+      "sourceIds": [],
+      "citations": []
+    },
+    {
+      "subClaimId": "DMC-05",
+      "claimText": "Del Monte closed or sold canned-vegetable and related plants as part of capacity rationalization.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "No plant-level source (county records, USDA inspection-list changes, local press, or filing-level disclosures) is in the source register. The pack scopes capacity discussion to the future industry-attack task.",
+      "sourceIds": [],
+      "citations": []
+    },
+    {
+      "subClaimId": "DMC-06",
+      "claimText": "Del Monte retreated from destructive private-label vegetable canning competition.",
+      "verdict": "unresolved",
+      "confidence": "low",
+      "rationale": "S-003 and S-008 are directionally consistent with a private-label retreat but the source pack does not yet quote Del Monte Pacific MD&A, U.S. retailer disclosures, or bankruptcy-court declarations describing private-label posture. Treated as indirect inference, not direct citation; per the acceptance rule, indirect-only evidence is insufficient and the verdict is unresolved.",
+      "sourceIds": ["S-003", "S-008"],
+      "citations": [
+        {
+          "sourceId": "S-003",
+          "type": "indirect",
+          "pointer": "Del Monte Pacific FY2025 annual report and SGX/PSE disclosure filings (https://www.delmontepacific.com/investors)"
+        },
+        {
+          "sourceId": "S-008",
+          "type": "indirect",
+          "pointer": "PACER bankruptcy docket for Del Monte Foods (U.S.) Chapter 11 case and Del Monte Foods newsroom press release"
+        }
+      ]
+    },
+    {
+      "subClaimId": "DMC-07",
+      "claimText": "Del Monte Pacific Limited deconsolidated its U.S. Del Monte Foods business effective May 2025 and classified it as discontinued operations.",
+      "verdict": "supported_by_anchor",
+      "confidence": "medium",
+      "rationale": "Asserted in the plan's Quick Source Anchors block ('Del Monte Pacific's FY2025 materials indicate the U.S. Del Monte business was classified as discontinued operations, deconsolidated effective May 2025, and later entered Chapter 11.') and assigned source ID S-003 in claims-source-pack.json under parent claim C-006. The underlying primary filing has not been retrieved into the repo, so the sub-claim is supported_by_anchor rather than passed under Gate 1.",
+      "sourceIds": ["S-003"],
+      "citations": [
+        {
+          "sourceId": "S-003",
+          "type": "primary-filing",
+          "pointer": "Del Monte Pacific FY2025 annual report and SGX/PSE disclosure filings (https://www.delmontepacific.com/investors)"
+        },
+        {
+          "sourceId": "plan",
+          "type": "plan-anchor",
+          "pointer": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md, Quick Source Anchors"
+        }
+      ]
+    },
+    {
+      "subClaimId": "DMC-08",
+      "claimText": "The deconsolidated U.S. Del Monte Foods entity filed for Chapter 11 in U.S. Bankruptcy Court.",
+      "verdict": "supported_by_anchor",
+      "confidence": "medium",
+      "rationale": "Asserted in the plan's Quick Source Anchors block and assigned source ID S-008 in claims-source-pack.json under parent claim C-006. PACER docket and Del Monte Foods press release are listed as the citation pointers but have not been retrieved into the repo. The exact filing entity (Del Monte Foods Inc., Del Monte Foods Holdings, or an intermediate) is flagged as Q-004 in claims-source-pack.json and Q-DMC-07 here.",
+      "sourceIds": ["S-008"],
+      "citations": [
+        {
+          "sourceId": "S-008",
+          "type": "court-record",
+          "pointer": "PACER bankruptcy docket for Del Monte Foods (U.S.) Chapter 11 case and Del Monte Foods newsroom press release"
+        },
+        {
+          "sourceId": "plan",
+          "type": "plan-anchor",
+          "pointer": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md, Quick Source Anchors"
+        }
+      ]
+    }
+  ],
+  "sourcesUsed": [
+    {
+      "sourceId": "S-003",
+      "title": "Del Monte Pacific Limited FY2025 annual report and FY2025 results materials describing classification of the U.S. Del Monte Foods business as discontinued operations and deconsolidation effective May 2025.",
+      "publisher": "Del Monte Pacific Limited (SGX/PSE listed)",
+      "urlOrCitation": "Del Monte Pacific FY2025 annual report and SGX/PSE disclosure filings (https://www.delmontepacific.com/investors)",
+      "sourceType": "primary-filing",
+      "confidence": "high",
+      "retrievalStatus": "not_retrieved",
+      "usedForSubClaims": ["DMC-06", "DMC-07"]
+    },
+    {
+      "sourceId": "S-008",
+      "title": "Del Monte Foods (U.S.) Chapter 11 bankruptcy filing and supporting docket records.",
+      "publisher": "U.S. Bankruptcy Court (PACER docket) / Del Monte Foods press release",
+      "urlOrCitation": "PACER bankruptcy docket for Del Monte Foods (U.S.) Chapter 11 case and corresponding press release (PACER + Del Monte Foods newsroom)",
+      "sourceType": "court-record",
+      "confidence": "high",
+      "retrievalStatus": "not_retrieved",
+      "usedForSubClaims": ["DMC-06", "DMC-08"]
+    },
+    {
+      "sourceId": "plan",
+      "title": "SENEA Diligence plan, Quick Source Anchors and Decision Gates sections.",
+      "publisher": "Internal plan document",
+      "urlOrCitation": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+      "sourceType": "plan-anchor",
+      "confidence": "medium",
+      "retrievalStatus": "retrieved",
+      "usedForSubClaims": ["DMC-07", "DMC-08"]
+    }
+  ],
+  "evidence": [
+    {
+      "evidenceId": "E-001",
+      "subClaimId": "DMC-07",
+      "sourceId": "S-003",
+      "evidenceType": "anchor",
+      "summary": "Del Monte Pacific FY2025 materials are listed as the primary filing for the May 2025 deconsolidation and discontinued-operations classification of the U.S. Del Monte Foods business. The plan's Quick Source Anchors restate this assertion verbatim.",
+      "citation": "Del Monte Pacific FY2025 annual report and SGX/PSE disclosure filings (https://www.delmontepacific.com/investors); /Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md, Quick Source Anchors.",
+      "supports": "DMC-07",
+      "weight": "anchor"
+    },
+    {
+      "evidenceId": "E-002",
+      "subClaimId": "DMC-08",
+      "sourceId": "S-008",
+      "evidenceType": "anchor",
+      "summary": "PACER bankruptcy docket and Del Monte Foods press release are listed as the court-record source for the U.S. Chapter 11 filing under parent claim C-006. The plan's Quick Source Anchors restate the Chapter 11 sequence.",
+      "citation": "PACER bankruptcy docket for Del Monte Foods (U.S.) Chapter 11 case and Del Monte Foods newsroom press release; /Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md, Quick Source Anchors.",
+      "supports": "DMC-08",
+      "weight": "anchor"
+    },
+    {
+      "evidenceId": "E-003",
+      "subClaimId": "DMC-06",
+      "sourceId": "S-003",
+      "evidenceType": "indirect",
+      "summary": "Deconsolidation and Chapter 11 are directionally consistent with a private-label retreat, but neither S-003 nor S-008 has been retrieved into the repo with a quoted passage on private-label posture. Treated as indirect support.",
+      "citation": "Del Monte Pacific FY2025 annual report and SGX/PSE disclosure filings (https://www.delmontepacific.com/investors).",
+      "supports": "DMC-06",
+      "weight": "indirect"
+    },
+    {
+      "evidenceId": "E-004",
+      "subClaimId": "DMC-06",
+      "sourceId": "S-008",
+      "evidenceType": "indirect",
+      "summary": "A Chapter 11 reorganization of the U.S. Del Monte Foods entity is directionally consistent with private-label retreat but does not by itself prove cessation of destructive private-label competition (capacity may be preserved under new ownership).",
+      "citation": "PACER bankruptcy docket for Del Monte Foods (U.S.) Chapter 11 case.",
+      "supports": "DMC-06",
+      "weight": "indirect"
+    }
+  ],
+  "contraryEvidence": [
+    {
+      "id": "X-001",
+      "summary": "A Chapter 11 reorganization frequently preserves operating capacity and customer contracts under new ownership. Without retrieved post-petition operating-plan disclosures, asset-purchase agreements, or stalking-horse bids, the source pack does not adjudicate whether U.S. Del Monte canned-vegetable capacity is being shut down or transferred.",
+      "againstSubClaims": ["DMC-06", "DMC-07", "DMC-08"],
+      "sourceIds": ["S-008"]
+    },
+    {
+      "id": "X-002",
+      "summary": "Improved market structure for SENEA also requires that other private-label competitors (notably Lakeside Foods, addressed under C-005 / S-004) do not absorb prior Del Monte volume on aggressive terms. That cross-competitor dynamic is out of scope for this test but is a contrary risk to the conduct-change thesis.",
+      "againstSubClaims": ["DMC-06"],
+      "sourceIds": ["S-004"]
+    },
+    {
+      "id": "X-003",
+      "summary": "Even if confirmed externally, the 2014 ownership change does not by itself imply price aggression: Del Monte Pacific's strategy could be framed as branded-share defense rather than private-label expansion. Without S-003 retrieved, this test cannot adjudicate which framing applies.",
+      "againstSubClaims": ["DMC-01", "DMC-02"],
+      "sourceIds": []
+    },
+    {
+      "id": "X-004",
+      "summary": "Plan Gate 1 explicitly requires a retrieved source artifact before any claim is admitted to the final memo. Two of the eight sub-claims here rely on anchors only and the rest rely on no source. The contrary-evidence position is therefore that the family should not yet be admitted to the verdict memo.",
+      "againstSubClaims": ["DMC-01", "DMC-02", "DMC-03", "DMC-04", "DMC-05", "DMC-06", "DMC-07", "DMC-08"],
+      "sourceIds": ["plan"]
+    }
+  ],
+  "openQuestions": [
+    {
+      "id": "Q-DMC-01",
+      "question": "Confirm the exact 2014 transaction by which Del Monte Pacific Limited acquired the U.S. Del Monte Foods consumer-products business and assign a primary source ID for the acquisition (8-K, foreign-issuer announcement, or court filing).",
+      "blocks": ["DMC-01"]
+    },
+    {
+      "id": "Q-DMC-02",
+      "question": "Identify primary or near-primary evidence for post-2014 price aggression by Del Monte Foods in U.S. canned vegetables (retailer testimony, antitrust filings, trade-press interviews) and add it to the source register.",
+      "blocks": ["DMC-02"]
+    },
+    {
+      "id": "Q-DMC-03",
+      "question": "Locate Del Monte Foods disclosures on the Sager Creek (Allens canned-vegetable) acquisition and any subsequent impairments, restructuring charges, or divestitures.",
+      "blocks": ["DMC-03"]
+    },
+    {
+      "id": "Q-DMC-04",
+      "question": "Compile Del Monte Foods restructuring announcements (refinancings, distressed-debt exchanges, cost programs) between 2017 and 2024 and decide whether they fold under S-003 or require new source IDs.",
+      "blocks": ["DMC-04"]
+    },
+    {
+      "id": "Q-DMC-05",
+      "question": "Map specific plant closures, sales, or co-packing transitions to either S-003 or to new sources (county records, USDA inspection-list changes, local press) so that capacity-reduction claims can be tested rather than asserted.",
+      "blocks": ["DMC-05"]
+    },
+    {
+      "id": "Q-DMC-06",
+      "question": "Replace the indirect inference for DMC-06 (private-label retreat) with a direct citation -- e.g., a Del Monte Pacific MD&A passage, a U.S. retailer disclosure, or a bankruptcy-court declaration describing the U.S. private-label posture.",
+      "blocks": ["DMC-06"]
+    },
+    {
+      "id": "Q-DMC-07",
+      "question": "Per Q-004 in the source pack, resolve which entity (Del Monte Foods Inc. vs. Del Monte Foods Holdings vs. an intermediate) actually filed Chapter 11 and how that maps to the deconsolidated perimeter in S-003.",
+      "blocks": ["DMC-07", "DMC-08"]
+    },
+    {
+      "id": "Q-DMC-08",
+      "question": "Retrieve the S-003 (Del Monte Pacific FY2025) and S-008 (Chapter 11 docket) artifacts into the repo so DMC-07 and DMC-08 can move from supported_by_anchor to passed under Gate 1.",
+      "blocks": ["DMC-07", "DMC-08"]
+    },
+    {
+      "id": "Q-DMC-09",
+      "question": "After retrieval, run the plan's Verification Commands (fetch_sec_filings.py, verify_claims.py) against the new artifacts and update both this Markdown report and the JSON sibling.",
+      "blocks": ["DMC-01", "DMC-02", "DMC-03", "DMC-04", "DMC-05", "DMC-06", "DMC-07", "DMC-08"]
+    }
+  ]
+}
