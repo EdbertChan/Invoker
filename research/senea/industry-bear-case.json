@@ -1,0 +1,390 @@
+{
+  "taskId": "validate-industry-and-bear-case",
+  "artifactStatus": "draft",
+  "ticker": "SENEA",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "upstreamArtifacts": [
+    "research/senea/claims-source-pack.md",
+    "research/senea/claims-source-pack.json",
+    "research/senea/source-register.csv",
+    "research/senea/financial-rebuild.md",
+    "research/senea/financial-rebuild.json"
+  ],
+  "fiscalYear": "FY2025",
+  "fiscalYearEnd": "2025-03-31",
+  "rebuildReferenceDate": "2026-04-30",
+  "generatedOn": "2026-04-30",
+  "scope": "Validates or attacks every major industry-structure and bear-case claim in the SENEA Diligence plan: Seneca / Lakeside / Del Monte and smaller players, private-label concentration, Del Monte restructuring/deconsolidation/Chapter 11, pricing rationality, customer concentration, and secular canned-vegetable decline. Each claim carries source IDs from the upstream register (S-001..S-008) plus newly registered industry sources (S-012..S-017). Where the upstream pack supplies only a pointer to a primary source and no archived quoted text, the claim is graded 'unverified' rather than 'passed' or 'failed'.",
+  "sourceIdsUsed": [
+    "S-001",
+    "S-003",
+    "S-004",
+    "S-007",
+    "S-008",
+    "S-012",
+    "S-013",
+    "S-014",
+    "S-015",
+    "S-016",
+    "S-017"
+  ],
+  "newSourcesIntroduced": [
+    {
+      "sourceId": "S-012",
+      "title": "USDA Economic Research Service 'Vegetables and Pulses Outlook' and U.S. Census Bureau 'Annual Survey of Manufactures' data on canned vegetable production and per-capita consumption",
+      "publisher": "USDA Economic Research Service / U.S. Census Bureau",
+      "urlOrCitation": "USDA ERS Vegetables and Pulses Outlook (https://www.ers.usda.gov/publications/pub-details/?pubid=) and Census Bureau Annual Survey of Manufactures, NAICS 311421 (https://www.census.gov/programs-surveys/asm.html)",
+      "sourceType": "government-statistics",
+      "usedFor": ["IC-010", "B-001", "B-009"],
+      "confidence": "medium"
+    },
+    {
+      "sourceId": "S-013",
+      "title": "Public materials and trade press for smaller U.S. canned-vegetable players (Hanover Foods, Faribault Foods, Furmano's, Truitt Bros., Allens / Sager Creek)",
+      "publisher": "Company corporate websites and food-industry trade press",
+      "urlOrCitation": "Company corporate websites and trade-press references (Food Dive, Food Business News, The Packer)",
+      "sourceType": "trade-press",
+      "usedFor": ["IC-003", "IC-004"],
+      "confidence": "low"
+    },
+    {
+      "sourceId": "S-014",
+      "title": "Trade press coverage of the Del Monte Foods (U.S.) Chapter 11 filing and the Del Monte Pacific deconsolidation",
+      "publisher": "Reuters / Bloomberg / Wall Street Journal / Food Dive",
+      "urlOrCitation": "Reuters and WSJ wire copy on the Del Monte Foods (U.S.) Chapter 11 filing; Food Dive industry coverage",
+      "sourceType": "trade-press",
+      "usedFor": ["IC-006", "IC-007", "B-003", "B-005"],
+      "confidence": "medium"
+    },
+    {
+      "sourceId": "S-015",
+      "title": "10-K / 20-F disclosures from Walmart, Kroger, Costco, Albertsons, and Ahold Delhaize on private-label penetration and grocery competitive intensity",
+      "publisher": "U.S. SEC / SEDAR / SGX",
+      "urlOrCitation": "EDGAR filing indexes for the listed retailers (https://www.sec.gov/cgi-bin/browse-edgar)",
+      "sourceType": "primary-filing",
+      "usedFor": ["IC-009", "B-002"],
+      "confidence": "medium"
+    },
+    {
+      "sourceId": "S-016",
+      "title": "Circana / IRI / Nielsen retail-scanner aggregates on U.S. canned vegetable category dollar and unit trend",
+      "publisher": "Circana (IRI) / NielsenIQ",
+      "urlOrCitation": "Circana / NielsenIQ syndicated panel aggregates as cited in trade press; subscription required for full data",
+      "sourceType": "third-party-data",
+      "usedFor": ["IC-005", "IC-010", "B-001", "B-004", "B-009"],
+      "confidence": "medium"
+    },
+    {
+      "sourceId": "S-017",
+      "title": "Tinplate / steel price index series (CRU Tinplate Index, S&P Global Platts / Argus tinplate spot, U.S. Federal Reserve Industrial Production index for canned vegetable manufacturing)",
+      "publisher": "CRU Group / S&P Global Platts / Argus / U.S. Federal Reserve",
+      "urlOrCitation": "CRU and S&P Platts subscription publications; FRED series for 'Canned Fruits and Vegetables' production index (https://fred.stlouisfed.org/)",
+      "sourceType": "commodity-index",
+      "usedFor": ["IC-008", "B-005"],
+      "confidence": "medium"
+    }
+  ],
+  "industryClaims": [
+    {
+      "claimId": "IC-001",
+      "claimText": "U.S. private-label vegetable canning is an oligopoly in which Seneca and Lakeside Foods together account for approximately 90% of supply.",
+      "linkedUpstreamClaims": ["C-005"],
+      "sourceIds": ["S-001", "S-004", "S-016"],
+      "verificationMethod": "Quote the Lakeside ~90% statement (S-004) verbatim with date and venue. Cross-check against Seneca FY2025 10-K Item 1 'Business' competitive-position language (S-001). Triangulate the share figure against Circana / NielsenIQ private-label scanner data (S-016).",
+      "status": "unverified",
+      "rationale": "The 90% figure is a self-reported corporate statement from one of the two named participants. Seneca's own competitive-position language has not been quoted in this validation pass.",
+      "blockingPrimaryChecks": ["P-001", "P-002"]
+    },
+    {
+      "claimId": "IC-002",
+      "claimText": "Lakeside Foods, Inc. is the second of the two private-label canned-vegetable producers of scale in the United States.",
+      "linkedUpstreamClaims": ["C-005"],
+      "sourceIds": ["S-004", "S-013", "S-016"],
+      "verificationMethod": "Confirm Lakeside Foods' corporate identity, headquarters, and product portfolio from corporate communications (S-004) and trade press (S-013). Triangulate the scale claim against Circana / NielsenIQ aggregates (S-016).",
+      "status": "partially-verified",
+      "rationale": "Lakeside Foods' identity and presence in private-label canning are well established at the pointer level. The 'of scale' qualifier is what depends on triangulation against syndicated aggregates.",
+      "blockingPrimaryChecks": ["P-002"]
+    },
+    {
+      "claimId": "IC-003",
+      "claimText": "Del Monte Foods (U.S.) is a significant branded participant in the U.S. canned-vegetable category.",
+      "linkedUpstreamClaims": ["C-006"],
+      "sourceIds": ["S-003", "S-008", "S-013", "S-014"],
+      "verificationMethod": "Confirm Del Monte Foods' brand presence and product scope via Del Monte Pacific FY2025 reporting (S-003), the Chapter 11 docket (S-008), and trade press (S-014).",
+      "status": "partially-verified",
+      "rationale": "Del Monte Foods (U.S.) is publicly known as a significant branded canned-vegetable participant, and Del Monte Pacific's filings provide a primary-source pointer; quoted text has not been archived in this pass.",
+      "blockingPrimaryChecks": ["P-004", "P-005"]
+    },
+    {
+      "claimId": "IC-004",
+      "claimText": "A long tail of smaller U.S. canned-vegetable producers (Hanover Foods, Faribault Foods, Furmano's, Truitt Bros., Allens / Sager Creek under Del Monte) collectively comprises the residual share of U.S. canned-vegetable supply.",
+      "linkedUpstreamClaims": ["C-005"],
+      "sourceIds": ["S-013", "S-014"],
+      "verificationMethod": "Catalog smaller players from corporate websites and trade press (S-013, S-014). Where possible, quote corporate statements on volume or share.",
+      "status": "unverified",
+      "rationale": "These companies are private and do not file with the SEC. Their share is not anchored anywhere in the upstream pack.",
+      "blockingPrimaryChecks": ["P-003"]
+    },
+    {
+      "claimId": "IC-005",
+      "claimText": "Private-label dollar share within the U.S. canned-vegetable category is high (typically a majority of category volume in mass and club retailers).",
+      "linkedUpstreamClaims": [],
+      "sourceIds": ["S-015", "S-016"],
+      "verificationMethod": "Quote retailer 10-K / 20-F private-label commentary (S-015) and Circana / NielsenIQ category aggregates (S-016).",
+      "status": "unverified",
+      "rationale": "No upstream anchor for this figure; magnitude must come from retailer disclosures and syndicated aggregates.",
+      "blockingPrimaryChecks": ["P-002", "P-008"]
+    },
+    {
+      "claimId": "IC-006",
+      "claimText": "Del Monte Pacific Limited classified the U.S. Del Monte Foods business as discontinued operations and deconsolidated effective May 2025.",
+      "linkedUpstreamClaims": ["C-006"],
+      "sourceIds": ["S-003", "S-014"],
+      "verificationMethod": "Quote the discontinued-operations / deconsolidation paragraphs in the Del Monte Pacific FY2025 annual report (S-003); triangulate the effective date against trade press (S-014).",
+      "status": "partially-verified",
+      "rationale": "Pointer-level evidence exists; quoted text has not been archived in this pass.",
+      "blockingPrimaryChecks": ["P-004", "P-005"]
+    },
+    {
+      "claimId": "IC-007",
+      "claimText": "Del Monte Foods (U.S.) filed for Chapter 11 in 2025, removing or restructuring a destructive private-label competitor.",
+      "linkedUpstreamClaims": ["C-006"],
+      "sourceIds": ["S-008", "S-014"],
+      "verificationMethod": "Pull the PACER docket (S-008) and trade-press coverage (S-014); confirm filing entity, filing date, and reorganization-vs-liquidation posture. Resolves upstream open question Q-004.",
+      "status": "partially-verified",
+      "rationale": "The Chapter 11 fact pattern is publicly known and pointer-anchored. The 'destructive private-label competitor' qualifier is a characterization that has not been quoted from primary sources.",
+      "blockingPrimaryChecks": ["P-004"]
+    },
+    {
+      "claimId": "IC-008",
+      "claimText": "Pricing among remaining U.S. canned-vegetable producers is rational; cost moves in raw produce, tinplate steel, freight, and labor are passed through to retailer pricing rather than absorbed.",
+      "linkedUpstreamClaims": ["C-011"],
+      "sourceIds": ["S-001", "S-007", "S-017"],
+      "verificationMethod": "Reconstruct FY2018-FY2025 revenue and gross-margin bridges from Seneca's 10-K MD&A (S-001, S-007) and triangulate against tinplate / steel price indices and freight indices (S-017).",
+      "status": "unverified",
+      "rationale": "The plan asserts rational pricing, but the bridge has not been computed in this pass; the financial-rebuild artifact graded the corresponding claim C-011 as 'deferred'.",
+      "blockingPrimaryChecks": ["P-006"]
+    },
+    {
+      "claimId": "IC-009",
+      "claimText": "Seneca's customer base is concentrated in a small number of large grocery, mass, club, and discount retailers.",
+      "linkedUpstreamClaims": [],
+      "sourceIds": ["S-001", "S-015"],
+      "verificationMethod": "Quote Item 1 ('Business') and Item 1A ('Risk Factors') of the FY2025 10-K (S-001) on customer concentration including any 10%+ customer disclosures; triangulate against retailer disclosures on private-label penetration (S-015).",
+      "status": "unverified",
+      "rationale": "No quoted text has been retrieved in this pass; the directional claim is consistent with industry structure.",
+      "blockingPrimaryChecks": ["P-008"]
+    },
+    {
+      "claimId": "IC-010",
+      "claimText": "U.S. per-capita canned-vegetable consumption has been in secular decline relative to fresh and frozen alternatives.",
+      "linkedUpstreamClaims": [],
+      "sourceIds": ["S-012", "S-016"],
+      "verificationMethod": "Retrieve and quote USDA ERS Vegetables and Pulses Outlook and Census Bureau Annual Survey of Manufactures data on per-capita and total canned-vegetable consumption (S-012); triangulate against Circana / NielsenIQ category trend (S-016).",
+      "status": "unverified",
+      "rationale": "The directional trend is widely reported but the exact slope must be quoted before this becomes 'verified'.",
+      "blockingPrimaryChecks": ["P-007"]
+    }
+  ],
+  "bearCaseItems": [
+    {
+      "bearCaseId": "B-001",
+      "title": "Secular per-capita decline in canned vegetable consumption",
+      "thesis": "U.S. per-capita canned-vegetable consumption trends down over multi-decade horizons; a more rational competitive structure on a shrinking base is still a shrinking base.",
+      "linkedIndustryClaims": ["IC-010"],
+      "sourceIds": ["S-012", "S-016"],
+      "evidenceStatus": "unverified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Caps long-run volume growth; constrains book-value compounding to what buybacks can produce."
+    },
+    {
+      "bearCaseId": "B-002",
+      "title": "Customer concentration caps pricing power",
+      "thesis": "Walmart, Kroger, Costco, Albertsons, and Ahold Delhaize collectively wield monopsonistic leverage over private-label suppliers; even a duopoly supplier base faces re-bid risk and cost-down clauses.",
+      "linkedIndustryClaims": ["IC-009", "IC-005"],
+      "sourceIds": ["S-001", "S-015"],
+      "evidenceStatus": "unverified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Compresses the gross-margin uplift that the duopoly narrative implies."
+    },
+    {
+      "bearCaseId": "B-003",
+      "title": "Del Monte restructuring may produce a stronger, not weaker, branded competitor",
+      "thesis": "Chapter 11 frequently emerges a leaner competitor with reduced debt service. A strategic acquirer or recapitalization could re-energize the Del Monte brand and its co-pack lines, eroding the duopoly thesis.",
+      "linkedIndustryClaims": ["IC-006", "IC-007"],
+      "sourceIds": ["S-003", "S-008", "S-014"],
+      "evidenceStatus": "unverified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Reduces the magnitude of the duopoly tailwind; the cost-side rationalization may persist while the demand-side rivalry returns."
+    },
+    {
+      "bearCaseId": "B-004",
+      "title": "The '~90% private-label' figure is self-reported and may overstate concentration",
+      "thesis": "The Lakeside corporate statement is interest-conflicted. Definitional scope (canned vegetables only? include canned beans? geography? time period?) is unclear. Triangulation against Census ASM and Circana / NielsenIQ aggregates is required.",
+      "linkedIndustryClaims": ["IC-001", "IC-005"],
+      "sourceIds": ["S-004", "S-012", "S-016"],
+      "evidenceStatus": "unverified",
+      "bindsEvenIfBullVerified": false,
+      "valuationImpact": "If actual private-label concentration is materially less than 90%, the duopoly pricing implication is weaker and the bull tangible-book / NCAV gap closes more slowly."
+    },
+    {
+      "bearCaseId": "B-005",
+      "title": "Tinplate and steel cost inflation outruns price recovery",
+      "thesis": "Steel tinplate is the largest non-produce input cost in canning. U.S. trade actions on imported tinplate (Section 232 tariffs, AD/CVD duties) raise the per-can cost. Incomplete pass-through compresses gross margin.",
+      "linkedIndustryClaims": ["IC-008"],
+      "sourceIds": ["S-001", "S-014", "S-017"],
+      "evidenceStatus": "unverified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Direct hit to FIFO-adjusted EBITDA; reduces both base earnings power and cycle-through-cycle margin durability."
+    },
+    {
+      "bearCaseId": "B-006",
+      "title": "Climate / crop-yield variability is structural",
+      "thesis": "Seneca's pack is concentrated in Pacific Northwest, Wisconsin / Minnesota, and New York grower regions; regional drought, heat, or pest events compress pack yield and force higher LIFO charges in subsequent years.",
+      "linkedIndustryClaims": [],
+      "sourceIds": ["S-001"],
+      "evidenceStatus": "partially-verified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Adds variance, not necessarily mean, to FIFO-adjusted EBITDA; biases LIFO charges higher in volatile years."
+    },
+    {
+      "bearCaseId": "B-007",
+      "title": "Dual-class structure prevents activist crystallization",
+      "thesis": "Seneca's concentrated Class B voting power blocks any activist-led sale, dividend, or recap. Even if the price-to-FIFO-tangible-book gap persists, the only crystallization vehicle is corporate-level buybacks at management's pace.",
+      "linkedIndustryClaims": [],
+      "linkedUpstreamClaims": ["C-010"],
+      "sourceIds": ["S-005"],
+      "evidenceStatus": "partially-verified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Caps the realization mechanism; persistent discount risk."
+    },
+    {
+      "bearCaseId": "B-008",
+      "title": "Private-label margins are structurally lower than branded",
+      "thesis": "Even at duopoly share, private-label canned vegetables generate lower gross margin per can than branded packaged food. Category economics, not relative supplier share, set the EBITDA-margin ceiling.",
+      "linkedIndustryClaims": ["IC-001", "IC-005"],
+      "sourceIds": ["S-014", "S-015"],
+      "evidenceStatus": "unverified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Caps EBITDA margin trajectory used in bull DCF / earnings-power framing."
+    },
+    {
+      "bearCaseId": "B-009",
+      "title": "Substitution to frozen and fresh persists",
+      "thesis": "Independent of supply-side rationalization, end-consumer substitution to frozen and fresh produce continues to compress total category dollar growth.",
+      "linkedIndustryClaims": ["IC-010"],
+      "sourceIds": ["S-012", "S-016"],
+      "evidenceStatus": "unverified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Reinforces B-001; should not be additively double-counted in scenario synthesis."
+    },
+    {
+      "bearCaseId": "B-010",
+      "title": "Realized FIFO add-back to equity is smaller than gross",
+      "thesis": "The financial-rebuild after-tax LIFO add-back to equity is LIFO_reserve * (1 - t). Even at the 21% federal floor, the after-tax add-back is roughly $284m vs $359.3m gross; state taxes lower it further.",
+      "linkedIndustryClaims": [],
+      "linkedUpstreamClaims": ["C-001", "C-002", "C-003"],
+      "sourceIds": ["S-001", "S-010"],
+      "evidenceStatus": "partially-verified",
+      "bindsEvenIfBullVerified": true,
+      "valuationImpact": "Quantitatively narrows the bull tangible-book and NCAV bridges; magnitude resolves once the FY2025 effective tax rate is retrieved (financial-rebuild gap F-002)."
+    }
+  ],
+  "primaryCheckList": [
+    {
+      "checkId": "P-001",
+      "description": "Retrieve Item 1 ('Business') of Seneca's FY2025 10-K and quote the text describing competitive position, key competitors, and any private-label share statement.",
+      "sourceIds": ["S-001"],
+      "resolves": ["IC-001"]
+    },
+    {
+      "checkId": "P-002",
+      "description": "Archive the Lakeside ~90% private-label statement verbatim with date and venue; triangulate against Circana / NielsenIQ aggregates and Census ASM data. Resolves upstream open question Q-001.",
+      "sourceIds": ["S-004", "S-012", "S-016"],
+      "resolves": ["IC-001", "IC-002", "IC-005", "Q-001"]
+    },
+    {
+      "checkId": "P-003",
+      "description": "Catalog smaller U.S. canned-vegetable producers (Hanover, Faribault, Furmano's, Truitt, Allens / Sager Creek) with corporate-website and trade-press references; quote any volume or share statement.",
+      "sourceIds": ["S-013", "S-014"],
+      "resolves": ["IC-004"]
+    },
+    {
+      "checkId": "P-004",
+      "description": "Pull the PACER docket for the Del Monte Foods (U.S.) Chapter 11 case; confirm filing entity (Del Monte Foods Inc. vs Del Monte Foods Holdings), filing date, and reorganization-vs-liquidation posture; triangulate via trade press. Resolves upstream open question Q-004.",
+      "sourceIds": ["S-008", "S-014"],
+      "resolves": ["IC-006", "IC-007", "B-003", "Q-004"]
+    },
+    {
+      "checkId": "P-005",
+      "description": "Retrieve and quote the discontinued-operations / deconsolidation paragraphs in the Del Monte Pacific FY2025 annual report.",
+      "sourceIds": ["S-003"],
+      "resolves": ["IC-006"]
+    },
+    {
+      "checkId": "P-006",
+      "description": "Reconstruct the FY2018-FY2025 revenue and gross-margin bridge from Seneca's 10-K MD&A; cross-reference tinplate / steel price indices and freight indices.",
+      "sourceIds": ["S-001", "S-007", "S-017"],
+      "resolves": ["IC-008", "B-005", "C-011"]
+    },
+    {
+      "checkId": "P-007",
+      "description": "Retrieve and quote USDA ERS Vegetables and Pulses Outlook, Census Bureau Annual Survey of Manufactures data on canned vegetable per-capita and total consumption, and Circana / NielsenIQ canned vegetable category trend.",
+      "sourceIds": ["S-012", "S-016"],
+      "resolves": ["IC-010", "B-001", "B-009"]
+    },
+    {
+      "checkId": "P-008",
+      "description": "Quote Item 1 / Item 1A of Seneca's FY2025 10-K on customer concentration including any 10%+ customer disclosures; triangulate against retailer side disclosures on private-label penetration.",
+      "sourceIds": ["S-001", "S-015"],
+      "resolves": ["IC-009", "IC-005", "B-002"]
+    },
+    {
+      "checkId": "P-009",
+      "description": "Confirm combined Class A / Class B voting power held by the founding family / insiders via the FY2025 DEF 14A. Resolves upstream open question Q-006.",
+      "sourceIds": ["S-005"],
+      "resolves": ["B-007", "Q-006"]
+    }
+  ],
+  "verdict": {
+    "overall": "mixed",
+    "summary": "No major industry claim moves from 'pending' to 'passed' in this validation pass. The bull narrative on private-label oligopoly (Seneca + Lakeside ~90%) and on a Del Monte exit (Pacific deconsolidation + U.S. Chapter 11) is directionally credible at the source-pointer level but is graded 'partially-verified' or 'unverified' until primary checks P-001 through P-009 close. The bear case is constructed so that items B-001, B-002, B-003, B-005, B-006, B-007, B-008, B-009, and B-010 each bind even under the strongest verified version of the bull industry-structure narrative.",
+    "industryStructure": {
+      "claimId": "IC-001",
+      "status": "unverified",
+      "blockingPrimaryChecks": ["P-001", "P-002"]
+    },
+    "competitorExit": {
+      "claimIds": ["IC-006", "IC-007"],
+      "status": "partially-verified",
+      "blockingPrimaryChecks": ["P-004", "P-005"]
+    },
+    "smallerPlayers": {
+      "claimId": "IC-004",
+      "status": "unverified",
+      "blockingPrimaryChecks": ["P-003"]
+    },
+    "privateLabelConcentration": {
+      "claimId": "IC-005",
+      "status": "unverified",
+      "blockingPrimaryChecks": ["P-002", "P-008"]
+    },
+    "pricingRationality": {
+      "claimId": "IC-008",
+      "status": "unverified",
+      "blockingPrimaryChecks": ["P-006"]
+    },
+    "customerConcentration": {
+      "claimId": "IC-009",
+      "status": "unverified",
+      "blockingPrimaryChecks": ["P-008"]
+    },
+    "secularDecline": {
+      "claimId": "IC-010",
+      "status": "unverified",
+      "blockingPrimaryChecks": ["P-007"]
+    },
+    "bearCaseStrength": "high-conviction-qualitative",
+    "bearCaseQuantification": "deferred-to-financial-rebuild"
+  }
+}
