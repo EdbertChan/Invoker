@@ -178,10 +178,6 @@ if (process.platform === 'linux') {
 // ── Shared state ─────────────────────────────────────────────
 
 let messageBus: MessageBus;
-// Typed against the PersistenceAdapter seam so wrappers (logging, metrics)
-// can be slotted in without touching call sites. The concrete SQLiteAdapter
-// instance is held in `sqlitePersistence` for subsystems (workflow-mutation
-// queue, lease recovery) that depend on SQLite-only methods.
 let persistence: PersistenceAdapter;
 let sqlitePersistence: SQLiteAdapter;
 let executorRegistry: ExecutorRegistry;
@@ -358,7 +354,6 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     ownerCapability: !readOnly, // writable mode requires owner capability
   });
   persistence = sqlitePersistence;
-  // Upgrade root logger with DB persistence now that the adapter is ready.
   logger = new FileAndDbLogger({ module: 'main' }, { persistence });
   const shellEnv = await initializeShellEnvironment();
   if (process.platform === 'darwin') {
