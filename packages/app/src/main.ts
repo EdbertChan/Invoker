@@ -50,8 +50,10 @@ if (process.platform === 'linux' && !enableTestCompositor) {
   app.commandLine.appendSwitch('disable-software-rasterizer');
 }
 
-import { Orchestrator, CommandService } from '@invoker/workflow-core';
+import { Orchestrator, CommandService, InstrumentedCommandService } from '@invoker/workflow-core';
 import type {
+  CommandServiceInstrumentationEvent,
+  CommandServiceInstrumenter,
   PlanDefinition,
   TaskDelta,
   TaskReplacementDef,
@@ -110,8 +112,6 @@ import {
 import {
   approveTask as sharedApproveTask,
   rebaseAndRetry,
-  recreateWorkflow as sharedRecreateWorkflow,
-  recreateTask as sharedRecreateTask,
   resolveConflictAction,
   selectExperiments as sharedSelectExperiments,
   setWorkflowMergeMode,
@@ -201,6 +201,28 @@ function dispatchStartedTasks(tasks: TaskState[]): void {
     });
   });
 }
+
+const commandServiceInstrumenter: CommandServiceInstrumenter = (event: CommandServiceInstrumentationEvent) => {
+  const meta = {
+    module: 'command-service',
+    scope: event.scope,
+    method: event.method,
+    durationMs: event.durationMs,
+    success: event.success,
+    ...(event.error ? { error: event.error } : {}),
+  };
+  if (event.success) {
+    logger.debug(
+      `[command-service] ${event.method} ok ${event.durationMs}ms`,
+      meta,
+    );
+  } else {
+    logger.warn(
+      `[command-service] ${event.method} failed ${event.durationMs}ms: ${event.error ?? ''}`,
+      meta,
+    );
+  }
+};
 let workflowMutationCoordinator: PersistedWorkflowMutationCoordinator | null = null;
 const workflowMutationDispatcher = new Map<string, (...args: unknown[]) => Promise<unknown>>();
 let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
@@ -410,7 +432,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     deferRunningUntilLaunch: true,
     taskDispatcher: dispatchStartedTasks,
   });
-  commandService = new CommandService(orchestrator);
+  commandService = new InstrumentedCommandService(orchestrator, commandServiceInstrumenter);
 
   const startupSyncMode = options?.startupSyncMode ?? 'all';
   const initLog = isHeadless
@@ -2635,7 +2657,7 @@ if (isHeadless) {
         deferRunningUntilLaunch: true,
         taskDispatcher: dispatchStartedTasks,
       });
-      commandService = new CommandService(orchestrator);
+      commandService = new InstrumentedCommandService(orchestrator, commandServiceInstrumenter);
       rebuildTaskRunner();
       taskHandles.clear();
     });
@@ -2974,7 +2996,18 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-workflow',
         });
-        const started = sharedRecreateWorkflow(workflowId, { persistence: sqlitePersistence, orchestrator });
+        const envelope = makeEnvelope('recreate-workflow', 'ui', 'workflow', { workflowId });
+        const result = await commandService.recreateWorkflow(envelope, {
+          beforeRecreate: () => {
+            const workflow = sqlitePersistence.loadWorkflow(workflowId);
+            if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
+            const nextGen = (workflow.generation ?? 0) + 1;
+            sqlitePersistence.updateWorkflow(workflowId, { generation: nextGen });
+            logger.info(`bumped generation to ${nextGen} for ${workflowId}`, { module: 'workflow' });
+          },
+        });
+        if (!result.ok) throw new Error(result.error.message);
+        const started = result.data;
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
@@ -3003,7 +3036,10 @@ if (isHeadless) {
       logger.info(`recreate-task: "${taskId}"`, { module: 'ipc' });
       try {
         await preemptTaskSubgraph(taskId);
-        const started = sharedRecreateTask(taskId, { persistence: sqlitePersistence, orchestrator });
+        const envelope = makeEnvelope('recreate-task', 'ui', 'task', { taskId });
+        const result = await commandService.recreateTask(envelope);
+        if (!result.ok) throw new Error(result.error.message);
+        const started = result.data;
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
