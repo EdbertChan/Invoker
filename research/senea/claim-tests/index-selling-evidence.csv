@@ -1,0 +1,15 @@
+evidenceId,claimId,evidenceType,description,dateOrWindow,value,sourceIds,missingSources,status
+EV-001,IS-1,event,"S&P Dow Jones Indices announcement of SENEA deletion from the S&P SmallCap 600","needs-retrieval (July 2023, exact day per S-002)",pending,S-002,,pending
+EV-002,IS-1,event,"Effective date of SENEA deletion (close of business on rebalance day)","needs-retrieval (July 2023, exact day per S-002)",pending,S-002,,pending
+EV-003,IS-2,etf-flow,"Aggregate SENEA share count held by S&P SmallCap 600 trackers (IJR, SLY, VIOO and other) as of T-2 - 1",T-2 - 1,pending,S-002,MS-2,pending
+EV-004,IS-2,volume,"Observed SENEA volume on T-2 vs 60-day pre-event median ADV (one-day rebalance spike test)","T-2 vs [T-1 - 60, T-1 - 1]",pending,,MS-1,pending
+EV-005,IS-3,liquidity,"Pre vs post-event ADV, bid-ask spread, and Amihud illiquidity ratio","[T-1 - 120, T-1 - 1] vs [T-2 + 5, T-2 + 125]",pending,,MS-1,pending
+EV-006,IS-4,event-study,"Cumulative abnormal returns from market-model and Fama-French-5 + momentum regressions across event windows","[T-1 - 1, T-1 + 1]; [T-1, T-2]; [T-2, T-2 + 5]; [T-2 + 6, T-2 + 60]",pending,S-002,MS-1;MS-3;MS-5,pending
+EV-007,IS-5,fundamentals-control,"Catalog of every SENEA SEC filing and press release inside [T-1 - 30, T-2 + 30], tagged fundamental vs non-fundamental","[T-1 - 30, T-2 + 30]",pending,S-001;S-007,,pending
+EV-008,IS-5,factor-control,"Cumulative HML, SMB, R2000V, and packaged-foods returns over the same event windows used for IS-4",matches IS-4 windows,pending,,MS-3;MS-5,pending
+EV-009,IS-5,index-overlap,"Russell 2000 / Russell 2000 Value membership and reconstitution dates inside [T-1 - 30, T-2 + 30]","[T-1 - 30, T-2 + 30]",pending,,MS-4,pending
+CE-001,IS-4,contrary-fundamentals,"Concurrent fundamentals (Seneca FY2024 reporting cycle) may explain part of the cumulative move","[T-1 - 30, T-2 + 30]",pending,S-001;S-007,,open
+CE-002,IS-4,contrary-factor,"Mid-2023 small-cap value factor weakness can absorb part of the negative drift; HML / R2000V control required","matches IS-4 windows",pending,,MS-3,open
+CE-003,IS-2,contrary-index-overlap,"Russell reconstitution typically lands in late June; some forced-selling volume may belong to Russell flows","[T-1 - 30, T-2 + 30]",pending,,MS-4,open
+CE-004,IS-4,contrary-leakage,"S&P SmallCap 600 deletions are pre-announced; CARs over [T-1, T-2] can be near zero by the effective date even when the flow story is real","[T-1, T-2]",pending,S-002,,open
+CE-005,IS-3,contrary-peer-liquidity,"Post-deletion ADV decline can reflect general small-cap volume contraction in 2023-2024 rather than SENEA-specific liquidity loss","[T-2 + 5, T-2 + 125]",pending,,MS-1;MS-5,open
