@@ -7,6 +7,7 @@ export * from './task-id-scope.js';
 export * from './fallback-policy.js';
 export * from './graph-mutation.js';
 export * from './command-service.js';
+export * from './instrumented-command-service.js';
 export * from './task-repository.js';
 export * from './instrumented-task-repository.js';
 export * from './invalidation-policy.js';
