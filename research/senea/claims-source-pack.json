@@ -1,0 +1,204 @@
+{
+  "taskId": "source-pack",
+  "artifactStatus": "draft",
+  "ticker": "SENEA",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "generatedOn": "2026-04-30",
+  "scope": "Initial claim-to-source mapping derived from the SENEA Diligence plan. Claims and sources reflect anchors documented in the plan; primary-source retrieval and pass/fail verification are deferred to downstream tasks (financial-rebuild, industry-attack, attribution).",
+  "claims": [
+    {
+      "claimId": "C-001",
+      "claimText": "Seneca Foods (SENEA) trades below tangible book value on a FIFO-adjusted basis.",
+      "verificationMethod": "Reconstruct tangible book value from the Seneca FY2025 10-K balance sheet, add the disclosed LIFO reserve to inventory, subtract goodwill and intangibles, and compare per-share equity to the prevailing market price.",
+      "sourceIds": ["S-001", "S-007"],
+      "status": "pending",
+      "nextArtifact": "artifacts/senea_metrics.csv (tangible_book_per_share, fifo_adjusted_book_per_share)"
+    },
+    {
+      "claimId": "C-002",
+      "claimText": "Seneca trades at or below net current asset value (NCAV) when inventory is restated to FIFO.",
+      "verificationMethod": "Compute NCAV (current assets minus total liabilities) from the FY2025 10-K with and without the LIFO reserve restatement, and compare to market cap.",
+      "sourceIds": ["S-001", "S-007"],
+      "status": "pending",
+      "nextArtifact": "artifacts/senea_metrics.csv (ncav, ncav_fifo_adjusted)"
+    },
+    {
+      "claimId": "C-003",
+      "claimText": "Seneca's reported earnings materially understate FIFO earnings power because of a $359.3m LIFO reserve.",
+      "verificationMethod": "Pull the LIFO reserve and FIFO-adjusted earnings/EBITDA disclosures from the FY2025 10-K and reconcile to management's non-GAAP bridge; recompute FIFO net income across cycles.",
+      "sourceIds": ["S-001"],
+      "status": "pending",
+      "nextArtifact": "artifacts/senea_metrics.csv (lifo_reserve, fifo_net_income, fifo_ebitda)"
+    },
+    {
+      "claimId": "C-004",
+      "claimText": "Seneca has compounded book value per share over a 20-year window despite minimal sell-side coverage.",
+      "verificationMethod": "Rebuild diluted share count and book value per share from 10-Ks across FY2005-FY2025; compute CAGR and compare against management commentary.",
+      "sourceIds": ["S-001", "S-002"],
+      "status": "pending",
+      "nextArtifact": "artifacts/senea_metrics.csv (book_value_per_share_history)"
+    },
+    {
+      "claimId": "C-005",
+      "claimText": "U.S. private-label vegetable canning is an oligopoly in which Seneca and one competitor (Lakeside Foods) account for roughly 90% of supply.",
+      "verificationMethod": "Cross-check the Lakeside public statement on private-label market share against Seneca 10-K segment disclosures and any third-party industry data; confirm the cited 90% figure and identify the second named competitor.",
+      "sourceIds": ["S-004", "S-001"],
+      "status": "pending",
+      "nextArtifact": "artifacts/industry_structure.json (private_label_share_table)"
+    },
+    {
+      "claimId": "C-006",
+      "claimText": "Del Monte Pacific deconsolidated its U.S. Del Monte Foods business effective May 2025 and that subsidiary subsequently filed for Chapter 11, removing destructive private-label competition.",
+      "verificationMethod": "Verify the deconsolidation and discontinued-operations classification in Del Monte Pacific's FY2025 annual report and confirm the U.S. Chapter 11 filing via court records or company press release.",
+      "sourceIds": ["S-003", "S-008"],
+      "status": "pending",
+      "nextArtifact": "artifacts/industry_structure.json (delmonte_event_timeline)"
+    },
+    {
+      "claimId": "C-007",
+      "claimText": "SENEA was deleted from the S&P SmallCap 600 in July 2023, producing forced selling pressure independent of fundamentals.",
+      "verificationMethod": "Confirm the deletion via the S&P Dow Jones Indices announcement and reconcile the effective date with index ETF rebalance flows; tie to event-study windows.",
+      "sourceIds": ["S-002"],
+      "status": "pending",
+      "nextArtifact": "artifacts/event_study.csv (sp600_deletion_window)"
+    },
+    {
+      "claimId": "C-008",
+      "claimText": "Seneca has executed material share repurchases relative to float, supporting per-share compounding.",
+      "verificationMethod": "Tabulate buyback authorizations and executions from 10-K Item 5/Item 7 disclosures and proxy statements; compute net repurchase as a percentage of beginning shares outstanding by year.",
+      "sourceIds": ["S-001", "S-005"],
+      "status": "pending",
+      "nextArtifact": "artifacts/senea_metrics.csv (buyback_history)"
+    },
+    {
+      "claimId": "C-009",
+      "claimText": "Seneca has minimal sell-side analyst coverage, contributing to the discount.",
+      "verificationMethod": "Pull active-coverage analyst counts from Seneca investor relations disclosures and consensus-estimate vendors; document the absence of formal sell-side reports.",
+      "sourceIds": ["S-006"],
+      "status": "pending",
+      "nextArtifact": "artifacts/coverage_register.json"
+    },
+    {
+      "claimId": "C-010",
+      "claimText": "Seneca operates a dual-class share structure with concentrated insider/family voting control.",
+      "verificationMethod": "Read the FY2025 proxy statement (DEF 14A) and 10-K share-class disclosures; document Class A vs Class B voting rights and beneficial ownership of insiders.",
+      "sourceIds": ["S-005", "S-001"],
+      "status": "pending",
+      "nextArtifact": "artifacts/governance_register.json"
+    },
+    {
+      "claimId": "C-011",
+      "claimText": "Seneca has demonstrated pricing-cost recovery across crop, steel/tinplate, freight, and labor cycles.",
+      "verificationMethod": "Decompose revenue and gross profit across FY2018-FY2025 into price, volume, mix, and input-cost components using 10-K MD&A commentary; confirm directional consistency with industry indices.",
+      "sourceIds": ["S-001"],
+      "status": "pending",
+      "nextArtifact": "artifacts/senea_metrics.csv (price_cost_bridge)"
+    }
+  ],
+  "sourceRegister": [
+    {
+      "sourceId": "S-001",
+      "title": "Seneca Foods Corporation FY2025 Annual Report on Form 10-K (LIFO accounting, $359.3m LIFO reserve, FIFO-adjusted earnings, FIFO EBITDA disclosures)",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "SEC EDGAR filing index for SENEA, Form 10-K covering fiscal year ended March 2025 (to be retrieved from https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10-K)",
+      "sourceType": "primary-filing",
+      "usedFor": ["C-001", "C-002", "C-003", "C-004", "C-008", "C-010", "C-011", "C-005"],
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-002",
+      "title": "S&P Dow Jones Indices announcement of the July 2023 deletion of Seneca Foods (SENEA) from the S&P SmallCap 600",
+      "publisher": "S&P Dow Jones Indices",
+      "urlOrCitation": "S&P Dow Jones Indices index-action press release archive, July 2023 SmallCap 600 rebalance (to be retrieved from https://www.spglobal.com/spdji/en/index-announcements/)",
+      "sourceType": "index-notice",
+      "usedFor": ["C-007", "C-004"],
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-003",
+      "title": "Del Monte Pacific Limited FY2025 annual report and FY2025 results materials describing classification of the U.S. Del Monte Foods business as discontinued operations and deconsolidation effective May 2025",
+      "publisher": "Del Monte Pacific Limited (SGX/PSE listed)",
+      "urlOrCitation": "Del Monte Pacific FY2025 annual report and SGX/PSE disclosure filings (to be retrieved from https://www.delmontepacific.com/investors)",
+      "sourceType": "primary-filing",
+      "usedFor": ["C-006"],
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-004",
+      "title": "Lakeside Foods public materials referencing the statement that Lakeside and one other competitor account for approximately 90% of U.S. private-label vegetable canning",
+      "publisher": "Lakeside Foods, Inc. (corporate communications / interview transcript)",
+      "urlOrCitation": "Lakeside Foods website and quoted industry interview material (to be archived as cited in the plan's Quick Source Anchors section)",
+      "sourceType": "industry-statement",
+      "usedFor": ["C-005"],
+      "confidence": "medium"
+    },
+    {
+      "sourceId": "S-005",
+      "title": "Seneca Foods Corporation proxy statement (DEF 14A) for FY2025 with dual-class share, voting, and beneficial-ownership disclosures",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "SEC EDGAR DEF 14A for SENEA covering FY2025 (to be retrieved from https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=DEF+14A)",
+      "sourceType": "primary-filing",
+      "usedFor": ["C-008", "C-010"],
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-006",
+      "title": "Seneca Foods Investor Relations coverage page and consensus-estimate vendor coverage records",
+      "publisher": "Seneca Foods Corporation Investor Relations / consensus-estimate vendor",
+      "urlOrCitation": "Seneca Foods IR coverage page (to be retrieved from https://investor.senecafoods.com) cross-referenced against a consensus-estimate vendor",
+      "sourceType": "issuer-disclosure",
+      "usedFor": ["C-009"],
+      "confidence": "medium"
+    },
+    {
+      "sourceId": "S-007",
+      "title": "Seneca Foods historical 10-K and 10-Q filings (FY2005-FY2025) for balance-sheet and inventory reconstruction",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "SEC EDGAR filing index for SENEA historical 10-K and 10-Q filings (to be retrieved from https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10)",
+      "sourceType": "primary-filing",
+      "usedFor": ["C-001", "C-002", "C-004"],
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-008",
+      "title": "Del Monte Foods (U.S.) Chapter 11 bankruptcy filing and supporting docket records",
+      "publisher": "U.S. Bankruptcy Court (PACER docket) / Del Monte Foods press release",
+      "urlOrCitation": "PACER bankruptcy docket for Del Monte Foods (U.S.) Chapter 11 case and corresponding press release (to be retrieved from PACER and the Del Monte Foods newsroom)",
+      "sourceType": "court-record",
+      "usedFor": ["C-006"],
+      "confidence": "high"
+    }
+  ],
+  "openQuestions": [
+    {
+      "id": "Q-001",
+      "question": "Which specific competitor does Lakeside name alongside itself in the ~90% private-label vegetable canning quote, and is that competitor Seneca or a third party?",
+      "blocks": ["C-005"]
+    },
+    {
+      "id": "Q-002",
+      "question": "Does the Seneca FY2025 10-K disclose a maintenance-capex figure or a useful proxy, or does the financial rebuild need to derive it from PP&E roll-forwards?",
+      "blocks": ["C-003", "C-011"]
+    },
+    {
+      "id": "Q-003",
+      "question": "What is the precise effective date of the S&P SmallCap 600 deletion in July 2023, and which constituent index ETFs rebalanced on that date?",
+      "blocks": ["C-007"]
+    },
+    {
+      "id": "Q-004",
+      "question": "Which entity (Del Monte Foods Inc. or Del Monte Foods Holdings) filed Chapter 11, and how does that map to Del Monte Pacific's deconsolidated U.S. business?",
+      "blocks": ["C-006"]
+    },
+    {
+      "id": "Q-005",
+      "question": "Are management's FIFO-adjusted earnings and FIFO EBITDA reconciled in the FY2025 10-K itself, or only in supplemental investor materials?",
+      "blocks": ["C-003"]
+    },
+    {
+      "id": "Q-006",
+      "question": "Does the FY2025 proxy quantify combined Class A/Class B voting power held by the founding family/insiders sufficiently to support the dual-class control claim without further estimation?",
+      "blocks": ["C-010"]
+    }
+  ]
+}
