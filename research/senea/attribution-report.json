@@ -1,0 +1,530 @@
+{
+  "taskId": "analyze-senea-attribution",
+  "artifactStatus": "draft",
+  "ticker": "SENEA",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "upstreamArtifacts": [
+    "research/senea/claims-source-pack.md",
+    "research/senea/claims-source-pack.json",
+    "research/senea/source-register.csv",
+    "research/senea/financial-rebuild.md",
+    "research/senea/financial-rebuild.json",
+    "research/senea/industry-bear-case.md",
+    "research/senea/industry-bear-case.json"
+  ],
+  "fiscalYearEnd": "2025-03-31",
+  "rebuildReferenceDate": "2026-04-30",
+  "generatedOn": "2026-04-30",
+  "scope": "Decomposes the SENEA price discount into attributable causes by tying each known event window to a testable claim, the evidence available, and an attribution assessment. Where a quantitative event-study return is required and the underlying market-data source has not been retrieved, the event is graded with status 'evidence-pending' and the exact data inputs needed are listed. No synthetic returns or inferred percentages are emitted.",
+  "sourceIdsUsed": [
+    "S-001",
+    "S-002",
+    "S-003",
+    "S-005",
+    "S-006",
+    "S-007",
+    "S-008",
+    "S-009",
+    "S-014",
+    "S-016",
+    "S-017",
+    "S-018",
+    "S-019",
+    "S-020",
+    "S-021"
+  ],
+  "newSourcesIntroduced": [
+    {
+      "sourceId": "S-018",
+      "title": "SENEA Class A daily price and volume series (event-window OHLCV) from a consolidated tape vendor",
+      "publisher": "NYSE consolidated tape / market-data vendor (e.g., Refinitiv, Bloomberg, Polygon, EODHD)",
+      "urlOrCitation": "Daily OHLCV for SENEA Class A across each event window listed in attribution-report.json (to be retrieved from a vendor that records consolidated NYSE prints; archive snapshot required for reproducibility)",
+      "sourceType": "market-data",
+      "usedFor": ["E-001", "E-002", "E-003", "E-004", "E-005", "E-006", "E-007", "E-008", "E-009", "E-010", "E-011"],
+      "confidence": "medium"
+    },
+    {
+      "sourceId": "S-019",
+      "title": "Small-cap and value factor return series (Russell 2000, Russell 2000 Value, S&P SmallCap 600, Fama-French SMB and HML)",
+      "publisher": "FTSE Russell / S&P Dow Jones Indices / Kenneth French Data Library",
+      "urlOrCitation": "FTSE Russell index history (https://www.lseg.com/en/ftse-russell), S&P DJI index history (https://www.spglobal.com/spdji/), Kenneth French Data Library (https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html)",
+      "sourceType": "market-data",
+      "usedFor": ["E-007", "E-010", "E-011"],
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-020",
+      "title": "iShares Core S&P SmallCap ETF (IJR) and SPDR S&P 600 Small Cap ETF (SLY) holdings disclosures and rebalance flows around the July 2023 SmallCap 600 reconstitution",
+      "publisher": "BlackRock iShares / State Street Global Advisors / S&P Dow Jones Indices",
+      "urlOrCitation": "IJR and SLY daily holdings files (https://www.ishares.com/us/products/239774, https://www.ssga.com/us/en/intermediary/etfs/spdr-sp-600-small-cap-etf-sly), and the S&P DJI rebalance announcement archive",
+      "sourceType": "fund-disclosure",
+      "usedFor": ["E-001"],
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-021",
+      "title": "U.S. Federal Reserve H.15 selected interest rates and Russell 2000 quarterly returns to define equity-market liquidity windows (2022 QT onset, 2023 SVB / regional-bank stress, 2025 macro window)",
+      "publisher": "U.S. Federal Reserve / FTSE Russell / Federal Reserve Bank of St. Louis (FRED)",
+      "urlOrCitation": "FRED series H15T10Y, DFF, DGS2, plus FTSE Russell return series; National Bureau of Economic Research recession dating where applicable",
+      "sourceType": "macroeconomic-data",
+      "usedFor": ["E-007", "E-010"],
+      "confidence": "high"
+    }
+  ],
+  "events": [
+    {
+      "eventId": "E-001",
+      "eventDate": "2023-07-pending-effective-date",
+      "eventType": "S&P SmallCap 600 deletion",
+      "category": "index-deletion",
+      "headline": "S&P Dow Jones Indices announced removal of Seneca Foods (SENEA) from the S&P SmallCap 600 in the July 2023 rebalance.",
+      "claimTested": "C-007 -- SENEA was deleted from the S&P SmallCap 600 in July 2023, producing forced selling pressure independent of fundamentals.",
+      "evidence": [
+        "Plan Quick Source Anchors and claim C-007 in claims-source-pack.json identify the deletion (S-002).",
+        "Mechanism is forced selling by index-replicating ETFs: IJR (iShares Core S&P SmallCap) and SLY (SPDR S&P 600) must reweight to zero on the effective date (S-020).",
+        "Effective date and the bracketing trade prints, volume spike, and 1-/5-/20-day excess return vs. an S&P SmallCap 600 ex-SENEA benchmark have not been retrieved (S-018, S-020); this is open question Q-003 in the upstream pack."
+      ],
+      "sourceIds": ["S-002", "S-018", "S-020"],
+      "attributionAssessment": {
+        "bucket": "non-fundamental-supply-shock",
+        "directionalSign": "negative",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "The deletion mechanism is well-understood and the forced-selling sign is unambiguously negative for the deleted name on the effective date. The magnitude (event-day and event-window excess return, plus volume z-score) requires the market-data series in S-018 and the rebalance file in S-020 to compute; these have not been retrieved in this pass."
+      },
+      "dataNeededIfMissing": [
+        "Effective deletion date confirmed by the S&P DJI announcement archive (S-002).",
+        "SENEA Class A daily close, OHLC, and volume for [t-30, t+30] around the effective date (S-018).",
+        "S&P SmallCap 600 total return and IJR/SLY daily returns for the same window (S-019, S-020) to compute excess return.",
+        "IJR and SLY pre-/post-rebalance holdings deltas to size the absolute share-volume of forced selling (S-020)."
+      ]
+    },
+    {
+      "eventId": "E-002",
+      "eventDate": "FY2023-Q4-FY2025-Q4 release dates pending",
+      "eventType": "Seneca quarterly and annual earnings release",
+      "category": "fundamental-repricing",
+      "headline": "Seneca Foods quarterly (10-Q) and annual (10-K) earnings releases across FY2023-FY2025, including the FY2025 release that anchored the $359.3m LIFO reserve in the upstream pack.",
+      "claimTested": "C-003 -- reported earnings materially understate FIFO earnings power because of a $359.3m LIFO reserve; C-011 -- pricing-cost recovery across cycles.",
+      "evidence": [
+        "FY2025 LIFO reserve of $359.3m is anchored in claims-source-pack.json claim C-003 and financial-rebuild.json adjustedMetric fifo_inventory_adjustment_gross (S-001).",
+        "Reported pre-tax income, net earnings, operating income, D&A, and the prior-year LIFO reserve required to compute the FY2025 LIFO charge are graded 'pending' in financial-rebuild.json (open questions F-001 through F-003).",
+        "Without per-release reported EPS surprise data and same-day price reaction (S-018), the share of price drift attributable to earnings-release fundamentals (vs. mean-reversion or factor moves) cannot be isolated."
+      ],
+      "sourceIds": ["S-001", "S-007", "S-018"],
+      "attributionAssessment": {
+        "bucket": "fundamental-repricing",
+        "directionalSign": "ambiguous",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "Earnings releases drive both the numerator (FIFO earnings power) and the market reaction. Until the per-release reported EPS, FIFO-adjusted EPS bridge, and same-day plus 5-day price reaction are computed, neither sign nor magnitude is anchored. The methodology is fully specified in financial-rebuild.json earningsPowerBridge but the inputs are pending."
+      },
+      "dataNeededIfMissing": [
+        "Filing dates of every 10-K and 10-Q released between 2022-04-01 and 2026-04-30 (S-001, S-007).",
+        "Reported pre-tax income, net earnings, operating income, D&A, and LIFO reserve per release (S-001, S-007).",
+        "Effective tax rate per FY for the after-tax FIFO add-back (financial-rebuild open question F-002).",
+        "SENEA Class A daily OHLCV around each release date (S-018) plus an industry-peer or S&P SmallCap 600 ex-SENEA benchmark for excess returns (S-019)."
+      ]
+    },
+    {
+      "eventId": "E-003",
+      "eventDate": "FY2023-FY2025 buyback authorization and execution windows pending",
+      "eventType": "Buyback authorization and execution",
+      "category": "fundamental-repricing",
+      "headline": "Seneca buyback authorizations and per-month repurchases disclosed in 10-K Item 5 / Item 7 and the FY2025 DEF 14A.",
+      "claimTested": "C-008 -- Seneca has executed material share repurchases relative to float, supporting per-share compounding.",
+      "evidence": [
+        "Buyback authorization, executions, average price, and net-buyback-as-percent-of-beginning-shares are explicitly defined as reportedMetrics in financial-rebuild.json but graded 'pending' (open question F-004).",
+        "Authorizations and 10b5-1 program announcements are press-release events and 8-K-disclosable; the exact dates have not been retrieved in this pass.",
+        "Same-day announcement returns require S-018."
+      ],
+      "sourceIds": ["S-001", "S-005", "S-018"],
+      "attributionAssessment": {
+        "bucket": "fundamental-repricing",
+        "directionalSign": "positive",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "Authorization announcements and executed repurchases are textbook positive shocks for tight-float, cash-generative names. Sign is positive but magnitude depends on the size of the authorization relative to market cap, the fraction executed, and the same-day reaction (S-018)."
+      },
+      "dataNeededIfMissing": [
+        "Each 8-K or press-release announcing a new or expanded buyback authorization (S-001, S-005).",
+        "Monthly repurchase tables from FY2023-FY2025 10-Ks Item 5 (S-001, S-007).",
+        "SENEA Class A daily OHLCV around each announcement (S-018).",
+        "Beginning-of-fiscal-year diluted share counts to compute net-buyback-percent (S-001, financial-rebuild reportedMetric net_buyback_pct_beginning_shares)."
+      ]
+    },
+    {
+      "eventId": "E-004",
+      "eventDate": "2025-05 Del Monte Pacific deconsolidation effective date",
+      "eventType": "Del Monte Pacific deconsolidation of U.S. Del Monte Foods",
+      "category": "competitor-restructuring",
+      "headline": "Del Monte Pacific Limited classified the U.S. Del Monte Foods business as discontinued operations and deconsolidated effective May 2025.",
+      "claimTested": "C-006 / IC-006 -- Del Monte Pacific deconsolidated U.S. Del Monte Foods, removing destructive private-label competition.",
+      "evidence": [
+        "Pointer-level evidence anchored in claims-source-pack.json claim C-006 (S-003) and industry-bear-case.json IC-006 (status partially-verified).",
+        "Quoted text from the Del Monte Pacific FY2025 annual report discontinued-operations / deconsolidation paragraphs has not been archived in this pass (industry primary check P-005).",
+        "SENEA price reaction around the May 2025 announcement window has not been retrieved (S-018)."
+      ],
+      "sourceIds": ["S-003", "S-014", "S-018"],
+      "attributionAssessment": {
+        "bucket": "competitor-restructuring",
+        "directionalSign": "positive",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "A deconsolidation by the parent of a destructive private-label competitor reduces expected long-run price competition for SENEA's private-label volumes. Sign is positive for SENEA. Magnitude requires (a) confirming the effective date and the announcement date(s) per S-003 and S-014, and (b) computing the same-day and 5-day SENEA reaction per S-018. Bear case B-003 (a leaner competitor may emerge from restructuring) caps the durable magnitude."
+      },
+      "dataNeededIfMissing": [
+        "Effective deconsolidation date and announcement date(s) from Del Monte Pacific FY2025 annual report and SGX/PSE filings (S-003).",
+        "Trade-press confirmation of the announcement window (S-014).",
+        "SENEA Class A daily OHLCV across [t-5, t+30] of each announcement (S-018).",
+        "S&P SmallCap 600 ex-SENEA or packaged-food peer benchmark for excess returns (S-019)."
+      ]
+    },
+    {
+      "eventId": "E-005",
+      "eventDate": "2025 Chapter 11 filing date pending",
+      "eventType": "Del Monte Foods (U.S.) Chapter 11 filing",
+      "category": "competitor-restructuring",
+      "headline": "Del Monte Foods (U.S.) filed for Chapter 11 in 2025, restructuring or removing a major branded canned-vegetable competitor.",
+      "claimTested": "C-006 / IC-007 -- the U.S. Del Monte Chapter 11 filing removed or restructured a destructive private-label and branded competitor.",
+      "evidence": [
+        "Anchored at the pointer level via PACER docket (S-008) and trade-press wire copy (S-014); status 'partially-verified' in industry-bear-case.json IC-007.",
+        "Filing entity (Del Monte Foods Inc. vs Del Monte Foods Holdings) and reorganization-vs-liquidation posture remain open question Q-004.",
+        "Bear case B-003 explicitly notes a Chapter 11 may produce a leaner competitor with reduced debt service rather than competitor exit."
+      ],
+      "sourceIds": ["S-008", "S-014", "S-018"],
+      "attributionAssessment": {
+        "bucket": "competitor-restructuring",
+        "directionalSign": "positive",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "First-order: a major branded competitor entering Chapter 11 reduces near-term private-label rivalry and creates take-or-pay co-pack opportunities, both supportive of SENEA. Magnitude depends on whether the case is a 363 sale to a strategic acquirer (bear case B-003 binds harder) or a long-tail liquidation. Same-day SENEA reaction must come from S-018."
+      },
+      "dataNeededIfMissing": [
+        "Exact PACER filing date and docket number for the Del Monte Foods U.S. Chapter 11 case (S-008).",
+        "Confirmation of filing entity (Del Monte Foods Inc. vs Del Monte Foods Holdings) (S-008, S-014).",
+        "Posture: reorganization plan vs Section 363 sale vs liquidation (S-008).",
+        "SENEA Class A daily OHLCV around the filing date and any subsequent material docket events (S-018)."
+      ]
+    },
+    {
+      "eventId": "E-006",
+      "eventDate": "FY2018-FY2025 fiscal-year MD&A windows pending",
+      "eventType": "Commodity and input-cost pressure (tinplate, steel, freight, energy, labor)",
+      "category": "commodity-input-cost-pressure",
+      "headline": "Multi-year input-cost cycle: U.S. tinplate trade actions (Section 232 tariffs and AD/CVD duties), 2021-2023 freight inflation, and 2022-2024 labor inflation that pressure canning gross margin.",
+      "claimTested": "C-011 / IC-008 -- pricing among remaining U.S. canned-vegetable producers is rational and cost moves are passed through; bear case B-005 -- tinplate / steel cost inflation outruns price recovery.",
+      "evidence": [
+        "Industry-bear-case.json grades IC-008 'unverified' and B-005 'unverified' pending P-006 (FY2018-FY2025 revenue and gross-margin bridge from Seneca MD&A plus tinplate / freight indices).",
+        "Tinplate index series and the FRED canned-vegetable production index are registered as S-017.",
+        "Per-quarter SENEA price reaction to gross-margin surprises requires S-018."
+      ],
+      "sourceIds": ["S-001", "S-007", "S-017", "S-018"],
+      "attributionAssessment": {
+        "bucket": "commodity-input-cost-pressure",
+        "directionalSign": "ambiguous",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "Sign depends on pass-through. The bull frame (C-011, IC-008) treats Seneca as price-rational and cost-recovering, which would make commodity spikes net neutral over a cycle. The bear frame (B-005) treats incomplete pass-through as a margin compressor. Resolving requires the FY2018-FY2025 revenue and gross-margin bridge against tinplate / freight indices (P-006)."
+      },
+      "dataNeededIfMissing": [
+        "Annual revenue, COGS, gross profit, and management-disclosed price/volume/mix commentary from FY2018-FY2025 10-K MD&A (S-001, S-007).",
+        "CRU Tinplate Index, S&P Platts tinplate spot, AAR rail and Cass freight indices, and FRED canned-vegetable production index for the same window (S-017).",
+        "U.S. trade-action history on tinplate (Section 232, AD/CVD timeline) (S-017).",
+        "SENEA Class A daily OHLCV around earnings releases that disclosed material gross-margin surprises (S-018)."
+      ]
+    },
+    {
+      "eventId": "E-007",
+      "eventDate": "2022-Q1 onset; 2023-03 SVB; 2025-Q1 macro window",
+      "eventType": "Equity-market liquidity windows (Fed QT onset, 2023 regional-bank stress, 2025 macro window)",
+      "category": "liquidity-window",
+      "headline": "Macro liquidity tightening windows that disproportionately weigh on small-cap, low-coverage, low-float names like SENEA.",
+      "claimTested": "Implicit non-fundamental discount: small-cap-and-illiquid factor exposure widens the SENEA discount in tightening windows, narrows it in easing windows. Linked to bear cases B-002, B-007 and to claim C-009 (low coverage).",
+      "evidence": [
+        "FRED-anchored Fed funds, 2-year, and 10-year Treasury series identify the QT onset (2022-Q1) and rate-cut pivot windows (S-021).",
+        "March 2023 SVB / regional-bank stress is a documented Russell 2000 drawdown window (S-019, S-021).",
+        "Russell 2000 / Russell 2000 Value relative-return series is required to attribute SENEA returns to small-cap and value factor moves vs idiosyncratic news (S-019).",
+        "Per-window SENEA returns and turnover have not been pulled (S-018)."
+      ],
+      "sourceIds": ["S-018", "S-019", "S-021"],
+      "attributionAssessment": {
+        "bucket": "liquidity-and-factor",
+        "directionalSign": "negative-in-tightening-windows",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "Small-cap, low-coverage names with concentrated voting structures typically exhibit a higher discount in liquidity-stress windows. The sign is well-supported in the empirical literature. Magnitude requires running a return regression of SENEA daily returns on market, SMB, and HML factors across each window (S-018, S-019)."
+      },
+      "dataNeededIfMissing": [
+        "FRED H15T10Y, DFF, DGS2 daily series (S-021).",
+        "Russell 2000, Russell 2000 Value, S&P SmallCap 600, and Fama-French SMB / HML daily returns (S-019).",
+        "SENEA Class A daily OHLCV across each window (S-018).",
+        "An NBER or analyst-defined window list to anchor the sub-period regressions (S-021)."
+      ]
+    },
+    {
+      "eventId": "E-008",
+      "eventDate": "FY2025 DEF 14A filing date pending",
+      "eventType": "Governance disclosure (dual-class voting power, insider beneficial ownership)",
+      "category": "governance-discount",
+      "headline": "FY2025 proxy statement disclosing combined Class A / Class B voting power held by founding-family and insider holders, plus board composition and related-party items.",
+      "claimTested": "C-010 -- Seneca operates a dual-class share structure with concentrated insider/family voting control; bear case B-007 -- dual-class structure prevents activist crystallization.",
+      "evidence": [
+        "Industry-bear-case.json grades B-007 'partially-verified', awaiting confirmation of combined voting power via P-009 (FY2025 DEF 14A, S-005). Upstream open question Q-006.",
+        "Plan Quick Source Anchors identify the FY2025 DEF 14A as the binding disclosure for the dual-class structure.",
+        "Governance-related disclosures rarely produce a same-day price reaction; the discount mechanism is structural (cap on activist crystallization) rather than event-driven."
+      ],
+      "sourceIds": ["S-005", "S-018"],
+      "attributionAssessment": {
+        "bucket": "governance-discount",
+        "directionalSign": "negative-structural",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "Dual-class control structures persistently discount equity in event-study and cross-sectional academic work. Sign is negative-structural. Magnitude is rarely event-window-isolable; it shows up as a persistent multiple discount vs comparable single-class peers. Magnitude requires combined voting share (S-005) and a comparable-multiple panel of single-class packaged-food peers."
+      },
+      "dataNeededIfMissing": [
+        "FY2025 DEF 14A combined Class A + Class B voting share held by founding-family and insider holders (S-005).",
+        "Voting-rights ratio between Class A and Class B per the FY2025 DEF 14A (S-005).",
+        "A comparable-multiple panel of single-class packaged-food peers across FY2018-FY2025 to size the dual-class discount (financial-rebuild reportedMetric set, S-018).",
+        "Any 13D / 13G activist filings against SENEA across 2015-2026 that may have bracketed governance-event windows (SEC EDGAR)."
+      ]
+    },
+    {
+      "eventId": "E-009",
+      "eventDate": "Persistent across the analysis window",
+      "eventType": "Sell-side coverage absence",
+      "category": "liquidity-and-coverage",
+      "headline": "Documented absence of formal sell-side analyst coverage on SENEA, contributing to the discount via a coverage / neglected-stock premium.",
+      "claimTested": "C-009 -- Seneca has minimal sell-side analyst coverage, contributing to the discount.",
+      "evidence": [
+        "Anchored via S-006 (Seneca IR coverage page and consensus-estimate vendor records) in the claims-source-pack.",
+        "Empirically, neglected-stock premiums are documented in the academic literature on small-cap and micro-cap value.",
+        "Per-window SENEA bid-ask spread and turnover would size the liquidity component but require S-018."
+      ],
+      "sourceIds": ["S-006", "S-018"],
+      "attributionAssessment": {
+        "bucket": "liquidity-and-coverage",
+        "directionalSign": "negative-structural",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "Coverage absence is well-anchored at the pointer level and aligns with the academic neglected-stock premium. Sign is negative-structural. Magnitude requires (a) a coverage-count snapshot and (b) bid-ask / turnover series from S-018."
+      },
+      "dataNeededIfMissing": [
+        "Active-coverage analyst count per year from Seneca IR and a consensus-estimate vendor (S-006).",
+        "SENEA Class A bid-ask spread and average daily turnover by year (S-018).",
+        "A peer panel of similarly sized packaged-food names with at least three covering analysts to size the relative discount (S-018)."
+      ]
+    },
+    {
+      "eventId": "E-010",
+      "eventDate": "2022-2024 small-cap-value drawdown; 2025 partial mean-reversion",
+      "eventType": "Small-cap / value factor context",
+      "category": "factor-context",
+      "headline": "Small-cap and value factor underperformance during 2022-2024 created a category-level headwind that persists through 2026-Q1; partial mean-reversion in 2025.",
+      "claimTested": "Implicit factor-attribution: a non-trivial fraction of SENEA's discount is small-cap and value beta, not idiosyncratic.",
+      "evidence": [
+        "Russell 2000 vs S&P 500 and Russell 2000 Value vs Russell 2000 Growth relative-return series document the 2022-2024 drawdown window (S-019).",
+        "Liquidity-window context (E-007) overlaps materially with this factor window.",
+        "Per-window SENEA factor loadings have not been estimated (S-018, S-019)."
+      ],
+      "sourceIds": ["S-018", "S-019"],
+      "attributionAssessment": {
+        "bucket": "liquidity-and-factor",
+        "directionalSign": "negative-2022-2024-then-partial-recovery",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "Sign is well-supported by the factor-return record. Magnitude attributable to SENEA specifically requires a Fama-French 3-factor or 5-factor regression on SENEA daily returns across the analysis window (S-018, S-019). Care must be taken not to double-count between E-007 (liquidity windows) and E-010 (factor context) -- the two should be combined as a single 'liquidity-and-factor' bucket in the verdict."
+      },
+      "dataNeededIfMissing": [
+        "Russell 2000, Russell 2000 Value, Russell 2000 Growth, and S&P 500 daily total returns (S-019).",
+        "Fama-French 3-factor or 5-factor daily series (S-019).",
+        "SENEA Class A daily OHLCV (S-018).",
+        "A regression specification: SENEA excess return = alpha + beta_mkt * MktRf + beta_smb * SMB + beta_hml * HML + epsilon, with sub-period coefficient stability checks."
+      ]
+    },
+    {
+      "eventId": "E-011",
+      "eventDate": "Continuous across the analysis window",
+      "eventType": "Trading liquidity and float utilization (turnover, bid-ask spread, days-to-cover)",
+      "category": "liquidity-window",
+      "headline": "SENEA Class A trades thinly relative to comparably-sized packaged-food peers, with elevated bid-ask spreads and concentrated insider/family ownership compressing free float.",
+      "claimTested": "Bear case B-007 (governance) and claim C-009 (coverage) imply structurally low liquidity; this event captures the liquidity attribution distinct from the index-deletion shock (E-001) and the macro liquidity windows (E-007).",
+      "evidence": [
+        "FY2025 DEF 14A insider beneficial ownership (S-005) defines the free-float ceiling.",
+        "SENEA Class A daily turnover and quoted spread series have not been retrieved (S-018).",
+        "Index deletion (E-001) further compressed institutional ownership, which is a sub-component of this attribution."
+      ],
+      "sourceIds": ["S-005", "S-018"],
+      "attributionAssessment": {
+        "bucket": "liquidity-and-coverage",
+        "directionalSign": "negative-structural",
+        "magnitudeStatus": "evidence-pending",
+        "rationale": "Liquidity is a documented driver of cross-sectional discount in small-cap names. Sign is negative-structural. Magnitude requires turnover and spread series from S-018 plus an institutional-ownership panel (13F-derived) to compare pre- and post-deletion ownership concentration."
+      },
+      "dataNeededIfMissing": [
+        "SENEA Class A average daily turnover, bid-ask spread, and Amihud illiquidity by year (S-018).",
+        "Pre- and post-July-2023 institutional ownership counts and percent-of-float from 13F aggregates (SEC EDGAR).",
+        "Free-float estimate net of insider holdings (S-005)."
+      ]
+    }
+  ],
+  "attributionBuckets": [
+    {
+      "bucket": "non-fundamental-supply-shock",
+      "definition": "Forced selling or buying driven by index methodology rather than firm fundamentals.",
+      "events": ["E-001"],
+      "qualitativeShare": "material-pending-quantification",
+      "rationale": "S&P SmallCap 600 deletion is a one-time supply shock with a well-documented event-window depression and partial mean-reversion. Magnitude requires S-018 and S-020.",
+      "blockingDataIds": ["S-018", "S-020"]
+    },
+    {
+      "bucket": "fundamental-repricing",
+      "definition": "Price moves driven by changes in disclosed earnings power, balance-sheet strength, capital returns, or guidance.",
+      "events": ["E-002", "E-003"],
+      "qualitativeShare": "indeterminate-pending-quantification",
+      "rationale": "FIFO-adjusted earnings power is anchored at the LIFO-reserve level ($359.3m) but the bridge to per-release reactions awaits the financial-rebuild data set (open questions F-001 through F-004) and S-018.",
+      "blockingDataIds": ["S-001", "S-005", "S-018"]
+    },
+    {
+      "bucket": "competitor-restructuring",
+      "definition": "Price moves driven by changes in the competitive set: deconsolidation, bankruptcy, or strategic exit by competitors.",
+      "events": ["E-004", "E-005"],
+      "qualitativeShare": "directionally-positive-magnitude-pending",
+      "rationale": "Del Monte Pacific deconsolidation (May 2025) and the Del Monte Foods (U.S.) Chapter 11 are positive-sign for SENEA at first order, with bear case B-003 capping the durable benefit.",
+      "blockingDataIds": ["S-003", "S-008", "S-014", "S-018"]
+    },
+    {
+      "bucket": "commodity-input-cost-pressure",
+      "definition": "Price moves driven by input-cost cycles (raw produce, tinplate / steel, freight, energy, labor) and pass-through completeness.",
+      "events": ["E-006"],
+      "qualitativeShare": "ambiguous-pending-bridge",
+      "rationale": "Bull (IC-008, C-011) and bear (B-005) framings disagree on pass-through. Resolving requires the FY2018-FY2025 revenue / gross-margin bridge against tinplate and freight indices (industry primary check P-006).",
+      "blockingDataIds": ["S-001", "S-007", "S-017", "S-018"]
+    },
+    {
+      "bucket": "liquidity-and-coverage",
+      "definition": "Persistent discount driven by low free float, low turnover, wide spreads, and absence of sell-side coverage.",
+      "events": ["E-009", "E-011"],
+      "qualitativeShare": "structural-negative",
+      "rationale": "Both coverage absence (E-009, anchored via S-006) and liquidity (E-011) are persistent rather than event-driven. They show up as a multiple discount; magnitude requires turnover, spread, and a comparable-coverage peer panel.",
+      "blockingDataIds": ["S-006", "S-018"]
+    },
+    {
+      "bucket": "liquidity-and-factor",
+      "definition": "Macro liquidity tightening windows and small-cap / value factor moves that produce non-fundamental drift in SENEA.",
+      "events": ["E-007", "E-010"],
+      "qualitativeShare": "material-during-tightening-windows",
+      "rationale": "2022-Q1 QT onset, 2023 SVB stress, and the 2022-2024 small-cap-value drawdown each contributed beta-level downside that overlaps materially with E-007 and E-010. These two events should be combined as a single bucket in any final variance decomposition to avoid double-counting.",
+      "blockingDataIds": ["S-018", "S-019", "S-021"]
+    },
+    {
+      "bucket": "governance-discount",
+      "definition": "Persistent discount driven by dual-class voting structure, insider control, and the resulting cap on activist crystallization.",
+      "events": ["E-008"],
+      "qualitativeShare": "structural-negative",
+      "rationale": "Dual-class control consistently produces a multiple discount in academic studies. Magnitude requires combined voting power per the FY2025 DEF 14A (S-005) and a single-class peer panel.",
+      "blockingDataIds": ["S-005", "S-018"]
+    }
+  ],
+  "verdict": {
+    "overall": "mixed-discount-with-multiple-non-fundamental-drivers-pending-quantification",
+    "summary": "The SENEA discount is best modeled as a sum of (a) a one-time index-deletion supply shock with partial mean-reversion (E-001), (b) a structural liquidity-and-coverage discount (E-009, E-011), (c) a structural governance discount tied to the dual-class structure (E-008), (d) a beta-driven liquidity-and-factor drag through 2022-2024 with partial recovery in 2025 (E-007, E-010), and (e) two competitor-restructuring positives that have not yet repriced (E-004, E-005). Fundamental repricing on FIFO earnings power (E-002, E-003) and the commodity / cost-recovery bridge (E-006) are methodologically defined but quantitatively pending. No event-window excess returns are reported in this artifact because the underlying market-data series (S-018) and rebalance-flow files (S-020) have not been retrieved; inventing returns in their place would violate the acceptance criterion.",
+    "indexDeletionVerdict": {
+      "events": ["E-001"],
+      "directionalSign": "negative-non-fundamental",
+      "status": "evidence-pending",
+      "blockingDataIds": ["S-018", "S-020"]
+    },
+    "fundamentalRepricingVerdict": {
+      "events": ["E-002", "E-003", "E-006"],
+      "directionalSign": "ambiguous",
+      "status": "evidence-pending",
+      "blockingDataIds": ["S-001", "S-007", "S-017", "S-018"]
+    },
+    "liquidityAndCoverageVerdict": {
+      "events": ["E-007", "E-009", "E-010", "E-011"],
+      "directionalSign": "negative-structural-and-cyclical",
+      "status": "evidence-pending",
+      "blockingDataIds": ["S-006", "S-018", "S-019", "S-021"]
+    },
+    "governanceDiscountVerdict": {
+      "events": ["E-008"],
+      "directionalSign": "negative-structural",
+      "status": "evidence-pending",
+      "blockingDataIds": ["S-005", "S-018"]
+    },
+    "competitorRestructuringVerdict": {
+      "events": ["E-004", "E-005"],
+      "directionalSign": "positive",
+      "status": "evidence-pending",
+      "blockingDataIds": ["S-003", "S-008", "S-014", "S-018"]
+    },
+    "marketDataLimitation": "All eleven events are graded magnitudeStatus=evidence-pending because S-018 (SENEA Class A daily OHLCV), S-019 (small-cap and factor return series), S-020 (IJR/SLY rebalance files), and S-021 (FRED rate / liquidity series) have not been retrieved in this pass. Per the acceptance criterion, exact data needed to compute event-window excess returns and factor-loaded attributions is enumerated in each event's dataNeededIfMissing field rather than inferred."
+  },
+  "residualRisks": [
+    {
+      "id": "R-001",
+      "description": "Effective date of the July 2023 SmallCap 600 deletion (carry-forward from upstream Q-003) is required to anchor the E-001 event window; without it, the index-deletion attribution cannot be sized.",
+      "blocks": ["E-001"],
+      "carryForwardFrom": "Q-003",
+      "sourceIds": ["S-002", "S-020"]
+    },
+    {
+      "id": "R-002",
+      "description": "Per-release reported pre-tax income, net earnings, and FY2024 LIFO reserve required to bridge FY2025 LIFO charge (carry-forward from financial-rebuild F-001 and F-003); without these, fundamental repricing in E-002 cannot be tested.",
+      "blocks": ["E-002", "E-006"],
+      "carryForwardFrom": ["F-001", "F-003"],
+      "sourceIds": ["S-001", "S-007"]
+    },
+    {
+      "id": "R-003",
+      "description": "FY2025 effective tax rate (carry-forward from financial-rebuild F-002) governs the magnitude of the after-tax FIFO add-back; affects E-002 and the bear-case binding strength of B-010.",
+      "blocks": ["E-002"],
+      "carryForwardFrom": "F-002",
+      "sourceIds": ["S-001", "S-010"]
+    },
+    {
+      "id": "R-004",
+      "description": "Buyback authorization and execution dates plus monthly repurchase tables (carry-forward from financial-rebuild F-004) required to anchor E-003 announcement-window analysis.",
+      "blocks": ["E-003"],
+      "carryForwardFrom": "F-004",
+      "sourceIds": ["S-001", "S-005"]
+    },
+    {
+      "id": "R-005",
+      "description": "Filing entity and posture for the Del Monte Foods (U.S.) Chapter 11 case (carry-forward from upstream Q-004); reorganization-vs-liquidation determines the bear case B-003 binding strength against E-005.",
+      "blocks": ["E-005"],
+      "carryForwardFrom": "Q-004",
+      "sourceIds": ["S-008", "S-014"]
+    },
+    {
+      "id": "R-006",
+      "description": "Quoted text from the Del Monte Pacific FY2025 annual report discontinued-operations / deconsolidation paragraphs (industry primary check P-005) required to confirm the May 2025 effective date and announcement window for E-004.",
+      "blocks": ["E-004"],
+      "carryForwardFrom": "P-005",
+      "sourceIds": ["S-003"]
+    },
+    {
+      "id": "R-007",
+      "description": "Combined Class A / Class B voting power held by founding-family and insider holders (carry-forward from upstream Q-006 / industry P-009) required to size the governance discount in E-008.",
+      "blocks": ["E-008"],
+      "carryForwardFrom": ["Q-006", "P-009"],
+      "sourceIds": ["S-005"]
+    },
+    {
+      "id": "R-008",
+      "description": "FY2018-FY2025 revenue and gross-margin bridge versus tinplate / freight indices (carry-forward from industry primary check P-006) required to attribute commodity / cost pass-through in E-006.",
+      "blocks": ["E-006"],
+      "carryForwardFrom": "P-006",
+      "sourceIds": ["S-001", "S-007", "S-017"]
+    },
+    {
+      "id": "R-009",
+      "description": "Market-data series for SENEA Class A daily OHLCV (S-018) is the single largest dependency: every quantitative event-window or factor-regression magnitude depends on it. No event in this pass produces a numerical excess return without it.",
+      "blocks": ["E-001", "E-002", "E-003", "E-004", "E-005", "E-006", "E-007", "E-008", "E-009", "E-010", "E-011"],
+      "sourceIds": ["S-018"]
+    },
+    {
+      "id": "R-010",
+      "description": "Risk of double-counting between E-007 (liquidity windows) and E-010 (factor context). The verdict combines them into a single 'liquidity-and-factor' bucket; any final variance decomposition must use a joint regression rather than additive single-factor regressions.",
+      "blocks": ["E-007", "E-010"],
+      "sourceIds": ["S-018", "S-019", "S-021"]
+    },
+    {
+      "id": "R-011",
+      "description": "Risk of attribution leakage between E-001 (index-deletion supply shock) and E-011 (structural liquidity / float). The deletion shock created a one-time level shift in institutional ownership that then persists as part of the structural liquidity discount; pre- and post-deletion 13F-aggregate ownership concentration is required to separate the two.",
+      "blocks": ["E-001", "E-011"],
+      "sourceIds": ["S-018", "S-020"]
+    }
+  ]
+}
