@@ -1,0 +1,13 @@
+name,ticker,niche,assetBacked,accountingHidden,undercoveredSmallCap,forcedSellingExposure,insiderFamilyControl,buybackSupport,boringDurableNiche,mechanismFitCount,notes
+Tootsie Roll Industries,TR,Confectionery,yes,partial,yes,yes,yes,yes,yes,6.5,"Family-controlled, dual-class, mature U.S. confectionery niche; long buyback record. Closest non-LIFO analog to Seneca's governance and capital-allocation side."
+John B. Sanfilippo & Son,JBSS,Tree-nut packaged foods,yes,partial,yes,partial,yes,partial,yes,6.0,"Owner-operator with founding-family dual-class; tree-nut private-label / branded mix similar in tone to Seneca's vegetable-canning posture; special dividends more than buybacks."
+Bridgford Foods,BRID,Frozen / refrigerated foods,yes,partial,yes,yes,yes,partial,yes,6.0,"Family-controlled micro-cap; structurally similar in float / coverage profile, narrower category."
+Lifeway Foods,LWAY,Cultured-dairy / kefir,partial,partial,yes,partial,yes,partial,partial,4.0,"Family-controlled small-cap food name; less LIFO-exposed than Seneca, more growth-oriented."
+Hooker Furnishings,HOFT,Furniture (LIFO accounting),yes,yes,yes,partial,no,yes,partial,5.0,"Direct LIFO-mechanism analog; family control absent."
+Olympic Steel,ZEUS,Steel service center,yes,yes,yes,partial,partial,yes,partial,5.5,"Strong LIFO-reserve accounting analog; cyclicality higher than Seneca; Siegal family historically large holder."
+Friedman Industries,FRD,Steel processor / distributor,yes,yes,yes,yes,partial,partial,partial,5.5,"Micro-cap LIFO steel processor; useful for LIFO + undercovered combination."
+Insteel Industries,IIIN,Steel wire products,yes,partial,yes,partial,no,yes,yes,4.5,"Steady-niche steel-wire supplier; useful for the durable-niche + buyback feature combination."
+Ethan Allen Interiors,ETD,Furniture (vertically integrated),yes,partial,yes,partial,partial,yes,partial,4.5,"LIFO furniture with vertically integrated assets; coverage thin."
+"Greif, Inc.",GEF / GEF.B,Industrial packaging,yes,partial,partial,partial,yes,yes,yes,5.5,"Dual-class industrial packaging with concentrated voting in B class; thicker coverage than Seneca but mechanism-fit for control / asset / buyback features."
+Hamilton Beach Brands Holding,HBB / HBBA,Small-appliance distribution,partial,partial,yes,partial,yes,partial,partial,4.0,"Dual-class controlled small-cap; undercovered."
+Crawford & Company,CRD.A / CRD.B,Insurance claims management,partial,partial,yes,partial,yes,yes,partial,4.5,"Dual-class controlled small-cap; mechanism overlap on undercovered + family control + buyback."
