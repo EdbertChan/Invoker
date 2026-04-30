@@ -1,0 +1,345 @@
+{
+  "claimFamily": {
+    "id": "CF-INDEX-SELLING",
+    "name": "Index Deletion And Forced Selling",
+    "anchorClaimId": "C-007",
+    "parentClaimText": "SENEA was deleted from the S&P SmallCap 600 in July 2023, producing forced selling pressure independent of fundamentals.",
+    "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+    "ledgerRef": "research/senea/claims-source-pack.json",
+    "registerRef": "research/senea/source-register.csv",
+    "generatedOn": "2026-04-30",
+    "ticker": "SENEA"
+  },
+  "verdict": "unresolved",
+  "confidence": "high",
+  "verdictRationale": "The local source register documents source S-002 only as a retrieval pointer to the S&P Dow Jones Indices index-action archive; no announcement-date, effective-date, ETF-holdings, price/volume, bid-ask, or factor-return data has been collected into the research artifact tree. The claims-source-pack scope field explicitly defers primary-source retrieval and pass/fail verification to downstream tasks (financial-rebuild, industry-attack, attribution), and open question Q-003 in the same pack remains unanswered. Per the acceptance rule that an absent reliable price/volume or ETF ownership dataset must be labeled `unresolved` with the exact data needed enumerated, every sub-claim below is `unresolved` and the family verdict is `unresolved` with high confidence in the verdict itself.",
+  "claimsTested": [
+    {
+      "id": "IS-1",
+      "text": "SENEA was deleted from the S&P SmallCap 600 in July 2023.",
+      "parentClaimId": "C-007",
+      "verdict": "unresolved",
+      "reason": "Source S-002 is a pointer to the S&P Dow Jones Indices index-action archive that the source-pack scope marks as not yet retrieved; the precise announcement date and effective date are still tracked as open question Q-003.",
+      "requiredEvidence": [
+        "S&P Dow Jones Indices index-action press release naming SENEA, with announcement date, effective date, and stated reason.",
+        "Reconciliation of the announcement to a corresponding constituent-change file (typical SP DJI rebalance file naming)."
+      ],
+      "primarySources": ["S-002"]
+    },
+    {
+      "id": "IS-2",
+      "text": "The deletion mechanically forced index-tracking ETFs to sell SENEA, producing concentrated, non-fundamental sell flow at the effective date.",
+      "parentClaimId": "C-007",
+      "verdict": "unresolved",
+      "reason": "No ETF-holdings or fund-flow source is on the local register. Expected mechanical sell volume cannot be computed without the IJR / SLY / VIOO (and any other S&P SmallCap 600 tracker) holdings as of the day before the effective date.",
+      "requiredEvidence": [
+        "iShares Core S&P Small-Cap ETF (IJR) holdings file as of T-2 - 1.",
+        "SPDR S&P 600 Small Cap ETF (SLY) holdings file as of T-2 - 1.",
+        "Vanguard S&P Small-Cap 600 ETF (VIOO) holdings file as of T-2 - 1.",
+        "Any other S&P SmallCap 600 tracker holdings on T-2 - 1 to capture the full mechanical bid.",
+        "Cross-check vs SENEA Form 10-Q / 10-K share-count and Form 13F holders for total institutional context."
+      ],
+      "primarySources": ["S-002"],
+      "missingSources": ["ETF holdings vendor (e.g. issuer fund-page CSVs, or a vendor like FactSet/Bloomberg)"]
+    },
+    {
+      "id": "IS-3",
+      "text": "Post-deletion liquidity (average daily volume, bid-ask spread, Amihud illiquidity) materially deteriorated versus a pre-deletion baseline.",
+      "parentClaimId": "C-007",
+      "verdict": "unresolved",
+      "reason": "No price, volume, or quote series has been ingested into the research tree (research/senea/ contains only claims-source-pack.json, claims-source-pack.md, and source-register.csv). Without OHLCV plus quote data, the pre/post liquidity comparison cannot be computed.",
+      "requiredEvidence": [
+        "SENEA daily OHLCV for the window [T-1 - 250, T-2 + 250] business days.",
+        "Daily best-bid/best-offer or TAQ-derived spreads for the same window.",
+        "Pre/post averages for ADV, bid-ask spread, and Amihud illiquidity, with statistical significance tests."
+      ],
+      "primarySources": ["S-002"],
+      "missingSources": ["Market-data vendor (exchange feed or vendor such as Refinitiv, Bloomberg, Polygon)"]
+    },
+    {
+      "id": "IS-4",
+      "text": "Cumulative abnormal returns inside the announcement-to-effective-date window are negative and statistically distinguishable from market, small-cap, and food-sector returns, in the direction predicted by the index-deletion literature.",
+      "parentClaimId": "C-007",
+      "verdict": "unresolved",
+      "reason": "The plan's nextArtifact for C-007 is artifacts/event_study.csv (sp600_deletion_window); that file has not been written. No estimation-window factor-return or sector-return data is on the register.",
+      "requiredEvidence": [
+        "Market-model and Fama-French-5 + momentum regressions over [T-1 - 250, T-1 - 30].",
+        "Cumulative abnormal returns over [T-1 - 1, T-1 + 1], [T-1, T-2], [T-2, T-2 + 5], and [T-2 + 6, T-2 + 60].",
+        "Sector control using a packaged-foods peer basket or a packaged-food ETF (e.g. PBJ, KXI components mapped to U.S. food).",
+        "p-values or bootstrap intervals on each CAR window."
+      ],
+      "primarySources": ["S-002", "S-001", "S-007"],
+      "missingSources": ["Factor-return source (e.g. Ken French data library)", "Sector benchmark series"]
+    },
+    {
+      "id": "IS-5",
+      "text": "Observed event-window weakness, and any persistent post-event drift, cannot be explained by Seneca fundamental disclosures, small-cap value factor moves, or food-sector moves.",
+      "parentClaimId": "C-007",
+      "verdict": "unresolved",
+      "reason": "No catalog of contemporaneous Seneca SEC filings or press releases in the [T-1 - 30, T-2 + 30] window has been produced; no factor or sector returns are loaded; the plan's Decision Gate 4 requires factor/sector controls before attribution can pass.",
+      "requiredEvidence": [
+        "Tagged catalog of every SENEA 10-K, 10-Q, 8-K, press release, and dividend/buyback announcement inside [T-1 - 30, T-2 + 30] (sources S-001, S-007).",
+        "Re-estimated residuals excluding fundamental-news days.",
+        "Russell 2000 / Russell 2000 Value reconstitution dates inside the window so that S&P-driven flows can be separated from Russell-driven flows.",
+        "Small-cap value factor (HML, SMB, R2000V) cumulative returns across the same windows."
+      ],
+      "primarySources": ["S-001", "S-007", "S-002"],
+      "missingSources": ["Russell reconstitution calendar", "Factor-return source"]
+    }
+  ],
+  "sourcesUsed": [
+    {
+      "sourceId": "S-001",
+      "title": "Seneca Foods Corporation FY2025 Annual Report on Form 10-K (LIFO accounting, $359.3m LIFO reserve, FIFO-adjusted earnings, FIFO EBITDA disclosures)",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10-K",
+      "sourceType": "primary-filing",
+      "usedFor": ["IS-4", "IS-5"],
+      "retrievalStatus": "not-retrieved-in-this-task",
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-002",
+      "title": "S&P Dow Jones Indices announcement of the July 2023 deletion of Seneca Foods (SENEA) from the S&P SmallCap 600",
+      "publisher": "S&P Dow Jones Indices",
+      "urlOrCitation": "https://www.spglobal.com/spdji/en/index-announcements/",
+      "sourceType": "index-notice",
+      "usedFor": ["IS-1", "IS-2", "IS-3", "IS-4", "IS-5"],
+      "retrievalStatus": "not-retrieved-in-this-task",
+      "confidence": "high"
+    },
+    {
+      "sourceId": "S-007",
+      "title": "Seneca Foods historical 10-K and 10-Q filings (FY2005-FY2025) for balance-sheet and inventory reconstruction",
+      "publisher": "Seneca Foods Corporation / U.S. Securities and Exchange Commission",
+      "urlOrCitation": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000088948&type=10",
+      "sourceType": "primary-filing",
+      "usedFor": ["IS-4", "IS-5"],
+      "retrievalStatus": "not-retrieved-in-this-task",
+      "confidence": "high"
+    },
+    {
+      "sourceId": "PLAN-SENEA",
+      "title": "SENEA Diligence plan",
+      "publisher": "Local plan",
+      "urlOrCitation": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+      "sourceType": "internal-plan",
+      "usedFor": ["IS-1", "IS-2", "IS-3", "IS-4", "IS-5"],
+      "retrievalStatus": "retrieved",
+      "confidence": "high"
+    },
+    {
+      "sourceId": "PACK-SENEA",
+      "title": "SENEA claims-source-pack",
+      "publisher": "Local pack",
+      "urlOrCitation": "research/senea/claims-source-pack.json",
+      "sourceType": "internal-pack",
+      "usedFor": ["IS-1", "IS-2", "IS-3", "IS-4", "IS-5"],
+      "retrievalStatus": "retrieved",
+      "confidence": "high"
+    }
+  ],
+  "missingSources": [
+    {
+      "id": "MS-1",
+      "description": "Daily OHLCV plus best-bid/best-offer for SENEA covering [T-1 - 250, T-2 + 250] business days.",
+      "candidateProviders": ["Exchange tape", "Refinitiv", "Bloomberg", "Polygon", "Nasdaq Data Link"],
+      "blocks": ["IS-3", "IS-4"]
+    },
+    {
+      "id": "MS-2",
+      "description": "Holdings files for IJR, SLY, VIOO and any other S&P SmallCap 600 trackers as of T-2 - 1, plus subsequent rebalances.",
+      "candidateProviders": ["BlackRock iShares fund page", "State Street SPDR fund page", "Vanguard fund page", "FactSet"],
+      "blocks": ["IS-2"]
+    },
+    {
+      "id": "MS-3",
+      "description": "Fama-French-5 + momentum factor returns and Russell 2000 / Russell 2000 Value daily returns covering the estimation and event windows.",
+      "candidateProviders": ["Ken French data library", "FTSE Russell", "Bloomberg"],
+      "blocks": ["IS-4", "IS-5"]
+    },
+    {
+      "id": "MS-4",
+      "description": "Russell 2000 / Russell 2000 Value reconstitution calendar for 2023 and SENEA membership before/after.",
+      "candidateProviders": ["FTSE Russell index announcements"],
+      "blocks": ["IS-5"]
+    },
+    {
+      "id": "MS-5",
+      "description": "Packaged-foods sector benchmark or peer basket return series for the event window.",
+      "candidateProviders": ["S&P 1500 Packaged Foods sub-index", "PBJ ETF holdings basket", "Bloomberg"],
+      "blocks": ["IS-4"]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "EV-001",
+      "type": "event",
+      "claimId": "IS-1",
+      "description": "S&P Dow Jones Indices announcement of SENEA deletion from the S&P SmallCap 600.",
+      "dateOrWindow": "needs-retrieval (July 2023, exact day per S-002)",
+      "value": "pending",
+      "sourceIds": ["S-002"],
+      "status": "pending"
+    },
+    {
+      "id": "EV-002",
+      "type": "event",
+      "claimId": "IS-1",
+      "description": "Effective date of SENEA deletion (close of business on rebalance day).",
+      "dateOrWindow": "needs-retrieval (July 2023, exact day per S-002)",
+      "value": "pending",
+      "sourceIds": ["S-002"],
+      "status": "pending"
+    },
+    {
+      "id": "EV-003",
+      "type": "etf-flow",
+      "claimId": "IS-2",
+      "description": "Aggregate SENEA share count held by S&P SmallCap 600 trackers (IJR, SLY, VIOO and other) as of T-2 - 1.",
+      "dateOrWindow": "T-2 - 1",
+      "value": "pending",
+      "sourceIds": ["S-002"],
+      "missingSources": ["MS-2"],
+      "status": "pending"
+    },
+    {
+      "id": "EV-004",
+      "type": "volume",
+      "claimId": "IS-2",
+      "description": "Observed SENEA volume on T-2 vs 60-day pre-event median ADV (one-day rebalance spike test).",
+      "dateOrWindow": "T-2 vs [T-1 - 60, T-1 - 1]",
+      "value": "pending",
+      "sourceIds": [],
+      "missingSources": ["MS-1"],
+      "status": "pending"
+    },
+    {
+      "id": "EV-005",
+      "type": "liquidity",
+      "claimId": "IS-3",
+      "description": "Pre vs post-event ADV, bid-ask spread, and Amihud illiquidity ratio.",
+      "dateOrWindow": "[T-1 - 120, T-1 - 1] vs [T-2 + 5, T-2 + 125]",
+      "value": "pending",
+      "sourceIds": [],
+      "missingSources": ["MS-1"],
+      "status": "pending"
+    },
+    {
+      "id": "EV-006",
+      "type": "event-study",
+      "claimId": "IS-4",
+      "description": "Cumulative abnormal returns from market-model and Fama-French-5 + momentum regressions across multiple event windows.",
+      "dateOrWindow": "[T-1 - 1, T-1 + 1]; [T-1, T-2]; [T-2, T-2 + 5]; [T-2 + 6, T-2 + 60]",
+      "value": "pending",
+      "sourceIds": ["S-002"],
+      "missingSources": ["MS-1", "MS-3", "MS-5"],
+      "status": "pending"
+    },
+    {
+      "id": "EV-007",
+      "type": "fundamentals-control",
+      "claimId": "IS-5",
+      "description": "Catalog of every SENEA SEC filing and press release inside [T-1 - 30, T-2 + 30], tagged fundamental vs non-fundamental.",
+      "dateOrWindow": "[T-1 - 30, T-2 + 30]",
+      "value": "pending",
+      "sourceIds": ["S-001", "S-007"],
+      "status": "pending"
+    },
+    {
+      "id": "EV-008",
+      "type": "factor-control",
+      "claimId": "IS-5",
+      "description": "Cumulative HML, SMB, R2000V, and packaged-foods returns over the same event windows used for IS-4.",
+      "dateOrWindow": "matches IS-4 windows",
+      "value": "pending",
+      "sourceIds": [],
+      "missingSources": ["MS-3", "MS-5"],
+      "status": "pending"
+    },
+    {
+      "id": "EV-009",
+      "type": "index-overlap",
+      "claimId": "IS-5",
+      "description": "Russell 2000 / Russell 2000 Value membership and reconstitution dates inside [T-1 - 30, T-2 + 30].",
+      "dateOrWindow": "[T-1 - 30, T-2 + 30]",
+      "value": "pending",
+      "sourceIds": [],
+      "missingSources": ["MS-4"],
+      "status": "pending"
+    }
+  ],
+  "contraryEvidence": [
+    {
+      "id": "CE-001",
+      "claimId": "IS-4",
+      "description": "Concurrent fundamentals (Seneca FY2024 reporting cycle) may explain part of the cumulative move; CARs can be biased without a fundamentals filter.",
+      "sourceIds": ["S-001", "S-007"],
+      "status": "open"
+    },
+    {
+      "id": "CE-002",
+      "claimId": "IS-4",
+      "description": "Mid-2023 small-cap value factor weakness can absorb part of the negative drift; without an HML / R2000V control the index-deletion signal is overstated.",
+      "sourceIds": [],
+      "missingSources": ["MS-3"],
+      "status": "open"
+    },
+    {
+      "id": "CE-003",
+      "claimId": "IS-2",
+      "description": "Russell reconstitution typically lands in late June; if SENEA's Russell membership changed in the same window, some forced-selling volume belongs to Russell flows rather than S&P SmallCap 600 flows.",
+      "sourceIds": [],
+      "missingSources": ["MS-4"],
+      "status": "open"
+    },
+    {
+      "id": "CE-004",
+      "claimId": "IS-4",
+      "description": "S&P SmallCap 600 deletions are pre-announced; arbitrageurs frequently front-run, so cumulative abnormal returns over [T-1, T-2] can be near zero by the effective date even when the flow story is real.",
+      "sourceIds": ["S-002"],
+      "status": "open"
+    },
+    {
+      "id": "CE-005",
+      "claimId": "IS-3",
+      "description": "Post-deletion ADV decline can reflect general small-cap volume contraction in 2023-2024 rather than SENEA-specific liquidity loss; a peer-control comparison is required.",
+      "sourceIds": [],
+      "missingSources": ["MS-1", "MS-5"],
+      "status": "open"
+    }
+  ],
+  "openQuestions": [
+    {
+      "id": "Q-IS-1",
+      "question": "What is the precise announcement date, effective date, and S&P-cited reason for SENEA's deletion from the S&P SmallCap 600 in July 2023?",
+      "blocks": ["IS-1", "IS-2", "IS-3", "IS-4", "IS-5"],
+      "mirrors": ["Q-003"]
+    },
+    {
+      "id": "Q-IS-2",
+      "question": "What were SENEA share counts and dollar exposure inside IJR, SLY, VIOO, and any other S&P SmallCap 600 trackers as of the close on T-2 - 1, and how do they sum to expected mechanical sell volume?",
+      "blocks": ["IS-2"]
+    },
+    {
+      "id": "Q-IS-3",
+      "question": "What are the pre/post averages for SENEA average daily volume, bid-ask spread, and Amihud illiquidity, and are the differences statistically significant?",
+      "blocks": ["IS-3"]
+    },
+    {
+      "id": "Q-IS-4",
+      "question": "What are the cumulative abnormal returns over [T-1 - 1, T-1 + 1], [T-1, T-2], [T-2, T-2 + 5], and [T-2 + 6, T-2 + 60] under both market-model and Fama-French-5 + momentum specifications?",
+      "blocks": ["IS-4"]
+    },
+    {
+      "id": "Q-IS-5",
+      "question": "Which Seneca filings and press releases fall inside [T-1 - 30, T-2 + 30], and how do CARs change when fundamental-news days are excluded?",
+      "blocks": ["IS-5"]
+    },
+    {
+      "id": "Q-IS-6",
+      "question": "Did SENEA's Russell 2000 / Russell 2000 Value membership change inside the same window, and how much of any forced-selling volume can be attributed to Russell rather than S&P flows?",
+      "blocks": ["IS-2", "IS-5"]
+    }
+  ]
+}
