@@ -2460,8 +2460,10 @@ describe('TaskRunner', () => {
       };
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
+      (executor as any).buildMergeSummary = vi.fn().mockResolvedValue('## Summary\nRaw workflow summary');
+      const authoredBody = '## Summary\n\nAuthored body\n\n## Test Plan\n\n- ok\n\n## Revert Plan\n\n- revert';
       (executor as any).authorPrBodyWithSkill = vi.fn().mockResolvedValue({
-        body: '## Summary\n\nAuthored body\n\n## Test Plan\n\n- ok\n\n## Revert Plan\n\n- revert',
+        body: authoredBody,
         sessionId: 'sess-pr-er',
         agentName: 'codex',
       });
@@ -2488,15 +2490,29 @@ describe('TaskRunner', () => {
       const commitCall = gitCalls.find(c => c[0] === 'commit');
       expect(commitCall).toBeUndefined();
 
+      // Raw workflow summary must reach the canonical PR author as authoring context, not as the published body.
+      expect((executor as any).authorPrBodyWithSkill).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Test Workflow',
+          baseBranch: 'master',
+          featureBranch: 'plan/feature',
+          workflowSummary: '## Summary\nRaw workflow summary',
+        }),
+      );
+
       // Should create a PR via mergeGateProvider (using the gate clone dir, not host.cwd)
+      // and the createReview body MUST be the authored canonical body — never the raw summary.
       expect(mergeGateProvider.createReview).toHaveBeenCalledWith(
         expect.objectContaining({
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           title: 'Test Workflow',
           cwd: '/tmp/mock-wt',
+          body: authoredBody,
         }),
       );
+      const createReviewCall = (mergeGateProvider.createReview as any).mock.calls[0]?.[0];
+      expect(createReviewCall?.body).not.toBe('## Summary\nRaw workflow summary');
 
       // Should set task awaiting approval with PR metadata (not handleWorkerResponse)
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
@@ -6360,15 +6376,30 @@ describe('TaskRunner', () => {
       const hostCalls = gitCalls.filter((c) => c.dir === '/tmp/host');
       expect(hostCalls).toHaveLength(0);
 
+      // Raw workflow summary must reach the canonical PR author as authoring context, not as the published body.
+      expect((executor as any).authorPrBodyWithSkill).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Test Workflow',
+          baseBranch: 'master',
+          featureBranch: 'plan/feature',
+          workflowSummary: '## Summary',
+          cwd: '/tmp/gate-clone',
+        }),
+      );
+
       // PR created via mergeGateProvider (using gate clone dir, not host.cwd)
+      // and the createReview body MUST be the authored canonical body — never the raw summary.
       expect(mergeGateProvider.createReview).toHaveBeenCalledWith(
         expect.objectContaining({
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           title: 'Test Workflow',
           cwd: '/tmp/gate-clone',
+          body: '## Summary\n\nPublished body',
         }),
       );
+      const createReviewCall = (mergeGateProvider.createReview as any).mock.calls[0]?.[0];
+      expect(createReviewCall?.body).not.toBe('## Summary');
 
       // Task set to awaiting_approval with PR metadata
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-pub', expect.objectContaining({
