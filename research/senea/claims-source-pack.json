@@ -1,5 +1,5 @@
 {
-  "taskId": "source-pack",
+  "taskId": "build-claims-source-pack",
   "artifactStatus": "draft",
   "ticker": "SENEA",
   "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
