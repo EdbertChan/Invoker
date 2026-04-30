@@ -110,8 +110,6 @@ import {
 import {
   approveTask as sharedApproveTask,
   rebaseAndRetry,
-  recreateWorkflow as sharedRecreateWorkflow,
-  recreateTask as sharedRecreateTask,
   resolveConflictAction,
   selectExperiments as sharedSelectExperiments,
   setWorkflowMergeMode,
@@ -2974,7 +2972,18 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-workflow',
         });
-        const started = sharedRecreateWorkflow(workflowId, { persistence: sqlitePersistence, orchestrator });
+        const envelope = makeEnvelope('recreate-workflow', 'ui', 'workflow', { workflowId });
+        const result = await commandService.recreateWorkflow(envelope, {
+          beforeRecreate: () => {
+            const workflow = sqlitePersistence.loadWorkflow(workflowId);
+            if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
+            const nextGen = (workflow.generation ?? 0) + 1;
+            sqlitePersistence.updateWorkflow(workflowId, { generation: nextGen });
+            logger.info(`bumped generation to ${nextGen} for ${workflowId}`, { module: 'workflow' });
+          },
+        });
+        if (!result.ok) throw new Error(result.error.message);
+        const started = result.data;
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
@@ -3003,7 +3012,10 @@ if (isHeadless) {
       logger.info(`recreate-task: "${taskId}"`, { module: 'ipc' });
       try {
         await preemptTaskSubgraph(taskId);
-        const started = sharedRecreateTask(taskId, { persistence: sqlitePersistence, orchestrator });
+        const envelope = makeEnvelope('recreate-task', 'ui', 'task', { taskId });
+        const result = await commandService.recreateTask(envelope);
+        if (!result.ok) throw new Error(result.error.message);
+        const started = result.data;
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
