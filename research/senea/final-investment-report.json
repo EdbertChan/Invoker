@@ -1,0 +1,498 @@
+{
+  "taskId": "screen-analogs-and-final-report",
+  "artifactStatus": "draft",
+  "ticker": "SENEA",
+  "planRef": "/Users/edbertchan/.cursor/plans/senea_diligence_05efbabd.plan.md",
+  "fiscalYear": "FY2025",
+  "fiscalYearEnd": "2025-03-31",
+  "rebuildReferenceDate": "2026-04-30",
+  "generatedOn": "2026-04-30",
+  "scope": "Final synthesis of the SENEA diligence stack. Consolidates claims-source-pack.json, financial-rebuild.json, industry-bear-case.json, and attribution-report.json into a claim-by-claim scorecard, financial / industry / attribution summaries, a mechanism-fit analog screen, a final verdict, and an enumerated unresolved-diligence list. Conclusions that lack anchored primary-source evidence are classified as 'unresolved' rather than asserted. This is a research artifact, not investment advice.",
+  "upstreamArtifacts": [
+    "research/senea/claims-source-pack.md",
+    "research/senea/claims-source-pack.json",
+    "research/senea/financial-rebuild.md",
+    "research/senea/financial-rebuild.json",
+    "research/senea/industry-bear-case.md",
+    "research/senea/industry-bear-case.json",
+    "research/senea/attribution-report.md",
+    "research/senea/attribution-report.json"
+  ],
+  "companionArtifacts": [
+    "research/senea/final-investment-report.md",
+    "research/senea/analog-screen.csv"
+  ],
+  "researchDisclaimer": "This is a research report. It is NOT investment advice, NOT a recommendation, and NOT a solicitation to buy or sell any security. Conclusions classified as 'unresolved' or 'partial' are not assertions of fact; they require the primary-source pulls enumerated in unresolvedDiligenceItems before any decision-relevant use.",
+  "sourceIdsUsed": [
+    "S-001",
+    "S-002",
+    "S-003",
+    "S-004",
+    "S-005",
+    "S-006",
+    "S-007",
+    "S-008",
+    "S-009",
+    "S-010",
+    "S-011",
+    "S-012",
+    "S-013",
+    "S-014",
+    "S-015",
+    "S-016",
+    "S-017",
+    "S-018",
+    "S-019",
+    "S-020",
+    "S-021"
+  ],
+  "claimScorecard": [
+    {
+      "claimId": "C-001",
+      "claimText": "Seneca trades below tangible book value on a FIFO-adjusted basis.",
+      "classification": "unresolved",
+      "evidenceStatus": "methodology-defined-data-pending",
+      "supportingArtifacts": ["financial-rebuild.json#valuationBridge.tangibleBookBridge"],
+      "sourceIds": ["S-001", "S-007", "S-009", "S-010", "S-011"],
+      "anchoredEvidence": "FY2025 LIFO reserve $359.3m anchored as the FIFO add-back input (S-001).",
+      "blockingItems": ["F-002", "F-003", "F-006", "F-007"],
+      "bindingBearItems": ["B-010"]
+    },
+    {
+      "claimId": "C-002",
+      "claimText": "Seneca trades at or below NCAV when inventory is restated to FIFO.",
+      "classification": "unresolved",
+      "evidenceStatus": "methodology-defined-data-pending",
+      "supportingArtifacts": ["financial-rebuild.json#valuationBridge.ncavBridge"],
+      "sourceIds": ["S-001", "S-007", "S-009", "S-010", "S-011"],
+      "anchoredEvidence": "FY2025 LIFO reserve $359.3m anchored as the FIFO add-back input (S-001).",
+      "blockingItems": ["F-002", "F-003", "F-006", "F-007"],
+      "bindingBearItems": ["B-010"]
+    },
+    {
+      "claimId": "C-003",
+      "claimText": "Seneca's reported earnings materially understate FIFO earnings power because of a $359.3m LIFO reserve.",
+      "classification": "partial",
+      "evidenceStatus": "lifo-reserve-anchored-bridge-pending",
+      "supportingArtifacts": [
+        "claims-source-pack.json#claims.C-003",
+        "financial-rebuild.json#adjustedMetrics.fifo_inventory_adjustment_gross"
+      ],
+      "sourceIds": ["S-001", "S-010"],
+      "anchoredEvidence": "FY2025 LIFO reserve $359.3m anchored verbatim from FY2025 10-K (S-001).",
+      "blockingItems": ["F-001", "F-002"],
+      "bindingBearItems": ["B-005", "B-010"]
+    },
+    {
+      "claimId": "C-004",
+      "claimText": "Seneca has compounded book value per share over a 20-year window despite minimal sell-side coverage.",
+      "classification": "unresolved",
+      "evidenceStatus": "methodology-defined-history-pending",
+      "supportingArtifacts": ["financial-rebuild.json#valuationBridge.perShareCompoundingBridge"],
+      "sourceIds": ["S-001", "S-002", "S-007", "S-010", "S-011"],
+      "anchoredEvidence": "Bridge specified; endpoints not yet retrieved.",
+      "blockingItems": ["F-005", "F-007"],
+      "bindingBearItems": ["B-008"]
+    },
+    {
+      "claimId": "C-005",
+      "claimText": "U.S. private-label vegetable canning is an oligopoly with Seneca and Lakeside Foods accounting for ~90% of supply.",
+      "classification": "unresolved",
+      "evidenceStatus": "self-reported-pointer-only",
+      "supportingArtifacts": ["industry-bear-case.json#industryClaims.IC-001"],
+      "sourceIds": ["S-001", "S-004", "S-016"],
+      "anchoredEvidence": "Lakeside corporate statement at the pointer level; not triangulated against syndicated panel data.",
+      "blockingItems": ["P-001", "P-002", "Q-001"],
+      "bindingBearItems": ["B-004", "B-008"]
+    },
+    {
+      "claimId": "C-006",
+      "claimText": "Del Monte Pacific deconsolidated its U.S. Del Monte Foods business effective May 2025; the U.S. subsidiary subsequently filed for Chapter 11.",
+      "classification": "partial",
+      "evidenceStatus": "pointer-anchored-text-pending",
+      "supportingArtifacts": [
+        "industry-bear-case.json#industryClaims.IC-006",
+        "industry-bear-case.json#industryClaims.IC-007"
+      ],
+      "sourceIds": ["S-003", "S-008", "S-014"],
+      "anchoredEvidence": "Both deconsolidation and Chapter 11 are pointer-anchored in primary filings and the PACER docket.",
+      "blockingItems": ["P-004", "P-005", "Q-004"],
+      "bindingBearItems": ["B-003"]
+    },
+    {
+      "claimId": "C-007",
+      "claimText": "SENEA was deleted from the S&P SmallCap 600 in July 2023, producing forced selling pressure independent of fundamentals.",
+      "classification": "partial",
+      "evidenceStatus": "deletion-fact-anchored-magnitude-pending",
+      "supportingArtifacts": ["attribution-report.json#events.E-001"],
+      "sourceIds": ["S-002", "S-018", "S-020"],
+      "anchoredEvidence": "Deletion announced by S&P DJI; rebalance mechanism documented (IJR / SLY).",
+      "blockingItems": ["Q-003", "R-001", "R-009"],
+      "bindingBearItems": []
+    },
+    {
+      "claimId": "C-008",
+      "claimText": "Seneca has executed material share repurchases relative to float, supporting per-share compounding.",
+      "classification": "unresolved",
+      "evidenceStatus": "methodology-defined-execution-data-pending",
+      "supportingArtifacts": [
+        "financial-rebuild.json#financialClaims.C-008",
+        "attribution-report.json#events.E-003"
+      ],
+      "sourceIds": ["S-001", "S-005", "S-011"],
+      "anchoredEvidence": "Sign positive at the directional level; magnitude requires Item 5 / DEF 14A retrieval.",
+      "blockingItems": ["F-004"],
+      "bindingBearItems": ["B-007"]
+    },
+    {
+      "claimId": "C-009",
+      "claimText": "Seneca has minimal sell-side analyst coverage, contributing to the discount.",
+      "classification": "partial",
+      "evidenceStatus": "pointer-anchored-magnitude-pending",
+      "supportingArtifacts": ["attribution-report.json#events.E-009"],
+      "sourceIds": ["S-006", "S-018"],
+      "anchoredEvidence": "Pointer-anchored via Seneca IR coverage page.",
+      "blockingItems": ["R-009"],
+      "bindingBearItems": ["B-002"]
+    },
+    {
+      "claimId": "C-010",
+      "claimText": "Seneca operates a dual-class share structure with concentrated insider/family voting control.",
+      "classification": "partial",
+      "evidenceStatus": "structure-anchored-voting-share-pending",
+      "supportingArtifacts": ["attribution-report.json#events.E-008"],
+      "sourceIds": ["S-001", "S-005"],
+      "anchoredEvidence": "Dual-class structure pointer-anchored; combined family / insider voting share pending P-009.",
+      "blockingItems": ["Q-006", "P-009"],
+      "bindingBearItems": ["B-007"]
+    },
+    {
+      "claimId": "C-011",
+      "claimText": "Seneca has demonstrated pricing-cost recovery across crop, steel/tinplate, freight, and labor cycles.",
+      "classification": "unresolved",
+      "evidenceStatus": "bridge-deferred",
+      "supportingArtifacts": [
+        "industry-bear-case.json#industryClaims.IC-008",
+        "financial-rebuild.json#financialClaims.C-011"
+      ],
+      "sourceIds": ["S-001", "S-007", "S-017"],
+      "anchoredEvidence": "Pass-through hypothesis stated in plan; bridge methodology defined; not computed.",
+      "blockingItems": ["P-006", "Q-002"],
+      "bindingBearItems": ["B-005", "B-006"]
+    }
+  ],
+  "financialSummary": {
+    "anchoredDatum": {
+      "metric": "lifo_reserve",
+      "fiscalYear": "FY2025",
+      "value": 359.3,
+      "units": "USD millions",
+      "sourceIds": ["S-001"]
+    },
+    "valuationBridges": {
+      "tangibleBookBridge": {
+        "method": "stockholders_equity - goodwill - intangibles + (lifo_reserve * (1 - effective_tax_rate)), divided by Class A + Class B shares.",
+        "fifoAddBackGross": 359.3,
+        "fifoAddBackGrossUnits": "USD millions",
+        "fifoAddBackAfterTaxAtFederalFloor": 283.847,
+        "fifoAddBackAfterTaxAtFederalFloorUnits": "USD millions",
+        "fifoAddBackAfterTaxNote": "Derived as 359.3 * (1 - 0.21). State-inclusive effective rates compress this further; bear case B-010.",
+        "sourceIds": ["S-001", "S-009", "S-010", "S-011"],
+        "claimsTested": ["C-001"],
+        "status": "unresolved"
+      },
+      "ncavBridge": {
+        "method": "total_current_assets - total_liabilities + (lifo_reserve * (1 - effective_tax_rate)), divided by Class A + Class B shares.",
+        "fifoAddBackGross": 359.3,
+        "fifoAddBackGrossUnits": "USD millions",
+        "sourceIds": ["S-001", "S-009", "S-010", "S-011"],
+        "claimsTested": ["C-002"],
+        "status": "unresolved"
+      },
+      "earningsPowerBridge": {
+        "method": "fifo_pretax_income = reported_pretax_income + (lifo_reserve_FY2025 - lifo_reserve_FY2024); fifo_net_earnings = reported_net_earnings + lifo_charge * (1 - effective_tax_rate); fifo_ebitda = reported_ebitda + lifo_charge.",
+        "sourceIds": ["S-001", "S-010"],
+        "claimsTested": ["C-003", "C-011"],
+        "status": "partial"
+      },
+      "perShareCompoundingBridge": {
+        "method": "Reconstruct per-share book value FY2005 to FY2025 from historical 10-Ks; compute LIFO-basis and FIFO-adjusted CAGRs.",
+        "sourceIds": ["S-001", "S-007", "S-010", "S-011"],
+        "claimsTested": ["C-004", "C-008"],
+        "status": "unresolved"
+      }
+    },
+    "blockingFinancialItems": [
+      "F-001",
+      "F-002",
+      "F-003",
+      "F-004",
+      "F-005",
+      "F-006",
+      "F-007",
+      "F-008"
+    ],
+    "sourceIds": ["S-001", "S-005", "S-007", "S-009", "S-010", "S-011"],
+    "summaryConclusion": "FIFO earnings power exists at >$0 (anchored at the $359.3m LIFO reserve). Whether SENEA is below FIFO tangible book or FIFO NCAV at the 2026-04-30 reference price is unresolved because reported equity, goodwill, intangibles, current assets, total liabilities, share count, and a price snapshot have not been retrieved.",
+    "summaryClassification": "partial-evidence-with-positive-mechanism-bias"
+  },
+  "industrySummary": {
+    "overallVerdict": "mixed",
+    "industryClaimsStatus": [
+      {"claimId": "IC-001", "status": "unverified", "blockingPrimaryChecks": ["P-001", "P-002"], "sourceIds": ["S-001", "S-004", "S-016"]},
+      {"claimId": "IC-002", "status": "partially-verified", "blockingPrimaryChecks": ["P-002"], "sourceIds": ["S-004", "S-013", "S-016"]},
+      {"claimId": "IC-003", "status": "partially-verified", "blockingPrimaryChecks": ["P-004", "P-005"], "sourceIds": ["S-003", "S-008", "S-013", "S-014"]},
+      {"claimId": "IC-004", "status": "unverified", "blockingPrimaryChecks": ["P-003"], "sourceIds": ["S-013", "S-014"]},
+      {"claimId": "IC-005", "status": "unverified", "blockingPrimaryChecks": ["P-002", "P-008"], "sourceIds": ["S-015", "S-016"]},
+      {"claimId": "IC-006", "status": "partially-verified", "blockingPrimaryChecks": ["P-004", "P-005"], "sourceIds": ["S-003", "S-014"]},
+      {"claimId": "IC-007", "status": "partially-verified", "blockingPrimaryChecks": ["P-004"], "sourceIds": ["S-008", "S-014"]},
+      {"claimId": "IC-008", "status": "unverified", "blockingPrimaryChecks": ["P-006"], "sourceIds": ["S-001", "S-007", "S-017"]},
+      {"claimId": "IC-009", "status": "unverified", "blockingPrimaryChecks": ["P-008"], "sourceIds": ["S-001", "S-015"]},
+      {"claimId": "IC-010", "status": "unverified", "blockingPrimaryChecks": ["P-007"], "sourceIds": ["S-012", "S-016"]}
+    ],
+    "bindingBearItems": [
+      {"bearCaseId": "B-001", "title": "Secular per-capita decline", "sourceIds": ["S-012", "S-016"]},
+      {"bearCaseId": "B-002", "title": "Customer concentration caps pricing power", "sourceIds": ["S-001", "S-015"]},
+      {"bearCaseId": "B-003", "title": "Del Monte may emerge leaner from Chapter 11", "sourceIds": ["S-003", "S-008", "S-014"]},
+      {"bearCaseId": "B-004", "title": "~90% private-label figure self-reported", "sourceIds": ["S-004", "S-012", "S-016"]},
+      {"bearCaseId": "B-005", "title": "Tinplate / steel cost inflation outruns price recovery", "sourceIds": ["S-001", "S-014", "S-017"]},
+      {"bearCaseId": "B-006", "title": "Climate / crop-yield variability", "sourceIds": ["S-001"]},
+      {"bearCaseId": "B-007", "title": "Dual-class blocks activist crystallization", "sourceIds": ["S-005"]},
+      {"bearCaseId": "B-008", "title": "Private-label margins structurally below branded", "sourceIds": ["S-014", "S-015"]},
+      {"bearCaseId": "B-009", "title": "Substitution to fresh / frozen", "sourceIds": ["S-012", "S-016"]},
+      {"bearCaseId": "B-010", "title": "After-tax LIFO add-back is smaller than gross", "sourceIds": ["S-001", "S-010"]}
+    ],
+    "blockingPrimaryChecks": ["P-001", "P-002", "P-003", "P-004", "P-005", "P-006", "P-007", "P-008", "P-009"],
+    "sourceIds": ["S-001", "S-003", "S-004", "S-005", "S-007", "S-008", "S-012", "S-013", "S-014", "S-015", "S-016", "S-017"],
+    "summaryConclusion": "Bull industry-structure narrative (Seneca + Lakeside duopoly with Del Monte exiting) is directionally credible at the source-pointer level but is graded 'unverified' or 'partially-verified' until P-001 through P-009 close. Bear case is high-conviction-qualitative; eight of ten items bind even under the strongest verified bull narrative.",
+    "summaryClassification": "mixed-bull-pointer-anchored-bear-binding"
+  },
+  "attributionSummary": {
+    "overallVerdict": "mixed-discount-with-multiple-non-fundamental-drivers-pending-quantification",
+    "buckets": [
+      {"bucket": "non-fundamental-supply-shock", "events": ["E-001"], "directionalSign": "negative", "magnitudeStatus": "evidence-pending", "blockingDataIds": ["S-018", "S-020"]},
+      {"bucket": "fundamental-repricing", "events": ["E-002", "E-003"], "directionalSign": "ambiguous (positive on buybacks)", "magnitudeStatus": "evidence-pending", "blockingDataIds": ["S-001", "S-005", "S-018"]},
+      {"bucket": "competitor-restructuring", "events": ["E-004", "E-005"], "directionalSign": "positive", "magnitudeStatus": "evidence-pending", "blockingDataIds": ["S-003", "S-008", "S-014", "S-018"]},
+      {"bucket": "commodity-input-cost-pressure", "events": ["E-006"], "directionalSign": "ambiguous", "magnitudeStatus": "evidence-pending", "blockingDataIds": ["S-001", "S-007", "S-017", "S-018"]},
+      {"bucket": "liquidity-and-coverage", "events": ["E-009", "E-011"], "directionalSign": "negative-structural", "magnitudeStatus": "evidence-pending", "blockingDataIds": ["S-006", "S-018"]},
+      {"bucket": "liquidity-and-factor", "events": ["E-007", "E-010"], "directionalSign": "negative-in-tightening-windows", "magnitudeStatus": "evidence-pending", "blockingDataIds": ["S-018", "S-019", "S-021"]},
+      {"bucket": "governance-discount", "events": ["E-008"], "directionalSign": "negative-structural", "magnitudeStatus": "evidence-pending", "blockingDataIds": ["S-005", "S-018"]}
+    ],
+    "masterDataDependency": {
+      "sourceId": "S-018",
+      "title": "SENEA Class A daily OHLCV from a consolidated tape vendor",
+      "blocks": ["E-001", "E-002", "E-003", "E-004", "E-005", "E-006", "E-007", "E-008", "E-009", "E-010", "E-011"],
+      "rationale": "All eleven event-window magnitudes are blocked on S-018; inventing returns in its absence would violate the upstream acceptance criterion."
+    },
+    "residualRiskIds": ["R-001", "R-002", "R-003", "R-004", "R-005", "R-006", "R-007", "R-008", "R-009", "R-010", "R-011"],
+    "sourceIds": ["S-001", "S-002", "S-003", "S-005", "S-006", "S-007", "S-008", "S-009", "S-014", "S-016", "S-017", "S-018", "S-019", "S-020", "S-021"],
+    "summaryConclusion": "The SENEA discount is best modeled as the sum of (a) a one-time index-deletion supply shock (E-001), (b) structural liquidity / coverage / governance discounts (E-008, E-009, E-011), (c) a beta-driven liquidity-and-factor drag through 2022-2024 with partial 2025 recovery (E-007, E-010), and (d) two competitor-restructuring positives that have not yet repriced (E-004, E-005). Fundamental repricing on FIFO earnings power (E-002, E-003) and the commodity / cost-recovery bridge (E-006) are methodologically defined but quantitatively pending.",
+    "summaryClassification": "directionally-mapped-magnitudes-pending-on-S-018"
+  },
+  "analogCandidates": [
+    {
+      "ticker": "HNFSA",
+      "company": "Hanover Foods Corporation",
+      "exchange": "OTC (dark / very thinly traded)",
+      "fitClass": "direct-industry-peer",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "Y", "M4": "Y", "M5": "Y", "M6": "~", "M7": "Y"},
+      "mechanismFitNote": "Closest industry analog: private-label canned vegetables / sauces, family-controlled dual-class, very thin float, LIFO accounting. Confirms the SENEA mechanism rather than diversifies it.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-004", "S-005", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "IMKTA",
+      "company": "Ingles Markets, Incorporated",
+      "exchange": "NASDAQ",
+      "fitClass": "lifo-family-control-asset-backed",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "Y", "M4": "~", "M5": "Y", "M6": "Y", "M7": "Y"},
+      "mechanismFitNote": "Dual-class family-controlled grocer with LIFO, owned-real-estate book, low coverage, multi-decade buyback history. Same mechanism class as SENEA across food retail.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-005", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "DDS",
+      "company": "Dillard's, Inc.",
+      "exchange": "NYSE",
+      "fitClass": "lifo-family-control-asset-backed",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "~", "M4": "N", "M5": "Y", "M6": "Y", "M7": "Y"},
+      "mechanismFitNote": "Family-controlled dual-class department store with LIFO, owned-real-estate base, structural buybacks of historic magnitude. Coverage exists but mechanism is extreme; included to size the M2/M5/M6 confluence.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-005"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "WMK",
+      "company": "Weis Markets, Inc.",
+      "exchange": "NYSE",
+      "fitClass": "lifo-family-control-asset-backed",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "Y", "M4": "~", "M5": "Y", "M6": "~", "M7": "Y"},
+      "mechanismFitNote": "Family-controlled grocer with LIFO, owned-real-estate book, undercovered. Buyback program smaller than DDS/IMKTA.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-005", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "JBSS",
+      "company": "John B. Sanfilippo & Son, Inc.",
+      "exchange": "NASDAQ",
+      "fitClass": "direct-industry-peer",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "Y", "M4": "N", "M5": "Y", "M6": "~", "M7": "Y"},
+      "mechanismFitNote": "Family-controlled (Class A super-voting) snack / nut processor; LIFO inventories; modest sell-side coverage; durable private-label-heavy customer base.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-005", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "LAS.A",
+      "company": "Lassonde Industries Inc.",
+      "exchange": "TSX",
+      "fitClass": "direct-industry-peer",
+      "mechanismScore": {"M1": "Y", "M2": "~", "M3": "Y", "M4": "N", "M5": "Y", "M6": "~", "M7": "Y"},
+      "mechanismFitNote": "Canadian family-controlled dual-class fruit-juice / private-label processor; asset-backed; under-covered ex-Canada. Mechanism analog without the U.S. LIFO tax effect.",
+      "linkedSeneaCriteriaSourceIds": ["S-005", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "BRID",
+      "company": "Bridgford Foods Corporation",
+      "exchange": "NASDAQ",
+      "fitClass": "direct-industry-peer",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "Y", "M4": "Y", "M5": "Y", "M6": "N", "M7": "Y"},
+      "mechanismFitNote": "Family-controlled snack / frozen-dough manufacturer; LIFO; very thinly traded; small-cap-index-vulnerable.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-005", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "TR",
+      "company": "Tootsie Roll Industries, Inc.",
+      "exchange": "NYSE",
+      "fitClass": "direct-industry-peer-mechanism-reference",
+      "mechanismScore": {"M1": "Y", "M2": "~", "M3": "Y", "M4": "N", "M5": "Y", "M6": "Y", "M7": "Y"},
+      "mechanismFitNote": "Founding-family dual-class (super-voting) confectionery; durable niche; conservative balance sheet; persistent buybacks. Tends to trade at a premium not a discount; included as a mechanism reference, not a value comparable.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-005"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "CALM",
+      "company": "Cal-Maine Foods, Inc.",
+      "exchange": "NASDAQ",
+      "fitClass": "direct-industry-peer",
+      "mechanismScore": {"M1": "Y", "M2": "N", "M3": "~", "M4": "N", "M5": "Y", "M6": "N", "M7": "Y"},
+      "mechanismFitNote": "Founding-family dual-class egg producer; asset-backed agricultural niche; mechanism partial (no LIFO inventory cushion of canning scale; dividend-led capital return rather than buyback-led).",
+      "linkedSeneaCriteriaSourceIds": ["S-005"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "MUEL",
+      "company": "Paul Mueller Company",
+      "exchange": "OTC (dark-stock-like; SEC-reporting)",
+      "fitClass": "lifo-family-control-asset-backed",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "Y", "M4": "Y", "M5": "Y", "M6": "~", "M7": "Y"},
+      "mechanismFitNote": "Family-controlled stainless-steel processing-equipment manufacturer; LIFO; very thin float; SEC-reporting but dark-stock-like. Strong M1/M2/M3/M4/M5 overlap with SENEA.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-005", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "FRD",
+      "company": "Friedman Industries, Incorporated",
+      "exchange": "NYSE American",
+      "fitClass": "lifo-small-cap-asset-backed",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "Y", "M4": "Y", "M5": "~", "M6": "Y", "M7": "Y"},
+      "mechanismFitNote": "Steel-coil processor; LIFO; small-cap-index-vulnerable; asset-backed. Insider ownership material but not strict family-control.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    },
+    {
+      "ticker": "ZEUS",
+      "company": "Olympic Steel, Inc.",
+      "exchange": "NASDAQ",
+      "fitClass": "lifo-small-cap-asset-backed",
+      "mechanismScore": {"M1": "Y", "M2": "Y", "M3": "Y", "M4": "N", "M5": "~", "M6": "Y", "M7": "Y"},
+      "mechanismFitNote": "Steel service center with LIFO; insider ownership material; durable mid-stream niche; periodic buyback.",
+      "linkedSeneaCriteriaSourceIds": ["S-001", "S-006"],
+      "verificationStatus": "unresolved-needs-primary-source-verification",
+      "verificationItems": ["U-001"]
+    }
+  ],
+  "analogScreenMethodology": {
+    "criteria": [
+      {"code": "M1", "name": "Asset-backed", "seneaLinkClaimIds": ["C-001", "C-002"], "seneaLinkSourceIds": ["S-001"]},
+      {"code": "M2", "name": "Accounting-hidden value (LIFO-like)", "seneaLinkClaimIds": ["C-003"], "seneaLinkSourceIds": ["S-001"]},
+      {"code": "M3", "name": "Undercovered small-cap", "seneaLinkClaimIds": ["C-009"], "seneaLinkSourceIds": ["S-006"]},
+      {"code": "M4", "name": "Forced selling / index-deletion exposure", "seneaLinkClaimIds": ["C-007"], "seneaLinkSourceIds": ["S-002"]},
+      {"code": "M5", "name": "Insider / family control", "seneaLinkClaimIds": ["C-010"], "seneaLinkSourceIds": ["S-001", "S-005"]},
+      {"code": "M6", "name": "Buyback support", "seneaLinkClaimIds": ["C-008"], "seneaLinkSourceIds": ["S-001", "S-005"]},
+      {"code": "M7", "name": "Boring durable niche", "seneaLinkClaimIds": ["C-005"], "seneaLinkSourceIds": ["S-001", "S-004", "S-016"]}
+    ],
+    "scoringConvention": "Y = mechanism present at the descriptive level; ~ = partial / smaller in magnitude; N = mechanism not present. All scores are descriptive priors and require primary-source verification per ticker.",
+    "verificationProtocol": "Mirror SENEA workflow per ticker: 10-K balance sheet for M1/M2, proxy for M5, IR coverage page for M3, ETF/index membership for M4, Item 5 buyback table for M6, Item 1 'Business' for M7.",
+    "csvCompanion": "research/senea/analog-screen.csv"
+  },
+  "finalVerdict": {
+    "classification": "unresolved-with-positive-mechanism-bias",
+    "summary": "The SENEA opportunity is mechanism-rich and evidence-incomplete. The bull thesis is structurally coherent but quantitatively unproven in this diligence pass: the only numerically anchored data point is the FY2025 LIFO reserve of $359.3m (S-001, claim C-003). Of eleven upstream claims, zero are verified, five are partial (C-003, C-006, C-007, C-009, C-010), and six are unresolved (C-001, C-002, C-004, C-005, C-008, C-011). No claim has been refuted. The bear case binds at multiple points (B-001, B-002, B-003, B-005, B-007, B-010) regardless of how the bull narrative resolves.",
+    "priceTarget": null,
+    "priceTargetReason": "A price target is intentionally not produced. The two valuation bridges that would produce one (tangibleBookBridge and ncavBridge in financial-rebuild.json) are blocked on F-002 (effective tax rate) and F-003 (balance-sheet line items). Inventing a number would violate the 'classify as unresolved if evidence is missing' acceptance criterion.",
+    "biggestUnblockingDependency": {
+      "sourceId": "S-001",
+      "title": "Seneca FY2025 10-K (LIFO note, Income Taxes note, balance sheet, Item 5 buybacks)",
+      "resolves": ["F-001", "F-002", "F-003", "F-004", "F-007"],
+      "claimsUnblocked": ["C-001", "C-002", "C-003", "C-008", "C-010", "C-011"]
+    },
+    "secondaryUnblockingDependencies": [
+      {"sourceId": "S-018", "title": "SENEA Class A daily OHLCV", "resolves": ["R-009", "R-010", "R-011"], "claimsUnblocked": ["C-007", "C-009"]},
+      {"sourceId": "S-009", "title": "SENEA Class A reference price snapshot", "resolves": ["F-006"], "claimsUnblocked": ["C-001", "C-002"]},
+      {"sourceId": "S-005", "title": "Seneca FY2025 DEF 14A", "resolves": ["P-009", "Q-006", "F-004"], "claimsUnblocked": ["C-008", "C-010"]}
+    ],
+    "decisionRecommendation": "Do not size a position from this artifact alone. Run the closing pulls (S-001, S-005, S-009, S-018) and rebuild the four valuation bridges before any decision-relevant use. Use the analog screen as a watchlist for the same mechanism profile, not as an alternative to verifying SENEA itself.",
+    "researchDisclaimer": "This is a research report. Not investment advice."
+  },
+  "unresolvedDiligenceItems": [
+    {"id": "Q-001", "source": "claims-source-pack.json", "description": "Identify the specific competitor named alongside Lakeside in the ~90% private-label statement.", "blocks": ["C-005", "IC-001", "IC-002", "B-004"], "sourceIds": ["S-004"]},
+    {"id": "Q-002", "source": "claims-source-pack.json", "description": "Determine whether the FY2025 10-K discloses a maintenance-capex figure or proxy.", "blocks": ["C-003", "C-011", "IC-008"], "sourceIds": ["S-001"]},
+    {"id": "Q-003", "source": "claims-source-pack.json", "description": "Confirm precise effective date of the July 2023 S&P SmallCap 600 deletion and identify rebalancing index ETFs.", "blocks": ["C-007", "E-001"], "sourceIds": ["S-002", "S-020"]},
+    {"id": "Q-004", "source": "claims-source-pack.json", "description": "Confirm Del Monte US Chapter 11 filing entity (Inc. vs Holdings) and posture (reorganization vs 363 vs liquidation).", "blocks": ["C-006", "IC-007", "B-003", "E-005"], "sourceIds": ["S-008", "S-014"]},
+    {"id": "Q-005", "source": "claims-source-pack.json", "description": "Determine whether management's FIFO-adjusted earnings / EBITDA are reconciled in the FY2025 10-K itself or only in supplemental investor materials.", "blocks": ["C-003"], "sourceIds": ["S-001"]},
+    {"id": "Q-006", "source": "claims-source-pack.json", "description": "Quantify combined Class A + Class B voting power held by founding family / insiders per FY2025 DEF 14A.", "blocks": ["C-010", "B-007", "E-008"], "sourceIds": ["S-005"]},
+    {"id": "F-001", "source": "financial-rebuild.json", "description": "Retrieve FY2024 LIFO reserve to compute the FY2025 LIFO charge.", "blocks": ["C-003"], "sourceIds": ["S-001"]},
+    {"id": "F-002", "source": "financial-rebuild.json", "description": "Retrieve FY2025 effective tax rate from the Income Taxes note.", "blocks": ["C-001", "C-002", "C-003", "C-004"], "sourceIds": ["S-001", "S-010"]},
+    {"id": "F-003", "source": "financial-rebuild.json", "description": "Retrieve FY2025 consolidated balance sheet (equity, goodwill, intangibles, current assets, total liabilities, debt, cash).", "blocks": ["C-001", "C-002"], "sourceIds": ["S-001"]},
+    {"id": "F-004", "source": "financial-rebuild.json", "description": "Retrieve FY2025 Item 5 monthly repurchase table and FY2025 DEF 14A buyback authorization disclosures.", "blocks": ["C-008"], "sourceIds": ["S-001", "S-005"]},
+    {"id": "F-005", "source": "financial-rebuild.json", "description": "Retrieve FY2005-FY2024 10-K filings for the 20-year per-share compounding rebuild.", "blocks": ["C-004"], "sourceIds": ["S-007"]},
+    {"id": "F-006", "source": "financial-rebuild.json", "description": "Capture an archived SENEA Class A closing price at or near 2026-04-30.", "blocks": ["C-001", "C-002"], "sourceIds": ["S-009"]},
+    {"id": "F-007", "source": "financial-rebuild.json", "description": "Confirm cover-page share counts on the FY2025 10-K and most recent 10-Q.", "blocks": ["C-001", "C-002", "C-003", "C-004", "C-008"], "sourceIds": ["S-011"]},
+    {"id": "F-008", "source": "financial-rebuild.json", "description": "Confirm whether maintenance-capex disclosure exists or must be PP&E-roll-forward-derived.", "blocks": ["C-003", "C-011"], "sourceIds": ["S-001"]},
+    {"id": "P-001", "source": "industry-bear-case.json", "description": "Quote Item 1 of Seneca FY2025 10-K on competitive position.", "blocks": ["IC-001"], "sourceIds": ["S-001"]},
+    {"id": "P-002", "source": "industry-bear-case.json", "description": "Archive Lakeside ~90% statement verbatim with date and venue; triangulate against Circana / NielsenIQ and Census ASM.", "blocks": ["IC-001", "IC-002", "IC-005", "Q-001"], "sourceIds": ["S-004", "S-012", "S-016"]},
+    {"id": "P-003", "source": "industry-bear-case.json", "description": "Catalog Hanover, Faribault, Furmano's, Truitt, Allens / Sager Creek with corporate-website and trade-press references.", "blocks": ["IC-004"], "sourceIds": ["S-013", "S-014"]},
+    {"id": "P-004", "source": "industry-bear-case.json", "description": "Pull Del Monte US Chapter 11 PACER docket; confirm filing entity, filing date, and posture.", "blocks": ["IC-006", "IC-007", "B-003", "Q-004"], "sourceIds": ["S-008", "S-014"]},
+    {"id": "P-005", "source": "industry-bear-case.json", "description": "Quote Del Monte Pacific FY2025 annual report deconsolidation paragraphs.", "blocks": ["IC-006"], "sourceIds": ["S-003"]},
+    {"id": "P-006", "source": "industry-bear-case.json", "description": "FY2018-FY2025 revenue / gross-margin bridge against tinplate / steel / freight indices.", "blocks": ["IC-008", "B-005", "C-011"], "sourceIds": ["S-001", "S-007", "S-017"]},
+    {"id": "P-007", "source": "industry-bear-case.json", "description": "Retrieve and quote USDA ERS, Census ASM, and Circana / NielsenIQ canned-vegetable category trend.", "blocks": ["IC-010", "B-001", "B-009"], "sourceIds": ["S-012", "S-016"]},
+    {"id": "P-008", "source": "industry-bear-case.json", "description": "Quote Item 1 / Item 1A of Seneca FY2025 10-K on customer concentration.", "blocks": ["IC-009", "IC-005", "B-002"], "sourceIds": ["S-001", "S-015"]},
+    {"id": "P-009", "source": "industry-bear-case.json", "description": "Confirm combined Class A / Class B voting power per FY2025 DEF 14A.", "blocks": ["B-007", "Q-006"], "sourceIds": ["S-005"]},
+    {"id": "R-001", "source": "attribution-report.json", "description": "Effective deletion date for E-001 (carry-forward of Q-003).", "blocks": ["E-001"], "sourceIds": ["S-002", "S-020"]},
+    {"id": "R-002", "source": "attribution-report.json", "description": "Per-release reported financials and FY2024 LIFO reserve (carry-forward of F-001, F-003).", "blocks": ["E-002", "E-006"], "sourceIds": ["S-001", "S-007"]},
+    {"id": "R-003", "source": "attribution-report.json", "description": "FY2025 effective tax rate (carry-forward of F-002).", "blocks": ["E-002"], "sourceIds": ["S-001", "S-010"]},
+    {"id": "R-004", "source": "attribution-report.json", "description": "Buyback authorization and execution dates (carry-forward of F-004).", "blocks": ["E-003"], "sourceIds": ["S-001", "S-005"]},
+    {"id": "R-005", "source": "attribution-report.json", "description": "Del Monte US Chapter 11 filing entity and posture (carry-forward of Q-004).", "blocks": ["E-005"], "sourceIds": ["S-008", "S-014"]},
+    {"id": "R-006", "source": "attribution-report.json", "description": "Quoted Del Monte Pacific deconsolidation paragraphs (carry-forward of P-005).", "blocks": ["E-004"], "sourceIds": ["S-003"]},
+    {"id": "R-007", "source": "attribution-report.json", "description": "Combined family / insider voting power (carry-forward of Q-006, P-009).", "blocks": ["E-008"], "sourceIds": ["S-005"]},
+    {"id": "R-008", "source": "attribution-report.json", "description": "FY2018-FY2025 revenue / gross-margin bridge (carry-forward of P-006).", "blocks": ["E-006"], "sourceIds": ["S-001", "S-007", "S-017"]},
+    {"id": "R-009", "source": "attribution-report.json", "description": "S-018 (SENEA Class A daily OHLCV) is the master event-window dependency.", "blocks": ["E-001", "E-002", "E-003", "E-004", "E-005", "E-006", "E-007", "E-008", "E-009", "E-010", "E-011"], "sourceIds": ["S-018"]},
+    {"id": "R-010", "source": "attribution-report.json", "description": "Joint Fama-French regression to avoid double-counting between E-007 and E-010.", "blocks": ["E-007", "E-010"], "sourceIds": ["S-018", "S-019", "S-021"]},
+    {"id": "R-011", "source": "attribution-report.json", "description": "13F-aggregate ownership concentration pre-/post-July-2023 to separate E-001 from E-011.", "blocks": ["E-001", "E-011"], "sourceIds": ["S-018", "S-020"]},
+    {"id": "U-001", "source": "final-investment-report.json", "description": "Per-ticker primary-source verification for every analog candidate in analog-screen.csv. Mirror SENEA workflow: 10-K balance sheet, proxy, IR coverage, ETF/index membership, Item 5 buyback table, Item 1 'Business'.", "blocks": ["analogCandidates.*"], "sourceIds": []},
+    {"id": "U-002", "source": "final-investment-report.json", "description": "A SENEA price target is intentionally not produced. Compute downstream once F-002 and F-003 close, using tangibleBookBridge and ncavBridge from financial-rebuild.json.", "blocks": ["finalVerdict.priceTarget"], "sourceIds": ["S-001", "S-009", "S-010", "S-011"]},
+    {"id": "U-003", "source": "final-investment-report.json", "description": "Formal Fama-French / liquidity-factor variance decomposition of the SENEA discount intentionally not produced because S-018, S-019, S-021 not retrieved.", "blocks": ["attributionSummary.buckets"], "sourceIds": ["S-018", "S-019", "S-021"]}
+  ]
+}
