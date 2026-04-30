@@ -1,0 +1,40 @@
+{
+  "artifactStatus": "thin-real",
+  "calculated": {
+    "adjustedEquityAfterTax": 902823000.0,
+    "adjustedEquityPreTax": 992323000.0,
+    "adjustedTangibleBookAfterTax": 902823000.0,
+    "adjustedTangibleBookPreTax": 992323000.0,
+    "ncavFifoAfterTax": 477048000.0,
+    "ncavFifoPreTax": 566548000.0
+  },
+  "factsUrl": "https://data.sec.gov/api/xbrl/companyfacts/CIK0000088948.json",
+  "filingUrl": "https://www.sec.gov/Archives/edgar/data/88948/000143774925020197/senea20250331_10k.htm",
+  "fiscalYear": 2025,
+  "lifoFifoAdjustments": {
+    "adjustedEarningsBeforeTax": 88957000,
+    "adjustedNetEarnings": 67114000,
+    "deferredTaxOnLifoReserve": 89500000.0,
+    "fifoEbitda": 171432000,
+    "fifoInventory": 963255000.0,
+    "lifoCharge": 34474000,
+    "lifoReserve": 359300000.0,
+    "taxRatePct": 24.9
+  },
+  "reported": {
+    "assetsCurrent": 755654000,
+    "earningsBeforeTax": 54483000,
+    "ebitda": 136958000,
+    "goodwill": 0,
+    "intangibles": 0,
+    "inventory": 603955000,
+    "liabilitiesCurrent": 214558000,
+    "liabilitiesTotal": 548406000,
+    "ncav": 207248000,
+    "stockholdersEquity": 633023000,
+    "tangibleBookValue": 633023000
+  },
+  "taskId": "rebuild-seneca-latest-financials",
+  "ticker": "SENEA",
+  "units": "USD unless otherwise noted"
+}
