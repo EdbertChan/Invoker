@@ -65,6 +65,31 @@ if ! grep -q "api.*repos.*pulls.*POST" "$GHLOG"; then
 fi
 echo "==> case 4.2: confirmed gh PR creation API was called"
 
+# PR-body parity: prove the request body sent through the external_review
+# path was authored via the canonical schema (## Summary / ## Test Plan /
+# ## Revert Plan), not the raw merge summary. The gh stub records the
+# decoded `-f body=...` field for any pulls POST/PATCH. If external_review
+# regresses to publishing the raw workflow summary, the body will only
+# carry `## Summary` and these assertions will fail.
+PR_BODY_FILE="$INVOKER_E2E_MARKER_ROOT/gh-pr-body.txt"
+if [ ! -f "$PR_BODY_FILE" ]; then
+  echo "FAIL case 4.2: gh stub did not record a PR body at $PR_BODY_FILE"
+  echo "--- gh-calls.log ---"
+  cat "$GHLOG"
+  exit 1
+fi
+
+for HEADING in "## Summary" "## Test Plan" "## Revert Plan"; do
+  if ! grep -qF "$HEADING" "$PR_BODY_FILE"; then
+    echo "FAIL case 4.2: PR body sent through external_review missing canonical section '$HEADING'"
+    echo "--- recorded PR body ($PR_BODY_FILE) ---"
+    cat "$PR_BODY_FILE"
+    echo "--- end body ---"
+    exit 1
+  fi
+done
+echo "==> case 4.2: confirmed canonical PR body sections (## Summary, ## Test Plan, ## Revert Plan)"
+
 echo "==> case 4.2: approve merge gate"
 invoker_e2e_run_headless approve "$MERGE_ID"
 
