@@ -4,7 +4,7 @@ import { LocalBus } from '@invoker/transport';
 import { SharedMutationOwnerTimeoutError, runHeadlessClientCommand } from '../headless-client.js';
 
 describe('headless-client', () => {
-  it('delegates mutating commands to an existing standalone owner without electron fallback', async () => {
+  it('delegates mutating commands to a standalone-capable owner endpoint', async () => {
     const bus = new LocalBus();
     const ownerHandler = vi.fn(async () => ({ ok: true }));
     bus.onRequest('headless.exec', ownerHandler);
@@ -29,7 +29,7 @@ describe('headless-client', () => {
     expect(runElectronHeadless).not.toHaveBeenCalled();
   });
 
-  it('delegates mutating commands to an existing GUI owner without bootstrapping standalone', async () => {
+  it('delegates mutating commands to a reachable non-standalone-capable owner endpoint', async () => {
     const bus = new LocalBus();
     const guiOwnerHandler = vi.fn(async () => ({ ok: true }));
 
@@ -46,7 +46,7 @@ describe('headless-client', () => {
     expect(guiOwnerHandler).toHaveBeenCalledTimes(1);
   });
 
-  it('uses a longer no-track delegation timeout for an already-running standalone owner under load', async () => {
+  it('uses a longer no-track delegation timeout for an already-running standalone-capable owner under load', async () => {
     const bus = new LocalBus();
     bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
     bus.onRequest('headless.exec', async () => {
@@ -63,7 +63,45 @@ describe('headless-client', () => {
     expect(exitCode).toBe(0);
   }, 15_000);
 
-  it('bootstraps a standalone owner once when no owner is present, then delegates', async () => {
+  // --- Regression: owner endpoint scope for headless.run ---
+
+  it('delegates headless.run to a standalone-capable owner endpoint', async () => {
+    const bus = new LocalBus();
+    const runHandler = vi.fn(async () => ({ ok: true }));
+    bus.onRequest('headless.run', runHandler);
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
+
+    const exitCode = await runHeadlessClientCommand(['run', '/tmp/plan.yaml', '--no-track'], {
+      messageBus: bus,
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      runElectronHeadless: vi.fn(async () => 0),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(runHandler).toHaveBeenCalledTimes(1);
+    expect(runHandler).toHaveBeenCalledWith(expect.objectContaining({ planPath: expect.stringContaining('plan.yaml') }));
+  });
+
+  // --- Regression: owner endpoint scope for headless.resume ---
+
+  it('delegates headless.resume to a standalone-capable owner endpoint', async () => {
+    const bus = new LocalBus();
+    const resumeHandler = vi.fn(async () => ({ ok: true }));
+    bus.onRequest('headless.resume', resumeHandler);
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
+
+    const exitCode = await runHeadlessClientCommand(['resume', 'wf-42', '--no-track'], {
+      messageBus: bus,
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      runElectronHeadless: vi.fn(async () => 0),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(resumeHandler).toHaveBeenCalledTimes(1);
+    expect(resumeHandler).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-42' }));
+  });
+
+  it('bootstraps when no owner endpoint is available, then delegates', async () => {
     const bus = new LocalBus();
     const ownerHandler = vi.fn(async () => ({ ok: true }));
     const ensureStandaloneOwner = vi.fn(async () => {
@@ -290,7 +328,7 @@ describe('headless-client', () => {
     expect(refreshMessageBus).toHaveBeenCalled();
   }, 15_000);
 
-  it('uses the current GUI owner directly without refreshing or bootstrapping standalone', async () => {
+  it('uses the current reachable owner endpoint directly without refreshing or bootstrapping', async () => {
     const firstBus = new LocalBus();
     let firstExecCalls = 0;
 
@@ -316,7 +354,7 @@ describe('headless-client', () => {
     expect(firstExecCalls).toBe(1);
   }, 15_000);
 
-  it('falls back to the electron runtime for non-mutating commands', async () => {
+  it('falls back to the host runtime for non-mutating commands', async () => {
     const runElectronHeadless = vi.fn(async () => 0);
     const exitCode = await runHeadlessClientCommand(['query', 'workflows'], {
       messageBus: new LocalBus(),
@@ -328,7 +366,7 @@ describe('headless-client', () => {
     expect(runElectronHeadless).toHaveBeenCalledWith(['query', 'workflows']);
   });
 
-  it('delegates query ui-perf to an existing owner without electron fallback', async () => {
+  it('delegates query ui-perf to a reachable owner endpoint', async () => {
     const bus = new LocalBus();
     bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'gui' }));
     bus.onRequest('headless.query', async () => ({
@@ -351,7 +389,7 @@ describe('headless-client', () => {
     stdout.mockRestore();
   });
 
-  it('does not silently fall back for query ui-perf when no owner is present', async () => {
+  it('does not silently fall back for query ui-perf when no owner endpoint is reachable', async () => {
     await expect(
       runHeadlessClientCommand(['query', 'ui-perf', '--output', 'json'], {
         messageBus: new LocalBus(),
@@ -361,7 +399,7 @@ describe('headless-client', () => {
     ).rejects.toThrow(/requires a running shared owner process/);
   }, 30_000);
 
-  it('delegates query queue to an existing owner without electron fallback', async () => {
+  it('delegates query queue to a reachable owner endpoint', async () => {
     const bus = new LocalBus();
     bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'gui' }));
     bus.onRequest('headless.query', async () => ({
