@@ -22,6 +22,22 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { stringify as yamlStringify } from 'yaml';
 
+/** Plan for queue-semantics visual proof: enough tasks to fill Action Queue and Backlog. */
+const QUEUE_SEMANTICS_PLAN = {
+  name: 'Queue Semantics Visual Proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    { id: 'qs-running', description: 'Running task (executing)', command: 'echo run', dependencies: [] },
+    { id: 'qs-fixing', description: 'Fixing with AI task', command: 'echo fix', dependencies: [] },
+    { id: 'qs-needs-input', description: 'Needs human input', command: 'echo input', dependencies: [] },
+    { id: 'qs-review', description: 'Review ready task', command: 'echo review', dependencies: [] },
+    { id: 'qs-approval', description: 'Awaiting approval task', command: 'echo approve', dependencies: [] },
+    { id: 'qs-queued', description: 'Queued pending task', command: 'echo queued', dependencies: [] },
+    { id: 'qs-blocked', description: 'Blocked by running task', command: 'echo blocked', dependencies: ['qs-running'] },
+  ],
+};
+
 /** Multi-task DAG for verifying deterministic layout ordering. */
 const DAG_DETERMINISM_PLAN = {
   name: 'DAG determinism test',
@@ -33,6 +49,18 @@ const DAG_DETERMINISM_PLAN = {
     { id: 'task-c', description: 'Task C (depends on A)', command: 'echo c', dependencies: ['task-a'] },
     { id: 'task-d', description: 'Task D (depends on A, B)', command: 'echo d', dependencies: ['task-a', 'task-b'] },
     { id: 'task-e', description: 'Task E (depends on C, D)', command: 'echo e', dependencies: ['task-c', 'task-d'] },
+  ],
+};
+
+/** Plan for queue-relationships visual proof: one actionable task with upstream deps and downstream dependents. */
+const QUEUE_RELATIONSHIPS_PLAN = {
+  name: 'Queue Relationships Visual Proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    { id: 'qr-upstream', description: 'Upstream dependency (completed)', command: 'echo upstream', dependencies: [] },
+    { id: 'qr-middle', description: 'Actionable task with relationships', command: 'echo middle', dependencies: ['qr-upstream'] },
+    { id: 'qr-downstream', description: 'Downstream dependent (blocked)', command: 'echo downstream', dependencies: ['qr-middle'] },
   ],
 };
 
@@ -49,6 +77,20 @@ const MERGE_GATE_TEXT_VISUAL_PLAN = {
       command: 'echo ok',
       dependencies: [] as string[],
     },
+  ],
+};
+
+/** Plan for queue-action-surface hardening: combines canonical states, dependency relationships, and destructive actions. */
+const QUEUE_HARDENING_PLAN = {
+  name: 'Queue Hardening Visual Proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    { id: 'qh-running', description: 'Running task with downstream', command: 'echo run', dependencies: [] },
+    { id: 'qh-fixing', description: 'AI fix in progress', command: 'echo fix', dependencies: [] },
+    { id: 'qh-approval', description: 'Awaiting approval task', command: 'echo approve', dependencies: [] },
+    { id: 'qh-queued', description: 'Queued pending task', command: 'echo queued', dependencies: [] },
+    { id: 'qh-downstream', description: 'Blocked by running task', command: 'echo downstream', dependencies: ['qh-running'] },
   ],
 };
 
@@ -499,9 +541,81 @@ test.describe('Visual proof capture', () => {
     await page.getByRole('button', { name: 'Queue' }).click();
     await expect(page.getByText('Running 1 / 3')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Action Queue (1)' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Backlog (Pending/Blocked, not in queue) (3)' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Backlog (3)' })).toBeVisible();
     await captureScreenshot(page, 'queue-view-concurrency');
     await assertPageScreenshot(page, 'queue-view-concurrency');
+  });
+
+  test('queue-semantics — action queue with canonical task states', async ({ page }) => {
+    await loadPlan(page, QUEUE_SEMANTICS_PLAN);
+    const now = new Date();
+    await injectTaskStates(page, [
+      { taskId: 'qs-running', changes: { status: 'running', execution: { startedAt: now } } },
+      { taskId: 'qs-fixing', changes: { status: 'running', execution: { isFixingWithAI: true, startedAt: now } } },
+      { taskId: 'qs-needs-input', changes: { status: 'needs_input', execution: { startedAt: now } } },
+      { taskId: 'qs-review', changes: { status: 'review_ready', execution: { startedAt: now } } },
+      { taskId: 'qs-approval', changes: { status: 'awaiting_approval', execution: { startedAt: now } } },
+      // qs-queued stays pending with no deps → lands in Action Queue queued section
+      // qs-blocked stays pending with unmet dep on qs-running → lands in Backlog
+    ]);
+
+    // Navigate to queue view
+    await page.getByRole('button', { name: 'Queue' }).click();
+
+    // Assert queue section headings are visible
+    await expect(page.getByRole('heading', { name: /Action Queue/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Backlog/ })).toBeVisible();
+
+    // Assert at least one canonical task-state label rendered in the action queue rows
+    await expect(page.locator('text=running').first()).toBeVisible();
+
+    await captureScreenshot(page, 'queue-semantics-action-states');
+    await assertPageScreenshot(page, 'queue-semantics-action-states');
+  });
+
+  test('queue-relationships — expanded row context with upstream and downstream', async ({ page }) => {
+    await loadPlan(page, QUEUE_RELATIONSHIPS_PLAN);
+    const now = new Date();
+    const earlier = new Date(Date.now() - 5000);
+    await injectTaskStates(page, [
+      // Upstream task completed — satisfies qr-middle's dependency
+      {
+        taskId: 'qr-upstream',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: earlier, completedAt: now },
+        },
+      },
+      // Middle task running — actionable, appears in Action Queue
+      {
+        taskId: 'qr-middle',
+        changes: {
+          status: 'running',
+          execution: { startedAt: now },
+        },
+      },
+      // qr-downstream stays pending with unmet dep on qr-middle → lands in Backlog
+    ]);
+
+    // Navigate to queue view
+    await page.getByRole('button', { name: 'Queue' }).click();
+
+    // Assert queue sections are visible
+    await expect(page.getByRole('heading', { name: /Action Queue/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Backlog/ })).toBeVisible();
+
+    // Assert downstream dependent is rendered in Backlog with its dep reference
+    await expect(page.getByText('deps: qr-middle')).toBeVisible();
+
+    // Click the middle task row to expand its relationship context in the task panel
+    await page.locator('[data-row-id$="/qr-middle"]').click();
+
+    // Assert the expanded relationship headings are visible in the task panel
+    await expect(page.getByRole('heading', { name: 'Actionable task with relationships' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Dependencies' })).toBeVisible();
+
+    await captureScreenshot(page, 'queue-relationships-expanded-context');
+    await assertPageScreenshot(page, 'queue-relationships-expanded-context');
   });
 
   test('gate-policy-side-panel — blocked task with satisfied and offender gates', async ({ page }) => {
@@ -628,5 +742,77 @@ test.describe('Visual proof capture', () => {
 
     // Capture second screenshot in edit mode
     await captureScreenshot(page, 'redesign-gate-policy-ui-edit-mode');
+  });
+
+  test('terminate-wording — task-level uses Terminate, workflow-level keeps Cancel', async ({ page }) => {
+    await loadPlan(page, TEST_PLAN);
+    const now = new Date();
+    await injectTaskStates(page, [
+      { taskId: 'task-alpha', changes: { status: 'running', execution: { startedAt: now } } },
+    ]);
+
+    // Switch to queue view to verify "Terminate" button text on task rows
+    await page.getByRole('button', { name: 'Queue' }).click();
+    await expect(page.getByRole('heading', { name: /Action Queue/ })).toBeVisible();
+    const terminateButton = page
+      .locator('[data-row-id$="/task-alpha"]')
+      .getByRole('button', { name: 'Terminate' });
+    await expect(terminateButton).toBeVisible();
+
+    // Switch back to DAG view and right-click the running task for context menu
+    await page.getByRole('button', { name: 'DAG' }).click();
+    await page.locator('.react-flow__node[data-testid$="task-alpha"]').click({ button: 'right' });
+    const menu = page.getByRole('menu');
+    await expect(menu).toBeVisible();
+
+    // Expand the More section to reveal Danger items
+    await page.getByRole('menuitem', { name: 'More' }).click();
+    await expect(menu.getByText('Danger', { exact: true })).toBeVisible();
+
+    // Assert task-level action uses "Terminate Task"
+    await expect(page.getByRole('menuitem', { name: 'Terminate Task' })).toBeVisible();
+
+    // Assert workflow-level action keeps "Cancel Workflow" (not converted)
+    await expect(page.getByRole('menuitem', { name: 'Cancel Workflow' })).toBeVisible();
+
+    await captureScreenshot(page, 'terminate-wording-task-vs-workflow');
+    await assertPageScreenshot(page, 'terminate-wording-task-vs-workflow');
+  });
+
+  test('queue-action-surface-hardening — composed queue UX with labels, relationships, and terminate', async ({ page }) => {
+    await loadPlan(page, QUEUE_HARDENING_PLAN);
+    const now = new Date();
+    await injectTaskStates(page, [
+      { taskId: 'qh-running', changes: { status: 'running', execution: { startedAt: now } } },
+      { taskId: 'qh-fixing', changes: { status: 'running', execution: { isFixingWithAI: true, startedAt: now } } },
+      { taskId: 'qh-approval', changes: { status: 'awaiting_approval', execution: { startedAt: now } } },
+      // qh-queued stays pending with no deps → Action Queue queued section
+      // qh-downstream stays pending with unmet dep on qh-running → Backlog
+    ]);
+
+    // Navigate to queue view
+    await page.getByRole('button', { name: 'Queue' }).click();
+
+    // Assert canonical Action Queue and Backlog headings
+    await expect(page.getByRole('heading', { name: /Action Queue/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Backlog/ })).toBeVisible();
+
+    // Assert canonical action queue labels are present
+    await expect(page.locator('text=running').first()).toBeVisible();
+
+    // Assert task-level Terminate wording on running task row
+    const terminateButton = page.getByRole('button', { name: 'Terminate' }).first();
+    await expect(terminateButton).toBeVisible();
+
+    // Assert downstream dependent shows its dependency in Backlog
+    await expect(page.getByText('deps: qh-running')).toBeVisible();
+
+    // Expand relationship section: click the running task row to open task panel
+    await page.locator('[data-row-id$="/qh-running"]').click();
+    await expect(page.getByRole('heading', { name: 'Running task with downstream' })).toBeVisible();
+    await expect(page.getByText('echo run')).toBeVisible();
+
+    await captureScreenshot(page, 'queue-action-surface-hardening');
+    await assertPageScreenshot(page, 'queue-action-surface-hardening');
   });
 });
