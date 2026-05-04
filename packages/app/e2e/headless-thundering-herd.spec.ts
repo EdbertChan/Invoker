@@ -60,8 +60,10 @@ test.describe('Headless thundering herd', () => {
     await startPlan(page);
     await page.locator('.react-flow__node[data-testid$="task-alpha"]').waitFor({ state: 'visible', timeout: 10000 });
 
-    // Discover the active workflow through the owner's IPC bridge (listWorkflows),
-    // not by reaching into task internals or opening the DB directly.
+    // Discover the active workflow through the renderer bridge API
+    // (listWorkflows) rather than reaching into task config internals.
+    // This is the owner-boundary-compliant discovery path — the renderer
+    // exposes it via IPC without crossing into persistence directly.
     const workflows = await page.evaluate(() => window.invoker.listWorkflows());
     expect(workflows.length).toBeGreaterThan(0);
     const currentWorkflowId = workflows[0].id as string;
@@ -83,7 +85,7 @@ test.describe('Headless thundering herd', () => {
     await writeFile(planPath, yamlStringify(herdPlan), 'utf8');
 
     const workflowIds = new Set<string>();
-    if (currentWorkflowId) workflowIds.add(currentWorkflowId);
+    workflowIds.add(currentWorkflowId);
     for (let i = 0; i < 8; i += 1) {
       const result = await runHeadlessClient(testDir, ['run', planPath, '--no-track']);
       // Use the workflow id echoed by this exact submission. Querying shared
@@ -95,25 +97,21 @@ test.describe('Headless thundering herd', () => {
 
     await page.waitForTimeout(500);
 
-    // Burst-retry all workflows through the owner's IPC bridge to stress-test
-    // UI responsiveness without the IPC transport contention caused by many
-    // concurrent external headless-client processes.
-    const retryIds = Array.from(workflowIds);
-    const burst = retryIds.map((workflowId) =>
-      page.evaluate(async (id) => window.invoker.retryWorkflow(id), workflowId),
+    const burst = Array.from(workflowIds).map((workflowId) =>
+      runHeadlessClient(testDir, ['retry', workflowId, '--no-track']),
     );
 
     const firstInteractionStartedAt = Date.now();
-    await assertTaskPanelResponsive(page, 15000);
-    expect(Date.now() - firstInteractionStartedAt).toBeLessThan(15000);
+    await assertTaskPanelResponsive(page, 8000);
+    expect(Date.now() - firstInteractionStartedAt).toBeLessThan(8000);
 
     await page.waitForTimeout(1500);
 
     const secondInteractionStartedAt = Date.now();
-    await assertTaskPanelResponsive(page, 15000);
-    expect(Date.now() - secondInteractionStartedAt).toBeLessThan(15000);
+    await assertTaskPanelResponsive(page, 8000);
+    expect(Date.now() - secondInteractionStartedAt).toBeLessThan(8000);
 
-    await Promise.allSettled(burst);
+    await Promise.all(burst);
 
     const perf = await page.evaluate(async () => await window.invoker.getUiPerfStats());
     expect(perf.maxRendererEventLoopLagMs).toBeLessThan(1000);
@@ -124,5 +122,11 @@ test.describe('Headless thundering herd', () => {
       "pgrep -af '[e]lectron/dist/electron .*packages/app/dist/main.js.*--headless owner-serve' || true",
     ]);
     expect(ownerServe.stdout.trim()).toBe('');
+
+    const retryElectrons = await execFileAsync('bash', [
+      '-lc',
+      "pgrep -af '[e]lectron/dist/electron .*packages/app/dist/main.js.*--headless retry ' || true",
+    ]);
+    expect(retryElectrons.stdout.trim()).toBe('');
   });
 });
