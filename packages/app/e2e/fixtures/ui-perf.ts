@@ -12,7 +12,6 @@ export interface ElectronGraphSeedOptions {
 
 export interface DragFrameStats {
   frames: number;
-  dragScoreMs: number;
   avgMs: number;
   p50Ms: number;
   p95Ms: number;
@@ -30,8 +29,6 @@ export interface ElectronUiPerfHarness {
   waitForGraphReady(): Promise<void>;
   resetPerfStats(): Promise<UiPerfStats>;
   getPerfStats(): Promise<UiPerfStats>;
-  setGraphStyleOverride(css: string): Promise<void>;
-  clearGraphStyleOverride(): Promise<void>;
   measureViewportDrag(options?: {
     steps?: number;
     stepDelayMs?: number;
@@ -61,7 +58,6 @@ function summarizeFrameTimes(samples: number[]): DragFrameStats {
   const pick = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
   return {
     frames: samples.length,
-    dragScoreMs: Number(avg.toFixed(2)),
     avgMs: Number(avg.toFixed(2)),
     p50Ms: Number(pick(0.5).toFixed(2)),
     p95Ms: Number(pick(0.95).toFixed(2)),
@@ -107,25 +103,6 @@ export function createElectronUiPerfHarness(page: Page): ElectronUiPerfHarness {
 
     async getPerfStats(): Promise<UiPerfStats> {
       return await page.evaluate(async () => await window.invoker.getUiPerfStats());
-    },
-
-    async setGraphStyleOverride(css: string): Promise<void> {
-      await page.evaluate((nextCss) => {
-        const id = 'electron-ui-perf-style-override';
-        let style = document.getElementById(id);
-        if (!style) {
-          style = document.createElement('style');
-          style.id = id;
-          document.head.appendChild(style);
-        }
-        style.textContent = nextCss;
-      }, css);
-    },
-
-    async clearGraphStyleOverride(): Promise<void> {
-      await page.evaluate(() => {
-        document.getElementById('electron-ui-perf-style-override')?.remove();
-      });
     },
 
     async measureViewportDrag(options = {}): Promise<DragFrameStats> {
