@@ -1812,6 +1812,8 @@ if (isHeadless) {
           : { channel: 'headless.exec', request: { args: ['fix', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-command':
         return { channel: 'headless.exec', request: { args: ['set', 'command', String(arg0), String(arg1)] } };
+      case 'invoker:edit-task-prompt':
+        return { channel: 'headless.exec', request: { args: ['set', 'prompt', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-type':
         return { channel: 'headless.exec', request: { args: ['set', 'executor', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-agent':
@@ -2071,7 +2073,7 @@ if (isHeadless) {
     lastKnownWorkflowCount = workflows.length;
     if (mainWindow && !mainWindow.isDestroyed()) {
       for (const removedTaskId of previousTaskIds) {
-        sendTaskDeltaToRenderer({ type: 'removed', taskId: removedTaskId });
+        sendTaskDeltaToRenderer({ type: 'removed', taskId: removedTaskId, previousTaskStateVersion: 0 });
       }
       mainWindow.webContents.send('invoker:workflows-changed', workflows);
     }
@@ -2537,11 +2539,15 @@ if (isHeadless) {
         'invoker:inject-task-states',
         async (_event, updates: Array<{ taskId: string; changes: TaskStateChanges }>) => {
           for (const { taskId, changes } of updates) {
+            const before = orchestrator.getTask(taskId);
             persistence.updateTask(taskId, changes);
+            const beforeTaskStateVersion = before?.taskStateVersion ?? 0;
             messageBus.publish(Channels.TASK_DELTA, {
               type: 'updated',
               taskId,
               changes,
+              taskStateVersion: beforeTaskStateVersion + 1,
+              previousTaskStateVersion: beforeTaskStateVersion,
             } satisfies TaskDelta);
           }
           orchestrator.syncAllFromDb();
@@ -2713,7 +2719,7 @@ if (isHeadless) {
         }
         if (mainWindow && !mainWindow.isDestroyed()) {
           for (const removedTaskId of previousTaskIds) {
-            sendTaskDeltaToRenderer({ type: 'removed', taskId: removedTaskId });
+            sendTaskDeltaToRenderer({ type: 'removed', taskId: removedTaskId, previousTaskStateVersion: 0 });
           }
           mainWindow.webContents.send('invoker:workflows-changed', workflows);
         }
@@ -3251,6 +3257,27 @@ if (isHeadless) {
         });
       } catch (err) {
         logger.error(`edit-task-command failed: ${err}`, { module: 'ipc' });
+        throw err;
+      }
+    });
+
+    registerGuiMutationHandler('invoker:edit-task-prompt', async (taskIdArg: unknown, newPromptArg: unknown) => {
+      const taskId = String(taskIdArg);
+      const newPrompt = String(newPromptArg);
+      logger.info(`edit-task-prompt: "${taskId}" → "${newPrompt}"`, { module: 'ipc' });
+      try {
+        const envelope = makeEnvelope('edit-task-prompt', 'ui', 'task', { taskId, newPrompt });
+        const result = await commandService.editTaskPrompt(envelope);
+        if (!result.ok) throw new Error(result.error.message);
+        await dispatchStartedTasksWithGlobalTopup({
+          orchestrator,
+          taskExecutor: requireTaskExecutor(),
+          logger,
+          context: 'ipc.edit-task-prompt',
+          started: result.data,
+        });
+      } catch (err) {
+        logger.error(`edit-task-prompt failed: ${err}`, { module: 'ipc' });
         throw err;
       }
     });
