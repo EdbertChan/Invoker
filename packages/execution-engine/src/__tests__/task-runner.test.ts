@@ -2460,8 +2460,9 @@ describe('TaskRunner', () => {
       };
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
+      (executor as any).buildMergeSummary = vi.fn().mockResolvedValue('## Summary\nRaw merge summary');
       (executor as any).authorPrBodyWithSkill = vi.fn().mockResolvedValue({
-        body: '## Summary\n\nAuthored body',
+        body: '## Summary\n\nAuthored canonical body for executeMergeNode external_review\n\n## Test Plan\n- ok\n\n## Revert Plan\n- revert',
         sessionId: 'sess-pr-ext-1',
         agentName: 'codex',
       });
@@ -2488,13 +2489,27 @@ describe('TaskRunner', () => {
       const commitCall = gitCalls.find(c => c[0] === 'commit');
       expect(commitCall).toBeUndefined();
 
+      // Raw workflow summary must flow through canonical PR authoring as context,
+      // never directly to createReview as the final body.
+      expect((executor as any).authorPrBodyWithSkill).toHaveBeenCalledWith(expect.objectContaining({
+        workflowId: 'wf-1',
+        mergeNodeTaskId: '__merge__wf-1',
+        title: 'Test Workflow',
+        baseBranch: 'master',
+        featureBranch: 'plan/feature',
+        workflowSummary: '## Summary\nRaw merge summary',
+        cwd: '/tmp/mock-wt',
+      }));
+
       // Should create a PR via mergeGateProvider (using the gate clone dir, not host.cwd)
+      // The body must be the authored canonical body, not the raw workflow summary.
       expect(mergeGateProvider.createReview).toHaveBeenCalledWith(
         expect.objectContaining({
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           title: 'Test Workflow',
           cwd: '/tmp/mock-wt',
+          body: '## Summary\n\nAuthored canonical body for executeMergeNode external_review\n\n## Test Plan\n- ok\n\n## Revert Plan\n- revert',
         }),
       );
 
@@ -6366,13 +6381,27 @@ describe('TaskRunner', () => {
       const hostCalls = gitCalls.filter((c) => c.dir === '/tmp/host');
       expect(hostCalls).toHaveLength(0);
 
+      // Raw workflow summary must flow through canonical PR authoring as context,
+      // never directly to createReview as the final body.
+      expect((executor as any).authorPrBodyWithSkill).toHaveBeenCalledWith(expect.objectContaining({
+        workflowId: 'wf-pub',
+        mergeNodeTaskId: '__merge__wf-pub',
+        title: 'Test Workflow',
+        baseBranch: 'master',
+        featureBranch: 'plan/feature',
+        workflowSummary: '## Summary',
+        cwd: '/tmp/gate-clone',
+      }));
+
       // PR created via mergeGateProvider (using gate clone dir, not host.cwd)
+      // The body must be the authored canonical body, not the raw workflow summary.
       expect(mergeGateProvider.createReview).toHaveBeenCalledWith(
         expect.objectContaining({
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           title: 'Test Workflow',
           cwd: '/tmp/gate-clone',
+          body: '## Summary\n\nPublished body',
         }),
       );
 
