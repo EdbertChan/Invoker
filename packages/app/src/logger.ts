@@ -9,22 +9,22 @@ import { homedir } from 'node:os';
 import * as path from 'node:path';
 
 import type { Logger } from '@invoker/contracts';
-import type { SQLiteAdapter } from '@invoker/data-store';
+import type { PersistenceAdapter } from '@invoker/data-store';
 
 const LOG_PATH = path.join(homedir(), '.invoker', 'invoker.log');
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
 export interface FileAndDbLoggerOptions {
-  /** SQLiteAdapter instance for activity_log writes. Omit to skip DB writes. */
-  persistence?: SQLiteAdapter;
+  /** Persistence seam for activity_log writes. Omit to skip DB writes. */
+  persistence?: PersistenceAdapter;
   /** Override the default log file path (mainly for tests). */
   filePath?: string;
 }
 
 export class FileAndDbLogger implements Logger {
   private readonly bindings: Record<string, unknown>;
-  private readonly persistence: SQLiteAdapter | undefined;
+  private readonly persistence: PersistenceAdapter | undefined;
   private readonly filePath: string;
   private dirEnsured = false;
 

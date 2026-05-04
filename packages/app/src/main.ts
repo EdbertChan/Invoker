@@ -50,8 +50,15 @@ if (process.platform === 'linux' && !enableTestCompositor) {
   app.commandLine.appendSwitch('disable-software-rasterizer');
 }
 
-import { Orchestrator, CommandService } from '@invoker/workflow-core';
+import {
+  Orchestrator,
+  CommandService,
+  InstrumentedCommandService,
+  InstrumentedTaskRepository,
+} from '@invoker/workflow-core';
 import type {
+  CommandServiceInstrumentationEvent,
+  CommandServiceInstrumenter,
   PlanDefinition,
   TaskDelta,
   TaskReplacementDef,
@@ -60,7 +67,14 @@ import type {
 } from '@invoker/workflow-core';
 import { makeEnvelope } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
-import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
+import {
+  SQLiteAdapter,
+  ConversationRepository,
+  InstrumentedPersistenceAdapter,
+  SqliteTaskRepository,
+} from '@invoker/data-store';
+import type { PersistenceAdapter } from '@invoker/data-store';
+import { DbTimings } from './db-timings.js';
 import { IpcBus, Channels } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
 import {
@@ -109,8 +123,6 @@ import {
 import {
   approveTask as sharedApproveTask,
   rebaseAndRetry,
-  recreateWorkflow as sharedRecreateWorkflow,
-  recreateTask as sharedRecreateTask,
   resolveConflictAction,
   selectExperiments as sharedSelectExperiments,
   setWorkflowMergeMode,
@@ -177,7 +189,8 @@ if (process.platform === 'linux') {
 // ── Shared state ─────────────────────────────────────────────
 
 let messageBus: MessageBus;
-let persistence: SQLiteAdapter;
+let persistence: PersistenceAdapter;
+let sqlitePersistence: SQLiteAdapter;
 let executorRegistry: ExecutorRegistry;
 let orchestrator: Orchestrator;
 let commandService: CommandService;
@@ -195,6 +208,31 @@ function dispatchStartedTasks(tasks: TaskState[]): void {
     });
   });
 }
+
+const dbTimings = new DbTimings();
+const dbTimingsCommandServiceTap = dbTimings.toCommandServiceInstrumenter();
+const commandServiceInstrumenter: CommandServiceInstrumenter = (event: CommandServiceInstrumentationEvent) => {
+  dbTimingsCommandServiceTap(event);
+  const meta = {
+    module: 'command-service',
+    scope: event.scope,
+    method: event.method,
+    durationMs: event.durationMs,
+    success: event.success,
+    ...(event.error ? { error: event.error } : {}),
+  };
+  if (event.success) {
+    logger.debug(
+      `[command-service] ${event.method} ok ${event.durationMs}ms`,
+      meta,
+    );
+  } else {
+    logger.warn(
+      `[command-service] ${event.method} failed ${event.durationMs}ms: ${event.error ?? ''}`,
+      meta,
+    );
+  }
+};
 let workflowMutationCoordinator: PersistedWorkflowMutationCoordinator | null = null;
 const workflowMutationDispatcher = new Map<string, (...args: unknown[]) => Promise<unknown>>();
 let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
@@ -347,11 +385,15 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   if (!readOnly) {
     writerLock = acquireDbWriterLock(dbPath);
   }
-  persistence = await SQLiteAdapter.create(dbPath, {
+  sqlitePersistence = await SQLiteAdapter.create(dbPath, {
     readOnly,
     ownerCapability: !readOnly, // writable mode requires owner capability
   });
-  // Upgrade root logger with DB persistence now that SQLiteAdapter is ready.
+  persistence = new InstrumentedPersistenceAdapter(
+    sqlitePersistence,
+    dbTimings.toPersistenceInstrumenter(),
+  );
+  // Upgrade root logger with DB persistence now that the adapter is ready.
   logger = new FileAndDbLogger({ module: 'main' }, { persistence });
   const shellEnv = await initializeShellEnvironment();
   if (process.platform === 'darwin') {
@@ -393,7 +435,10 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
       agentRegistry: options?.executionAgentRegistry,
     }),
   );
-  const taskRepository = new SqliteTaskRepository(persistence);
+  const taskRepository = new InstrumentedTaskRepository(
+    new SqliteTaskRepository(persistence),
+    dbTimings.toTaskRepositoryInstrumenter(),
+  );
   orchestrator = new Orchestrator({
     persistence, messageBus,
     taskRepository,
@@ -403,7 +448,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     deferRunningUntilLaunch: true,
     taskDispatcher: dispatchStartedTasks,
   });
-  commandService = new CommandService(orchestrator);
+  commandService = new InstrumentedCommandService(orchestrator, commandServiceInstrumenter);
 
   const startupSyncMode = options?.startupSyncMode ?? 'all';
   const initLog = isHeadless
@@ -415,7 +460,9 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   const workflows = persistence.listWorkflows();
   if (startupSyncMode === 'all') {
     try {
-      orchestrator.syncAllFromDb();
+      dbTimings.timeSync('startup', 'orchestrator.syncAllFromDb', () => {
+        orchestrator.syncAllFromDb();
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error(`workflow invariant violation during startup sync: ${message}`, {
@@ -697,7 +744,10 @@ if (isHeadless) {
 
       const headlessDeps: HeadlessDeps = {
         logger,
-        orchestrator, persistence, executorRegistry, messageBus,
+        orchestrator,
+        persistence: sqlitePersistence,
+        executorRegistry,
+        messageBus,
         repoRoot, invokerConfig, initServices, wireSlackBot,
         commandService,
         setTaskDispatcherExecutor: setDispatcherTaskExecutor,
@@ -710,8 +760,11 @@ if (isHeadless) {
           rendererReports: 0,
           maxRendererEventLoopLagMs: 0,
           maxRendererLongTaskMs: 0,
+          dbTimings: dbTimings.snapshot(),
         }),
-        resetUiPerfStats: () => {},
+        resetUiPerfStats: () => {
+          dbTimings.reset();
+        },
         waitForApproval,
         noTrack,
         executionAgentRegistry: agentRegistry,
@@ -1155,11 +1208,13 @@ if (isHeadless) {
     uiPerfStats.rendererReports = 0;
     uiPerfStats.maxRendererEventLoopLagMs = 0;
     uiPerfStats.maxRendererLongTaskMs = 0;
+    dbTimings.reset();
   };
 
   const getUiPerfStats = (): Record<string, unknown> => ({
     ...uiPerfStats,
     startupMarks: Object.fromEntries(startupMarks.entries()),
+    dbTimings: dbTimings.snapshot(),
     ts: new Date().toISOString(),
   });
 
@@ -1399,7 +1454,7 @@ if (isHeadless) {
   function rebuildTaskRunner(): void {
     taskExecutor = new TaskRunner({
       orchestrator,
-      persistence,
+      persistence: sqlitePersistence,
       executorRegistry,
       executionAgentRegistry: agentRegistry,
       cwd: repoRoot,
@@ -1590,7 +1645,7 @@ if (isHeadless) {
     });
     const headlessCommand = String(payload.args[0] ?? '');
     const headlessTarget = String(payload.args[1] ?? '');
-    const resolvedHeadlessTarget = resolveHeadlessTarget(headlessTarget, persistence);
+    const resolvedHeadlessTarget = resolveHeadlessTarget(headlessTarget, sqlitePersistence);
     if (
       (headlessCommand === 'recreate' || headlessCommand === 'retry')
       && resolvedHeadlessTarget.kind === 'workflow'
@@ -1599,7 +1654,10 @@ if (isHeadless) {
     }
     await runHeadless(payload.args, {
       logger,
-      orchestrator, persistence, executorRegistry, messageBus,
+      orchestrator,
+      persistence: sqlitePersistence,
+      executorRegistry,
+      messageBus,
       commandService,
       repoRoot, invokerConfig, initServices, wireSlackBot,
       setTaskDispatcherExecutor: setDispatcherTaskExecutor,
@@ -2171,7 +2229,7 @@ if (isHeadless) {
       apiServer = startApiServer({
         logger,
         orchestrator,
-        persistence,
+        persistence: sqlitePersistence,
         executorRegistry,
         taskExecutor: requireTaskExecutor(),
         autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
@@ -2197,7 +2255,7 @@ if (isHeadless) {
 
       void recoverWorkflowMutationsOnStartup({
         ownerMode,
-        persistence,
+        persistence: sqlitePersistence,
         workflowMutationCoordinator: workflowMutationCoordinator ?? undefined,
         logger,
         maybeDelayResume: maybeDelayWorkflowResumeForTest,
@@ -2351,7 +2409,7 @@ if (isHeadless) {
     if (ownerMode) {
       rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
-        persistence,
+        sqlitePersistence,
         workflowMutationOwnerId,
         async (channel: string, args: unknown[]) => {
           const handler = workflowMutationDispatcher.get(channel);
@@ -2615,14 +2673,17 @@ if (isHeadless) {
       orchestrator = new Orchestrator({
         persistence,
         messageBus,
-        taskRepository: new SqliteTaskRepository(persistence),
+        taskRepository: new InstrumentedTaskRepository(
+          new SqliteTaskRepository(persistence),
+          dbTimings.toTaskRepositoryInstrumenter(),
+        ),
         maxConcurrency: effectiveMaxConcurrency,
         defaultAutoFixRetries: invokerConfig.autoFixRetries,
         executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
         deferRunningUntilLaunch: true,
         taskDispatcher: dispatchStartedTasks,
       });
-      commandService = new CommandService(orchestrator);
+      commandService = new InstrumentedCommandService(orchestrator, commandServiceInstrumenter);
       rebuildTaskRunner();
       taskHandles.clear();
     });
@@ -2632,13 +2693,17 @@ if (isHeadless) {
     registerGuiMutationHandler('invoker:delete-all-workflows', async () => {
       logger.info('delete-all-workflows', { module: 'ipc' });
       assertDeleteAllEnabled();
-      const snapshot = createDeleteAllSnapshot(resolveInvokerHomeRoot());
-      if (snapshot) {
-        logger.info(`delete-all-workflows snapshot: ${snapshot}`, { module: 'ipc' });
-      } else {
-        logger.info('delete-all-workflows snapshot skipped: DB file does not exist yet', { module: 'ipc' });
-      }
-      orchestrator.deleteAllWorkflows();
+      await dbTimings.timeAsync('delete', 'app.preDeleteAllSnapshot', async () => {
+        const snapshot = createDeleteAllSnapshot(resolveInvokerHomeRoot());
+        if (snapshot) {
+          logger.info(`delete-all-workflows snapshot: ${snapshot}`, { module: 'ipc' });
+        } else {
+          logger.info('delete-all-workflows snapshot skipped: DB file does not exist yet', { module: 'ipc' });
+        }
+      });
+      dbTimings.timeSync('delete', 'app.orchestratorDeleteAll', () => {
+        orchestrator.deleteAllWorkflows();
+      });
       taskHandles.clear();
       lastKnownTaskStates.clear();
       lastKnownWorkflowCount = 0;
@@ -2652,15 +2717,17 @@ if (isHeadless) {
       logger.info(`delete-workflow: "${workflowId}"`, { module: 'ipc' });
       try {
         // Kill all running tasks belonging to the workflow (process management is outside orchestrator scope)
-        const allTasks = orchestrator.getAllTasks();
-        const workflowTasks = allTasks.filter(
-          (t) =>
-            t.config.workflowId === workflowId &&
-            (t.status === 'running' || t.status === 'fixing_with_ai'),
-        );
-        for (const task of workflowTasks) {
-          await killRunningTask(task.id);
-        }
+        await dbTimings.timeAsync('delete', 'app.preDeleteKillRunning', async () => {
+          const allTasks = orchestrator.getAllTasks();
+          const workflowTasks = allTasks.filter(
+            (t) =>
+              t.config.workflowId === workflowId &&
+              (t.status === 'running' || t.status === 'fixing_with_ai'),
+          );
+          for (const task of workflowTasks) {
+            await killRunningTask(task.id);
+          }
+        });
 
         // Serialized via CommandService: DB delete + memory clear + scheduler cleanup + removal deltas
         const envelope = makeEnvelope('delete-workflow', 'ui', 'workflow', { workflowId });
@@ -2961,7 +3028,18 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-workflow',
         });
-        const started = sharedRecreateWorkflow(workflowId, { persistence, orchestrator });
+        const envelope = makeEnvelope('recreate-workflow', 'ui', 'workflow', { workflowId });
+        const result = await commandService.recreateWorkflow(envelope, {
+          beforeRecreate: () => {
+            const workflow = sqlitePersistence.loadWorkflow(workflowId);
+            if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
+            const nextGen = (workflow.generation ?? 0) + 1;
+            sqlitePersistence.updateWorkflow(workflowId, { generation: nextGen });
+            logger.info(`bumped generation to ${nextGen} for ${workflowId}`, { module: 'workflow' });
+          },
+        });
+        if (!result.ok) throw new Error(result.error.message);
+        const started = result.data;
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
@@ -2990,7 +3068,10 @@ if (isHeadless) {
       logger.info(`recreate-task: "${taskId}"`, { module: 'ipc' });
       try {
         await preemptTaskSubgraph(taskId);
-        const started = sharedRecreateTask(taskId, { persistence, orchestrator });
+        const envelope = makeEnvelope('recreate-task', 'ui', 'task', { taskId });
+        const result = await commandService.recreateTask(envelope);
+        if (!result.ok) throw new Error(result.error.message);
+        const started = result.data;
         remoteFetchForPool.enabled = false;
         try {
           await dispatchStartedTasksWithGlobalTopup({
@@ -3064,7 +3145,7 @@ if (isHeadless) {
         }
         const started = await rebaseAndRetry(taskId, {
           orchestrator,
-          persistence,
+          persistence: sqlitePersistence,
           repoRoot,
           taskExecutor: requireTaskExecutor(),
         });
@@ -3114,7 +3195,7 @@ if (isHeadless) {
       try {
         await setWorkflowMergeMode(workflowId, mergeMode, {
           orchestrator,
-          persistence,
+          persistence: sqlitePersistence,
           taskExecutor: requireTaskExecutor(),
         });
       } catch (err) {
@@ -3181,7 +3262,7 @@ if (isHeadless) {
       try {
         const result = await resolveConflictAction(taskId, {
           orchestrator,
-          persistence,
+          persistence: sqlitePersistence,
           taskExecutor: requireTaskExecutor(),
           autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
         }, agentName);
@@ -3383,7 +3464,7 @@ if (isHeadless) {
       logger.info(`invoked for task="${taskId}"`, { module: 'open-terminal' });
       return openExternalTerminalForTask({
         taskId,
-        persistence,
+        persistence: sqlitePersistence,
         executorRegistry,
         executionAgentRegistry: agentRegistry,
         repoRoot,

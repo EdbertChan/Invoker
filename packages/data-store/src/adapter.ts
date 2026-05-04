@@ -2,10 +2,38 @@
  * PersistenceAdapter — Interface for task/workflow storage.
  *
  * The core orchestrator depends on this interface, not on SQLite directly.
- * This allows swapping storage backends (in-memory, SQLite, etc.)
+ * This allows swapping storage backends (in-memory, SQLite, etc.) and
+ * wrapping the live store with decorators (logging, metrics, retries)
+ * without touching call sites.
  */
 
 import type { TaskState, TaskStateChanges, PlanDefinition, Attempt } from '@invoker/workflow-core';
+
+// ── Output Spool Types ──────────────────────────────────────
+
+export interface OutputChunk {
+  offset: number;
+  data: string;
+}
+
+// ── Workflow Mutation Intent Types ──────────────────────────
+
+export type WorkflowMutationPriority = 'high' | 'normal';
+export type WorkflowMutationIntentStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+export interface WorkflowMutationIntent {
+  id: number;
+  workflowId: string;
+  channel: string;
+  args: unknown[];
+  priority: WorkflowMutationPriority;
+  status: WorkflowMutationIntentStatus;
+  ownerId?: string;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+}
 
 // ── Conversation Types ─────────────────────────────────────
 
@@ -123,6 +151,32 @@ export interface PersistenceAdapter {
   // Agent queries
   /** Read the configured execution agent name for a task (e.g. 'claude', 'codex'). */
   getExecutionAgent?(taskId: string): string | null;
+
+  // Output spool (offset-addressed streaming buffer)
+  appendOutputChunk(taskId: string, data: string): void;
+  getOutputChunks(taskId: string): OutputChunk[];
+  replayOutputFrom(taskId: string, fromOffset: number): OutputChunk[];
+  getOutputTail(taskId: string): OutputChunk[];
+
+  // Activity log (structured app-level audit trail)
+  writeActivityLog(source: string, level: string, message: string): void;
+  getActivityLogs(sinceId?: number, limit?: number): ActivityLogEntry[];
+
+  // Aggregated task queries
+  loadAllCompletedTasks(): Array<TaskState & { workflowName: string }>;
+
+  // Workflow mutation intent queue (read access; write/claim primitives
+  // remain on concrete adapters that own the queue subsystem).
+  listWorkflowMutationIntents(
+    workflowId?: string,
+    statuses?: WorkflowMutationIntentStatus[],
+  ): WorkflowMutationIntent[];
+
+  /**
+   * Execute a group of writes atomically when the backing store supports it.
+   * Adapters without transactions may simply execute the callback inline.
+   */
+  runInTransaction<T>(work: () => T): T;
 
   // Lifecycle
   close(): void;

@@ -1,8 +1,10 @@
 /**
  * SqliteTaskRepository — Adapter that implements the TaskRepository port
- * by delegating to SQLiteAdapter.
+ * by delegating to a PersistenceAdapter.
  *
- * This is a thin wrapper: all persistence logic lives in SQLiteAdapter.
+ * Accepts the seam (PersistenceAdapter) rather than SQLiteAdapter so
+ * decorators that wrap the adapter (logging, metrics) flow through the
+ * repository without code changes.
  */
 
 import type {
@@ -13,10 +15,10 @@ import type {
   AttemptFailPatch,
 } from '@invoker/workflow-core';
 import type { TaskState, TaskStateChanges, Attempt } from '@invoker/workflow-core';
-import type { SQLiteAdapter } from './sqlite-adapter.js';
+import type { PersistenceAdapter } from './adapter.js';
 
 export class SqliteTaskRepository implements TaskRepository {
-  constructor(private adapter: SQLiteAdapter) {}
+  constructor(private adapter: PersistenceAdapter) {}
 
   runInTransaction<T>(work: () => T): T {
     return this.adapter.runInTransaction(work);
@@ -25,13 +27,11 @@ export class SqliteTaskRepository implements TaskRepository {
   // ── Workflow writes ──
 
   saveWorkflow(workflow: WorkflowRecord): void {
-    // Port uses broader types (string) than adapter (literal unions).
-    // Safe at runtime because callers always pass valid literals.
-    this.adapter.saveWorkflow(workflow as any);
+    this.adapter.saveWorkflow(workflow);
   }
 
   updateWorkflow(workflowId: string, changes: WorkflowChanges): void {
-    this.adapter.updateWorkflow(workflowId, changes as any);
+    this.adapter.updateWorkflow(workflowId, changes);
   }
 
   deleteWorkflow(workflowId: string): void {

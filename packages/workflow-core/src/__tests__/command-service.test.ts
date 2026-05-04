@@ -389,6 +389,103 @@ describe('CommandService', () => {
       const result = await service.recreateWorkflow(makeEnvelope({ workflowId: 'bad' }));
       expect(result).toEqual({ ok: false, error: { code: 'RECREATE_WORKFLOW_FAILED', message: 'wf not found' } });
     });
+
+    it('runs beforeRecreate callback before orchestrator.recreateWorkflow under the same mutex acquisition', async () => {
+      const callOrder: string[] = [];
+      (orchestrator.recreateWorkflow as ReturnType<typeof vi.fn>).mockImplementation((id: string) => {
+        callOrder.push(`orchestrator.recreateWorkflow:${id}`);
+        return [];
+      });
+      const beforeRecreate = vi.fn(async (id: string) => {
+        callOrder.push(`beforeRecreate:${id}`);
+      });
+
+      const result = await service.recreateWorkflow(
+        makeEnvelope({ workflowId: 'wf-1' }),
+        { beforeRecreate },
+      );
+
+      expect(result).toEqual({ ok: true, data: [] });
+      expect(beforeRecreate).toHaveBeenCalledWith('wf-1');
+      expect(callOrder).toEqual([
+        'beforeRecreate:wf-1',
+        'orchestrator.recreateWorkflow:wf-1',
+      ]);
+    });
+
+    it('beforeRecreate failure short-circuits orchestrator.recreateWorkflow and surfaces a CommandResult error', async () => {
+      const beforeRecreate = vi.fn(async () => {
+        throw new Error('bump failed');
+      });
+
+      const result = await service.recreateWorkflow(
+        makeEnvelope({ workflowId: 'wf-1' }),
+        { beforeRecreate },
+      );
+
+      expect(result).toEqual({
+        ok: false,
+        error: { code: 'RECREATE_WORKFLOW_FAILED', message: 'bump failed' },
+      });
+      expect(orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('serializes beforeRecreate + orchestrator.recreateWorkflow under the workflow mutex against concurrent recreate calls', async () => {
+      const events: string[] = [];
+      let releaseFirstRecreate: () => void = () => {};
+      const firstRecreateGate = new Promise<void>((resolve) => {
+        releaseFirstRecreate = resolve;
+      });
+      let recreateCallCount = 0;
+
+      (orchestrator.recreateWorkflow as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_id: string) => {
+          recreateCallCount += 1;
+          const callIndex = recreateCallCount;
+          events.push(`recreate:start:${callIndex}`);
+          if (callIndex === 1) {
+            await firstRecreateGate;
+          }
+          events.push(`recreate:end:${callIndex}`);
+          return [];
+        },
+      );
+
+      let beforeCallCount = 0;
+      const beforeRecreate = vi.fn(async () => {
+        beforeCallCount += 1;
+        events.push(`before:${beforeCallCount}`);
+      });
+
+      const first = service.recreateWorkflow(
+        makeEnvelope({ workflowId: 'wf-1' }, 'k-1'),
+        { beforeRecreate },
+      );
+      const second = service.recreateWorkflow(
+        makeEnvelope({ workflowId: 'wf-1' }, 'k-2'),
+        { beforeRecreate },
+      );
+
+      // Allow microtasks to drain so the first call reaches its blocked recreate.
+      for (let i = 0; i < 10; i += 1) {
+        await Promise.resolve();
+      }
+
+      // Second call must not have started its before/recreate work yet.
+      expect(events).toEqual(['before:1', 'recreate:start:1']);
+
+      releaseFirstRecreate();
+      await Promise.all([first, second]);
+
+      expect(events).toEqual([
+        'before:1',
+        'recreate:start:1',
+        'recreate:end:1',
+        'before:2',
+        'recreate:start:2',
+        'recreate:end:2',
+      ]);
+    });
   });
 
   // ── recreateWorkflowFromFreshBase ────────────────────────

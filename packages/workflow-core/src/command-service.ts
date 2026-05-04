@@ -411,17 +411,31 @@ export class CommandService {
    * workflow root tasks. Thin delegate to `Orchestrator.recreateWorkflow`;
    * serialized through the workflow mutex. Step 17
    * (`docs/architecture/task-invalidation-roadmap.md`) closes the
-   * 5-method matrix on `CommandService`. Production callers that
-   * need an additional generation bump should use the app-layer
-   * wrapper (`packages/app/src/workflow-actions.ts → recreateWorkflow`)
-   * which composes the bump on top of this primitive.
+   * 5-method matrix on `CommandService`.
+   *
+   * App-layer entrypoints that need to bump the workflow generation
+   * (or run other under-mutex prep) supply a `beforeRecreate` callback
+   * via `opts`. The callback runs inside the same workflow-scoped
+   * promise-chain mutex as `Orchestrator.recreateWorkflow`, so the
+   * bump and the recreate observe the same mutation as a single
+   * serialized step. Orchestrator-internal callers that are already
+   * inside the mutex (e.g. `applyInvalidation` via
+   * `buildInvalidationDeps`) MUST NOT route through this seam — they
+   * call `Orchestrator.recreateWorkflow` directly to avoid mutex
+   * re-entry.
    */
   async recreateWorkflow(
     envelope: CommandEnvelope<{ workflowId: string }>,
+    opts?: { beforeRecreate?: (workflowId: string) => void | Promise<void> },
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
       'RECREATE_WORKFLOW_FAILED',
-      () => this.orchestrator.recreateWorkflow(envelope.payload.workflowId),
+      async () => {
+        if (opts?.beforeRecreate) {
+          await opts.beforeRecreate(envelope.payload.workflowId);
+        }
+        return this.orchestrator.recreateWorkflow(envelope.payload.workflowId);
+      },
       envelope.payload.workflowId,
     );
   }
