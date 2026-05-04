@@ -70,6 +70,7 @@ interface TaskPanelProps {
   onReject: (task: TaskState) => void;
   onSelectExperiment: (task: TaskState) => void;
   onEditCommand?: (taskId: string, newCommand: string) => void;
+  onEditPrompt?: (taskId: string, newPrompt: string) => void;
   onEditType?: (taskId: string, executorType: string, remoteTargetId?: string) => void;
   onEditAgent?: (taskId: string, agentName: string) => void;
   onSetExternalGatePolicies?: (taskId: string, updates: ExternalGatePolicyUpdate[]) => Promise<void>;
@@ -170,6 +171,7 @@ export function TaskPanel({
   onReject,
   onSelectExperiment,
   onEditCommand,
+  onEditPrompt,
   onEditType,
   onEditAgent,
   onSetExternalGatePolicies,
