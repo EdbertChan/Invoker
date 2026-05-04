@@ -22,3 +22,19 @@ test('electron UI perf harness can seed a graph, reset stats, and measure drag f
   const stats = await perf.getPerfStats();
   expect(stats.ts).toBeTruthy();
 });
+
+test('workflow DAG drag stays within an acceptable Electron perf envelope', async ({ page }) => {
+  const perf = createElectronUiPerfHarness(page);
+
+  await perf.seedLinearGraph({ workflowCount: 12, tasksPerWorkflow: 8 });
+  await perf.waitForGraphReady();
+  await perf.resetPerfStats();
+  const drag = await perf.measureViewportDrag({ steps: 90, stepDelayMs: 8 });
+  const stats = await perf.getPerfStats();
+
+  expect(drag.frames).toBeGreaterThan(60);
+  expect(drag.avgMs).toBeLessThan(75);
+  expect(drag.p95Ms).toBeLessThan(150);
+  expect(stats.maxRendererLongTaskMs).toBeLessThan(750);
+  expect(stats.maxRendererEventLoopLagMs).toBeLessThan(1000);
+});
