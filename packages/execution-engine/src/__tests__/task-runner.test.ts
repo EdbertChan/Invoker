@@ -2460,6 +2460,11 @@ describe('TaskRunner', () => {
       };
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
+      (executor as any).authorPrBodyWithSkill = vi.fn().mockResolvedValue({
+        body: '## Summary\n\nAuthored body',
+        sessionId: 'sess-pr-ext-1',
+        agentName: 'codex',
+      });
 
       const mergeTask = makeTask({
         id: '__merge__wf-1',
@@ -2642,6 +2647,11 @@ describe('TaskRunner', () => {
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
       (executor as any).startPrPolling = vi.fn();
+      (executor as any).authorPrBodyWithSkill = vi.fn().mockResolvedValue({
+        body: '## Summary\n\nAuthored body',
+        sessionId: 'sess-pr-ext-2',
+        agentName: 'codex',
+      });
 
       const mergeTask = makeTask({
         id: '__merge__wf-1',
@@ -2786,6 +2796,11 @@ describe('TaskRunner', () => {
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
       (executor as any).startPrPolling = vi.fn();
+      (executor as any).authorPrBodyWithSkill = vi.fn().mockResolvedValue({
+        body: '## Summary\n\nAuthored body',
+        sessionId: 'sess-pr-ext-3',
+        agentName: 'codex',
+      });
 
       const mergeTask = makeTask({
         id: '__merge__wf-1',
@@ -2956,6 +2971,11 @@ describe('TaskRunner', () => {
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
       (executor as any).startPrPolling = vi.fn();
+      (executor as any).authorPrBodyWithSkill = vi.fn().mockResolvedValue({
+        body: '## Summary\n\nAuthored body',
+        sessionId: 'sess-pr-ext-4',
+        agentName: 'codex',
+      });
 
       const mergeTask = makeTask({
         id: '__merge__wf-1',
@@ -3187,7 +3207,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode passes summary body to createReview in external_review mode', async () => {
+    it('executeMergeNode routes external_review body through authorPrBodyForMerge', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -3234,6 +3254,11 @@ describe('TaskRunner', () => {
       (executor as any).removeMergeWorktree = async () => {};
       (executor as any).startPrPolling = vi.fn();
       (executor as any).buildMergeSummary = vi.fn().mockResolvedValue('## Summary\nTest summary');
+      (executor as any).authorPrBodyWithSkill = vi.fn().mockResolvedValue({
+        body: '## Summary\n\nAuthored canonical body\n\n## Test Plan\n- ok\n\n## Revert Plan\n- revert',
+        sessionId: 'sess-pr-ext-5',
+        agentName: 'codex',
+      });
 
       const mergeTask = makeTask({
         id: '__merge__wf-1',
@@ -3244,8 +3269,21 @@ describe('TaskRunner', () => {
 
       await (executor as any).executeMergeNode(mergeTask);
 
+      // Workflow summary is authoring context, not the raw PR body.
+      expect((executor as any).authorPrBodyWithSkill).toHaveBeenCalledWith(expect.objectContaining({
+        workflowId: 'wf-1',
+        mergeNodeTaskId: '__merge__wf-1',
+        title: 'Test Workflow',
+        baseBranch: 'master',
+        featureBranch: 'plan/feature',
+        workflowSummary: '## Summary\nTest summary',
+        cwd: '/tmp/mock-wt',
+      }));
+
       expect(mergeGateProvider.createReview).toHaveBeenCalledWith(
-        expect.objectContaining({ body: '## Summary\nTest summary' }),
+        expect.objectContaining({
+          body: '## Summary\n\nAuthored canonical body\n\n## Test Plan\n- ok\n\n## Revert Plan\n- revert',
+        }),
       );
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith(
         '__merge__wf-1',
