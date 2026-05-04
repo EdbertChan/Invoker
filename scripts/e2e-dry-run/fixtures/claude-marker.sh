@@ -3,6 +3,11 @@
 # Invoked like: claude --session-id <uuid> ... (prompt) or via INVOKER_CLAUDE_FIX_COMMAND (fix).
 set -eu
 SESSION_ID=""
+# Preserve the full original argv (joined with NUL-safe spaces) for prompt
+# inspection. The make-pr authoring path passes its prompt via `-p <prompt>`,
+# so we need the original args to detect that flow before the parsing loop
+# below consumes them with `shift`.
+ALL_ARGS_STR="$*"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --session-id)
@@ -25,6 +30,28 @@ if [ -n "$ROOT" ] && [ -n "$SESSION_ID" ]; then
   # Portable timestamp (no %N on macOS bash)
   ts="$(date +%s)"
   echo ok >"$ROOT/${SESSION_ID}-${ts}-$$.marker"
+fi
+
+# external_review publication invokes claude with a prompt that references the
+# bundled `invoker-make-pr` skill. When we detect that prompt, emit a
+# canonical PR body so `validateCanonicalPrBody` accepts it and the
+# external_review path proceeds end-to-end. (Other claude invocations — fix
+# flows, generic prompts — keep the previous silent-stub behaviour.)
+if printf '%s' "$ALL_ARGS_STR" | grep -q 'invoker-make-pr'; then
+  cat <<'PR_BODY'
+## Summary
+End-to-end dry-run coverage for the canonical GitHub PR publication path.
+This body is emitted by the e2e claude stub to exercise the
+`invoker-make-pr` authoring contract (## Summary / ## Test Plan / ## Revert
+Plan) without depending on a real Claude CLI.
+
+## Test Plan
+- `bash scripts/e2e-dry-run/cases/case-4.2-github-pr.sh`
+
+## Revert Plan
+- Safe to revert via `git revert <sha>`. No data migration required.
+PR_BODY
+  exit 0
 fi
 
 # Auto-resolve merge conflicts (no-op when none exist).
