@@ -31,10 +31,10 @@ describe('headless-client', () => {
 
   it('delegates mutating commands to a reachable non-standalone-capable owner endpoint', async () => {
     const bus = new LocalBus();
-    const guiOwnerHandler = vi.fn(async () => ({ ok: true }));
+    const ownerHandler = vi.fn(async () => ({ ok: true }));
 
     bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'gui' }));
-    bus.onRequest('headless.exec', guiOwnerHandler);
+    bus.onRequest('headless.exec', ownerHandler);
 
     const exitCode = await runHeadlessClientCommand(['retry', 'wf-1', '--no-track'], {
       messageBus: bus,
@@ -43,7 +43,7 @@ describe('headless-client', () => {
     });
 
     expect(exitCode).toBe(0);
-    expect(guiOwnerHandler).toHaveBeenCalledTimes(1);
+    expect(ownerHandler).toHaveBeenCalledTimes(1);
   });
 
   it('uses a longer no-track delegation timeout for an already-running standalone-capable owner under load', async () => {

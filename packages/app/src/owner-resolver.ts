@@ -6,8 +6,8 @@
  *   2. If stale (unreachable or not standalone-capable), refresh the bus and retry.
  *   3. If no owner is available at all, bootstrap one.
  *
- * The interface is surface-neutral: callers receive an OwnerEndpointInfo and a
- * MessageBus handle, but never branch on GUI/headless mode flags.
+ * The interface is host-neutral: callers receive an OwnerEndpointInfo and a
+ * MessageBus handle, but never branch on the owner's launch mode.
  */
 
 import type { MessageBus } from '@invoker/transport';
@@ -86,7 +86,7 @@ export interface OwnerResolver {
 
   /**
    * Discover any reachable owner (standalone or not).
-   * Useful for read-only queries that can target any owner surface.
+   * Useful for read-only queries that can target any owner endpoint.
    */
   discoverAny(): Promise<OwnerResolveResult>;
 
