@@ -714,7 +714,7 @@ export function App() {
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
-          task={contextMenu.task}
+          task={tasks.get(contextMenu.task.id) ?? contextMenu.task}
           onRestart={handleRestartTask}
           onReplace={handleReplaceTask}
           onOpenTerminal={handleOpenTerminal}
