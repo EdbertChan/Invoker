@@ -381,7 +381,7 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, onTaskClick, onTaskDou
 
   return (
     <div
-      className="h-full w-full task-dag-perf-optimized"
+      className="h-full w-full task-dag-reduced-effects"
       style={{ minHeight: '300px' }}
       data-testid="task-dag-root"
     >

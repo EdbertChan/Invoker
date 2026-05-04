@@ -5,8 +5,8 @@
 /* ── Edge styling for TaskDAG ──────────────────────────────── */
 
 /* Keep viewport interaction cheap by disabling expensive subtree effects. */
-.task-dag-perf-optimized,
-.task-dag-perf-optimized * {
+.task-dag-reduced-effects,
+.task-dag-reduced-effects * {
   animation: none !important;
   transition: none !important;
   filter: none !important;

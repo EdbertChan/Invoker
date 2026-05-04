@@ -33,7 +33,7 @@ describe('TaskDAG perf guard', () => {
   });
 
   it('keeps the graph subtree in reduced-effects mode', () => {
-    expect(cssSource).toContain('.task-dag-perf-optimized');
+    expect(cssSource).toContain('.task-dag-reduced-effects');
     expect(cssSource).toContain('animation: none !important;');
     expect(cssSource).toContain('transition: none !important;');
     expect(cssSource).toContain('filter: none !important;');
