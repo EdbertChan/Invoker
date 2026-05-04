@@ -76,6 +76,12 @@ unset ELECTRON_RUN_AS_NODE
 # In headless mode (child of running app), skip cleanup and rebuild.
 if [ "$1" = "--headless" ]; then
   shift
+  # Build @invoker/app on-demand when dist/headless-client.js is missing
+  # (e.g. fresh worktree that only ran pnpm install).
+  if [ ! -f "$REPO_ROOT/packages/app/dist/headless-client.js" ]; then
+    echo "Building @invoker/app (headless-client.js missing)..." >&2
+    pnpm --filter @invoker/app build >&2
+  fi
   exec node ./packages/app/dist/headless-client.js "$@"
 fi
 
