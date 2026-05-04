@@ -72,6 +72,9 @@ invoker_e2e_init() {
   ln -sf "$INVOKER_E2E_ROOT/fixtures/codex-marker.sh" "$stubdir/codex"
   chmod +x "$INVOKER_E2E_ROOT/fixtures/codex-marker.sh" 2>/dev/null || true
   export PATH="$stubdir:$PATH"
+
+  # Ensure the app is built so headless commands work when cases run standalone.
+  invoker_e2e_ensure_app_built
 }
 
 invoker_e2e_kill_owned_headless_processes() {
@@ -161,14 +164,16 @@ invoker_e2e_ensure_app_built() {
   invoker_e2e_ensure_branch_aliases
   local app_dist="$INVOKER_E2E_REPO_ROOT/packages/app/dist/main.js"
   local ui_dist="$INVOKER_E2E_REPO_ROOT/packages/ui/dist/index.html"
-  local build_lock_dir="$INVOKER_E2E_REPO_ROOT/.git/invoker-e2e-build.lock"
+  local git_dir
+  git_dir="$(git -C "$INVOKER_E2E_REPO_ROOT" rev-parse --git-dir)"
+  local build_lock_dir="$git_dir/invoker-e2e-build.lock"
   local wait_secs=0
   if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && [ -f "$app_dist" ] && [ -f "$ui_dist" ]; then
     echo "==> e2e: reusing existing app/ui build artifacts"
     return 0
   fi
   if mkdir "$build_lock_dir" 2>/dev/null; then
-    trap 'rmdir "$build_lock_dir" 2>/dev/null || true' RETURN
+    trap "rmdir '$build_lock_dir' 2>/dev/null || true" RETURN
   else
     echo "==> e2e: waiting for shared app/ui build lock"
     while [ -d "$build_lock_dir" ]; do
@@ -191,7 +196,7 @@ invoker_e2e_ensure_app_built() {
       echo "ERROR: unable to acquire shared app/ui build lock" >&2
       return 1
     fi
-    trap 'rmdir "$build_lock_dir" 2>/dev/null || true' RETURN
+    trap "rmdir '$build_lock_dir' 2>/dev/null || true" RETURN
   fi
   echo "==> e2e: building @invoker/ui and @invoker/app"
   (
