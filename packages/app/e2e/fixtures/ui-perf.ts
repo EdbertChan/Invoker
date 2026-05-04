@@ -12,6 +12,7 @@ export interface ElectronGraphSeedOptions {
 
 export interface DragFrameStats {
   frames: number;
+  dragScoreMs: number;
   avgMs: number;
   p50Ms: number;
   p95Ms: number;
@@ -60,6 +61,7 @@ function summarizeFrameTimes(samples: number[]): DragFrameStats {
   const pick = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
   return {
     frames: samples.length,
+    dragScoreMs: Number(avg.toFixed(2)),
     avgMs: Number(avg.toFixed(2)),
     p50Ms: Number(pick(0.5).toFixed(2)),
     p95Ms: Number(pick(0.95).toFixed(2)),
