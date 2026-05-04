@@ -56,7 +56,7 @@ export function TaskNode({ data }: TaskNodeProps) {
 
   return (
     <div
-      className={`relative w-[264px] rounded-2xl border px-5 py-4 transition-[opacity,box-shadow,border-color] duration-75 shadow-[0_6px_24px_rgba(0,0,0,0.28)] ${colors.bg} ${colors.border} ${selected ? 'ring-2 ring-white/90 ring-offset-2 ring-offset-gray-950 shadow-[0_0_0_1px_rgba(255,255,255,0.25),0_10px_30px_rgba(0,0,0,0.38)]' : ''} ${dimmed ? 'opacity-20 pointer-events-none' : isStale ? 'opacity-50' : ''}`}
+      className={`relative w-[264px] rounded-2xl border px-5 py-4 transition-[opacity,border-color] duration-75 ${colors.bg} ${colors.border} ${selected ? 'ring-2 ring-white/90 ring-offset-2 ring-offset-gray-950' : ''} ${dimmed ? 'opacity-20 pointer-events-none' : isStale ? 'opacity-50' : ''}`}
       title={task.id}
       data-selected={selected ? 'true' : 'false'}
     >

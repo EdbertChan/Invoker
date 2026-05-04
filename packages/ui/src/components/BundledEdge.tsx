@@ -77,8 +77,6 @@ export function BundledEdge({
     ...style,
     stroke: currentStroke,
     strokeWidth: currentWidth,
-    transition: 'stroke 0.2s ease, stroke-width 0.2s ease, opacity 0.2s ease',
-    filter: hovered ? `drop-shadow(0 0 4px ${currentStroke}40)` : undefined,
   };
 
   const label = data?.label;
