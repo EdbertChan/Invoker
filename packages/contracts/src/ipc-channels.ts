@@ -165,6 +165,18 @@ export interface SystemDiagnostics {
   bundledSkills?: BundledSkillsStatus;
 }
 
+export interface UiPerfStats {
+  ts: string;
+  mainDeltaToUi: number;
+  dbPollCreated: number;
+  dbPollUpdatedAsCreated: number;
+  dbPollUpdatedAsUpdated: number;
+  rendererReports: number;
+  maxRendererEventLoopLagMs: number;
+  maxRendererLongTaskMs: number;
+  startupMarks?: Record<string, number>;
+}
+
 // ── Invoke Channel Registry ─────────────────────────────────
 // Each key is the channel name string; value is { request, response }.
 // `request` is a tuple of the arguments passed after the channel name.
@@ -374,7 +386,11 @@ export const IpcChannels = {
   },
   'invoker:get-ui-perf-stats': {} as {
     request: [];
-    response: Record<string, unknown>;
+    response: UiPerfStats;
+  },
+  'invoker:reset-ui-perf-stats': {} as {
+    request: [];
+    response: UiPerfStats;
   },
   'invoker:get-activity-logs': {} as {
     request: [];
