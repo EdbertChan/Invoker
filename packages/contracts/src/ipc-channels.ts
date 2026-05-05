@@ -330,6 +330,10 @@ export const IpcChannels = {
     request: [mergeTaskId: string];
     response: RebaseAndRetryResult;
   },
+  'invoker:recreate-with-rebase': {} as {
+    request: [workflowId: string];
+    response: void;
+  },
   'invoker:set-merge-branch': {} as {
     request: [workflowId: string, baseBranch: string];
     response: void;
