@@ -80,6 +80,14 @@ export function createDelegatedTaskFeed(
         if (delta.type === 'removed') {
           if (!tasks.delete(delta.taskId)) return;
           notify();
+          return;
+        }
+
+        if (delta.type === 'replaced') {
+          const task = delta.task;
+          if (workflowId && task.config.workflowId !== workflowId) return;
+          tasks.set(task.id, task);
+          notify();
         }
       });
 
@@ -138,7 +146,7 @@ export async function trackWorkflow(options: TrackWorkflowOptions): Promise<Trac
   const deltaUnsub = options.subscribeToChanges
     ? options.subscribeToChanges(signalWake)
     : options.messageBus?.subscribe<TaskDelta>(Channels.TASK_DELTA, (delta) => {
-      const deltaWorkflowId = delta.type === 'created'
+      const deltaWorkflowId = delta.type === 'created' || delta.type === 'replaced'
         ? delta.task.config.workflowId
         : delta.type === 'updated'
           ? tasks.find((task) => task.id === delta.taskId)?.config.workflowId

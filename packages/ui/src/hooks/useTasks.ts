@@ -131,7 +131,7 @@ export function useTasks(): UseTasksResult {
             }
             next = applyDelta(next, delta);
             if (
-              delta.type === 'created' &&
+              (delta.type === 'created' || delta.type === 'replaced') &&
               delta.task?.config.workflowId &&
               !workflowsRef.current.has(delta.task.config.workflowId)
             ) {
@@ -159,9 +159,13 @@ export function useTasks(): UseTasksResult {
           console.log(
             `[useTasks:task-delta] created id=${delta.task.id} status=${delta.task.status}`,
           );
+        } else if (delta.type === 'replaced') {
+          console.log(
+            `[useTasks:task-delta] replaced id=${delta.task.id} status=${delta.task.status} revision=${delta.task.revision}`,
+          );
         } else if (delta.type === 'removed') {
           console.log(`[useTasks:task-delta] removed taskId=${delta.taskId}`);
-        } else {
+        } else if (delta.type === 'updated') {
           const ex = delta.changes.execution;
           console.log(
             `[useTasks:task-delta] updated taskId=${delta.taskId} ` +

@@ -185,7 +185,7 @@ export class SlackSurface implements Surface {
     // For task deltas, try to update existing message or post new one
     if (event.type === 'task_delta') {
       const delta = event.delta;
-      const taskId = delta.type === 'created' ? delta.task.id : delta.taskId;
+      const taskId = delta.type === 'created' || delta.type === 'replaced' ? delta.task.id : delta.taskId;
 
       const existingTs = this.taskMessages.get(taskId);
       if (existingTs && delta.type === 'updated') {

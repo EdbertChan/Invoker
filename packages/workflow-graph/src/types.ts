@@ -183,7 +183,8 @@ export interface TaskStateChanges {
 export type TaskDelta =
   | { readonly type: 'created'; readonly task: TaskState }
   | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges; readonly revision: number; readonly previousRevision: number }
-  | { readonly type: 'removed'; readonly taskId: string; readonly previousRevision: number };
+  | { readonly type: 'removed'; readonly taskId: string; readonly previousRevision: number }
+  | { readonly type: 'replaced'; readonly task: TaskState };
 
 // ── Task Delta Factories ────────────────────────────────────
 
@@ -206,6 +207,12 @@ export function updatedDelta(
 /** Build a `removed` delta with the last known revision of the task. */
 export function removedDelta(taskId: string, previousRevision: number): TaskDelta {
   return { type: 'removed', taskId, previousRevision };
+}
+
+/** Build a `replaced` delta — authoritative full-task snapshot that overwrites local state.
+ *  Used after quarantine resolution to push the DB-backed truth to the renderer. */
+export function replacedDelta(task: TaskState): TaskDelta {
+  return { type: 'replaced', task };
 }
 
 // ── Task Create Options (alias for TaskConfig) ──────────────
