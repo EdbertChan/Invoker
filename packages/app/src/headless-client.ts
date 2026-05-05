@@ -198,43 +198,6 @@ async function delegateReadOnlyQuery(
   return true;
 }
 
-async function delegateAfterBootstrap(
-  args: string[],
-  deps: Pick<HeadlessClientDeps, 'refreshMessageBus'>,
-  bus: MessageBus,
-  waitForApproval?: boolean,
-  noTrack?: boolean,
-): Promise<boolean> {
-  const startedAt = Date.now();
-  delegationClientLog(`post-bootstrap delegation loop begin timeoutMs=${POST_BOOTSTRAP_OWNER_READY_TIMEOUT_MS}`);
-  const deadline = Date.now() + POST_BOOTSTRAP_OWNER_READY_TIMEOUT_MS;
-  let messageBus = bus;
-  let attempts = 0;
-  while (Date.now() < deadline) {
-    attempts += 1;
-    const owner = await discoverOwner(messageBus, 1_000);
-    delegationClientLog(
-      `post-bootstrap attempt=${attempts} ownerReachable=${isOwnerReachable(owner) ? 'true' : 'false'} standaloneCapable=${isStandaloneCapable(owner) ? 'true' : 'false'} ownerId=${owner?.ownerId ?? '<none>'}`,
-    );
-    if (isStandaloneCapable(owner) && await delegateMutation(
-      args,
-      messageBus,
-      waitForApproval,
-      noTrack,
-      noTrack ? POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS : DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS,
-    )) {
-      delegationClientLog(`post-bootstrap delegation succeeded attempts=${attempts} elapsedMs=${Date.now() - startedAt}`);
-      return true;
-    }
-    if (deps.refreshMessageBus) {
-      messageBus = await deps.refreshMessageBus();
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  delegationClientLog(`post-bootstrap delegation exhausted attempts=${attempts} elapsedMs=${Date.now() - startedAt}`);
-  return false;
-}
-
 export interface HeadlessClientDeps {
   messageBus: MessageBus;
   ensureStandaloneOwner: (bus?: MessageBus) => Promise<void>;
@@ -290,12 +253,15 @@ function parseArgs(argv: string[]): { args: string[]; waitForApproval?: boolean;
 }
 
 /**
- * Resolve a writable owner endpoint using the resolver, then delegate.
+ * Find a writable owner and delegate the mutation command to it.
  *
- * This function encapsulates the discover → fallback → bootstrap → delegate
- * policy that was previously inline. It uses the OwnerResolver for the
- * discovery/refresh/bootstrap phases and delegates command execution once
- * an owner is acquired.
+ * The discovery policy has two stages:
+ *   1. Try the existing owner (standalone or GUI) on the current bus.
+ *   2. If no owner accepted, bootstrap a standalone owner and retry.
+ *
+ * Stage 1 lets a GUI session accept mutations without a standalone
+ * process. Stage 2 starts a long-lived standalone daemon when no
+ * existing owner can serve the command.
  */
 async function resolveOwnerAndDelegate(
   args: string[],
@@ -305,108 +271,110 @@ async function resolveOwnerAndDelegate(
 ): Promise<number | null> {
   const startedAt = Date.now();
   delegationClientLog(`resolveOwnerAndDelegate begin command=${args[0] ?? '<missing>'} noTrack=${noTrack ? 'true' : 'false'}`);
-  let messageBus = deps.messageBus;
+
   const resolvedExitCode = (): number => {
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
   };
 
-  // Phase 1: Discover a standalone-capable owner
-  const owner = await discoverOwner(messageBus, 3_000);
+  // ── Stage 1: delegate to an already-running owner ──────────
+  // Discover whatever owner is live (standalone or GUI). A standalone
+  // owner is preferred, but a GUI owner can also accept mutations.
+  const owner = await discoverOwner(deps.messageBus, 3_000);
   delegationClientLog(
-    `phase1 discover standaloneCapable=${isStandaloneCapable(owner) ? 'true' : 'false'} ownerReachable=${isOwnerReachable(owner) ? 'true' : 'false'} ownerId=${owner?.ownerId ?? '<none>'}`,
+    `stage1 discover standaloneCapable=${isStandaloneCapable(owner) ? 'true' : 'false'} ownerReachable=${isOwnerReachable(owner) ? 'true' : 'false'} ownerId=${owner?.ownerId ?? '<none>'}`,
   );
-  if (isStandaloneCapable(owner)) {
-    if (await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
-      delegationClientLog(`phase1 delegated successfully elapsedMs=${Date.now() - startedAt}`);
-      return resolvedExitCode();
-    }
-    delegationClientLog('phase1 owner found but delegation returned false');
-  }
-
-  // Phase 2: Try any reachable owner (may be non-standalone)
-  if (isOwnerReachable(owner) && await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
-    delegationClientLog(`phase2 delegated to reachable owner ownerId=${owner.ownerId} elapsedMs=${Date.now() - startedAt}`);
+  if (isOwnerReachable(owner) && await delegateMutation(args, deps.messageBus, waitForApproval, noTrack)) {
+    delegationClientLog(`stage1 delegated elapsedMs=${Date.now() - startedAt}`);
     return resolvedExitCode();
   }
-  if (isOwnerReachable(owner)) {
-    delegationClientLog(`phase2 reachable owner did not accept delegation ownerId=${owner.ownerId}`);
-  } else {
-    delegationClientLog('phase2 skipped: no reachable owner');
-  }
 
-  // Phase 3: Refresh and retry against any reachable owner
-  if (isOwnerReachable(owner) && deps.refreshMessageBus) {
-    delegationClientLog('phase3 refreshing message bus');
-    messageBus = await deps.refreshMessageBus();
-    const refreshedOwner = await discoverOwner(messageBus, 1_000);
-    delegationClientLog(
-      `phase3 discover ownerReachable=${isOwnerReachable(refreshedOwner) ? 'true' : 'false'} standaloneCapable=${isStandaloneCapable(refreshedOwner) ? 'true' : 'false'} ownerId=${refreshedOwner?.ownerId ?? '<none>'}`,
-    );
-    if (isOwnerReachable(refreshedOwner) && await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
-      delegationClientLog(`phase3 delegated successfully elapsedMs=${Date.now() - startedAt}`);
-      return resolvedExitCode();
-    }
-    delegationClientLog('phase3 delegation did not succeed');
-  }
-
-  // Phase 4: Bootstrap with retry loop (delegated to resolver pattern)
+  // ── Stage 2: bootstrap a standalone owner, then delegate ───
+  // No live owner accepted the command. Start a standalone daemon
+  // and poll until it is ready. Retry up to POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS
+  // times to handle transient bootstrap failures.
+  let messageBus = deps.messageBus;
   if (deps.refreshMessageBus) {
     messageBus = await deps.refreshMessageBus();
   }
+
   for (let attempt = 0; attempt < POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS; attempt += 1) {
-    delegationClientLog(`phase4 bootstrap attempt=${attempt + 1}/${POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS}`);
+    delegationClientLog(`stage2 bootstrap attempt=${attempt + 1}/${POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS}`);
+
+    // Bootstrap: spawn or wait for a standalone owner process.
     try {
       await deps.ensureStandaloneOwner(messageBus);
     } catch (err) {
-      if (!isSharedMutationOwnerTimeoutError(err)) {
+      if (!isSharedMutationOwnerTimeoutError(err) || !deps.refreshMessageBus) {
         throw err;
       }
-      if (!deps.refreshMessageBus) {
-        throw err;
-      }
-      delegationClientLog(`phase4 bootstrap timeout; refreshing bus and retrying attempt=${attempt + 1}`);
+      delegationClientLog(`stage2 bootstrap timeout; refreshing bus attempt=${attempt + 1}`);
       messageBus = await deps.refreshMessageBus();
       await deps.ensureStandaloneOwner(messageBus);
     }
+
+    // Refresh the bus to pick up the newly-started owner, then
+    // poll until a standalone owner is reachable and delegation succeeds.
     if (deps.refreshMessageBus) {
       messageBus = await deps.refreshMessageBus();
     }
-    if (await delegateAfterBootstrap(args, deps, messageBus, waitForApproval, noTrack)) {
-      delegationClientLog(`phase4 delegated successfully attempt=${attempt + 1} elapsedMs=${Date.now() - startedAt}`);
-      return resolvedExitCode();
+    const resolver = createOwnerResolver(
+      { messageBus, refreshMessageBus: deps.refreshMessageBus, ensureStandaloneOwner: async () => {} },
+      { discoveryTimeoutMs: 1_000 },
+    );
+    const found = await resolver.waitForStandalone(POST_BOOTSTRAP_OWNER_READY_TIMEOUT_MS);
+    if (found.resolved) {
+      const timeoutMs = noTrack ? POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS : DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS;
+      if (await delegateMutation(args, found.bus, waitForApproval, noTrack, timeoutMs)) {
+        delegationClientLog(`stage2 delegated attempt=${attempt + 1} elapsedMs=${Date.now() - startedAt}`);
+        return resolvedExitCode();
+      }
     }
+    delegationClientLog(`stage2 owner not ready after bootstrap attempt=${attempt + 1}`);
+
     if (!deps.refreshMessageBus) {
       break;
     }
     messageBus = await deps.refreshMessageBus();
   }
 
-  delegationClientLog(`resolveOwnerAndDelegate failed after elapsedMs=${Date.now() - startedAt}`);
-  return null; // Could not resolve
+  delegationClientLog(`resolveOwnerAndDelegate failed elapsedMs=${Date.now() - startedAt}`);
+  return null;
 }
 
+/**
+ * Route a headless CLI command to the right execution path.
+ *
+ * Three paths, checked in order:
+ *   1. Read-only query  → delegate to any live owner (no bootstrap).
+ *   2. Local execution  → run in-process via Electron (standalone mode,
+ *      owner-serve, or non-mutating commands like list/status).
+ *   3. Mutation delegation → find or bootstrap an owner, delegate via IPC.
+ */
 export async function runHeadlessClientCommand(
   argv: string[],
   deps: HeadlessClientDeps,
 ): Promise<number> {
-  // Validate config before any delegation path so malformed JSON fails fast
-  // even for commands that do not boot the full Electron owner process.
+  // Fail fast on malformed config before any delegation attempt.
   loadConfig();
 
   const { args, waitForApproval, noTrack } = parseArgs(argv);
   const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1';
   const internalOwnerServe = args[0] === 'owner-serve';
 
+  // Path 1: read-only queries (queue, ui-perf) delegate to any live owner.
   if (!standaloneMode && !internalOwnerServe && await delegateReadOnlyQuery(args, deps.messageBus, deps.refreshMessageBus)) {
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
   }
 
+  // Path 2: non-mutating commands, standalone mode, and owner-serve
+  // run locally in the Electron host process.
   if (!isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {
     return deps.runElectronHeadless(argv);
   }
 
+  // Path 3: mutating commands delegate to an owner via IPC.
   const result = await resolveOwnerAndDelegate(args, deps, waitForApproval, noTrack);
   if (result !== null) {
     return result;
