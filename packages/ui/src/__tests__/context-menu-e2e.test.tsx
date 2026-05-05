@@ -141,6 +141,24 @@ describe('Context menu (component)', () => {
     });
   });
 
+  it('Recreate with Rebase is visible and dispatches distinct handler', async () => {
+    await setupAndRightClick();
+
+    await waitFor(() => {
+      expect(screen.getByText('Retry with Rebase')).toBeInTheDocument();
+      expect(screen.getByText('Recreate with Rebase')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Recreate with Rebase'));
+
+    await waitFor(() => {
+      expect(mock.api.recreateWithRebase).toHaveBeenCalledWith('wf-1');
+      // Verify the other handler was NOT called
+      expect(mock.api.rebaseAndRetry).not.toHaveBeenCalled();
+      expect(screen.queryByText('Restart Task')).not.toBeInTheDocument();
+    });
+  });
+
   it('shows and triggers Recreate from Task', async () => {
     await setupAndRightClick();
 
