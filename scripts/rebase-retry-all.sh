@@ -3,11 +3,8 @@ set -euo pipefail
 
 # Detect repo root
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
-
-# Set Electron paths
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
+source "$REPO_ROOT/scripts/lib/bulk-common.sh"
+bulk_init_paths
 
 # Parse arguments
 DRY_RUN=false
@@ -19,38 +16,16 @@ RECOVER_STALE=true
 STALE_THRESHOLD_SECONDS=900
 STALE_RECOVERY_RETRIES=12
 STALE_RECOVERY_RETRY_DELAY_SECONDS=5
-STANDALONE_MODE="${INVOKER_HEADLESS_STANDALONE:-0}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --dry-run)
-      DRY_RUN=true
-      shift
-      ;;
-    --status)
-      STATUS_FILTER="$2"
-      shift 2
-      ;;
-    --follow)
-      FOLLOW=true
-      shift
-      ;;
-    --parallel)
-      PARALLELISM="$2"
-      shift 2
-      ;;
-    --timeout)
-      COMMAND_TIMEOUT_SECONDS="$2"
-      shift 2
-      ;;
-    --no-recover-stale)
-      RECOVER_STALE=false
-      shift
-      ;;
-    --stale-threshold)
-      STALE_THRESHOLD_SECONDS="$2"
-      shift 2
-      ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --status) STATUS_FILTER="$2"; shift 2 ;;
+    --follow) FOLLOW=true; shift ;;
+    --parallel) PARALLELISM="$2"; shift 2 ;;
+    --timeout) COMMAND_TIMEOUT_SECONDS="$2"; shift 2 ;;
+    --no-recover-stale) RECOVER_STALE=false; shift ;;
+    --stale-threshold) STALE_THRESHOLD_SECONDS="$2"; shift 2 ;;
     *)
       echo "Unknown option: $1" >&2
       echo "Usage: $0 [--dry-run] [--follow] [--status <filter>] [--parallel <n>] [--timeout <seconds>] [--no-recover-stale] [--stale-threshold <seconds>]" >&2
@@ -74,20 +49,10 @@ if [ "$STANDALONE_MODE" = "1" ]; then
   COMMAND_TIMEOUT_SECONDS=0
 fi
 
-# Handle Linux Electron sandbox detection
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
+# ---------------------------------------------------------------------------
+# Script-specific helpers
+# ---------------------------------------------------------------------------
 
-# Helper functions
-# Read-only queries remain quiet; mutating commands delegate to the current owner
-# so workflow-scoped mutations can run in parallel lanes.
 run_with_optional_timeout() {
   local seconds="$1"
   shift
@@ -124,32 +89,12 @@ PY
   return 127
 }
 
-headless_query() {
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-headless_mutation() {
-  if [ "$STANDALONE_MODE" = "1" ]; then
-    "$REPO_ROOT/run.sh" --headless "$@"
-    return $?
-  fi
-  node "$IPC_HELPER" exec -- "$@"
-}
-
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
-
-headless_task_ids() {
-  headless_query "$@" | grep '/' || true
-}
-
 find_stale_workflow_ids() {
   local wf_id=""
-  headless_workflow_ids query workflows --output label \
+  bulk_headless_workflow_ids query workflows --output label \
     | while IFS= read -r wf_id; do
         [ -z "$wf_id" ] && continue
-        headless_query query tasks --workflow "$wf_id" --output jsonl
+        bulk_headless_query query tasks --workflow "$wf_id" --output jsonl
       done \
     | grep '^{' \
     | jq -r --argjson threshold "$STALE_THRESHOLD_SECONDS" '
@@ -173,7 +118,7 @@ resume_stale_workflow() {
 
   while [ "$attempt" -le "$STALE_RECOVERY_RETRIES" ]; do
     set +e
-    cmd_out="$(headless_mutation --no-track resume "$stale_wf" 2>&1)"
+    cmd_out="$(bulk_headless_mutation --no-track resume "$stale_wf" 2>&1)"
     cmd_status=$?
     set -e
 
@@ -201,14 +146,17 @@ resume_stale_workflow() {
   return 1
 }
 
-# Query workflow IDs
+# ---------------------------------------------------------------------------
+# Query workflows
+# ---------------------------------------------------------------------------
+
 QUERY_ARGS=(query workflows --output label)
 if [ -n "$STATUS_FILTER" ]; then
   QUERY_ARGS+=(--status "$STATUS_FILTER")
 fi
 
 echo "Querying workflows..." >&2
-WORKFLOW_IDS=$(headless_workflow_ids "${QUERY_ARGS[@]}")
+WORKFLOW_IDS=$(bulk_headless_workflow_ids "${QUERY_ARGS[@]}")
 
 if [ -z "$WORKFLOW_IDS" ]; then
   echo "No workflows found." >&2
@@ -228,6 +176,10 @@ echo "Follow mode: $FOLLOW" >&2
 if [ "$FOLLOW" = false ]; then
   echo "Note: fire-and-forget dispatches all workflows immediately; --parallel is enforced with --follow." >&2
 fi
+
+# ---------------------------------------------------------------------------
+# Stale recovery
+# ---------------------------------------------------------------------------
 
 if [ "$RECOVER_STALE" = true ]; then
   STALE_WF_IDS="$(find_stale_workflow_ids)"
@@ -250,15 +202,12 @@ if [ "$RECOVER_STALE" = true ]; then
   fi
 fi
 
-# Initialize counters
-SUCCEEDED=0
-FAILED=0
-SKIPPED=0
-DISPATCHED=0
-LAUNCH_FAILED=0
+# ---------------------------------------------------------------------------
+# Follow mode
+# ---------------------------------------------------------------------------
 
 if [ "$FOLLOW" = true ]; then
-  process_one_workflow() {
+  _rebase_one_workflow() {
     local wf_id="$1"
     local result_file="$2"
     local task_id=""
@@ -266,7 +215,7 @@ if [ "$FOLLOW" = true ]; then
     echo "Processing workflow: $wf_id" >&2
 
     # Use first non-merge task as rebase anchor.
-    task_id=$(headless_task_ids query tasks --workflow "$wf_id" --no-merge --output label | head -1)
+    task_id=$(bulk_headless_task_ids query tasks --workflow "$wf_id" --no-merge --output label | head -1)
     if [ -z "$task_id" ]; then
       echo "  No non-merge tasks found, skipping" >&2
       printf "%s\tSKIPPED\n" "$wf_id" >> "$result_file"
@@ -284,23 +233,16 @@ if [ "$FOLLOW" = true ]; then
     else
       echo "  Rebasing task: $task_id (no timeout)" >&2
     fi
-    local cmd_out
-    local cmd_status
+
+    local cmd_out cmd_status
+    set +e
     if [ "$COMMAND_TIMEOUT_SECONDS" -gt 0 ]; then
-      set +e
-      cmd_out="$(
-        run_with_optional_timeout "$COMMAND_TIMEOUT_SECONDS" headless_mutation --no-track rebase "$task_id" 2>&1
-      )"
-      cmd_status=$?
-      set -e
+      cmd_out="$(run_with_optional_timeout "$COMMAND_TIMEOUT_SECONDS" bulk_headless_mutation --no-track rebase "$task_id" 2>&1)"
     else
-      set +e
-      cmd_out="$(
-        headless_mutation --no-track rebase "$task_id" 2>&1
-      )"
-      cmd_status=$?
-      set -e
+      cmd_out="$(bulk_headless_mutation --no-track rebase "$task_id" 2>&1)"
     fi
+    cmd_status=$?
+    set -e
 
     if [ "$cmd_status" -eq 0 ]; then
       printf "%s\n" "$cmd_out" >&2
@@ -318,134 +260,81 @@ if [ "$FOLLOW" = true ]; then
   }
 
   RESULTS_FILE="$(mktemp -t rebase-retry-all-results.XXXXXX)"
-  PIDS=()
-
-  # Process workflows in parallel with bounded fan-out.
-  while IFS= read -r WF_ID; do
-    process_one_workflow "$WF_ID" "$RESULTS_FILE" &
-    PIDS+=("$!")
-
-    while [ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]; do
-      sleep 0.2
-    done
-  done <<< "$WORKFLOW_IDS"
-
-  for pid in "${PIDS[@]}"; do
-    wait "$pid" || true
-  done
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-      SKIPPED) SKIPPED=$((SKIPPED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
-
+  bulk_follow_parallel "$WORKFLOW_IDS" "$PARALLELISM" "$RESULTS_FILE" _rebase_one_workflow
+  bulk_tally_results "$RESULTS_FILE"
   rm -f "$RESULTS_FILE"
 
   echo "" >&2
   echo "Summary:" >&2
-  echo "  Succeeded: $SUCCEEDED" >&2
-  echo "  Failed: $FAILED" >&2
-  echo "  Skipped: $SKIPPED" >&2
-  echo "  Total: $((SUCCEEDED + FAILED + SKIPPED))" >&2
+  echo "  Succeeded: $BULK_TALLY_SUCCEEDED" >&2
+  echo "  Failed: $BULK_TALLY_FAILED" >&2
+  echo "  Skipped: $BULK_TALLY_SKIPPED" >&2
+  echo "  Total: $((BULK_TALLY_SUCCEEDED + BULK_TALLY_FAILED + BULK_TALLY_SKIPPED))" >&2
 
-  if [ "$FAILED" -ne 0 ]; then
+  if [ "$BULK_TALLY_FAILED" -ne 0 ]; then
     exit 1
   fi
-else
-  LOG_DIR="$(mktemp -d -t rebase-retry-all-logs.XXXXXX)"
-  RESULT_FILE="$(mktemp -t rebase-retry-all-results.XXXXXX)"
-  COMMANDS_FILE="$(mktemp -t rebase-retry-all-commands.XXXXXX)"
-  OUTPUT_JSONL="$(mktemp -t rebase-retry-all-output.XXXXXX)"
+  exit 0
+fi
 
-  IDX=0
-  while IFS= read -r WF_ID; do
-    [ -z "$WF_ID" ] && continue
-    IDX=$((IDX + 1))
-    echo "[queue $IDX/$TOTAL_WORKFLOWS] $WF_ID" >&2
+# ---------------------------------------------------------------------------
+# Fire-and-forget mode
+# ---------------------------------------------------------------------------
 
-    task_id="$(headless_task_ids query tasks --workflow "$WF_ID" --no-merge --output label | head -1)"
-    if [ -z "$task_id" ]; then
-      echo "  No non-merge tasks found, skipping" >&2
-      SKIPPED=$((SKIPPED + 1))
-      continue
-    fi
+LOG_DIR="$(mktemp -d -t rebase-retry-all-logs.XXXXXX)"
+RESULT_FILE="$(mktemp -t rebase-retry-all-results.XXXXXX)"
+COMMANDS_FILE="$(mktemp -t rebase-retry-all-commands.XXXXXX)"
+OUTPUT_JSONL="$(mktemp -t rebase-retry-all-output.XXXXXX)"
+SKIPPED=0
 
-    if [ "$DRY_RUN" = true ]; then
-      echo "  [DRY RUN] Would dispatch rebase for task: $task_id" >&2
-      DISPATCHED=$((DISPATCHED + 1))
-      continue
-    fi
+IDX=0
+while IFS= read -r WF_ID; do
+  [ -z "$WF_ID" ] && continue
+  IDX=$((IDX + 1))
+  echo "[queue $IDX/$TOTAL_WORKFLOWS] $WF_ID" >&2
 
-    log_file="$LOG_DIR/${WF_ID}.log"
-    printf '{"label":"%s","workflowId":"%s","taskId":"%s","args":["rebase","%s"]}\n' "$WF_ID" "$WF_ID" "$task_id" "$task_id" >> "$COMMANDS_FILE"
-    echo "  queued log=$log_file" >&2
-  done <<< "$WORKFLOW_IDS"
-
-  BATCH_ARGS=(batch-exec --no-track --parallel "$PARALLELISM")
-  if [ "$COMMAND_TIMEOUT_SECONDS" -gt 0 ]; then
-    BATCH_ARGS+=(--timeout-ms "$((COMMAND_TIMEOUT_SECONDS * 1000))")
+  task_id="$(bulk_headless_task_ids query tasks --workflow "$WF_ID" --no-merge --output label | head -1)"
+  if [ -z "$task_id" ]; then
+    echo "  No non-merge tasks found, skipping" >&2
+    SKIPPED=$((SKIPPED + 1))
+    continue
   fi
-  if [ "$STANDALONE_MODE" = "1" ]; then
-    while IFS= read -r WF_ID; do
-      [ -z "$WF_ID" ] && continue
-      task_id="$(headless_task_ids query tasks --workflow "$WF_ID" --no-merge --output label | head -1)"
-      [ -z "$task_id" ] && continue
-      if headless_mutation --no-track rebase "$task_id" > "$LOG_DIR/${WF_ID}.log" 2>&1; then
-        printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULT_FILE"
-      else
-        printf "%s\tFAILED\n" "$WF_ID" >> "$RESULT_FILE"
-      fi
-    done <<< "$WORKFLOW_IDS"
-  else
-    node "$IPC_HELPER" "${BATCH_ARGS[@]}" < "$COMMANDS_FILE" > "$OUTPUT_JSONL"
-    python3 - "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL" <<'PY'
-import json
-import pathlib
-import sys
 
-result_file = pathlib.Path(sys.argv[1])
-log_dir = pathlib.Path(sys.argv[2])
-output_jsonl = pathlib.Path(sys.argv[3])
-
-for raw in output_jsonl.read_text(encoding="utf-8").splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    item = json.loads(raw)
-    workflow_id = item.get("workflowId") or item.get("label") or "unknown"
-    (log_dir / f"{workflow_id}.log").write_text(raw + "\n", encoding="utf-8")
-    with result_file.open("a", encoding="utf-8") as handle:
-        handle.write(f"{workflow_id}\t{'SUCCEEDED' if item.get('ok') else 'FAILED'}\n")
-PY
-  fi
-  rm -f "$COMMANDS_FILE"
-  rm -f "$OUTPUT_JSONL"
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) DISPATCHED=$((DISPATCHED + 1)) ;;
-      FAILED) LAUNCH_FAILED=$((LAUNCH_FAILED + 1)) ;;
-    esac
-  done < "$RESULT_FILE"
-  rm -f "$RESULT_FILE"
-
-  echo "" >&2
-  echo "Summary (fire-and-forget):" >&2
   if [ "$DRY_RUN" = true ]; then
-    echo "  Would dispatch: $DISPATCHED" >&2
-  else
-    echo "  Dispatched: $DISPATCHED" >&2
-  fi
-  echo "  Launch failed: $LAUNCH_FAILED" >&2
-  echo "  Skipped: $SKIPPED" >&2
-  if [ "$DRY_RUN" = false ]; then
-    echo "  Logs: $LOG_DIR" >&2
+    echo "  [DRY RUN] Would dispatch rebase for task: $task_id" >&2
+    continue
   fi
 
-  if [ "$LAUNCH_FAILED" -ne 0 ]; then
-    exit 1
+  log_file="$LOG_DIR/${WF_ID}.log"
+  printf '{"label":"%s","workflowId":"%s","taskId":"%s","args":["rebase","%s"]}\n' "$WF_ID" "$WF_ID" "$task_id" "$task_id" >> "$COMMANDS_FILE"
+  echo "  queued log=$log_file" >&2
+done <<< "$WORKFLOW_IDS"
+
+if [ "$DRY_RUN" = false ] && [ -s "$COMMANDS_FILE" ]; then
+  EXTRA_BATCH_ARGS=()
+  if [ "$COMMAND_TIMEOUT_SECONDS" -gt 0 ]; then
+    EXTRA_BATCH_ARGS+=(--timeout-ms "$((COMMAND_TIMEOUT_SECONDS * 1000))")
   fi
+  bulk_dispatch_fire_and_forget "$COMMANDS_FILE" "$OUTPUT_JSONL" "$LOG_DIR" "$RESULT_FILE" "$PARALLELISM" "${EXTRA_BATCH_ARGS[@]}"
+fi
+rm -f "$COMMANDS_FILE" "$OUTPUT_JSONL"
+
+bulk_tally_results "$RESULT_FILE"
+rm -f "$RESULT_FILE"
+
+echo "" >&2
+echo "Summary (fire-and-forget):" >&2
+if [ "$DRY_RUN" = true ]; then
+  echo "  Would dispatch: $((IDX - SKIPPED))" >&2
+else
+  echo "  Dispatched: $BULK_TALLY_SUCCEEDED" >&2
+fi
+echo "  Launch failed: $BULK_TALLY_FAILED" >&2
+echo "  Skipped: $SKIPPED" >&2
+if [ "$DRY_RUN" = false ]; then
+  echo "  Logs: $LOG_DIR" >&2
+fi
+
+if [ "$BULK_TALLY_FAILED" -ne 0 ]; then
+  exit 1
 fi
