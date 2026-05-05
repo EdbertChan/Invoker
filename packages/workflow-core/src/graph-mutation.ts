@@ -13,7 +13,7 @@
 
 import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig } from '@invoker/workflow-graph';
 import type { GraphMutation, OrchestratorPersistence, OrchestratorMessageBus } from './orchestrator.js';
-import { createTaskState } from '@invoker/workflow-graph';
+import { createTaskState, createdDelta, updatedDelta } from '@invoker/workflow-graph';
 import { findLeafTaskIds } from '@invoker/workflow-graph';
 
 const TASK_DELTA_CHANNEL = 'task.delta';
@@ -117,12 +117,9 @@ export function reconcileMergeLeavesImpl(host: GraphMutationHost, workflowId: st
     status: 'pending',
     execution: {},
   };
-  host.writeAndSync(mergeNode.id, changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, {
-    type: 'updated',
-    taskId: mergeNode.id,
-    changes,
-  });
+  const prevRev = mergeNode.revision;
+  const updated = host.writeAndSync(mergeNode.id, changes);
+  host.messageBus.publish(TASK_DELTA_CHANNEL, updatedDelta(mergeNode.id, changes, updated.revision, prevRev));
 }
 
 /**
@@ -147,8 +144,9 @@ export function applyGraphMutationImpl(host: GraphMutationHost, mutation: GraphM
       dep === mutation.sourceNodeId ? mutation.outputNodeId : dep,
     );
     const remapChanges: TaskStateChanges = { dependencies: newDeps };
-    host.writeAndSync(task.id, remapChanges);
-    const delta: TaskDelta = { type: 'updated', taskId: task.id, changes: remapChanges };
+    const prevRev = task.revision;
+    const remapped = host.writeAndSync(task.id, remapChanges);
+    const delta = updatedDelta(task.id, remapChanges, remapped.revision, prevRev);
     host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     allDeltas.push(delta);
   }
@@ -165,12 +163,10 @@ export function applyGraphMutationImpl(host: GraphMutationHost, mutation: GraphM
     config: { ...baseChanges.config, ...mutation.sourceChanges?.config },
     execution: { ...baseChanges.execution, ...mutation.sourceChanges?.execution },
   } as TaskStateChanges;
-  host.writeAndSync(mutation.sourceNodeId, sourceChanges);
-  const sourceDelta: TaskDelta = {
-    type: 'updated',
-    taskId: mutation.sourceNodeId,
-    changes: sourceChanges,
-  };
+  const sourceTask0 = host.stateMachine.getTask(mutation.sourceNodeId);
+  const sourcePrevRev = sourceTask0?.revision ?? 0;
+  const sourceUpdated = host.writeAndSync(mutation.sourceNodeId, sourceChanges);
+  const sourceDelta = updatedDelta(mutation.sourceNodeId, sourceChanges, sourceUpdated.revision, sourcePrevRev);
   host.persistence.logEvent?.(
     mutation.sourceNodeId,
     mutation.sourceDisposition === 'complete' ? 'task.completed' : 'task.stale',
@@ -208,7 +204,7 @@ export function applyGraphMutationImpl(host: GraphMutationHost, mutation: GraphM
     }
     const task = createTaskState(nodeDef.id, nodeDef.description, nodeDef.dependencies, nodeConfig);
     host.createAndSync(task);
-    const delta: TaskDelta = { type: 'created', task };
+    const delta = createdDelta(task);
     host.persistence.logEvent?.(task.id, 'task.created');
     host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     allDeltas.push(delta);
