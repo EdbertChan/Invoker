@@ -286,6 +286,10 @@ export const IpcChannels = {
     request: [taskId: string, agentName: string];
     response: void;
   },
+  'invoker:edit-task-prompt': {} as {
+    request: [taskId: string, newPrompt: string];
+    response: void;
+  },
   'invoker:set-task-external-gate-policies': {} as {
     request: [taskId: string, updates: ExternalGatePolicyUpdate[]];
     response: void;
