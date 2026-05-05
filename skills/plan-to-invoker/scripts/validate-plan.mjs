@@ -388,6 +388,20 @@ function validatePlan(yamlContent) {
     }
   });
 
+  // Validate visual proof flag for UI-modifying plans
+  const UI_PATH_PATTERN = /packages\/ui\//;
+  const touchesUi = raw.tasks.some((task) => {
+    const text = [task.command, task.prompt, task.description].filter(Boolean).join(' ');
+    return UI_PATH_PATTERN.test(text);
+  });
+  if (touchesUi && !raw.visualProof) {
+    errors.push({
+      errorType: 'missing_visual_proof_flag',
+      field: 'visualProof',
+      message: "Plan modifies packages/ui/ but 'visualProof' is not set to true. Set visualProof: true and include visual proof capture tasks.",
+    });
+  }
+
   return errors;
 }
 
