@@ -122,7 +122,6 @@ import { collectSystemDiagnostics } from './system-diagnostics.js';
 import { installBundledSkills, resolveBundledSkillsStatus } from './bundled-skills.js';
 import { createRequire } from 'node:module';
 import { acquireDbWriterLock, type DbWriterLockResult } from './db-writer-lock.js';
-import { applyDelta } from './delta-merge.js';
 import { shouldSkipAutoFixForError } from './auto-fix-gating.js';
 import { ensureSqliteFlushDebounceForOwner } from './sqlite-flush-policy.js';
 import type { WorkflowMutationPriority } from './workflow-mutation-coordinator.js';
@@ -2490,7 +2489,32 @@ if (isHeadless) {
         }
       }
 
-      applyDelta(d, lastKnownTaskStates, orchestrator);
+      if (d.type === 'created') {
+        lastKnownTaskStates.set(d.task.id, JSON.stringify(d.task));
+      } else if (d.type === 'updated') {
+        let existing = lastKnownTaskStates.get(d.taskId);
+        if (!existing && orchestrator) {
+          logger.debug(`task-delta fallback lookup for ${d.taskId}`, { module: 'ui' });
+          const task = orchestrator.getAllTasks().find(t => t.id === d.taskId);
+          if (task) {
+            existing = JSON.stringify(task);
+            lastKnownTaskStates.set(d.taskId, existing);
+          }
+        }
+        if (existing) {
+          const prev = JSON.parse(existing);
+          const { config: cfgChanges, execution: execChanges, ...topLevel } = d.changes;
+          const task = {
+            ...prev,
+            ...topLevel,
+            config: { ...prev.config, ...cfgChanges },
+            execution: { ...prev.execution, ...execChanges },
+          };
+          lastKnownTaskStates.set(d.taskId, JSON.stringify(task));
+        }
+      } else if (d.type === 'removed') {
+        lastKnownTaskStates.delete(d.taskId);
+      }
     });
 
     uiPerfLogInterval = setInterval(() => {
