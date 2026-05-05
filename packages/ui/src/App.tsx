@@ -242,6 +242,15 @@ export function App() {
     }
   }, []);
 
+  const handleRecreateWithRebase = useCallback(async (workflowId: string) => {
+    setContextMenu(null);
+    try {
+      await window.invoker?.recreateWithRebase(workflowId);
+    } catch (err) {
+      console.error('Recreate with Rebase failed:', err);
+    }
+  }, []);
+
   const handleRetryWorkflow = useCallback(async (workflowId: string) => {
     setContextMenu(null);
     try {
@@ -719,6 +728,7 @@ export function App() {
           onReplace={handleReplaceTask}
           onOpenTerminal={handleOpenTerminal}
           onRebaseAndRetry={handleRebaseAndRetry}
+          onRecreateWithRebase={handleRecreateWithRebase}
           onRetryWorkflow={handleRetryWorkflow}
           onRecreateTask={handleRecreateTask}
           onRecreateWorkflow={handleRecreateWorkflow}

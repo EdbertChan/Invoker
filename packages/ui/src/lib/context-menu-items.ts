@@ -121,6 +121,14 @@ export function getMenuItems(
     });
 
     items.push({
+      id: 'recreate-with-rebase',
+      label: 'Recreate with Rebase',
+      enabled: true,
+      action: 'onRecreateWithRebase',
+      variant: 'warning',
+    });
+
+    items.push({
       id: 'retry-workflow',
       label: 'Retry',
       enabled: true,
