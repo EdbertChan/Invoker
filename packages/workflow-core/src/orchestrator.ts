@@ -528,6 +528,7 @@ export function taskRepositoryFromPersistence(p: OrchestratorPersistence): TaskR
     updateWorkflow: (id, c) => p.updateWorkflow?.(id, c),
     deleteWorkflow: (id) => p.deleteWorkflow?.(id),
     deleteAllWorkflows: () => p.deleteAllWorkflows?.(),
+    getTask: (_id) => undefined,
     saveTask: (wfId, t) => p.saveTask(wfId, t),
     updateTask: (id, c) => p.updateTask(id, c),
     logEvent: (id, et, pl) => p.logEvent?.(id, et, pl),

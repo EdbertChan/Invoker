@@ -42,6 +42,12 @@ export class SqliteTaskRepository implements TaskRepository {
     this.adapter.deleteAllWorkflows();
   }
 
+  // ── Task reads ──
+
+  getTask(taskId: string): TaskState | undefined {
+    return this.adapter.getTask(taskId);
+  }
+
   // ── Task writes ──
 
   saveTask(workflowId: string, task: TaskState): void {
