@@ -110,6 +110,7 @@ import {
   approveTask as sharedApproveTask,
   fixWithAgentAction,
   rebaseAndRetry,
+  recreateWithRebase,
   recreateWorkflow as sharedRecreateWorkflow,
   recreateTask as sharedRecreateTask,
   resolveConflictAction,
@@ -3158,6 +3159,39 @@ if (isHeadless) {
         });
       } catch (err) {
         logger.error(`rebase-and-retry failed: ${err}`, { module: 'ipc' });
+        throw err;
+      }
+      },
+    );
+
+    registerWorkflowScopedGuiMutationHandler(
+      'invoker:recreate-with-rebase',
+      (workflowIdArg: unknown) => String(workflowIdArg) || undefined,
+      'high',
+      async (workflowIdArg: unknown) => {
+      const workflowId = String(workflowIdArg);
+      logger.info(`recreate-with-rebase: "${workflowId}"`, { module: 'ipc' });
+      try {
+        await preemptWorkflowBeforeMutation(workflowId, {
+          preemptWorkflowExecution,
+          logger,
+          context: 'ipc.recreate-with-rebase',
+        });
+        const started = await recreateWithRebase(workflowId, {
+          orchestrator,
+          persistence,
+          repoRoot,
+          taskExecutor: requireTaskExecutor(),
+        });
+        await dispatchStartedTasksWithGlobalTopup({
+          orchestrator,
+          taskExecutor: requireTaskExecutor(),
+          logger,
+          context: 'ipc.recreate-with-rebase',
+          started,
+        });
+      } catch (err) {
+        logger.error(`recreate-with-rebase failed: ${err}`, { module: 'ipc' });
         throw err;
       }
       },
