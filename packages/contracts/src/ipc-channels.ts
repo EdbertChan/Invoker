@@ -209,6 +209,10 @@ export const IpcChannels = {
   },
 
   // Task Queries
+  'invoker:get-task': {} as {
+    request: [taskId: string];
+    response: TaskState | null;
+  },
   'invoker:get-tasks': {} as {
     request: [forceRefresh?: boolean];
     response: { tasks: TaskState[]; workflows: WorkflowMeta[] };
