@@ -14,8 +14,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RUNNER="$REPO_ROOT/run.sh"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
+source "$REPO_ROOT/scripts/headless-bulk-lib.sh"
 
 DRY_RUN=false
 STATUS_FILTER=""
@@ -60,12 +59,12 @@ if [[ -n "$PARALLELISM" ]] && ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-if [[ ! -x "$RUNNER" ]]; then
-  echo "Missing executable runner at $RUNNER" >&2
+if [[ ! -x "$_BULK_RUNNER" ]]; then
+  echo "Missing executable runner at $_BULK_RUNNER" >&2
   exit 1
 fi
 
-WORKFLOWS_JSON="$("$RUNNER" --headless query workflows --output json)"
+WORKFLOWS_JSON="$("$_BULK_RUNNER" --headless query workflows --output json)"
 
 WORKFLOWS="$(
   WORKFLOWS_JSON_INPUT="$WORKFLOWS_JSON" python3 -c '
@@ -116,10 +115,10 @@ if $DRY_RUN; then
   echo "---"
   echo "Dry run complete. $TOTAL workflow(s) would be retried."
   exit 0
-else
-  FAILED=0
-  SUCCEEDED=0
-  DISPATCHED=0
+elif $FOLLOW; then
+  RESULTS_FILE="$(mktemp -t retry-failed-results.XXXXXX)"
+  PIDS=()
+  LOG_DIR="$(mktemp -d -t retry-failed-logs.XXXXXX)"
   IDX=0
 
   launch_one_workflow() {
@@ -129,11 +128,7 @@ else
     local code=0
 
     set +e
-    if [[ "${INVOKER_HEADLESS_STANDALONE:-0}" = "1" ]]; then
-      cmd_out="$("$RUNNER" --headless --no-track retry "$wf_id" 2>&1)"
-    else
-      cmd_out="$(node "$IPC_HELPER" exec --no-track -- retry "$wf_id" 2>&1)"
-    fi
+    cmd_out="$(headless_mutation --no-track retry "$wf_id" 2>&1)"
     code=$?
     set -e
 
@@ -148,115 +143,69 @@ else
     return "$code"
   }
 
-  if $FOLLOW; then
-    RESULTS_FILE="$(mktemp -t retry-failed-results.XXXXXX)"
-    PIDS=()
-    LOG_DIR="$(mktemp -d -t retry-failed-logs.XXXXXX)"
+  while IFS= read -r WF_ID; do
+    [[ -z "$WF_ID" ]] && continue
+    IDX=$((IDX + 1))
+    echo "[queue $IDX/$TOTAL] $WF_ID"
+    log_file="$LOG_DIR/${WF_ID}.log"
+    (
+      if launch_one_workflow "$WF_ID" "$log_file"; then
+        printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULTS_FILE"
+      else
+        printf "%s\tFAILED\n" "$WF_ID" >> "$RESULTS_FILE"
+      fi
+      cat "$log_file"
+      echo ""
+    ) &
+    PIDS+=("$!")
 
-    while IFS= read -r WF_ID; do
-      [[ -z "$WF_ID" ]] && continue
-      IDX=$((IDX + 1))
-      echo "[queue $IDX/$TOTAL] $WF_ID"
-      log_file="$LOG_DIR/${WF_ID}.log"
-      (
-        if launch_one_workflow "$WF_ID" "$log_file"; then
-          printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULTS_FILE"
-        else
-          printf "%s\tFAILED\n" "$WF_ID" >> "$RESULTS_FILE"
-        fi
-        cat "$log_file"
-        echo ""
-      ) &
-      PIDS+=("$!")
-
-      while [[ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]]; do
-        sleep 0.2
-      done
-    done <<<"$WORKFLOWS"
-
-    for pid in "${PIDS[@]}"; do
-      wait "$pid" || true
+    while [[ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]]; do
+      sleep 0.2
     done
+  done <<<"$WORKFLOWS"
 
-    while IFS=$'\t' read -r _wf result; do
-      case "$result" in
-        SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-        FAILED) FAILED=$((FAILED + 1)) ;;
-      esac
-    done < "$RESULTS_FILE"
+  for pid in "${PIDS[@]}"; do
+    wait "$pid" || true
+  done
 
-    rm -f "$RESULTS_FILE"
+  headless_count_results "$RESULTS_FILE"
+  SUCCEEDED=$_BULK_COUNT_SUCCEEDED
+  FAILED=$_BULK_COUNT_FAILED
+  rm -f "$RESULTS_FILE"
+else
+  LOG_DIR="$(mktemp -d -t retry-failed-logs.XXXXXX)"
+  RESULT_FILE="$(mktemp -t retry-failed-results.XXXXXX)"
+  COMMANDS_FILE="$(mktemp -t retry-failed-commands.XXXXXX)"
+  OUTPUT_JSONL="$(mktemp -t retry-failed-output.XXXXXX)"
+  IDX=0
+  DISPATCHED=0
+  FAILED=0
+
+  while IFS= read -r WF_ID; do
+    [[ -z "$WF_ID" ]] && continue
+    IDX=$((IDX + 1))
+    printf '{"label":"%s","workflowId":"%s","args":["retry","%s"]}\n' "$WF_ID" "$WF_ID" "$WF_ID" >> "$COMMANDS_FILE"
+    echo "[dispatch $IDX/$TOTAL] $WF_ID log=$LOG_DIR/${WF_ID}.log"
+  done <<<"$WORKFLOWS"
+
+  _retry_args() { echo "--no-track retry $1"; }
+
+  if headless_is_standalone; then
+    headless_standalone_batch "$RESULT_FILE" "$LOG_DIR" "$WORKFLOWS" _retry_args
   else
-    LOG_DIR="$(mktemp -d -t retry-failed-logs.XXXXXX)"
-    RESULT_FILE="$(mktemp -t retry-failed-results.XXXXXX)"
-    COMMANDS_FILE="$(mktemp -t retry-failed-commands.XXXXXX)"
-    OUTPUT_JSONL="$(mktemp -t retry-failed-output.XXXXXX)"
-    while IFS= read -r WF_ID; do
-      [[ -z "$WF_ID" ]] && continue
-      IDX=$((IDX + 1))
-      printf '{"label":"%s","workflowId":"%s","args":["retry","%s"]}\n' "$WF_ID" "$WF_ID" "$WF_ID" >> "$COMMANDS_FILE"
-      echo "[dispatch $IDX/$TOTAL] $WF_ID log=$LOG_DIR/${WF_ID}.log"
-    done <<<"$WORKFLOWS"
-
-    if [[ "${INVOKER_HEADLESS_STANDALONE:-0}" = "1" ]]; then
-      while IFS= read -r WF_ID; do
-        [[ -z "$WF_ID" ]] && continue
-        if "$RUNNER" --headless --no-track retry "$WF_ID" > "$LOG_DIR/${WF_ID}.log" 2>&1; then
-          printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULT_FILE"
-          DISPATCHED=$((DISPATCHED + 1))
-        else
-          printf "%s\tFAILED\n" "$WF_ID" >> "$RESULT_FILE"
-        fi
-      done <<<"$WORKFLOWS"
-    else
-      node "$IPC_HELPER" batch-exec --no-track --parallel "$PARALLELISM" < "$COMMANDS_FILE" > "$OUTPUT_JSONL"
-    fi
-    if [[ "${INVOKER_HEADLESS_STANDALONE:-0}" != "1" ]]; then
-    python3 - "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL" <<'PY'
-import json
-import pathlib
-import sys
-
-result_file = pathlib.Path(sys.argv[1])
-log_dir = pathlib.Path(sys.argv[2])
-output_jsonl = pathlib.Path(sys.argv[3])
-
-for raw in output_jsonl.read_text(encoding="utf-8").splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    item = json.loads(raw)
-    workflow_id = item.get("workflowId") or item.get("label") or "unknown"
-    log_path = log_dir / f"{workflow_id}.log"
-    with log_path.open("w", encoding="utf-8") as handle:
-        handle.write(raw + "\n")
-    with result_file.open("a", encoding="utf-8") as handle:
-        handle.write(f"{workflow_id}\t{'SUCCEEDED' if item.get('ok') else 'FAILED'}\n")
-PY
-    fi
-    rm -f "$COMMANDS_FILE"
-    rm -f "$OUTPUT_JSONL"
-
-    while IFS=$'\t' read -r _wf result; do
-      case "$result" in
-        SUCCEEDED)
-          if [[ "${INVOKER_HEADLESS_STANDALONE:-0}" != "1" ]]; then
-            DISPATCHED=$((DISPATCHED + 1))
-          fi
-          ;;
-        FAILED)
-          FAILED=$((FAILED + 1))
-          ;;
-      esac
-    done < "$RESULT_FILE"
-    rm -f "$RESULT_FILE"
+    headless_batch_dispatch "$COMMANDS_FILE" "$OUTPUT_JSONL" --parallel "$PARALLELISM"
+    headless_parse_batch_results "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL"
   fi
+  rm -f "$COMMANDS_FILE" "$OUTPUT_JSONL"
+
+  headless_count_results "$RESULT_FILE"
+  DISPATCHED=$_BULK_COUNT_SUCCEEDED
+  FAILED=$_BULK_COUNT_FAILED
+  rm -f "$RESULT_FILE"
 fi
 
 echo "---"
-if $DRY_RUN; then
-  :
-elif $FOLLOW; then
+if $FOLLOW; then
   echo "Done. $SUCCEEDED succeeded, $FAILED failed out of $TOTAL."
   if [[ "$FAILED" -ne 0 ]]; then
     exit 1
