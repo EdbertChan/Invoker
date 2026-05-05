@@ -101,6 +101,7 @@ function createMocks() {
         forkedWorkflowId: `${workflowId}-fork`,
         started: [makeTask({ id: `${workflowId}-fork/task-1`, config: { workflowId: `${workflowId}-fork` } })],
       })),
+      recreateWorkflowFromFreshBase: vi.fn(async () => [makeTask()]),
       deleteWorkflow: vi.fn(),
       getQueueStatus: vi.fn(() => ({
         maxConcurrency: 4,
@@ -185,6 +186,7 @@ beforeEach(() => {
   mocks.orchestrator.editTaskType.mockReturnValue([makeTask()]);
   mocks.orchestrator.setTaskExternalGatePolicies.mockReturnValue([makeTask()]);
   mocks.orchestrator.cancelTask.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
+  mocks.orchestrator.recreateWorkflowFromFreshBase.mockResolvedValue([makeTask()]);
   mocks.orchestrator.getQueueStatus.mockReturnValue({
     maxConcurrency: 4, runningCount: 1,
     running: [{ taskId: 'task-1', description: 'test' }], queued: [],
@@ -880,6 +882,40 @@ describe('POST /api/workflows/:id/restart', () => {
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledTimes(2);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [topup]);
+  });
+});
+
+describe('POST /api/workflows/:id/recreate-with-rebase', () => {
+  it('recreates workflow from fresh base and returns 200', async () => {
+    const res = await request(port, 'POST', '/api/workflows/wf-1/recreate-with-rebase');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('recreated_with_rebase');
+    expect(res.body.workflowId).toBe('wf-1');
+    expect(typeof res.body.tasksStarted).toBe('number');
+    expect(res.body.deprecated).toBeUndefined();
+    expect(mocks.persistence.loadWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.persistence.updateWorkflow).toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalled();
+  });
+
+  it('returns 404 when workflow not found', async () => {
+    mocks.persistence.loadWorkflow.mockReturnValue(undefined);
+    const res = await request(port, 'POST', '/api/workflows/missing/recreate-with-rebase');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('not found');
+  });
+});
+
+describe('POST /api/workflows/:id/rebase-and-retry (legacy alias)', () => {
+  it('routes to same handler as recreate-with-rebase but marks as deprecated', async () => {
+    const res = await request(port, 'POST', '/api/workflows/wf-1/rebase-and-retry');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('rebase_and_retried');
+    expect(res.body.deprecated).toBe(true);
+    expect(res.body.replacement).toBe('/api/workflows/:id/recreate-with-rebase');
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalled();
   });
 });
 
