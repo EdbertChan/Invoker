@@ -12,6 +12,7 @@
  */
 
 import type { MessageBus } from '@invoker/transport';
+export { IpcBus, DEFAULT_SOCKET_PATH } from '@invoker/transport';
 
 import { isHeadlessMutatingCommand } from './headless-command-classification.js';
 import {
