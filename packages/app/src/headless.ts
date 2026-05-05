@@ -700,14 +700,14 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
     case 'rebase':
       await headlessRebaseAndRetry(args[1], deps);
       break;
+    case 'recreate-with-rebase':
+      await headlessRecreateWithRebase(args[1], deps);
+      break;
 
     // Deprecated aliases
     case 'rebase-and-retry':
       warnDeprecated('rebase-and-retry', 'rebase');
       await headlessRebaseAndRetry(args[1], deps);
-      break;
-    case 'recreate-with-rebase':
-      await headlessRecreateWithRebase(args[1], deps);
       break;
     case 'fix':
       await headlessFix(args[1], deps, args[2]);
@@ -864,8 +864,8 @@ ${BOLD}Execute:${RESET}
   recreate <workflowId>                                Recreate workflow: wipe all state, new generation
   recreate-task <taskId>                               Recreate task + downstream (task-scoped reset)
   fork-workflow <workflowId>                          Fork a live workflow into a new branched workflow (Step 14)
-  rebase <taskId>                                     Refresh pool base + nuclear restart
-  recreate-with-rebase <workflowId>                   Recreate workflow with pool refresh (workflow-scoped)
+  rebase <taskId>                                     Refresh pool base + nuclear restart (task-scoped)
+  recreate-with-rebase <workflowId>                   Recreate workflow from fresh base with pool refresh (workflow-scoped)
   fix <taskId> [claude|codex]                         Fix a failed task (default: claude)
   resolve-conflict <taskId> [claude|codex]            Resolve merge conflict + restart
 
