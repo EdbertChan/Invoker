@@ -1299,8 +1299,14 @@ if (isHeadless) {
       `fix-with-agent: "${taskId}" agent=${agentName ?? 'claude'} source=${source} route=fixWithAgent`,
       { module: 'ipc' },
     );
+    const task = orchestrator.getTask(taskId);
+    if (!task) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+    const savedError = task.execution.error ?? '';
+    const recoveryRoute = selectFailureRecoveryRoute(task, savedError);
+
     if (source === 'auto-fix') {
-      const task = orchestrator.getTask(taskId);
       const attemptsBefore = task?.execution.autoFixAttempts ?? 0;
       const attemptsAfter = attemptsBefore + 1;
       persistence.updateTask(taskId, {
