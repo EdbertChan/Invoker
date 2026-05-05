@@ -67,6 +67,10 @@ describe('headless→owner delegation', () => {
       expect(delegationTimeoutMs(['rebase-and-retry', 'wf-1'], targetLookup)).toBe(60_000);
     });
 
+    it('uses 60s timeout for workflow-scoped recreate-with-rebase', () => {
+      expect(delegationTimeoutMs(['recreate-with-rebase', 'wf-1'], targetLookup)).toBe(60_000);
+    });
+
     it('uses 60s timeout for workflow-scoped restart', () => {
       expect(delegationTimeoutMs(['restart', 'wf-123'], targetLookup)).toBe(60_000);
     });
@@ -202,6 +206,19 @@ describe('headless→owner delegation', () => {
       });
     });
 
+    it('delegates recreate-with-rebase command to owner', async () => {
+      const ownerHandler = vi.fn(async () => ({ success: true }));
+      messageBus.onRequest('headless.exec', ownerHandler);
+
+      const delegated = await tryDelegateExec(['recreate-with-rebase', 'wf-1'], messageBus);
+
+      expect(delegated).toBe(true);
+      expect(ownerHandler).toHaveBeenCalledWith(expect.objectContaining({
+        args: ['recreate-with-rebase', 'wf-1'],
+        waitForApproval: undefined,
+      }));
+    });
+
     it('delegates rebase with noTrack so owner can return before workflow settlement', async () => {
       const ownerHandler = vi.fn(async () => ({ success: true }));
       messageBus.onRequest('headless.exec', ownerHandler);
@@ -255,6 +272,7 @@ describe('headless→owner delegation', () => {
     it.each([
       ['rebase', ['rebase', 'wf-1']],
       ['rebase-and-retry', ['rebase-and-retry', 'wf-1']],
+      ['recreate-with-rebase', ['recreate-with-rebase', 'wf-1']],
       ['restart workflow', ['restart', 'wf-123']],
     ])('keeps %s pending at 5s and only times out at 60s', async (_label, args) => {
       const delegatedPromise = tryDelegateExec(
