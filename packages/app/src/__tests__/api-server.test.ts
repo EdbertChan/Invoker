@@ -682,6 +682,41 @@ describe('POST /api/tasks/:id/edit-prompt', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Missing "prompt"');
   });
+
+  it('dispatches only running tasks returned by editTaskPrompt (recreate semantics)', async () => {
+    const running = makeTask({ id: 'task-1', status: 'running', execution: { selectedAttemptId: 'a1' } });
+    const pending = makeTask({ id: 'task-2', status: 'pending' });
+    mocks.orchestrator.editTaskPrompt.mockReturnValue([running, pending]);
+
+    const res = await request(port, 'POST', '/api/tasks/task-1/edit-prompt', { prompt: 'updated prompt' });
+    expect(res.status).toBe(200);
+    expect(res.body.tasksStarted).toBe(1);
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledWith([running]);
+  });
+
+  it('returns 400 on orchestrator error', async () => {
+    mocks.orchestrator.editTaskPrompt.mockImplementation(() => {
+      throw new Error('prompt not editable');
+    });
+    const res = await request(port, 'POST', '/api/tasks/task-1/edit-prompt', { prompt: 'nope' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('prompt not editable');
+  });
+
+  it('edit-prompt is recreate-class: does not trigger retry/cancel routes', async () => {
+    mocks.orchestrator.recreateTask = vi.fn();
+    mocks.orchestrator.recreateWorkflow = vi.fn();
+    mocks.orchestrator.cancelWorkflow = vi.fn();
+
+    const res = await request(port, 'POST', '/api/tasks/task-1/edit-prompt', { prompt: 'new prompt' });
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('prompt_edited');
+    expect(mocks.orchestrator.editTaskPrompt).toHaveBeenCalledTimes(1);
+    expect(mocks.orchestrator.retryTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.editTaskCommand).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.cancelTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.cancelWorkflow).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/tasks/:id/edit-type', () => {
