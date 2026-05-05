@@ -70,6 +70,7 @@ interface TaskPanelProps {
   onReject: (task: TaskState) => void;
   onSelectExperiment: (task: TaskState) => void;
   onEditCommand?: (taskId: string, newCommand: string) => void;
+  onEditPrompt?: (taskId: string, newPrompt: string) => void;
   onEditType?: (taskId: string, executorType: string, remoteTargetId?: string) => void;
   onEditAgent?: (taskId: string, agentName: string) => void;
   onSetExternalGatePolicies?: (taskId: string, updates: ExternalGatePolicyUpdate[]) => Promise<void>;
@@ -170,6 +171,7 @@ export function TaskPanel({
   onReject,
   onSelectExperiment,
   onEditCommand,
+  onEditPrompt,
   onEditType,
   onEditAgent,
   onSetExternalGatePolicies,
@@ -657,7 +659,10 @@ export function TaskPanel({
             </div>
 
             {/* Summary line */}
-            <div className={`text-xs font-medium ${offenderCount > 0 ? 'text-amber-300' : 'text-emerald-300'}`}>
+            <div
+              className={`text-xs font-medium ${offenderCount > 0 ? 'text-amber-300' : 'text-emerald-300'}`}
+              data-testid="gate-policy-summary"
+            >
               {offenderCount > 0 ? (
                 <>⚠ {offenderCount} gate{offenderCount === 1 ? '' : 's'} {offenderCount === 1 ? 'blocking' : 'need attention'}</>
               ) : (
@@ -712,7 +717,7 @@ export function TaskPanel({
                   const dotColor = status !== 'missing' ? getStatusColor(status as TaskStatus).dot : 'bg-slate-500';
 
                   return (
-                    <div key={`${key}-${index}`} className="rounded border border-gray-700 bg-gray-800/40 p-2 space-y-1" data-testid={`gate-policy-offender-${index}`}>
+                    <div key={key} className="rounded border border-gray-700 bg-gray-800/40 p-2 space-y-1" data-testid={`gate-policy-offender-${key}`}>
                       <div className="flex items-start gap-1">
                         <span className="text-amber-400 flex-shrink-0">⚠</span>
                         <div className="flex-1 min-w-0">
@@ -733,7 +738,7 @@ export function TaskPanel({
                       </div>
 
                       {hasMixedPolicy ? (
-                        <div className="text-xs text-gray-400 ml-4">
+                        <div className="text-xs text-gray-400 ml-4" data-testid={`gate-policy-offender-${key}-mixed-threshold`}>
                           <div>Mixed thresholds across {group.length} dep{group.length === 1 ? '' : 's'}</div>
                           {!isEditingGatePolicies && <div className="mt-0.5">Unblock at <span className="text-amber-400">⚠ mixed</span></div>}
                         </div>
@@ -766,7 +771,11 @@ export function TaskPanel({
                                 <span className="text-gray-300">{formatStatusLabel(draftPolicy as TaskStatus)}</span>
                               </>
                             )}
-                            {impactText && <span className="text-gray-400 ml-1">{impactText}</span>}
+                            {impactText && (
+                              <span className="text-gray-400 ml-1" data-testid={`gate-policy-offender-${key}-impact`}>
+                                {impactText}
+                              </span>
+                            )}
                           </div>
                         </div>
                       )}
@@ -782,6 +791,7 @@ export function TaskPanel({
                 <button
                   onClick={() => setIsSatisfiedListExpanded(!isSatisfiedListExpanded)}
                   className="text-xs text-gray-400 hover:text-gray-300 w-full text-left"
+                  data-testid="gate-policy-satisfied-toggle"
                 >
                   {effectiveExpanded ? '▾' : '▸'} {satisfied.length} satisfied gate{satisfied.length === 1 ? '' : 's'}
                 </button>
