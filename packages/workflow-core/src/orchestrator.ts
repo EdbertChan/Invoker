@@ -140,10 +140,31 @@ export interface OrchestratorPersistence {
     repoUrl?: string;
     onFinish?: string;
     baseBranch?: string;
+    parentRemote?: string;
     featureBranch?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
+    reviewProvider?: string;
+    publicationState?: 'unpublished' | 'review_published' | 'landing_published' | 'landing_stale';
+    reviewBaseSha?: string;
+    reviewBaseBranch?: string;
+    reviewPrUrl?: string;
+    landingBaseSha?: string;
+    landingPrUrl?: string;
   }): void;
-  updateWorkflow?(workflowId: string, changes: { status?: string; updatedAt?: string; baseBranch?: string; generation?: number; mergeMode?: 'manual' | 'automatic' | 'external_review' }): void;
+  updateWorkflow?(workflowId: string, changes: {
+    status?: string;
+    updatedAt?: string;
+    baseBranch?: string;
+    generation?: number;
+    mergeMode?: 'manual' | 'automatic' | 'external_review';
+    parentRemote?: string;
+    publicationState?: 'unpublished' | 'review_published' | 'landing_published' | 'landing_stale';
+    reviewBaseSha?: string;
+    reviewBaseBranch?: string;
+    reviewPrUrl?: string;
+    landingBaseSha?: string;
+    landingPrUrl?: string;
+  }): void;
   saveTask(workflowId: string, task: TaskState): void;
   updateTask(taskId: string, changes: TaskStateChanges): void;
   logEvent?(taskId: string, eventType: string, payload?: unknown): void;
@@ -179,6 +200,9 @@ export interface OrchestratorPersistence {
   loadWorkflow?(workflowId: string): {
     repoUrl?: string;
     baseBranch?: string;
+    parentRemote?: string;
+    featureBranch?: string;
+    reviewProvider?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
   } | undefined;
   /** Delete a single workflow and its tasks from the DB. */
@@ -199,6 +223,7 @@ export interface PlanDefinition {
   visualProof?: boolean;
   onFinish?: 'none' | 'merge' | 'pull_request';
   baseBranch?: string;
+  parentRemote?: string;
   featureBranch?: string;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
   reviewProvider?: string;
@@ -1264,8 +1289,10 @@ export class Orchestrator {
       repoUrl: plan.repoUrl,
       onFinish: plan.onFinish,
       baseBranch: plan.baseBranch,
+      parentRemote: plan.parentRemote,
       featureBranch: plan.featureBranch,
       mergeMode: plan.mergeMode,
+      reviewProvider: plan.reviewProvider,
       createdAt,
       updatedAt: createdAt,
     });
@@ -3029,7 +3056,9 @@ export class Orchestrator {
       if (typeof m.repoUrl === 'string') baseSaveWf.repoUrl = m.repoUrl;
       if (typeof m.onFinish === 'string') baseSaveWf.onFinish = m.onFinish;
       if (typeof m.baseBranch === 'string') baseSaveWf.baseBranch = m.baseBranch;
+      if (typeof m.parentRemote === 'string') baseSaveWf.parentRemote = m.parentRemote;
       if (typeof m.featureBranch === 'string') baseSaveWf.featureBranch = m.featureBranch;
+      if (typeof m.reviewProvider === 'string') baseSaveWf.reviewProvider = m.reviewProvider;
       if (m.mergeMode === 'manual' || m.mergeMode === 'automatic' || m.mergeMode === 'external_review') {
         baseSaveWf.mergeMode = m.mergeMode;
       }

@@ -25,8 +25,16 @@ export interface WorkflowRecord {
   repoUrl?: string;
   onFinish?: string;
   baseBranch?: string;
+  parentRemote?: string;
   featureBranch?: string;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
+  reviewProvider?: string;
+  publicationState?: 'unpublished' | 'review_published' | 'landing_published' | 'landing_stale';
+  reviewBaseSha?: string;
+  reviewBaseBranch?: string;
+  reviewPrUrl?: string;
+  landingBaseSha?: string;
+  landingPrUrl?: string;
 }
 
 export interface WorkflowChanges {
@@ -35,6 +43,13 @@ export interface WorkflowChanges {
   baseBranch?: string;
   generation?: number;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
+  parentRemote?: string;
+  publicationState?: 'unpublished' | 'review_published' | 'landing_published' | 'landing_stale';
+  reviewBaseSha?: string;
+  reviewBaseBranch?: string;
+  reviewPrUrl?: string;
+  landingBaseSha?: string;
+  landingPrUrl?: string;
 }
 
 export type AttemptChanges = Partial<

@@ -41,9 +41,16 @@ export interface Workflow {
   branch?: string;
   onFinish?: 'none' | 'merge' | 'pull_request';
   baseBranch?: string;
+  parentRemote?: string;
   featureBranch?: string;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
   reviewProvider?: string;
+  publicationState?: 'unpublished' | 'review_published' | 'landing_published' | 'landing_stale';
+  reviewBaseSha?: string;
+  reviewBaseBranch?: string;
+  reviewPrUrl?: string;
+  landingBaseSha?: string;
+  landingPrUrl?: string;
   generation?: number;
   createdAt: string;
   updatedAt: string;
@@ -68,7 +75,24 @@ export interface ActivityLogEntry {
 export interface PersistenceAdapter {
   // Workflows
   saveWorkflow(workflow: Workflow): void;
-  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'status' | 'updatedAt' | 'baseBranch' | 'generation' | 'mergeMode'>>): void;
+  updateWorkflow(
+    workflowId: string,
+    changes: Partial<Pick<
+      Workflow,
+      | 'status'
+      | 'updatedAt'
+      | 'baseBranch'
+      | 'generation'
+      | 'mergeMode'
+      | 'parentRemote'
+      | 'publicationState'
+      | 'reviewBaseSha'
+      | 'reviewBaseBranch'
+      | 'reviewPrUrl'
+      | 'landingBaseSha'
+      | 'landingPrUrl'
+    >>,
+  ): void;
   loadWorkflow(workflowId: string): Workflow | undefined;
   listWorkflows(): Workflow[];
 

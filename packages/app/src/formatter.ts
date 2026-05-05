@@ -259,9 +259,16 @@ export function serializeWorkflow(wf: Workflow): Record<string, unknown> {
     ...(wf.branch != null && { branch: wf.branch }),
     ...(wf.onFinish != null && { onFinish: wf.onFinish }),
     ...(wf.baseBranch != null && { baseBranch: wf.baseBranch }),
+    ...(wf.parentRemote != null && { parentRemote: wf.parentRemote }),
     ...(wf.featureBranch != null && { featureBranch: wf.featureBranch }),
     ...(wf.mergeMode != null && { mergeMode: wf.mergeMode }),
     ...(wf.reviewProvider != null && { reviewProvider: wf.reviewProvider }),
+    ...(wf.publicationState != null && { publicationState: wf.publicationState }),
+    ...(wf.reviewBaseSha != null && { reviewBaseSha: wf.reviewBaseSha }),
+    ...(wf.reviewBaseBranch != null && { reviewBaseBranch: wf.reviewBaseBranch }),
+    ...(wf.reviewPrUrl != null && { reviewPrUrl: wf.reviewPrUrl }),
+    ...(wf.landingBaseSha != null && { landingBaseSha: wf.landingBaseSha }),
+    ...(wf.landingPrUrl != null && { landingPrUrl: wf.landingPrUrl }),
     ...(wf.generation != null && { generation: wf.generation }),
   };
 }

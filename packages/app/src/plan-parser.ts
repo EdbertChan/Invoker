@@ -31,6 +31,9 @@ export function applyPlanDefinitionDefaults(plan: PlanDefinition): PlanDefinitio
     ...plan,
     onFinish: plan.onFinish ?? 'pull_request',
     baseBranch: resolveDefaultBaseBranch(plan),
+    parentRemote: typeof plan.parentRemote === 'string' && plan.parentRemote.trim() !== ''
+      ? plan.parentRemote.trim()
+      : undefined,
     featureBranch,
   };
 }
@@ -70,6 +73,7 @@ export interface RawPlan {
   visualProof?: boolean;
   onFinish?: string;
   baseBranch?: string;
+  parentRemote?: string;
   featureBranch?: string;
   mergeMode?: string;
   reviewProvider?: string;
@@ -351,6 +355,7 @@ export function parsePlan(yamlContent: string): PlanDefinition {
     visualProof: raw.visualProof,
     onFinish,
     baseBranch: raw.baseBranch,
+    parentRemote: raw.parentRemote,
     featureBranch: raw.featureBranch,
     mergeMode,
     reviewProvider,

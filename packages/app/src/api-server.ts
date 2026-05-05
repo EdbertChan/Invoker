@@ -27,6 +27,8 @@
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
  *   POST   /api/workflows/:id/restart
+ *   POST   /api/workflows/:id/publish-review-stack
+ *   POST   /api/workflows/:id/publish-landing-stack
  *   POST   /api/workflows/:id/cancel
  *   POST   /api/workflows/:id/merge-mode  body: { mode }
  *   DELETE /api/workflows/:id
@@ -482,6 +484,32 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const message = err instanceof Error ? err.message : String(err);
           const statusCode = message.includes('not found') ? 404 : 400;
           json(res, statusCode, { error: message });
+        }
+        return;
+      }
+
+      const wfPublishReviewMatch = path.match(/^\/api\/workflows\/([^/]+)\/publish-review-stack$/);
+      if (method === 'POST' && wfPublishReviewMatch) {
+        const workflowId = decodeURIComponent(wfPublishReviewMatch[1]);
+        try {
+          const result = await taskExecutor.publishReviewStack(workflowId);
+          json(res, 200, { ok: true, workflowId, action: 'published_review_stack', reviewUrl: result.reviewUrl });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          json(res, message.includes('not found') ? 404 : 400, { error: message });
+        }
+        return;
+      }
+
+      const wfPublishLandingMatch = path.match(/^\/api\/workflows\/([^/]+)\/publish-landing-stack$/);
+      if (method === 'POST' && wfPublishLandingMatch) {
+        const workflowId = decodeURIComponent(wfPublishLandingMatch[1]);
+        try {
+          const result = await taskExecutor.publishLandingStack(workflowId);
+          json(res, 200, { ok: true, workflowId, action: 'published_landing_stack', landingUrl: result.landingUrl });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          json(res, message.includes('not found') ? 404 : 400, { error: message });
         }
         return;
       }

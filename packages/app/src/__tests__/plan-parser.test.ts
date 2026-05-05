@@ -32,11 +32,13 @@ describe('applyPlanDefinitionDefaults', () => {
     const plan = applyPlanDefinitionDefaults({
       name: 'X',
       baseBranch: 'develop',
+      parentRemote: ' upstream ',
       featureBranch: 'feat/x',
       onFinish: 'merge',
       tasks: [{ id: 'a', description: 'd', command: 'echo' }],
     });
     expect(plan.baseBranch).toBe('develop');
+    expect(plan.parentRemote).toBe('upstream');
     expect(plan.featureBranch).toBe('feat/x');
     expect(plan.onFinish).toBe('merge');
   });
@@ -78,6 +80,7 @@ tasks:
     const yaml = `
 name: Hello World Test
 repoUrl: git@github.com:test/repo.git
+parentRemote: upstream
 tasks:
   - id: greet
     description: Say hello
@@ -85,6 +88,7 @@ tasks:
 `;
     const plan = parsePlan(yaml);
     expect(plan.name).toBe('Hello World Test');
+    expect(plan.parentRemote).toBe('upstream');
     expect(plan.tasks).toHaveLength(1);
     expect(plan.tasks[0].id).toBe('greet');
     expect(plan.tasks[0].description).toBe('Say hello');

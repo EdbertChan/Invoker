@@ -54,6 +54,32 @@ describe('SQLiteAdapter', () => {
     });
   });
 
+  describe('workflow publication metadata', () => {
+    it('round-trips parentRemote and publication fields', () => {
+      adapter.saveWorkflow({
+        ...testWorkflow,
+        parentRemote: 'upstream',
+        reviewProvider: 'github',
+        publicationState: 'review_published',
+        reviewBaseSha: 'abc123',
+        reviewBaseBranch: 'review-base/wf-1',
+        reviewPrUrl: 'https://github.com/example/repo/pull/1',
+        landingBaseSha: 'def456',
+        landingPrUrl: 'https://github.com/example/repo/pull/2',
+      });
+
+      const loaded = adapter.loadWorkflow('wf-1');
+      expect(loaded?.parentRemote).toBe('upstream');
+      expect(loaded?.reviewProvider).toBe('github');
+      expect(loaded?.publicationState).toBe('review_published');
+      expect(loaded?.reviewBaseSha).toBe('abc123');
+      expect(loaded?.reviewBaseBranch).toBe('review-base/wf-1');
+      expect(loaded?.reviewPrUrl).toBe('https://github.com/example/repo/pull/1');
+      expect(loaded?.landingBaseSha).toBe('def456');
+      expect(loaded?.landingPrUrl).toBe('https://github.com/example/repo/pull/2');
+    });
+  });
+
   describe('updateTask', () => {
     it('persists partial changes', () => {
       adapter.saveWorkflow(testWorkflow);

@@ -38,3 +38,17 @@ node scripts/create-pr.mjs --title "<title>" --base master --body-file /tmp/my-p
 ```
 
 By default, tools in this workflow use `upstream` as the parent remote. Override it when your team uses a different remote name.
+
+## Invoker Review Stacks
+
+Invoker-on-Invoker review publication now has two distinct lanes:
+
+- `publish-review-stack <workflowId>` creates a synthetic `review-base/<root-workflow-id>` branch and publishes a Mergify review stack on top of that fork-point base. This keeps stale workflow histories reviewable even when `upstream/master` has moved on.
+- `publish-landing-stack <workflowId>` rebuilds the same workflow chain on current `upstream/master` and publishes the mergeable landing stack that Mergify can queue against `master`.
+
+Why this split exists:
+
+- GitHub review diffs are computed from actual branch ancestry, not intent.
+- A stale workflow branch can contain the right logical change but still show a noisy PR against current `master`.
+- The synthetic review base preserves the old fork point for human review.
+- The landing stack reapplies the reviewed delta onto fresh `upstream/master` for mergeability.

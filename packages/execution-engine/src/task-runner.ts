@@ -50,6 +50,10 @@ import {
   spawnAgentPrAuthorViaRegistry,
   validateCanonicalPrBody,
 } from './pr-authoring.js';
+import {
+  publishInvokerStack,
+  shouldUseInvokerSyntheticReview,
+} from './invoker-stack-publisher.js';
 
 /** Keeps `lastHeartbeatAt` fresh while `executor.start()` is awaited (SSH remote setup/provision can take minutes). Matches BaseExecutor default heartbeat cadence. */
 const PRE_START_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -926,6 +930,26 @@ export class TaskRunner {
 
   async buildMergeSummary(workflowId: string): Promise<string> {
     return buildMergeSummaryImpl(this, workflowId);
+  }
+
+  async publishReviewStack(workflowId: string): Promise<{ reviewUrl: string }> {
+    if (!(await shouldUseInvokerSyntheticReview(this, workflowId))) {
+      throw new Error(`Workflow ${workflowId} is not eligible for Invoker synthetic review publication`);
+    }
+    const published = await publishInvokerStack(this, workflowId, 'review');
+    const current = published.prs.find((pr) => pr.workflowId === workflowId);
+    if (!current) throw new Error(`No review PR found for workflow ${workflowId}`);
+    return { reviewUrl: current.url };
+  }
+
+  async publishLandingStack(workflowId: string): Promise<{ landingUrl: string }> {
+    if (!(await shouldUseInvokerSyntheticReview(this, workflowId))) {
+      throw new Error(`Workflow ${workflowId} is not eligible for Invoker landing publication`);
+    }
+    const published = await publishInvokerStack(this, workflowId, 'landing');
+    const current = published.prs.find((pr) => pr.workflowId === workflowId);
+    if (!current) throw new Error(`No landing PR found for workflow ${workflowId}`);
+    return { landingUrl: current.url };
   }
 
   private async commitApprovedMergeFix(task: TaskState): Promise<void> {

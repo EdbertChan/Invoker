@@ -699,6 +699,12 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
     case 'rebase':
       await headlessRebaseAndRetry(args[1], deps);
       break;
+    case 'publish-review-stack':
+      await headlessPublishReviewStack(args[1], deps);
+      break;
+    case 'publish-landing-stack':
+      await headlessPublishLandingStack(args[1], deps);
+      break;
 
     // Deprecated aliases
     case 'rebase-and-retry':
@@ -861,6 +867,8 @@ ${BOLD}Execute:${RESET}
   recreate-task <taskId>                               Recreate task + downstream (task-scoped reset)
   fork-workflow <workflowId>                          Fork a live workflow into a new branched workflow (Step 14)
   rebase <taskId>                                     Refresh pool base + nuclear restart
+  publish-review-stack <workflowId>                   Publish synthetic review-base stack for Invoker review
+  publish-landing-stack <workflowId>                  Publish upstream/master landing stack for Invoker review
   fix <taskId> [claude|codex]                         Fix a failed task (default: claude)
   resolve-conflict <taskId> [claude|codex]            Resolve merge conflict + restart
 
@@ -1367,6 +1375,20 @@ async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promi
 
   const tasksStarted = runnable.length;
   process.stdout.write(`Rebase-and-retry: resetting workflow from current HEAD (${tasksStarted} task(s))\n`);
+}
+
+async function headlessPublishReviewStack(workflowId: string, deps: HeadlessDeps): Promise<void> {
+  if (!workflowId) throw new Error('Missing workflowId. Usage: --headless publish-review-stack <workflowId>');
+  const te = createHeadlessExecutor(deps);
+  const result = await te.publishReviewStack(workflowId);
+  process.stdout.write(`Review stack published for ${workflowId}: ${result.reviewUrl}\n`);
+}
+
+async function headlessPublishLandingStack(workflowId: string, deps: HeadlessDeps): Promise<void> {
+  if (!workflowId) throw new Error('Missing workflowId. Usage: --headless publish-landing-stack <workflowId>');
+  const te = createHeadlessExecutor(deps);
+  const result = await te.publishLandingStack(workflowId);
+  process.stdout.write(`Landing stack published for ${workflowId}: ${result.landingUrl}\n`);
 }
 
 async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps): Promise<void> {

@@ -299,6 +299,13 @@ export class SQLiteAdapter implements PersistenceAdapter {
         repo_url TEXT,
         branch TEXT,
         parent_remote TEXT,
+        review_provider TEXT,
+        publication_state TEXT,
+        review_base_sha TEXT,
+        review_base_branch TEXT,
+        review_pr_url TEXT,
+        landing_base_sha TEXT,
+        landing_pr_url TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       );
@@ -521,6 +528,13 @@ export class SQLiteAdapter implements PersistenceAdapter {
       'ALTER TABLE workflows ADD COLUMN parent_remote TEXT',
       'ALTER TABLE workflows ADD COLUMN feature_branch TEXT',
       'ALTER TABLE workflows ADD COLUMN generation INTEGER DEFAULT 0',
+      'ALTER TABLE workflows ADD COLUMN review_provider TEXT',
+      'ALTER TABLE workflows ADD COLUMN publication_state TEXT',
+      'ALTER TABLE workflows ADD COLUMN review_base_sha TEXT',
+      'ALTER TABLE workflows ADD COLUMN review_base_branch TEXT',
+      'ALTER TABLE workflows ADD COLUMN review_pr_url TEXT',
+      'ALTER TABLE workflows ADD COLUMN landing_base_sha TEXT',
+      'ALTER TABLE workflows ADD COLUMN landing_pr_url TEXT',
       'ALTER TABLE tasks ADD COLUMN last_heartbeat_at TEXT',
       'ALTER TABLE tasks ADD COLUMN experiment_prompt TEXT',
       'ALTER TABLE tasks ADD COLUMN auto_fix INTEGER DEFAULT 0',
@@ -654,23 +668,51 @@ export class SQLiteAdapter implements PersistenceAdapter {
 
   saveWorkflow(workflow: Workflow): void {
     this.execRun(`
-      INSERT OR REPLACE INTO workflows (id, name, description, visual_proof, status, plan_file, repo_url, branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode, review_provider, generation, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO workflows (
+        id, name, description, visual_proof, status, plan_file, repo_url, branch,
+        on_finish, base_branch, parent_remote, feature_branch, merge_mode, review_provider,
+        publication_state, review_base_sha, review_base_branch, review_pr_url, landing_base_sha, landing_pr_url,
+        generation, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       workflow.id, workflow.name,
       workflow.description ?? null,
       workflow.visualProof ? 1 : 0,
       workflow.status,
       workflow.planFile ?? null, workflow.repoUrl ?? null, workflow.branch ?? null,
-      workflow.onFinish ?? null, workflow.baseBranch ?? null, null, workflow.featureBranch ?? null,
+      workflow.onFinish ?? null, workflow.baseBranch ?? null, workflow.parentRemote ?? null, workflow.featureBranch ?? null,
       workflow.mergeMode ?? null,
       workflow.reviewProvider ?? null,
+      workflow.publicationState ?? null,
+      workflow.reviewBaseSha ?? null,
+      workflow.reviewBaseBranch ?? null,
+      workflow.reviewPrUrl ?? null,
+      workflow.landingBaseSha ?? null,
+      workflow.landingPrUrl ?? null,
       workflow.generation ?? 0,
       workflow.createdAt, workflow.updatedAt,
     ]);
   }
 
-  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'status' | 'updatedAt' | 'baseBranch' | 'generation' | 'mergeMode'>>): void {
+  updateWorkflow(
+    workflowId: string,
+    changes: Partial<Pick<
+      Workflow,
+      | 'status'
+      | 'updatedAt'
+      | 'baseBranch'
+      | 'generation'
+      | 'mergeMode'
+      | 'parentRemote'
+      | 'publicationState'
+      | 'reviewBaseSha'
+      | 'reviewBaseBranch'
+      | 'reviewPrUrl'
+      | 'landingBaseSha'
+      | 'landingPrUrl'
+    >>,
+  ): void {
     const setClauses: string[] = [];
     const values: unknown[] = [];
     if (changes.status !== undefined) {
@@ -681,6 +723,10 @@ export class SQLiteAdapter implements PersistenceAdapter {
       setClauses.push('base_branch = ?');
       values.push(changes.baseBranch);
     }
+    if (changes.parentRemote !== undefined) {
+      setClauses.push('parent_remote = ?');
+      values.push(changes.parentRemote);
+    }
     if (changes.generation !== undefined) {
       setClauses.push('generation = ?');
       values.push(changes.generation);
@@ -688,6 +734,30 @@ export class SQLiteAdapter implements PersistenceAdapter {
     if (changes.mergeMode !== undefined) {
       setClauses.push('merge_mode = ?');
       values.push(changes.mergeMode);
+    }
+    if (changes.publicationState !== undefined) {
+      setClauses.push('publication_state = ?');
+      values.push(changes.publicationState);
+    }
+    if (changes.reviewBaseSha !== undefined) {
+      setClauses.push('review_base_sha = ?');
+      values.push(changes.reviewBaseSha);
+    }
+    if (changes.reviewBaseBranch !== undefined) {
+      setClauses.push('review_base_branch = ?');
+      values.push(changes.reviewBaseBranch);
+    }
+    if (changes.reviewPrUrl !== undefined) {
+      setClauses.push('review_pr_url = ?');
+      values.push(changes.reviewPrUrl);
+    }
+    if (changes.landingBaseSha !== undefined) {
+      setClauses.push('landing_base_sha = ?');
+      values.push(changes.landingBaseSha);
+    }
+    if (changes.landingPrUrl !== undefined) {
+      setClauses.push('landing_pr_url = ?');
+      values.push(changes.landingPrUrl);
     }
     setClauses.push('updated_at = ?');
     values.push(changes.updatedAt ?? new Date().toISOString());
@@ -1592,9 +1662,16 @@ export class SQLiteAdapter implements PersistenceAdapter {
       branch: row.branch ?? undefined,
       onFinish: row.on_finish ?? undefined,
       baseBranch: row.base_branch ?? undefined,
+      parentRemote: row.parent_remote ?? undefined,
       featureBranch: row.feature_branch ?? undefined,
       mergeMode: row.merge_mode ?? undefined,
       reviewProvider: row.review_provider ?? undefined,
+      publicationState: row.publication_state ?? undefined,
+      reviewBaseSha: row.review_base_sha ?? undefined,
+      reviewBaseBranch: row.review_base_branch ?? undefined,
+      reviewPrUrl: row.review_pr_url ?? undefined,
+      landingBaseSha: row.landing_base_sha ?? undefined,
+      landingPrUrl: row.landing_pr_url ?? undefined,
       generation: row.generation ?? 0,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
