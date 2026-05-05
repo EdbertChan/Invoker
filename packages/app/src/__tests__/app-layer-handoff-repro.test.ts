@@ -15,6 +15,18 @@ const LINEAR_PLAN: PlanDefinition = {
   ],
 };
 
+const PROMPT_PLAN: PlanDefinition = {
+  name: 'Prompt Handoff Repro',
+  onFinish: 'merge',
+  mergeMode: 'automatic',
+  baseBranch: 'master',
+  featureBranch: 'plan/prompt-handoff',
+  tasks: [
+    { id: 'P', description: 'Prompt Task', prompt: 'Write a test for foo' },
+    { id: 'Q', description: 'Downstream', command: 'echo q', dependencies: ['P'] },
+  ],
+};
+
 const PARALLEL_PLAN: PlanDefinition = {
   name: 'Parallel Handoff Repro',
   onFinish: 'merge',
@@ -84,6 +96,44 @@ describe('app-layer handoff repros', () => {
 
     expect(h.getTask('A')!.execution.workspacePath).toBe('/tmp/mock-worktree');
     expect(h.getTask('A')!.status).toBe('completed');
+  });
+
+  it('edit-task-prompt recreates task with new prompt and dispatches started tasks', async () => {
+    h.loadAndStart(PROMPT_PLAN);
+    h.failTask('P', 'prompt failed');
+
+    const beforeGeneration = h.getTask('P')!.execution.generation ?? 0;
+
+    const started = h.orchestrator.editTaskPrompt('P', 'Write a better test for bar');
+    expect(started.some((task) => task.id.endsWith('/P') && task.status === 'running')).toBe(true);
+    // Generation must bump (recreate semantics, not just callback)
+    expect(h.getTask('P')!.execution.generation).toBeGreaterThan(beforeGeneration);
+    // Prompt config is updated
+    expect(h.getTask('P')!.config.prompt).toBe('Write a better test for bar');
+    expect(h.getTask('P')!.execution.workspacePath).toBeUndefined();
+
+    await dispatchStarted(h, started, 'test.edit-task-prompt');
+
+    expect(h.getTask('P')!.execution.workspacePath).toBe('/tmp/mock-worktree');
+    expect(h.getTask('P')!.status).toBe('completed');
+  });
+
+  it('edit-task-prompt on running task cancels then recreates', async () => {
+    h.loadAndStart(PROMPT_PLAN);
+    // Task P should be running after start
+    expect(h.getTask('P')!.status).toBe('running');
+    const beforeGeneration = h.getTask('P')!.execution.generation ?? 0;
+
+    const started = h.orchestrator.editTaskPrompt('P', 'Updated prompt while running');
+    // Recreate semantics: generation bumped
+    expect(h.getTask('P')!.execution.generation).toBeGreaterThan(beforeGeneration);
+    expect(h.getTask('P')!.config.prompt).toBe('Updated prompt while running');
+    expect(started.some((task) => task.id.endsWith('/P') && task.status === 'running')).toBe(true);
+
+    await dispatchStarted(h, started, 'test.edit-task-prompt-running');
+
+    expect(h.getTask('P')!.status).toBe('completed');
+    expect(h.getTask('P')!.execution.workspacePath).toBe('/tmp/mock-worktree');
   });
 
   it('set-task-external-gate-policies launches newly unblocked task and persists workspacePath', async () => {
