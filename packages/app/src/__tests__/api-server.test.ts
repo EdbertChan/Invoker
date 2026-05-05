@@ -96,6 +96,7 @@ function createMocks() {
       editTaskAgent: vi.fn(() => [makeTask()]),
       setTaskExternalGatePolicies: vi.fn(() => [makeTask()]),
       cancelTask: vi.fn(() => ({ cancelled: ['task-1'], runningCancelled: ['task-1'] })),
+      recreateWorkflowFromFreshBase: vi.fn(async () => [makeTask()]),
       forkWorkflow: vi.fn((workflowId: string) => ({
         sourceWorkflowId: workflowId,
         forkedWorkflowId: `${workflowId}-fork`,
@@ -880,6 +881,40 @@ describe('POST /api/workflows/:id/restart', () => {
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledTimes(2);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [topup]);
+  });
+});
+
+describe('POST /api/workflows/:id/recreate-with-rebase', () => {
+  it('routes to recreateWorkflowFromFreshBase and returns started tasks', async () => {
+    const res = await request(port, 'POST', '/api/workflows/wf-1/recreate-with-rebase');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('recreated_with_rebase');
+    expect(res.body.workflowId).toBe('wf-1');
+    expect(res.body.tasksStarted).toBe(1);
+    expect(res.body.deprecated).toBeUndefined();
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalled();
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
+  });
+
+  it('returns 404 when workflow not found', async () => {
+    mocks.persistence.loadWorkflow.mockReturnValueOnce(undefined);
+    const res = await request(port, 'POST', '/api/workflows/missing/recreate-with-rebase');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('not found');
+  });
+});
+
+describe('POST /api/workflows/:id/rebase-and-retry (deprecated)', () => {
+  it('routes to same handler as recreate-with-rebase with deprecation metadata', async () => {
+    const res = await request(port, 'POST', '/api/workflows/wf-1/rebase-and-retry');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('rebase_and_retried');
+    expect(res.body.deprecated).toBe(true);
+    expect(res.body.replacement).toBe('/api/workflows/:id/recreate-with-rebase');
+    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalled();
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
   });
 });
 

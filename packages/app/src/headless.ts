@@ -863,8 +863,9 @@ ${BOLD}Execute:${RESET}
   retry-task <taskId>                                 Retry a single failed/stuck task
   recreate <workflowId>                                Recreate workflow: wipe all state, new generation
   recreate-task <taskId>                               Recreate task + downstream (task-scoped reset)
+  recreate-with-rebase <workflowId>                   Recreate workflow from fresh upstream base
   fork-workflow <workflowId>                          Fork a live workflow into a new branched workflow (Step 14)
-  rebase <taskId>                                     Refresh pool base + nuclear restart
+  rebase <taskId>                                     Refresh pool base + nuclear restart (task-scoped)
   fix <taskId> [claude|codex]                         Fix a failed task (default: claude)
   resolve-conflict <taskId> [claude|codex]            Resolve merge conflict + restart
 
@@ -901,7 +902,7 @@ ${BOLD}Deprecated${RESET} (use new names above):
   edit → set command            edit-executor → set executor
   edit-agent → set agent        set-merge-mode → set merge-mode
   delete-workflow → delete
-  rebase-and-retry → rebase
+  rebase-and-retry → recreate-with-rebase (workflow-scoped) or rebase (task-scoped)
 
 ${BOLD}Options:${RESET}
   --wait-for-approval    Keep running until PR approval (use with 'run' or 'resume')
