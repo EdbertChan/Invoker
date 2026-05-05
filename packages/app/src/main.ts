@@ -122,7 +122,7 @@ import { collectSystemDiagnostics } from './system-diagnostics.js';
 import { installBundledSkills, resolveBundledSkillsStatus } from './bundled-skills.js';
 import { createRequire } from 'node:module';
 import { acquireDbWriterLock, type DbWriterLockResult } from './db-writer-lock.js';
-import { applyDelta } from './delta-merge.js';
+import { applyDelta, resolveQuarantine, type CacheEntry } from './delta-merge.js';
 import { shouldSkipAutoFixForError } from './auto-fix-gating.js';
 import { ensureSqliteFlushDebounceForOwner } from './sqlite-flush-policy.js';
 import type { WorkflowMutationPriority } from './workflow-mutation-coordinator.js';
@@ -1080,7 +1080,8 @@ if (isHeadless) {
   let dbPollInterval: ReturnType<typeof setInterval> | null = null;
   let activityPollInterval: ReturnType<typeof setInterval> | null = null;
   let uiPerfLogInterval: ReturnType<typeof setInterval> | null = null;
-  const lastKnownTaskStates = new Map<string, string>();
+  const lastKnownTaskStates = new Map<string, CacheEntry>();
+  const quarantinedTaskIds = new Set<string>();
   const deferredWorkflowLaunches = new Map<string, {
     timer: ReturnType<typeof setTimeout>;
     taskIds: string[];
@@ -2008,8 +2009,12 @@ if (isHeadless) {
   function seedUiSnapshotCache(): void {
     lastKnownWorkflowCount = persistence.listWorkflows().length;
     lastKnownTaskStates.clear();
+    quarantinedTaskIds.clear();
     for (const task of orchestrator.getAllTasks()) {
-      lastKnownTaskStates.set(task.id, JSON.stringify(task));
+      lastKnownTaskStates.set(task.id, {
+        snapshot: JSON.stringify(task),
+        revision: task.revision,
+      });
     }
   }
 
@@ -2060,10 +2065,13 @@ if (isHeadless) {
     const tasks = orchestrator.getAllTasks();
     const previousTaskIds = new Set(lastKnownTaskStates.keys());
     lastKnownTaskStates.clear();
+    quarantinedTaskIds.clear();
     for (const task of tasks) {
-      const snapshot = JSON.stringify(task);
       previousTaskIds.delete(task.id);
-      lastKnownTaskStates.set(task.id, snapshot);
+      lastKnownTaskStates.set(task.id, {
+        snapshot: JSON.stringify(task),
+        revision: task.revision,
+      });
       if (mainWindow && !mainWindow.isDestroyed()) {
         sendTaskDeltaToRenderer({ type: 'created', task });
       }
@@ -2071,7 +2079,7 @@ if (isHeadless) {
     lastKnownWorkflowCount = workflows.length;
     if (mainWindow && !mainWindow.isDestroyed()) {
       for (const removedTaskId of previousTaskIds) {
-        sendTaskDeltaToRenderer({ type: 'removed', taskId: removedTaskId });
+        sendTaskDeltaToRenderer({ type: 'removed', taskId: removedTaskId, previousRevision: 0 } as TaskDelta);
       }
       mainWindow.webContents.send('invoker:workflows-changed', workflows);
     }
@@ -2285,23 +2293,27 @@ if (isHeadless) {
                 }
 
                 const snapshot = JSON.stringify(task);
-                const prev = lastKnownTaskStates.get(task.id);
-                if (!prev) {
+                const entry = lastKnownTaskStates.get(task.id);
+                if (!entry) {
                   if (traceDbPollPerTask) {
                     const msg = `New task: ${task.id} (${task.status})`;
                     logger.info(msg, { module: 'db-poll' });
                     try { persistence.writeActivityLog('db-poll', 'info', msg); } catch { /* db locked */ }
                   }
-                  lastKnownTaskStates.set(task.id, snapshot);
+                  lastKnownTaskStates.set(task.id, { snapshot, revision: task.revision });
+                  // DB poll reads are authoritative — clear quarantine.
+                  quarantinedTaskIds.delete(task.id);
                   uiPerfStats.dbPollCreated += 1;
                   sendTaskDeltaToRenderer({ type: 'created', task });
-                } else if (prev !== snapshot) {
+                } else if (entry.snapshot !== snapshot) {
                   if (traceDbPollPerTask) {
                     const msg = `Task updated: ${task.id} (${task.status})`;
                     logger.info(msg, { module: 'db-poll' });
                     try { persistence.writeActivityLog('db-poll', 'info', msg); } catch { /* db locked */ }
                   }
-                  lastKnownTaskStates.set(task.id, snapshot);
+                  lastKnownTaskStates.set(task.id, { snapshot, revision: task.revision });
+                  // DB poll reads are authoritative — clear quarantine.
+                  quarantinedTaskIds.delete(task.id);
                   uiPerfStats.dbPollUpdatedAsCreated += 1;
                   sendTaskDeltaToRenderer({ type: 'created', task });
                 }
@@ -2490,7 +2502,15 @@ if (isHeadless) {
         }
       }
 
-      applyDelta(d, lastKnownTaskStates, orchestrator);
+      const result = applyDelta(d, lastKnownTaskStates, quarantinedTaskIds);
+      if (result.action === 'quarantine') {
+        logger.info(`delta quarantine: taskId=${result.taskId} reason=${result.reason}`, { module: 'delta-merge' });
+        // Trigger authoritative reload from persistence.
+        const recovered = resolveQuarantine(result.taskId, lastKnownTaskStates, quarantinedTaskIds, persistence);
+        if (recovered) {
+          sendTaskDeltaToRenderer({ type: 'created', task: recovered });
+        }
+      }
     });
 
     uiPerfLogInterval = setInterval(() => {
@@ -2537,11 +2557,17 @@ if (isHeadless) {
         'invoker:inject-task-states',
         async (_event, updates: Array<{ taskId: string; changes: TaskStateChanges }>) => {
           for (const { taskId, changes } of updates) {
+            const prevTask = persistence.getTask(taskId);
+            const prevRev = prevTask?.revision ?? 0;
             persistence.updateTask(taskId, changes);
+            const updatedTask = persistence.getTask(taskId);
+            const newRev = updatedTask?.revision ?? prevRev + 1;
             messageBus.publish(Channels.TASK_DELTA, {
               type: 'updated',
               taskId,
               changes,
+              revision: newRev,
+              previousRevision: prevRev,
             } satisfies TaskDelta);
           }
           orchestrator.syncAllFromDb();
@@ -2567,8 +2593,12 @@ if (isHeadless) {
 
       const allStarted = relaunchOrphansAndStartReady(orchestrator, logger, 'resume-workflow');
       const tasks = orchestrator.getAllTasks();
+      quarantinedTaskIds.clear();
       for (const task of tasks) {
-        lastKnownTaskStates.set(task.id, JSON.stringify(task));
+        lastKnownTaskStates.set(task.id, {
+          snapshot: JSON.stringify(task),
+          revision: task.revision,
+        });
         if (mainWindow && !mainWindow.isDestroyed()) {
           sendTaskDeltaToRenderer({ type: 'created', task });
         }
@@ -2641,6 +2671,7 @@ if (isHeadless) {
       orchestrator.deleteAllWorkflows();
       taskHandles.clear();
       lastKnownTaskStates.clear();
+      quarantinedTaskIds.clear();
       lastKnownWorkflowCount = 0;
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('invoker:workflows-changed', []);
@@ -2687,7 +2718,11 @@ if (isHeadless) {
       const workflow = persistence.loadWorkflow(workflowId);
       logger.info(`load-workflow: found ${tasks.length} tasks for "${workflow?.name ?? workflowId}"`, { module: 'ipc' });
       for (const task of tasks) {
-        lastKnownTaskStates.set(task.id, JSON.stringify(task));
+        lastKnownTaskStates.set(task.id, {
+          snapshot: JSON.stringify(task),
+          revision: task.revision,
+        });
+        quarantinedTaskIds.delete(task.id);
         if (mainWindow && !mainWindow.isDestroyed()) {
           sendTaskDeltaToRenderer({ type: 'created', task });
         }
@@ -2704,8 +2739,12 @@ if (isHeadless) {
       if (forceRefresh) {
         const previousTaskIds = new Set(lastKnownTaskStates.keys());
         lastKnownTaskStates.clear();
+        quarantinedTaskIds.clear();
         for (const task of tasks) {
-          lastKnownTaskStates.set(task.id, JSON.stringify(task));
+          lastKnownTaskStates.set(task.id, {
+            snapshot: JSON.stringify(task),
+            revision: task.revision,
+          });
           previousTaskIds.delete(task.id);
           if (mainWindow && !mainWindow.isDestroyed()) {
             sendTaskDeltaToRenderer({ type: 'created', task });
@@ -2713,7 +2752,7 @@ if (isHeadless) {
         }
         if (mainWindow && !mainWindow.isDestroyed()) {
           for (const removedTaskId of previousTaskIds) {
-            sendTaskDeltaToRenderer({ type: 'removed', taskId: removedTaskId });
+            sendTaskDeltaToRenderer({ type: 'removed', taskId: removedTaskId, previousRevision: 0 } as TaskDelta);
           }
           mainWindow.webContents.send('invoker:workflows-changed', workflows);
         }
