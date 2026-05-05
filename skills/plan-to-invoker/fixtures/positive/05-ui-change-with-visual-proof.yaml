@@ -28,7 +28,16 @@ featureBranch: fix/sidebar-collapse-animation
 
 tasks:
   - id: add-visual-proof-test
-    description: "Add E2E test case capturing sidebar collapse states for visual comparison"
+    description: |
+      Add E2E test coverage that captures sidebar collapse states for visual comparison.
+      Layer: e2e_regression
+      Feature state: active
+      Files:
+      - packages/app/e2e/visual-proof.spec.ts
+      Change types:
+      - modify
+      Acceptance criteria:
+      - Ensure the visual proof suite captures expanded and collapsed sidebar screenshots.
     prompt: |
       In packages/app/e2e/visual-proof.spec.ts, add a new test case that must verify the
       sidebar renders correctly in both expanded and collapsed states. The test must use
@@ -41,7 +50,16 @@ tasks:
     dependencies: []
 
   - id: fix-sidebar-transition
-    description: "Reorder CSS transition application in packages/ui/ Sidebar component"
+    description: |
+      Reorder the sidebar transition setup so collapse width changes animate smoothly.
+      Layer: ui_activation
+      Feature state: active
+      Files:
+      - packages/ui/src/Sidebar.tsx
+      Change types:
+      - modify
+      Acceptance criteria:
+      - Ensure collapse transitions animate before the width change is applied.
     prompt: |
       In packages/ui/src/Sidebar.tsx, fix the collapse animation. The Sidebar must animate
       smoothly between expanded and collapsed states. Locate the toggleCollapse handler in
@@ -54,16 +72,45 @@ tasks:
     dependencies: []
 
   - id: run-sidebar-unit-tests
-    description: "Run UI package unit tests to verify sidebar fix"
+    description: |
+      Run the UI package unit test suite after the sidebar transition fix lands.
+      Layer: ui
+      Feature state: active
+      Files:
+      - packages/ui
+      Change types:
+      - verify
+      Acceptance criteria:
+      - Ensure the existing Sidebar-related unit tests pass without regressions.
     command: "cd packages/ui && pnpm test 2>&1"
     dependencies: [fix-sidebar-transition]
 
   - id: capture-visual-proof
-    description: "Build UI and app packages then capture after-state screenshots"
+    description: |
+      Build the UI surfaces and capture the after-state screenshot set for review.
+      Layer: ui
+      Feature state: active
+      Files:
+      - packages/ui
+      - packages/app
+      - scripts/ui-visual-proof.sh
+      Change types:
+      - verify
+      Acceptance criteria:
+      - Ensure the after label capture includes the updated sidebar collapse visuals.
     command: "pnpm --filter @invoker/ui build && pnpm --filter @invoker/app build && bash scripts/ui-visual-proof.sh --label after"
     dependencies: [fix-sidebar-transition, add-visual-proof-test]
 
   - id: verify-regression-suite
-    description: "Re-run UI unit tests as final regression gate"
+    description: |
+      Re-run the UI regression lane as the final gate after visual proof capture completes.
+      Layer: ui
+      Feature state: active
+      Files:
+      - packages/ui
+      Change types:
+      - verify
+      Acceptance criteria:
+      - Ensure the sidebar fix still passes the UI package regression suite after all plan work.
     command: "cd packages/ui && pnpm test 2>&1"
     dependencies: [run-sidebar-unit-tests, capture-visual-proof]
