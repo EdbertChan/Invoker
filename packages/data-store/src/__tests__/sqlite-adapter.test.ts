@@ -142,6 +142,130 @@ describe('SQLiteAdapter', () => {
     it('loadTask returns undefined for missing tasks', () => {
       expect(adapter.loadTask('nonexistent')).toBeUndefined();
     });
+
+    it('bumps revision exactly once per mutation regardless of field count', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      // Single field change
+      adapter.updateTask('t1', { status: 'running' });
+      expect(adapter.loadTask('t1')!.revision).toBe(2);
+
+      // Multi-field change in one call still bumps by exactly 1
+      adapter.updateTask('t1', {
+        status: 'completed',
+        execution: { exitCode: 0, completedAt: new Date() },
+      });
+      expect(adapter.loadTask('t1')!.revision).toBe(3);
+    });
+
+    it('revisions increase monotonically across diverse mutation types', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      const revisions: number[] = [adapter.loadTask('t1')!.revision];
+
+      // Status mutation
+      adapter.updateTask('t1', { status: 'running' });
+      revisions.push(adapter.loadTask('t1')!.revision);
+
+      // Execution metadata mutation
+      adapter.updateTask('t1', { execution: { startedAt: new Date() } });
+      revisions.push(adapter.loadTask('t1')!.revision);
+
+      // Config mutation
+      adapter.updateTask('t1', { config: { command: 'echo updated' } });
+      revisions.push(adapter.loadTask('t1')!.revision);
+
+      // Dependencies mutation
+      adapter.updateTask('t1', { dependencies: ['dep-a', 'dep-b'] });
+      revisions.push(adapter.loadTask('t1')!.revision);
+
+      // Verify strict monotonicity: each revision > previous
+      for (let i = 1; i < revisions.length; i++) {
+        expect(revisions[i]).toBe(revisions[i - 1] + 1);
+      }
+      expect(revisions).toEqual([1, 2, 3, 4, 5]);
+    });
+
+    it('loadTask returns authoritative DB-backed snapshot after multiple updates', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1', {
+        status: 'pending',
+        config: { command: 'echo original' },
+      }));
+
+      adapter.updateTask('t1', { status: 'running' });
+      adapter.updateTask('t1', { execution: { startedAt: new Date() } });
+      adapter.updateTask('t1', {
+        status: 'completed',
+        execution: { exitCode: 0, completedAt: new Date() },
+      });
+
+      const snapshot = adapter.loadTask('t1');
+      expect(snapshot).toBeDefined();
+      // Authoritative state reflects all accumulated mutations
+      expect(snapshot!.status).toBe('completed');
+      expect(snapshot!.execution.exitCode).toBe(0);
+      expect(snapshot!.execution.startedAt).toBeInstanceOf(Date);
+      expect(snapshot!.execution.completedAt).toBeInstanceOf(Date);
+      expect(snapshot!.config.command).toBe('echo original');
+      expect(snapshot!.revision).toBe(4); // 1 + 3 updates
+    });
+
+    it('loadTask and loadTasks agree on revision for the same task', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+      adapter.updateTask('t1', { status: 'running' });
+      adapter.updateTask('t1', { status: 'completed' });
+
+      const single = adapter.loadTask('t1');
+      const [fromList] = adapter.loadTasks('wf-1');
+      expect(single!.revision).toBe(fromList.revision);
+      expect(single!.revision).toBe(3);
+    });
+
+    it('failTaskAndAttempt bumps revision exactly once', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-rev-fail-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+
+        const attempt = createAttempt('t1', {
+          status: 'running',
+          startedAt: new Date(),
+        });
+        db.saveTask('wf-1', makeTask('t1', {
+          status: 'running',
+          execution: {
+            selectedAttemptId: attempt.id,
+            startedAt: new Date(),
+          },
+        }));
+        db.saveAttempt(attempt);
+
+        // Revision starts at 1 after saveTask
+        expect(db.loadTask('t1')!.revision).toBe(1);
+
+        db.failTaskAndAttempt(
+          't1',
+          {
+            status: 'failed',
+            execution: { exitCode: 1, error: 'boom', completedAt: new Date() },
+          },
+          { status: 'failed', exitCode: 1, error: 'boom', completedAt: new Date() },
+        );
+
+        // failTaskAndAttempt wraps updateTask, so revision bumps exactly once
+        expect(db.loadTask('t1')!.revision).toBe(2);
+
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('failTaskAndAttempt', () => {
