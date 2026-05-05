@@ -152,6 +152,7 @@ export interface TaskState {
   readonly createdAt: Date;
   readonly config: TaskConfig;
   readonly execution: TaskExecution;
+  readonly revision: number;
 }
 
 export interface ExperimentVariant {
@@ -181,8 +182,31 @@ export interface TaskStateChanges {
 
 export type TaskDelta =
   | { readonly type: 'created'; readonly task: TaskState }
-  | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges }
-  | { readonly type: 'removed'; readonly taskId: string };
+  | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges; readonly revision: number; readonly previousRevision: number }
+  | { readonly type: 'removed'; readonly taskId: string; readonly previousRevision: number };
+
+// ── Task Delta Factories ────────────────────────────────────
+
+/** Build a `created` delta. The task's own revision is the authoritative value. */
+export function createdDelta(task: TaskState): TaskDelta {
+  return { type: 'created', task };
+}
+
+/** Build an `updated` delta with continuity metadata.
+ *  `previousRevision` is the task's revision *before* the update was applied. */
+export function updatedDelta(
+  taskId: string,
+  changes: TaskStateChanges,
+  revision: number,
+  previousRevision: number,
+): TaskDelta {
+  return { type: 'updated', taskId, changes, revision, previousRevision };
+}
+
+/** Build a `removed` delta with the last known revision of the task. */
+export function removedDelta(taskId: string, previousRevision: number): TaskDelta {
+  return { type: 'removed', taskId, previousRevision };
+}
 
 // ── Task Create Options (alias for TaskConfig) ──────────────
 
@@ -211,6 +235,7 @@ export function createTaskState(
     createdAt: resolveInitialTaskTimestamp(),
     config: { ...options },
     execution: { generation: 0 },
+    revision: 1,
   };
 }
 
