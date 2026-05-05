@@ -1344,6 +1344,33 @@ describe('headless delegation enforcement', () => {
           expect((mockDeps.orchestrator as any).restartTask).not.toHaveBeenCalled();
           preparePoolSpy.mockRestore();
         });
+
+        it('headless `recreate-with-rebase <wfId>` routes to orchestrator.recreateWorkflowFromFreshBase (only) — workflow-scoped entry point', async () => {
+          const { preemptWorkflowExecution, preparePoolSpy } = seedHappyPath();
+          const depsWithNoTrack: HeadlessDeps = {
+            ...mockDeps,
+            noTrack: true,
+            preemptWorkflowExecution,
+          } as HeadlessDeps;
+
+          await runHeadless(['recreate-with-rebase', 'wf-1'], depsWithNoTrack);
+
+          expect(mockDeps.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
+            'wf-1',
+            expect.objectContaining({ refreshBase: expect.any(Function) }),
+          );
+          expect(preparePoolSpy).toHaveBeenCalledWith(
+            'wf-1',
+            'https://example/repo.git',
+            'main',
+          );
+          expect(mockDeps.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+          expect(mockDeps.commandService.retryTask).not.toHaveBeenCalled();
+          expect(mockDeps.commandService.retryWorkflow).not.toHaveBeenCalled();
+          expect(mockDeps.orchestrator.recreateTask).not.toHaveBeenCalled();
+          expect((mockDeps.orchestrator as any).restartTask).not.toHaveBeenCalled();
+          preparePoolSpy.mockRestore();
+        });
       });
 
       it('headless cancel-workflow prefers preemptWorkflowExecution when available', async () => {

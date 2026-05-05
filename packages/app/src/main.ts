@@ -1831,6 +1831,8 @@ if (isHeadless) {
         return { channel: 'headless.exec', request: { args: ['retry', String(arg0)] } };
       case 'invoker:rebase-and-retry':
         return { channel: 'headless.exec', request: { args: ['rebase', String(arg0)] } };
+      case 'invoker:recreate-with-rebase':
+        return { channel: 'headless.exec', request: { args: ['recreate-with-rebase', String(arg0)] } };
       case 'invoker:set-merge-mode':
         return { channel: 'headless.exec', request: { args: ['set', 'merge-mode', String(arg0), String(arg1)] } };
       case 'invoker:approve-merge': {
