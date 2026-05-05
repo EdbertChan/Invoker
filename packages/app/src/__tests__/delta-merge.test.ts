@@ -291,3 +291,213 @@ describe('getSnapshot', () => {
     expect(getSnapshot(cache, 'missing')).toBeUndefined();
   });
 });
+
+// ── End-to-end gap recovery scenarios ────────────────────────
+
+describe('gap recovery: unknown task → quarantine → authoritative reload', () => {
+  it('quarantines unknown task, reloads from persistence, then accepts next ordered delta', () => {
+    const cache = new Map<string, CacheEntry>();
+    const quarantined = new Set<string>();
+
+    // Step 1: An `updated` delta arrives for a task not in the cache.
+    const r1 = applyDelta({
+      type: 'updated',
+      taskId: 't1',
+      changes: { status: 'completed' },
+      revision: 2,
+      previousRevision: 1,
+    }, cache, quarantined);
+    expect(r1).toEqual({ action: 'quarantine', taskId: 't1', reason: 'unknown_task' });
+    expect(quarantined.has('t1')).toBe(true);
+
+    // Step 2: Authoritative reload from persistence (simulated DB read).
+    const dbTask = makeTask('t1', { revision: 2, status: 'completed' });
+    const source = makeSource([dbTask]);
+    const recovered = resolveQuarantine('t1', cache, quarantined, source);
+    expect(recovered).toBeDefined();
+    expect(recovered!.revision).toBe(2);
+    expect(quarantined.has('t1')).toBe(false);
+    expect(cache.get('t1')!.revision).toBe(2);
+
+    // Step 3: A subsequent ordered delta is accepted normally.
+    const r2 = applyDelta({
+      type: 'updated',
+      taskId: 't1',
+      changes: { execution: { exitCode: 0 } },
+      revision: 3,
+      previousRevision: 2,
+    }, cache, quarantined);
+    expect(r2).toEqual({ action: 'applied' });
+    expect(cache.get('t1')!.revision).toBe(3);
+    const stored = JSON.parse(cache.get('t1')!.snapshot);
+    expect(stored.execution.exitCode).toBe(0);
+  });
+});
+
+describe('gap recovery: revision gap → quarantine → authoritative reload', () => {
+  it('quarantines on revision gap, reloads from persistence, then accepts next ordered delta', () => {
+    const cache = new Map<string, CacheEntry>();
+    const quarantined = new Set<string>();
+    const task = makeTask('t1', { revision: 1 });
+    cache.set('t1', makeEntry(task));
+
+    // Step 1: A delta arrives with a revision gap (previousRevision 3, cached is 1).
+    const r1 = applyDelta({
+      type: 'updated',
+      taskId: 't1',
+      changes: { status: 'completed' },
+      revision: 4,
+      previousRevision: 3,
+    }, cache, quarantined);
+    expect(r1).toEqual({ action: 'quarantine', taskId: 't1', reason: 'revision_gap' });
+    expect(quarantined.has('t1')).toBe(true);
+    // Cache retains the stale snapshot — no blind merge.
+    expect(cache.get('t1')!.revision).toBe(1);
+
+    // Step 2: Authoritative reload from persistence.
+    const dbTask = makeTask('t1', { revision: 4, status: 'completed' });
+    const source = makeSource([dbTask]);
+    const recovered = resolveQuarantine('t1', cache, quarantined, source);
+    expect(recovered!.revision).toBe(4);
+    expect(quarantined.has('t1')).toBe(false);
+
+    // Step 3: Next ordered delta applies cleanly.
+    const r2 = applyDelta({
+      type: 'updated',
+      taskId: 't1',
+      changes: { execution: { error: 'timeout' } },
+      revision: 5,
+      previousRevision: 4,
+    }, cache, quarantined);
+    expect(r2).toEqual({ action: 'applied' });
+    expect(cache.get('t1')!.revision).toBe(5);
+  });
+});
+
+describe('gap recovery: quarantined task ignores multiple deltas until reload', () => {
+  it('skips all deltas while quarantined, then resumes after authoritative reload', () => {
+    const cache = new Map<string, CacheEntry>();
+    const quarantined = new Set<string>();
+    const task = makeTask('t1', { revision: 1 });
+    cache.set('t1', makeEntry(task));
+
+    // Trigger quarantine via revision gap.
+    applyDelta({
+      type: 'updated',
+      taskId: 't1',
+      changes: { status: 'running' },
+      revision: 3,
+      previousRevision: 2,
+    }, cache, quarantined);
+    expect(quarantined.has('t1')).toBe(true);
+
+    // Multiple subsequent deltas arrive — all are skipped.
+    for (let rev = 4; rev <= 7; rev++) {
+      const result = applyDelta({
+        type: 'updated',
+        taskId: 't1',
+        changes: { execution: { exitCode: rev } },
+        revision: rev,
+        previousRevision: rev - 1,
+      }, cache, quarantined);
+      expect(result).toEqual({ action: 'skipped', reason: 'quarantined' });
+    }
+    // Cache still holds the original stale snapshot.
+    expect(cache.get('t1')!.revision).toBe(1);
+
+    // Authoritative reload resolves the quarantine.
+    const dbTask = makeTask('t1', { revision: 7, status: 'completed' });
+    const source = makeSource([dbTask]);
+    resolveQuarantine('t1', cache, quarantined, source);
+    expect(quarantined.has('t1')).toBe(false);
+    expect(cache.get('t1')!.revision).toBe(7);
+
+    // Post-reload delta applies cleanly.
+    const r = applyDelta({
+      type: 'updated',
+      taskId: 't1',
+      changes: { execution: { error: 'final' } },
+      revision: 8,
+      previousRevision: 7,
+    }, cache, quarantined);
+    expect(r).toEqual({ action: 'applied' });
+    expect(cache.get('t1')!.revision).toBe(8);
+  });
+});
+
+describe('gap recovery: no orchestrator memory fallback', () => {
+  it('does not accept an updated delta for unknown task even when data would be available elsewhere', () => {
+    // Under the old code, the caller could pass a TaskLookup (orchestrator)
+    // that would seed unknown tasks from in-memory state.  The new API has
+    // no such parameter — the only recovery path is quarantine + persistence.
+    const cache = new Map<string, CacheEntry>();
+    const quarantined = new Set<string>();
+
+    // applyDelta accepts exactly 3 arguments — no orchestrator fallback.
+    const result = applyDelta({
+      type: 'updated',
+      taskId: 't1',
+      changes: { status: 'completed' },
+      revision: 2,
+      previousRevision: 1,
+    }, cache, quarantined);
+
+    // Must quarantine, not silently merge from another source.
+    expect(result.action).toBe('quarantine');
+    expect(cache.has('t1')).toBe(false);
+  });
+});
+
+describe('gap recovery: concurrent quarantine on multiple tasks', () => {
+  it('independently quarantines and resolves multiple tasks', () => {
+    const cache = new Map<string, CacheEntry>();
+    const quarantined = new Set<string>();
+    cache.set('t1', makeEntry(makeTask('t1', { revision: 1 })));
+    cache.set('t2', makeEntry(makeTask('t2', { revision: 1 })));
+
+    // Both tasks hit revision gaps.
+    const r1 = applyDelta({
+      type: 'updated', taskId: 't1',
+      changes: { status: 'completed' },
+      revision: 5, previousRevision: 3,
+    }, cache, quarantined);
+    const r2 = applyDelta({
+      type: 'updated', taskId: 't2',
+      changes: { status: 'failed' },
+      revision: 4, previousRevision: 2,
+    }, cache, quarantined);
+    expect(r1.action).toBe('quarantine');
+    expect(r2.action).toBe('quarantine');
+    expect(quarantined.size).toBe(2);
+
+    // Resolve t1 only — t2 stays quarantined.
+    const source1 = makeSource([makeTask('t1', { revision: 5, status: 'completed' })]);
+    resolveQuarantine('t1', cache, quarantined, source1);
+    expect(quarantined.has('t1')).toBe(false);
+    expect(quarantined.has('t2')).toBe(true);
+
+    // t1 accepts deltas; t2 still skips.
+    expect(applyDelta({
+      type: 'updated', taskId: 't1',
+      changes: { execution: { exitCode: 0 } },
+      revision: 6, previousRevision: 5,
+    }, cache, quarantined).action).toBe('applied');
+
+    expect(applyDelta({
+      type: 'updated', taskId: 't2',
+      changes: { execution: { exitCode: 1 } },
+      revision: 5, previousRevision: 4,
+    }, cache, quarantined)).toEqual({ action: 'skipped', reason: 'quarantined' });
+
+    // Resolve t2.
+    const source2 = makeSource([makeTask('t2', { revision: 4, status: 'failed' })]);
+    resolveQuarantine('t2', cache, quarantined, source2);
+    expect(quarantined.size).toBe(0);
+
+    expect(applyDelta({
+      type: 'updated', taskId: 't2',
+      changes: { execution: { error: 'oom' } },
+      revision: 5, previousRevision: 4,
+    }, cache, quarantined).action).toBe('applied');
+  });
+});
