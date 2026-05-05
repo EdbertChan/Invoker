@@ -17,6 +17,7 @@ export * from './repo-pool.js';
 export * from './registry.js';
 export * from './task-runner.js';
 export * from './merge-runner.js';
+export * from './review-publication-service.js';
 export * from './conflict-resolver.js';
 export * from './merge-gate-provider.js';
 export * from './github-merge-gate-provider.js';

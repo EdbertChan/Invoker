@@ -314,6 +314,30 @@ export interface HeadlessAutoFixController {
   isBusy: () => boolean;
 }
 
+type HeadlessFormatterModule = Awaited<typeof import('./formatter.js')>;
+
+type OutputMode = QueryFlags['output'];
+
+type OutputRendererMap<T> = {
+  [K in OutputMode]: (value: T) => string;
+};
+
+type HeadlessQueryHandler = (
+  flags: QueryFlags,
+  deps: HeadlessDeps,
+  formatter: HeadlessFormatterModule,
+) => Promise<void>;
+
+type HeadlessSubcommandHandler = {
+  readonly run: (args: string[], deps: HeadlessDeps) => Promise<void>;
+  readonly aliases?: readonly string[];
+};
+
+type HeadlessCommandHandler = {
+  readonly run: (args: string[], deps: HeadlessDeps) => Promise<void>;
+  readonly aliases?: readonly string[];
+};
+
 export function parseQueryFlags(args: string[]): QueryFlags {
   const flags: QueryFlags = { output: 'text', positional: [] };
   let i = 0;
@@ -348,37 +372,79 @@ export function parseQueryFlags(args: string[]): QueryFlags {
   return flags;
 }
 
-// ── Query Router ────────────────────────────────────────────
-
-async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> {
-  const subCommand = args[0];
-  if (!subCommand) {
-    throw new Error('Missing query sub-command. Usage: --headless query <workflows|tasks|task|queue|audit|session|ui-perf>');
+function createHandlerRegistry<T extends { readonly aliases?: readonly string[] }>(
+  entries: Record<string, T>,
+): Record<string, T> {
+  const registry: Record<string, T> = {};
+  for (const [name, handler] of Object.entries(entries)) {
+    registry[name] = handler;
+    for (const alias of handler.aliases ?? []) {
+      registry[alias] = handler;
+    }
   }
-  const flags = parseQueryFlags(args.slice(1));
+  return registry;
+}
 
-  const {
-    formatWorkflowList, formatTaskStatus, formatWorkflowStatus,
-    formatEventLog, formatQueueStatus, formatWorkflowStats,
-    serializeWorkflow, serializeTask, serializeEvent,
-    formatAsLabel, formatAsJson, formatAsJsonl,
-  } = await import('./formatter.js');
+async function loadHeadlessFormatter(): Promise<HeadlessFormatterModule> {
+  return import('./formatter.js');
+}
 
-  switch (subCommand) {
-    case 'workflows': {
+function writeRenderedOutput<T>(
+  output: OutputMode,
+  value: T,
+  renderers: OutputRendererMap<T>,
+): void {
+  process.stdout.write(renderers[output](value));
+}
+
+function resolveRegisteredHandler<T>(
+  registry: Record<string, T>,
+  name: string | undefined,
+  missingMessage: string,
+  unknownMessage: (name: string) => string,
+): T {
+  if (!name) {
+    throw new Error(missingMessage);
+  }
+  const handler = registry[name];
+  if (!handler) {
+    throw new Error(unknownMessage(name));
+  }
+  return handler;
+}
+
+const DEFAULT_UI_PERF_STATS = {
+  ownerMode: 'local',
+  ts: '',
+  mainDeltaToUi: 0,
+  dbPollCreated: 0,
+  dbPollUpdatedAsCreated: 0,
+  dbPollUpdatedAsUpdated: 0,
+  rendererReports: 0,
+  maxRendererEventLoopLagMs: 0,
+  maxRendererLongTaskMs: 0,
+};
+
+const headlessQueryHandlers = createHandlerRegistry<{
+  readonly run: HeadlessQueryHandler;
+  readonly aliases?: readonly string[];
+}>({
+  workflows: {
+    run: async (flags, deps, formatter) => {
       let workflows = deps.persistence.listWorkflows();
       if (flags.status) {
         workflows = workflows.filter(wf => wf.status === flags.status);
       }
-      switch (flags.output) {
-        case 'label': process.stdout.write(formatAsLabel(workflows) + '\n'); break;
-        case 'json':  process.stdout.write(formatAsJson(workflows.map(serializeWorkflow)) + '\n'); break;
-        case 'jsonl': process.stdout.write(formatAsJsonl(workflows.map(serializeWorkflow)) + '\n'); break;
-        default:      process.stdout.write(formatWorkflowList(workflows) + '\n'); break;
-      }
-      break;
-    }
-    case 'tasks': {
+      writeRenderedOutput(flags.output, workflows, {
+        text: (value) => formatter.formatWorkflowList(value) + '\n',
+        label: (value) => formatter.formatAsLabel(value) + '\n',
+        json: (value) => formatter.formatAsJson(value.map(formatter.serializeWorkflow)) + '\n',
+        jsonl: (value) => formatter.formatAsJsonl(value.map(formatter.serializeWorkflow)) + '\n',
+      });
+    },
+  },
+  tasks: {
+    run: async (flags, deps, formatter) => {
       const { orchestrator, persistence } = deps;
       const workflows = persistence.listWorkflows();
       if (workflows.length === 0) {
@@ -386,12 +452,7 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
         return;
       }
 
-      // Support both:
-      //   query tasks --workflow <id>
-      //   query tasks <workflowId>
       const workflowFilter = flags.workflow ?? flags.positional[0];
-
-      // Load tasks from specific workflow or latest
       const targetWorkflows = workflowFilter
         ? workflows.filter(wf => wf.id === workflowFilter)
         : [workflows[0]];
@@ -402,13 +463,10 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
 
       let allTasks: import('@invoker/workflow-core').TaskState[] = [];
       for (const wf of targetWorkflows) {
-        // Query must stay read-only: sync graph from DB without starting/restarting tasks.
         orchestrator.syncFromDb(wf.id);
-        // Filter by workflow ID — the orchestrator may have loaded other workflows during init.
         allTasks.push(...orchestrator.getAllTasks().filter(t => t.config.workflowId === wf.id));
       }
 
-      // Apply filters
       if (flags.status) {
         allTasks = allTasks.filter(t => t.status === flags.status);
       }
@@ -416,110 +474,98 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
         allTasks = allTasks.filter(t => !t.config.isMergeNode);
       }
 
-      switch (flags.output) {
-        case 'label': process.stdout.write(formatAsLabel(allTasks) + '\n'); break;
-        case 'json':  process.stdout.write(formatAsJson(allTasks.map(serializeTask)) + '\n'); break;
-        case 'jsonl': process.stdout.write(formatAsJsonl(allTasks.map(serializeTask)) + '\n'); break;
-        default: {
-          for (const task of allTasks) process.stdout.write(formatTaskStatus(task) + '\n');
+      writeRenderedOutput(flags.output, allTasks, {
+        text: (value) => {
+          const lines = value.map((task) => formatter.formatTaskStatus(task));
           const status = orchestrator.getWorkflowStatus();
-          process.stdout.write(`\n${formatWorkflowStatus(status)}\n`);
-          break;
-        }
-      }
-      break;
-    }
-    case 'task': {
+          const prefix = lines.length > 0 ? `${lines.join('\n')}\n\n` : '\n';
+          return `${prefix}${formatter.formatWorkflowStatus(status)}\n`;
+        },
+        label: (value) => formatter.formatAsLabel(value) + '\n',
+        json: (value) => formatter.formatAsJson(value.map(formatter.serializeTask)) + '\n',
+        jsonl: (value) => formatter.formatAsJsonl(value.map(formatter.serializeTask)) + '\n',
+      });
+    },
+  },
+  task: {
+    run: async (flags, deps, formatter) => {
       const taskId = flags.positional[0];
       if (!taskId) throw new Error('Usage: --headless query task <taskId>');
       const resolved = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
       const task = deps.orchestrator.getTask(resolved);
       if (!task) throw new Error(`Task "${taskId}" not found`);
 
-      switch (flags.output) {
-        case 'label': process.stdout.write(task.id + '\n'); break;
-        case 'json':  process.stdout.write(formatAsJson(serializeTask(task)) + '\n'); break;
-        case 'jsonl': process.stdout.write(formatAsJsonl([serializeTask(task)]) + '\n'); break;
-        default:      process.stdout.write(task.status + '\n'); break;
-      }
-      break;
-    }
-    case 'queue': {
+      writeRenderedOutput(flags.output, task, {
+        text: (value) => value.status + '\n',
+        label: (value) => value.id + '\n',
+        json: (value) => formatter.formatAsJson(formatter.serializeTask(value)) + '\n',
+        jsonl: (value) => formatter.formatAsJsonl([formatter.serializeTask(value)]) + '\n',
+      });
+    },
+  },
+  queue: {
+    run: async (flags, deps, formatter) => {
       const workflows = deps.persistence.listWorkflows();
       for (const workflow of workflows) {
         deps.orchestrator.syncFromDb(workflow.id);
       }
       const status = deps.orchestrator.getQueueStatus();
 
-      switch (flags.output) {
-        case 'label': {
-          const ids = [...status.running.map(t => t.taskId), ...status.queued.map(t => t.taskId)];
-          process.stdout.write(ids.join('\n') + '\n');
-          break;
-        }
-        case 'json':  process.stdout.write(formatAsJson(status) + '\n'); break;
-        case 'jsonl': {
-          for (const t of status.running) process.stdout.write(JSON.stringify({ ...t, state: 'running' }) + '\n');
-          for (const t of status.queued) process.stdout.write(JSON.stringify({ ...t, state: 'queued' }) + '\n');
-          break;
-        }
-        default: process.stdout.write(formatQueueStatus(status) + '\n'); break;
-      }
-      break;
-    }
-    case 'audit': {
+      writeRenderedOutput(flags.output, status, {
+        text: (value) => formatter.formatQueueStatus(value) + '\n',
+        label: (value) => [...value.running.map(t => t.taskId), ...value.queued.map(t => t.taskId)].join('\n') + '\n',
+        json: (value) => formatter.formatAsJson(value) + '\n',
+        jsonl: (value) => {
+          const lines = [
+            ...value.running.map(t => JSON.stringify({ ...t, state: 'running' })),
+            ...value.queued.map(t => JSON.stringify({ ...t, state: 'queued' })),
+          ];
+          return lines.length > 0 ? `${lines.join('\n')}\n` : '';
+        },
+      });
+    },
+  },
+  audit: {
+    run: async (flags, deps, formatter) => {
       const taskId = flags.positional[0];
       if (!taskId) throw new Error('Usage: --headless query audit <taskId>');
       const events = deps.persistence.getEvents(taskId);
 
-      switch (flags.output) {
-        case 'label': process.stdout.write(events.map(e => `${e.taskId}:${e.eventType}`).join('\n') + '\n'); break;
-        case 'json':  process.stdout.write(formatAsJson(events.map(serializeEvent)) + '\n'); break;
-        case 'jsonl': process.stdout.write(formatAsJsonl(events.map(serializeEvent)) + '\n'); break;
-        default:      process.stdout.write(formatEventLog(events) + '\n'); break;
-      }
-      break;
-    }
-    case 'session': {
+      writeRenderedOutput(flags.output, events, {
+        text: (value) => formatter.formatEventLog(value) + '\n',
+        label: (value) => value.map(e => `${e.taskId}:${e.eventType}`).join('\n') + '\n',
+        json: (value) => formatter.formatAsJson(value.map(formatter.serializeEvent)) + '\n',
+        jsonl: (value) => formatter.formatAsJsonl(value.map(formatter.serializeEvent)) + '\n',
+      });
+    },
+  },
+  session: {
+    run: async (flags, deps) => {
       const taskId = flags.positional[0];
       if (!taskId) throw new Error('Usage: --headless query session <taskId>');
-      // For non-text output, we'd need structured session data.
-      // For now, session only supports text output; other formats fall through to text.
       await headlessSession(taskId, deps);
-      break;
-    }
-    case 'ui-perf': {
+    },
+  },
+  'ui-perf': {
+    run: async (flags, deps, formatter) => {
       if (flags.reset) {
         deps.resetUiPerfStats?.();
       }
       const stats = deps.getUiPerfStats?.() ?? {
-        ownerMode: 'local',
+        ...DEFAULT_UI_PERF_STATS,
         ts: new Date().toISOString(),
-        mainDeltaToUi: 0,
-        dbPollCreated: 0,
-        dbPollUpdatedAsCreated: 0,
-        dbPollUpdatedAsUpdated: 0,
-        rendererReports: 0,
-        maxRendererEventLoopLagMs: 0,
-        maxRendererLongTaskMs: 0,
       };
-      switch (flags.output) {
-        case 'label':
-          process.stdout.write(String((stats as Record<string, unknown>).maxRendererEventLoopLagMs ?? 0) + '\n');
-          break;
-        case 'json':
-          process.stdout.write(formatAsJson(stats) + '\n');
-          break;
-        case 'jsonl':
-          process.stdout.write(formatAsJsonl([stats]) + '\n');
-          break;
-        default:
-          process.stdout.write(`${JSON.stringify(stats, null, 2)}\n`);
-          break;
-      }
-      break;
-    }
-    case 'stats': {
+
+      writeRenderedOutput(flags.output, stats, {
+        text: (value) => `${JSON.stringify(value, null, 2)}\n`,
+        label: (value) => String((value as Record<string, unknown>).maxRendererEventLoopLagMs ?? 0) + '\n',
+        json: (value) => formatter.formatAsJson(value) + '\n',
+        jsonl: (value) => formatter.formatAsJsonl([value]) + '\n',
+      });
+    },
+  },
+  stats: {
+    run: async (flags, deps, formatter) => {
       const { orchestrator, persistence } = deps;
       const workflows = persistence.listWorkflows();
 
@@ -528,9 +574,6 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
       const running = workflows.filter(w => w.status === 'running').length;
       const terminal = completed + failed;
       const successRate = terminal > 0 ? (completed / terminal) * 100 : 0;
-
-      // Average duration across workflows that have both timestamps.
-      // startedAt/completedAt are added by the workflow-duration feature; guard for older DBs.
       const durations = (workflows as Array<typeof workflows[0] & { startedAt?: string; completedAt?: string }>)
         .filter(w => w.startedAt && w.completedAt)
         .map(w => new Date(w.completedAt!).getTime() - new Date(w.startedAt!).getTime());
@@ -538,7 +581,6 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
         ? durations.reduce((a, b) => a + b, 0) / durations.length
         : null;
 
-      // Most-failed task descriptions across all workflows
       const failCounts = new Map<string, number>();
       for (const wf of workflows) {
         orchestrator.syncFromDb(wf.id);
@@ -564,55 +606,69 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
         mostFailedTasks,
       };
 
-      switch (flags.output) {
-        case 'label': process.stdout.write(`${successRate.toFixed(1)}%\n`); break;
-        case 'json':  process.stdout.write(formatAsJson(stats) + '\n'); break;
-        case 'jsonl': process.stdout.write(formatAsJsonl([stats]) + '\n'); break;
-        default:      process.stdout.write(formatWorkflowStats(stats) + '\n'); break;
-      }
-      break;
-    }
-    default:
-      throw new Error(`Unknown query sub-command: "${subCommand}". Use: workflows, tasks, task, queue, audit, session, ui-perf, stats`);
-  }
+      writeRenderedOutput(flags.output, stats, {
+        text: (value) => formatter.formatWorkflowStats(value) + '\n',
+        label: (value) => `${value.successRate.toFixed(1)}%\n`,
+        json: (value) => formatter.formatAsJson(value) + '\n',
+        jsonl: (value) => formatter.formatAsJsonl([value]) + '\n',
+      });
+    },
+  },
+});
+
+const headlessSetHandlers = createHandlerRegistry<HeadlessSubcommandHandler>({
+  command: {
+    run: async (args, deps) => headlessEdit(args[1], args.slice(2).join(' '), deps),
+  },
+  prompt: {
+    run: async (args, deps) => headlessEditPrompt(args[1], args.slice(2).join(' '), deps),
+  },
+  executor: {
+    run: async (args, deps) => headlessEditExecutor(args[1], args[2], deps),
+  },
+  agent: {
+    run: async (args, deps) => headlessEditAgent(args[1], args[2], deps),
+  },
+  'merge-mode': {
+    run: async (args, deps) => headlessSetMergeMode(args[1], args[2], deps),
+  },
+  'fix-prompt': {
+    run: async (args, deps) => headlessSetFixContext(args[1], { fixPrompt: args.slice(2).join(' ') }, deps),
+  },
+  'fix-context': {
+    run: async (args, deps) => headlessSetFixContext(args[1], { fixContext: args.slice(2).join(' ') }, deps),
+  },
+  'gate-policy': {
+    run: async (args, deps) => headlessSetGatePolicy(args.slice(1), deps),
+  },
+});
+
+// ── Query Router ────────────────────────────────────────────
+
+async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> {
+  const subCommand = args[0];
+  const handler = resolveRegisteredHandler(
+    headlessQueryHandlers,
+    subCommand,
+    'Missing query sub-command. Usage: --headless query <workflows|tasks|task|queue|audit|session|ui-perf>',
+    (name) => `Unknown query sub-command: "${name}". Use: workflows, tasks, task, queue, audit, session, ui-perf, stats`,
+  );
+  const flags = parseQueryFlags(args.slice(1));
+  const formatter = await loadHeadlessFormatter();
+  await handler.run(flags, deps, formatter);
 }
 
 // ── Set Router ──────────────────────────────────────────────
 
 async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
   const subCommand = args[0];
-  if (!subCommand) {
-    throw new Error('Missing set sub-command. Usage: --headless set <command|executor|agent|merge-mode|gate-policy>');
-  }
-
-  switch (subCommand) {
-    case 'command':
-      await headlessEdit(args[1], args.slice(2).join(' '), deps);
-      break;
-    case 'prompt':
-      await headlessEditPrompt(args[1], args.slice(2).join(' '), deps);
-      break;
-    case 'executor':
-      await headlessEditExecutor(args[1], args[2], deps);
-      break;
-    case 'agent':
-      await headlessEditAgent(args[1], args[2], deps);
-      break;
-    case 'merge-mode':
-      await headlessSetMergeMode(args[1], args[2], deps);
-      break;
-    case 'fix-prompt':
-      await headlessSetFixContext(args[1], { fixPrompt: args.slice(2).join(' ') }, deps);
-      break;
-    case 'fix-context':
-      await headlessSetFixContext(args[1], { fixContext: args.slice(2).join(' ') }, deps);
-      break;
-    case 'gate-policy':
-      await headlessSetGatePolicy(args.slice(1), deps);
-      break;
-    default:
-      throw new Error(`Unknown set sub-command: "${subCommand}". Use: command, prompt, executor, agent, merge-mode, fix-prompt, fix-context, gate-policy`);
-  }
+  const handler = resolveRegisteredHandler(
+    headlessSetHandlers,
+    subCommand,
+    'Missing set sub-command. Usage: --headless set <command|executor|agent|merge-mode|gate-policy>',
+    (name) => `Unknown set sub-command: "${name}". Use: command, prompt, executor, agent, merge-mode, fix-prompt, fix-context, gate-policy`,
+  );
+  await handler.run(args, deps);
 }
 
 async function headlessMigrateCompatibility(deps: HeadlessDeps): Promise<void> {
@@ -640,185 +696,209 @@ async function headlessInstallSkills(
   }
 }
 
-// ── Headless Command Router ──────────────────────────────────
-
-export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<void> {
-  const command = args[0];
-
-  switch (command) {
-    case 'owner-serve':
-      await headlessOwnerServe(deps);
-      break;
-    // ── New grouped commands ──
-    case 'query':
-      await headlessQuery(args.slice(1), deps);
-      break;
-    case 'set':
-      await headlessSet(args.slice(1), deps);
-      break;
-    case 'migrate-compat':
-      await headlessMigrateCompatibility(deps);
-      break;
-    case 'install-skills':
-      await headlessInstallSkills(
-        args[1] === 'reinstall' || args[1] === 'update' ? args[1] : 'install',
-        deps,
-      );
-      break;
-    case 'watch':
-      await headlessWatch(args[1], deps);
-      break;
-
-    // ── Execute (unchanged) ──
-    case 'run':
-      await headlessRun(args[1], deps, deps.waitForApproval, deps.noTrack);
-      break;
-    case 'resume':
-      await headlessResume(args[1], deps, deps.waitForApproval, deps.noTrack);
-      break;
-    case 'retry':
-      await headlessRetryWorkflow(args[1], deps);
-      break;
-    case 'retry-task':
-      await headlessRetryTask(args[1], deps);
-      break;
-    case 'recreate':
-      await headlessRecreateWorkflow(args[1], deps);
-      break;
-    case 'recreate-task':
-      await headlessRecreateTask(args[1], deps);
-      break;
-    case 'replace-task':
+const headlessCommandHandlers = createHandlerRegistry<HeadlessCommandHandler>({
+  'owner-serve': {
+    run: async (_args, deps) => headlessOwnerServe(deps),
+  },
+  query: {
+    run: async (args, deps) => headlessQuery(args.slice(1), deps),
+  },
+  set: {
+    run: async (args, deps) => headlessSet(args.slice(1), deps),
+  },
+  'migrate-compat': {
+    run: async (_args, deps) => headlessMigrateCompatibility(deps),
+  },
+  'install-skills': {
+    run: async (args, deps) => headlessInstallSkills(
+      args[1] === 'reinstall' || args[1] === 'update' ? args[1] : 'install',
+      deps,
+    ),
+  },
+  watch: {
+    run: async (args, deps) => headlessWatch(args[1], deps),
+  },
+  run: {
+    run: async (args, deps) => headlessRun(args[1], deps, deps.waitForApproval, deps.noTrack),
+  },
+  resume: {
+    run: async (args, deps) => headlessResume(args[1], deps, deps.waitForApproval, deps.noTrack),
+  },
+  retry: {
+    run: async (args, deps) => headlessRetryWorkflow(args[1], deps),
+  },
+  'retry-task': {
+    run: async (args, deps) => headlessRetryTask(args[1], deps),
+  },
+  recreate: {
+    run: async (args, deps) => headlessRecreateWorkflow(args[1], deps),
+  },
+  'recreate-task': {
+    run: async (args, deps) => headlessRecreateTask(args[1], deps),
+  },
+  'replace-task': {
+    run: async () => {
       throw new Error(
         'Headless replace-task is disabled because it is not a safe supported CLI flow. ' +
         'Use the UI replace-task flow instead.',
       );
-    case 'fork-workflow':
-      await headlessForkWorkflow(args[1], deps);
-      break;
-    case 'rebase':
-      await headlessRebaseAndRetry(args[1], deps);
-      break;
-    case 'publish-review-stack':
-      await headlessPublishReviewStack(args[1], deps);
-      break;
-    case 'publish-landing-stack':
-      await headlessPublishLandingStack(args[1], deps);
-      break;
-
-    // Deprecated aliases
-    case 'rebase-and-retry':
+    },
+  },
+  'fork-workflow': {
+    run: async (args, deps) => headlessForkWorkflow(args[1], deps),
+  },
+  rebase: {
+    run: async (args, deps) => headlessRebaseAndRetry(args[1], deps),
+  },
+  'rebase-and-retry': {
+    run: async (args, deps) => {
       warnDeprecated('rebase-and-retry', 'rebase');
       await headlessRebaseAndRetry(args[1], deps);
-      break;
-    case 'fix':
-      await headlessFix(args[1], deps, args[2]);
-      break;
-    case 'resolve-conflict':
-      await headlessResolveConflict(args[1], deps, args[2]);
-      break;
-
-    // ── Respond (unchanged) ──
-    case 'approve':
-      await headlessApprove(args[1], deps);
-      break;
-    case 'reject':
-      await headlessReject(args[1], deps, args.slice(2).join(' ') || undefined);
-      break;
-    case 'input':
-      await headlessInput(args[1], args.slice(2).join(' '), deps);
-      break;
-    case 'select':
-      await headlessSelect(args[1], args[2], deps);
-      break;
-
-    // ── Lifecycle (unchanged) ──
-    case 'cancel':
-      await headlessCancel(args[1], deps);
-      break;
-    case 'cancel-workflow':
-      await headlessCancelWorkflow(args[1], deps);
-      break;
-    case 'delete':
-    case 'delete-workflow':
-      await headlessDeleteWorkflow(args[1], deps);
-      break;
-    case 'delete-all':
+    },
+  },
+  'publish-review-stack': {
+    run: async (args, deps) => headlessPublishReviewStack(args[1], deps),
+  },
+  'publish-landing-stack': {
+    run: async (args, deps) => headlessPublishLandingStack(args[1], deps),
+  },
+  fix: {
+    run: async (args, deps) => headlessFix(args[1], deps, args[2]),
+  },
+  'resolve-conflict': {
+    run: async (args, deps) => headlessResolveConflict(args[1], deps, args[2]),
+  },
+  approve: {
+    run: async (args, deps) => headlessApprove(args[1], deps),
+  },
+  reject: {
+    run: async (args, deps) => headlessReject(args[1], deps, args.slice(2).join(' ') || undefined),
+  },
+  input: {
+    run: async (args, deps) => headlessInput(args[1], args.slice(2).join(' '), deps),
+  },
+  select: {
+    run: async (args, deps) => headlessSelect(args[1], args[2], deps),
+  },
+  cancel: {
+    run: async (args, deps) => headlessCancel(args[1], deps),
+  },
+  'cancel-workflow': {
+    run: async (args, deps) => headlessCancelWorkflow(args[1], deps),
+  },
+  delete: {
+    run: async (args, deps) => headlessDeleteWorkflow(args[1], deps),
+    aliases: ['delete-workflow'],
+  },
+  'delete-all': {
+    run: async (_args, deps) => {
       assertDeleteAllEnabled();
-      {
-        const snapshot = createDeleteAllSnapshot();
-        if (snapshot) {
-          process.stderr.write(`[headless] delete-all snapshot: ${snapshot}\n`);
-        } else {
-          process.stderr.write('[headless] delete-all snapshot skipped: DB file does not exist yet\n');
-        }
+      const snapshot = createDeleteAllSnapshot();
+      if (snapshot) {
+        process.stderr.write(`[headless] delete-all snapshot: ${snapshot}\n`);
+      } else {
+        process.stderr.write('[headless] delete-all snapshot skipped: DB file does not exist yet\n');
       }
       deps.orchestrator.deleteAllWorkflows();
       process.stdout.write('All workflows deleted.\n');
-      break;
-    case 'open-terminal':
-      await headlessOpenTerminal(args[1], deps);
-      break;
-    case 'slack':
-      await headlessSlack(deps);
-      break;
-    case 'query-select':
-      await headlessQuerySelect(args[1], deps);
-      break;
-
-    // ── Deprecated aliases → query ──
-    case 'list':
+    },
+  },
+  'open-terminal': {
+    run: async (args, deps) => headlessOpenTerminal(args[1], deps),
+  },
+  slack: {
+    run: async (_args, deps) => headlessSlack(deps),
+  },
+  'query-select': {
+    run: async (args, deps) => headlessQuerySelect(args[1], deps),
+  },
+  list: {
+    run: async (args, deps) => {
       warnDeprecated('list', 'query workflows');
       await headlessQuery(['workflows', ...args.slice(1)], deps);
-      break;
-    case 'status':
+    },
+  },
+  status: {
+    run: async (args, deps) => {
       warnDeprecated('status', 'query tasks');
       await headlessQuery(['tasks', ...args.slice(1)], deps);
-      break;
-    case 'task-status':
+    },
+  },
+  'task-status': {
+    run: async (args, deps) => {
       warnDeprecated('task-status', 'query task');
       await headlessQuery(['task', ...args.slice(1)], deps);
-      break;
-    case 'queue':
+    },
+  },
+  queue: {
+    run: async (args, deps) => {
       warnDeprecated('queue', 'query queue');
       await headlessQuery(['queue', ...args.slice(1)], deps);
-      break;
-    case 'audit':
+    },
+  },
+  audit: {
+    run: async (args, deps) => {
       warnDeprecated('audit', 'query audit');
       await headlessQuery(['audit', ...args.slice(1)], deps);
-      break;
-    case 'session':
+    },
+  },
+  session: {
+    run: async (args, deps) => {
       warnDeprecated('session', 'query session');
       await headlessQuery(['session', ...args.slice(1)], deps);
-      break;
-
-    // ── Deprecated aliases → set ──
-    case 'edit':
+    },
+  },
+  edit: {
+    run: async (args, deps) => {
       warnDeprecated('edit', 'set command');
       await headlessSet(['command', ...args.slice(1)], deps);
-      break;
-    case 'edit-executor':
-    case 'edit-type':
-      warnDeprecated(command, 'set executor');
+    },
+  },
+  'edit-executor': {
+    run: async (args, deps) => {
+      warnDeprecated('edit-executor', 'set executor');
       await headlessSet(['executor', ...args.slice(1)], deps);
-      break;
-    case 'edit-agent':
+    },
+  },
+  'edit-type': {
+    run: async (args, deps) => {
+      warnDeprecated('edit-type', 'set executor');
+      await headlessSet(['executor', ...args.slice(1)], deps);
+    },
+  },
+  'edit-agent': {
+    run: async (args, deps) => {
       warnDeprecated('edit-agent', 'set agent');
       await headlessSet(['agent', ...args.slice(1)], deps);
-      break;
-    case 'set-merge-mode':
+    },
+  },
+  'set-merge-mode': {
+    run: async (args, deps) => {
       warnDeprecated('set-merge-mode', 'set merge-mode');
       await headlessSet(['merge-mode', ...args.slice(1)], deps);
-      break;
+    },
+  },
+  '--help': {
+    run: async () => printHeadlessUsage(),
+    aliases: ['-h'],
+  },
+});
 
-    case '--help':
-    case '-h':
-    case undefined:
-      printHeadlessUsage();
-      break;
-    default:
-      throw new Error(`Unknown command: ${command}. Run with --help for usage.`);
+// ── Headless Command Router ──────────────────────────────────
+
+export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<void> {
+  const command = args[0];
+  if (!command) {
+    printHeadlessUsage();
+    return;
   }
+  const handler = resolveRegisteredHandler(
+    headlessCommandHandlers,
+    command,
+    'Missing command. Run with --help for usage.',
+    (name) => `Unknown command: ${name}. Run with --help for usage.`,
+  );
+  await handler.run(args, deps);
 }
 
 async function headlessOwnerServe(deps: Pick<HeadlessDeps, 'isStandaloneOwnerIdle'>): Promise<void> {

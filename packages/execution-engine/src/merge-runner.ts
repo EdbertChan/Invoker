@@ -17,10 +17,7 @@ import type { TaskRunnerCallbacks } from './task-runner.js';
 import type { MergeGateProvider } from './merge-gate-provider.js';
 import type { ReviewProviderRegistry } from './review-provider-registry.js';
 import { normalizeBranchForGithubCli } from './github-branch-ref.js';
-import {
-  publishInvokerStack,
-  shouldUseInvokerSyntheticReview,
-} from './invoker-stack-publisher.js';
+import { publishReview } from './review-publication-service.js';
 
 // ── Trace logging ────────────────────────────────────────
 
@@ -419,10 +416,6 @@ export async function executeMergeNodeImpl(
         return;
       }
       if (mergeMode === 'external_review') {
-        if (!host.mergeGateProvider) {
-          throw new Error('mergeMode is "external_review" but no review provider configured');
-        }
-
         let fullSummary = summary;
         if (visualProof && host.runVisualProofCapture) {
           const slug = (featureBranch ?? 'workflow').replace(/\//g, '-');
@@ -439,26 +432,15 @@ export async function executeMergeNodeImpl(
           gateWorkspacePath!,
         );
 
-        // Create PR via provider (consolidation already done above).
-        // Use the gate clone dir so gh CLI resolves the correct GitHub remote.
-        const result = await (async () => {
-          if (workflowId && await shouldUseInvokerSyntheticReview(host, workflowId)) {
-            const published = await publishInvokerStack(host, workflowId, 'review');
-            const current = published.prs.find((pr) => pr.workflowId === workflowId);
-            if (!current) throw new Error(`No published review PR found for workflow ${workflowId}`);
-            return {
-              url: current.url,
-              identifier: `${current.number}`,
-            };
-          }
-          return host.mergeGateProvider!.createReview({
-            baseBranch,
-            featureBranch,
-            title: workflow?.name ?? 'Workflow',
-            cwd: gateWorkspacePath!,
-            body: fullSummary,
-          });
-        })();
+        const result = await publishReview(host, {
+          kind: 'external_review',
+          workflowId,
+          baseBranch,
+          featureBranch,
+          title: workflow?.name ?? 'Workflow',
+          cwd: gateWorkspacePath!,
+          body: fullSummary,
+        });
         console.log(`[merge] Created GitHub PR: ${result.url}`);
 
         const prResponse: WorkResponse = {
@@ -478,6 +460,9 @@ export async function executeMergeNodeImpl(
           `[merge-gate-workspace] setTaskReviewReady path=external_review ` +
             `task=${task.id} gateWorkspacePath=${gateWorkspacePath ?? 'NULL'}`,
         );
+        if (!result.identifier) {
+          throw new Error(`Review publication did not return an identifier for workflow ${workflowId}`);
+        }
         setMergeGateReviewReady(host, task.id, {
           config: { executorType: 'worktree', summary },
           execution: {
@@ -659,23 +644,17 @@ export async function approveMergeImpl(
       mergeTrace('GIT_PUSH', { featureBranch, worktreeDir });
       // Push feature branch directly to origin (GitHub) from the clone
       await execGitInMergeSafe(host, ['push', '--force', '-u', 'origin', featureBranch], worktreeDir);
-      const reviewUrl = await (
-        workflowId && await shouldUseInvokerSyntheticReview(host, workflowId)
-          ? publishInvokerStack(host, workflowId, 'review').then((published) => {
-              const current = published.prs.find((pr) => pr.workflowId === workflowId);
-              if (!current) throw new Error(`No published review PR found for workflow ${workflowId}`);
-              return current.url;
-            })
-          : authorPrBodyForMerge(host, {
-              workflowId,
-              mergeNodeTaskId: mergeTaskId,
-              title: mergeMessage,
-              baseBranch,
-              featureBranch,
-              workflowSummary: fullSummary ?? '',
-              cwd: worktreeDir,
-            }).then((prBody) => host.execPr(baseBranch, featureBranch, mergeMessage, prBody, worktreeDir))
-      );
+      const review = await publishReview(host, {
+        kind: 'pull_request',
+        workflowId,
+        mergeNodeTaskId: mergeTaskId,
+        title: mergeMessage,
+        baseBranch,
+        featureBranch,
+        workflowSummary: fullSummary ?? '',
+        cwd: worktreeDir,
+      });
+      const reviewUrl = review.url;
       mergeTrace('PR_CREATED', { featureBranch, baseBranch, reviewUrl });
       console.log(`[merge] Approved: created pull request ${reviewUrl}`);
       host.persistence.updateTask(mergeTaskId, {
@@ -926,32 +905,20 @@ export async function publishAfterFixImpl(
     }
 
     if (mergeMode === 'external_review') {
-      if (!host.mergeGateProvider) {
-        throw new Error('mergeMode is "external_review" but no review provider configured');
-      }
-
-      const result = await (
-        workflowId && await shouldUseInvokerSyntheticReview(host, workflowId)
-          ? publishInvokerStack(host, workflowId, 'review').then((published) => {
-              const current = published.prs.find((pr) => pr.workflowId === workflowId);
-              if (!current) throw new Error(`No published review PR found for workflow ${workflowId}`);
-              return {
-                url: current.url,
-                identifier: `${current.number}`,
-              };
-            })
-          : host.mergeGateProvider.createReview({
-              baseBranch,
-              featureBranch,
-              title: workflow?.name ?? 'Workflow',
-              cwd: consolidateDir,
-              body: fullSummary,
-            })
-      );
+      const result = await publishReview(host, {
+        kind: 'external_review',
+        workflowId,
+        baseBranch,
+        featureBranch,
+        title: workflow?.name ?? 'Workflow',
+        cwd: consolidateDir,
+        body: fullSummary,
+      });
       console.log(`[merge] Post-fix: created/updated GitHub PR: ${result.url}`);
 
-
-
+      if (!result.identifier) {
+        throw new Error(`Review publication did not return an identifier for workflow ${workflowId}`);
+      }
       setMergeGateReviewReady(host, task.id, {
         config: { executorType: 'worktree', summary },
         execution: {
@@ -972,23 +939,17 @@ export async function publishAfterFixImpl(
 
     // manual mode with pull_request onFinish
     if (onFinish === 'pull_request') {
-      const reviewUrl = await (
-        workflowId && await shouldUseInvokerSyntheticReview(host, workflowId)
-          ? publishInvokerStack(host, workflowId, 'review').then((published) => {
-              const current = published.prs.find((pr) => pr.workflowId === workflowId);
-              if (!current) throw new Error(`No published review PR found for workflow ${workflowId}`);
-              return current.url;
-            })
-          : authorPrBodyForMerge(host, {
-              workflowId,
-              mergeNodeTaskId: task.id,
-              title: workflow?.name ?? 'Workflow',
-              baseBranch,
-              featureBranch,
-              workflowSummary: fullSummary ?? '',
-              cwd: consolidateDir,
-            }).then((prBody) => host.execPr(baseBranch, featureBranch, workflow?.name ?? 'Workflow', prBody, consolidateDir))
-      );
+      const review = await publishReview(host, {
+        kind: 'pull_request',
+        workflowId,
+        mergeNodeTaskId: task.id,
+        title: workflow?.name ?? 'Workflow',
+        baseBranch,
+        featureBranch,
+        workflowSummary: fullSummary ?? '',
+        cwd: consolidateDir,
+      });
+      const reviewUrl = review.url;
       console.log(`[merge] Post-fix: created pull request ${reviewUrl}`);
       host.persistence.updateTask(task.id, {
         config: { summary },
