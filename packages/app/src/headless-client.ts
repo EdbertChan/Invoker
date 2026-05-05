@@ -97,6 +97,7 @@ export function isSharedMutationOwnerTimeoutError(error: unknown): error is Shar
   return error instanceof SharedMutationOwnerTimeoutError;
 }
 
+/** Send a mutation command over IPC to the owner, using command-specific channels and timeouts. */
 async function delegateMutation(
   args: string[],
   bus: MessageBus,
@@ -198,6 +199,7 @@ async function delegateReadOnlyQuery(
   return true;
 }
 
+/** Poll for a standalone-capable owner post-bootstrap and delegate once it responds. */
 async function delegateAfterBootstrap(
   args: string[],
   deps: Pick<HeadlessClientDeps, 'refreshMessageBus'>,
@@ -290,12 +292,12 @@ function parseArgs(argv: string[]): { args: string[]; waitForApproval?: boolean;
 }
 
 /**
- * Resolve a writable owner endpoint using the resolver, then delegate.
+ * Resolve a writable owner and delegate the mutation command.
  *
- * This function encapsulates the discover → fallback → bootstrap → delegate
- * policy that was previously inline. It uses the OwnerResolver for the
- * discovery/refresh/bootstrap phases and delegates command execution once
- * an owner is acquired.
+ * Routing lanes (matches the shared transport policy):
+ *   1. Standalone-capable owner already running → delegate immediately.
+ *   2. GUI owner (non-standalone) already running → delegate to it (no bootstrap).
+ *   3. No owner reachable → bootstrap a standalone owner, then delegate.
  */
 async function resolveOwnerAndDelegate(
   args: string[],
@@ -311,61 +313,36 @@ async function resolveOwnerAndDelegate(
     return typeof exitCode === 'number' ? exitCode : 0;
   };
 
-  // Phase 1: Discover a standalone-capable owner
+  // Lane 1: Standalone-capable owner — preferred target for mutations
   const owner = await discoverOwner(messageBus, 3_000);
   delegationClientLog(
-    `phase1 discover standaloneCapable=${isStandaloneCapable(owner) ? 'true' : 'false'} ownerReachable=${isOwnerReachable(owner) ? 'true' : 'false'} ownerId=${owner?.ownerId ?? '<none>'}`,
+    `discover standaloneCapable=${isStandaloneCapable(owner)} ownerReachable=${isOwnerReachable(owner)} ownerId=${owner?.ownerId ?? '<none>'}`,
   );
   if (isStandaloneCapable(owner)) {
     if (await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
-      delegationClientLog(`phase1 delegated successfully elapsedMs=${Date.now() - startedAt}`);
+      delegationClientLog(`delegated to standalone owner elapsedMs=${Date.now() - startedAt}`);
       return resolvedExitCode();
     }
-    delegationClientLog('phase1 owner found but delegation returned false');
   }
 
-  // Phase 2: Try any reachable owner (may be non-standalone)
+  // Lane 2: GUI owner — delegate without bootstrapping a standalone process
   if (isOwnerReachable(owner) && await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
-    delegationClientLog(`phase2 delegated to reachable owner ownerId=${owner.ownerId} elapsedMs=${Date.now() - startedAt}`);
+    delegationClientLog(`delegated to GUI owner ownerId=${owner.ownerId} elapsedMs=${Date.now() - startedAt}`);
     return resolvedExitCode();
   }
-  if (isOwnerReachable(owner)) {
-    delegationClientLog(`phase2 reachable owner did not accept delegation ownerId=${owner.ownerId}`);
-  } else {
-    delegationClientLog('phase2 skipped: no reachable owner');
-  }
 
-  // Phase 3: Refresh and retry against any reachable owner
-  if (isOwnerReachable(owner) && deps.refreshMessageBus) {
-    delegationClientLog('phase3 refreshing message bus');
-    messageBus = await deps.refreshMessageBus();
-    const refreshedOwner = await discoverOwner(messageBus, 1_000);
-    delegationClientLog(
-      `phase3 discover ownerReachable=${isOwnerReachable(refreshedOwner) ? 'true' : 'false'} standaloneCapable=${isStandaloneCapable(refreshedOwner) ? 'true' : 'false'} ownerId=${refreshedOwner?.ownerId ?? '<none>'}`,
-    );
-    if (isOwnerReachable(refreshedOwner) && await delegateMutation(args, messageBus, waitForApproval, noTrack)) {
-      delegationClientLog(`phase3 delegated successfully elapsedMs=${Date.now() - startedAt}`);
-      return resolvedExitCode();
-    }
-    delegationClientLog('phase3 delegation did not succeed');
-  }
-
-  // Phase 4: Bootstrap with retry loop (delegated to resolver pattern)
+  // Lane 3: No usable owner — bootstrap a standalone owner and delegate
   if (deps.refreshMessageBus) {
     messageBus = await deps.refreshMessageBus();
   }
   for (let attempt = 0; attempt < POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS; attempt += 1) {
-    delegationClientLog(`phase4 bootstrap attempt=${attempt + 1}/${POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS}`);
+    delegationClientLog(`bootstrap attempt=${attempt + 1}/${POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS}`);
     try {
       await deps.ensureStandaloneOwner(messageBus);
     } catch (err) {
-      if (!isSharedMutationOwnerTimeoutError(err)) {
-        throw err;
-      }
-      if (!deps.refreshMessageBus) {
-        throw err;
-      }
-      delegationClientLog(`phase4 bootstrap timeout; refreshing bus and retrying attempt=${attempt + 1}`);
+      if (!isSharedMutationOwnerTimeoutError(err)) throw err;
+      if (!deps.refreshMessageBus) throw err;
+      delegationClientLog(`bootstrap timeout; refreshing bus attempt=${attempt + 1}`);
       messageBus = await deps.refreshMessageBus();
       await deps.ensureStandaloneOwner(messageBus);
     }
@@ -373,47 +350,47 @@ async function resolveOwnerAndDelegate(
       messageBus = await deps.refreshMessageBus();
     }
     if (await delegateAfterBootstrap(args, deps, messageBus, waitForApproval, noTrack)) {
-      delegationClientLog(`phase4 delegated successfully attempt=${attempt + 1} elapsedMs=${Date.now() - startedAt}`);
+      delegationClientLog(`post-bootstrap delegation succeeded attempt=${attempt + 1} elapsedMs=${Date.now() - startedAt}`);
       return resolvedExitCode();
     }
-    if (!deps.refreshMessageBus) {
-      break;
-    }
+    if (!deps.refreshMessageBus) break;
     messageBus = await deps.refreshMessageBus();
   }
 
-  delegationClientLog(`resolveOwnerAndDelegate failed after elapsedMs=${Date.now() - startedAt}`);
-  return null; // Could not resolve
+  delegationClientLog(`resolveOwnerAndDelegate failed elapsedMs=${Date.now() - startedAt}`);
+  return null;
 }
 
 export async function runHeadlessClientCommand(
   argv: string[],
   deps: HeadlessClientDeps,
 ): Promise<number> {
-  // Validate config before any delegation path so malformed JSON fails fast
-  // even for commands that do not boot the full Electron owner process.
+  // Fail fast on malformed config before any IPC or process spawn.
   loadConfig();
 
   const { args, waitForApproval, noTrack } = parseArgs(argv);
   const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1';
   const internalOwnerServe = args[0] === 'owner-serve';
 
+  // Route 1: Read-only queries (queue, ui-perf) delegate to any live owner.
   if (!standaloneMode && !internalOwnerServe && await delegateReadOnlyQuery(args, deps.messageBus, deps.refreshMessageBus)) {
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
   }
 
+  // Route 2: Non-mutating commands and standalone mode run in-process.
   if (!isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {
     return deps.runElectronHeadless(argv);
   }
 
+  // Route 3: Mutating commands delegate to a shared owner (bootstrap if needed).
   const result = await resolveOwnerAndDelegate(args, deps, waitForApproval, noTrack);
   if (result !== null) {
     return result;
   }
 
   process.stderr.write(
-    `${RED}Error:${RESET} Mutation command "${args[0] ?? ''}" could not reach a standalone shared owner after bootstrap.\n`,
+    `${RED}Error:${RESET} Mutation command "${args[0] ?? ''}" could not reach a shared owner after bootstrap.\n`,
   );
   return 1;
 }
