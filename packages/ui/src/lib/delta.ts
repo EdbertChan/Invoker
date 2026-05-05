@@ -1,10 +1,11 @@
 /**
  * Applies a TaskDelta to an immutable task map, returning a new map.
  *
- * Three delta types:
- * - created: adds a new task
- * - updated: merges changes into an existing task (with nested config/execution)
- * - removed: deletes a task
+ * Four delta types:
+ * - created:  adds a new task
+ * - updated:  merges changes into an existing task (with nested config/execution)
+ * - removed:  deletes a task
+ * - replaced: authoritative full-task overwrite after quarantine recovery
  */
 
 import type { TaskState, TaskDelta } from '../types.js';
@@ -27,6 +28,7 @@ export function applyDelta(
         next.set(delta.taskId, {
           ...existing,
           ...topLevel,
+          revision: delta.revision,
           config: { ...existing.config, ...cfgChanges },
           execution: { ...existing.execution, ...execChanges },
         });
@@ -40,6 +42,12 @@ export function applyDelta(
 
     case 'removed':
       next.delete(delta.taskId);
+      break;
+
+    case 'replaced':
+      // Authoritative overwrite — unconditionally set the full task snapshot.
+      // Used after quarantine recovery to replace stale local state.
+      next.set(delta.task.id, delta.task);
       break;
   }
 

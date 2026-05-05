@@ -98,6 +98,17 @@ export function applyDelta(
     return { action: 'removed' };
   }
 
+  if (delta.type === 'replaced') {
+    // `replaced` deltas are emitted to the renderer after quarantine resolution.
+    // The main-process cache never consumes them — seed directly and clear quarantine.
+    cache.set(delta.task.id, {
+      snapshot: JSON.stringify(delta.task),
+      revision: delta.task.revision,
+    });
+    quarantined.delete(delta.task.id);
+    return { action: 'applied' };
+  }
+
   // Exhaustiveness guard.
   return { action: 'skipped', reason: 'no_source' };
 }

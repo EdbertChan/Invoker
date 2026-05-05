@@ -2508,7 +2508,7 @@ if (isHeadless) {
         // Trigger authoritative reload from persistence.
         const recovered = resolveQuarantine(result.taskId, lastKnownTaskStates, quarantinedTaskIds, persistence);
         if (recovered) {
-          sendTaskDeltaToRenderer({ type: 'created', task: recovered });
+          sendTaskDeltaToRenderer({ type: 'replaced', task: recovered });
         }
       }
     });
