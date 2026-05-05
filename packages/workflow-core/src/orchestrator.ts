@@ -21,7 +21,7 @@ import type { ParsedResponse } from './response-handler.js';
 import { TaskScheduler } from './scheduler.js';
 import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, ExternalDependency, TaskStatus } from '@invoker/workflow-graph';
 import type { ExecutorType } from '@invoker/workflow-graph';
-import { createTaskState, createAttempt } from '@invoker/workflow-graph';
+import { createTaskState, createAttempt, createdDelta, updatedDelta, removedDelta } from '@invoker/workflow-graph';
 import type { Logger, WorkResponse } from '@invoker/contracts';
 import { normalizeExecutorType } from '@invoker/workflow-graph';
 
@@ -528,6 +528,7 @@ export function taskRepositoryFromPersistence(p: OrchestratorPersistence): TaskR
     updateWorkflow: (id, c) => p.updateWorkflow?.(id, c),
     deleteWorkflow: (id) => p.deleteWorkflow?.(id),
     deleteAllWorkflows: () => p.deleteAllWorkflows?.(),
+    getTask: (_id) => undefined,
     saveTask: (wfId, t) => p.saveTask(wfId, t),
     updateTask: (id, c) => p.updateTask(id, c),
     logEvent: (id, et, pl) => p.logEvent?.(id, et, pl),
@@ -690,6 +691,7 @@ export class Orchestrator {
       // value preserves the correct executorType discriminant from existing.config.
       config: { ...existing.config, ...changes.config } as TaskConfig,
       execution: { ...existing.execution, ...changes.execution },
+      revision: existing.revision + 1,
     };
     if (process.env.NODE_ENV !== 'test' && TRACE_PERSIST_SYNC) {
       const ex = updated.execution;
@@ -821,15 +823,11 @@ export class Orchestrator {
         }
 
         const changesWithGeneration = this.withBumpedExecutionGeneration(current, resetChanges);
-        this.writeAndSync(id, changesWithGeneration, { skipWorkflowStatusSync: true });
+        const taskAfter = this.writeAndSync(id, changesWithGeneration, { skipWorkflowStatusSync: true });
         const priorAttemptId = current.execution.selectedAttemptId;
         this.replaceSelectedAttempt(current, {}, { skipWorkflowStatusSync: true });
         this.persistence.logEvent?.(id, 'task.pending', changesWithGeneration);
-        pendingTaskDeltas.push({
-          type: 'updated',
-          taskId: id,
-          changes: changesWithGeneration,
-        });
+        pendingTaskDeltas.push(updatedDelta(id, changesWithGeneration, taskAfter.revision, taskAfter.revision - 1));
 
         this.clearQueuedSchedulerEntries(id, priorAttemptId);
       }
@@ -920,13 +918,9 @@ export class Orchestrator {
         status: 'failed',
         execution: { error, completedAt },
       };
-      this.writeAndSync(t.id, changes);
+      const taskAfterCancel = this.writeAndSync(t.id, changes);
       this.persistence.logEvent?.(t.id, 'task.cancelled', changes);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, {
-        type: 'updated',
-        taskId: t.id,
-        changes,
-      });
+      this.messageBus.publish(TASK_DELTA_CHANNEL, updatedDelta(t.id, changes, taskAfterCancel.revision, taskAfterCancel.revision - 1));
       this.deferredTaskIds.delete(t.id);
       this.clearQueuedSchedulerEntries(t.id, t.execution.selectedAttemptId);
       cancelled.push(t.id);
@@ -1273,11 +1267,11 @@ export class Orchestrator {
     const deltas: TaskDelta[] = [];
     for (const task of validatedTasks) {
       this.createAndSync(task);
-      deltas.push({ type: 'created', task });
+      deltas.push(createdDelta(task));
     }
 
     this.createAndSync(mergeTask);
-    deltas.push({ type: 'created', task: mergeTask });
+    deltas.push(createdDelta(mergeTask));
 
     for (const delta of deltas) {
       this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
@@ -1441,11 +1435,11 @@ export class Orchestrator {
     const id = task.id;
 
     const changes: TaskStateChanges = { status: 'running', execution: { inputPrompt: undefined } };
-    this.writeAndSync(id, changes);
+    const taskAfter = this.writeAndSync(id, changes);
     if (task.execution.selectedAttemptId) {
       this.taskRepository.updateAttempt(task.execution.selectedAttemptId, { status: 'running' });
     }
-    const delta: TaskDelta = { type: 'updated', taskId: id, changes };
+    const delta = updatedDelta(id, changes, taskAfter.revision, taskAfter.revision - 1);
     this.persistence.logEvent?.(id, 'task.running', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
   }
@@ -1500,7 +1494,7 @@ export class Orchestrator {
         },
       );
     }
-    this.writeAndSync(id, changes);
+    const taskAfter = this.writeAndSync(id, changes);
     this.updateSelectedAttempt(id, {
       status: 'needs_input',
       completedAt: changes.execution?.completedAt,
@@ -1510,7 +1504,7 @@ export class Orchestrator {
       ...(changes.execution?.workspacePath !== undefined ? { workspacePath: changes.execution.workspacePath } : {}),
       ...(keepAgentSessionId !== undefined ? { agentSessionId: keepAgentSessionId } : {}),
     });
-    const delta: TaskDelta = { type: 'updated', taskId: id, changes };
+    const delta = updatedDelta(id, changes, taskAfter.revision, taskAfter.revision - 1);
     this.persistence.logEvent?.(id, eventName, changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
   }
@@ -1569,13 +1563,13 @@ export class Orchestrator {
       taskId: tid,
       execution: changes.execution,
     });
-    this.writeAndSync(tid, changes);
+    const taskAfterFix = this.writeAndSync(tid, changes);
     this.updateSelectedAttempt(tid, {
       status: 'needs_input',
       error: originalError,
       agentSessionId: task.execution.agentSessionId,
     });
-    const delta: TaskDelta = { type: 'updated', taskId: tid, changes };
+    const delta = updatedDelta(tid, changes, taskAfterFix.revision, taskAfterFix.revision - 1);
     this.persistence.logEvent?.(tid, 'task.awaiting_approval', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
   }
@@ -1621,12 +1615,12 @@ export class Orchestrator {
       status: 'completed',
       execution: { completedAt: new Date() },
     };
-    this.writeAndSync(taskId, changes);
+    const taskAfterApprove = this.writeAndSync(taskId, changes);
     this.updateSelectedAttempt(taskId, {
       status: 'completed',
       completedAt: changes.execution?.completedAt,
     });
-    const delta: TaskDelta = { type: 'updated', taskId, changes };
+    const delta = updatedDelta(taskId, changes, taskAfterApprove.revision, taskAfterApprove.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.completed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     mergeTrace('APPROVE_DONE', { taskId });
@@ -1670,13 +1664,13 @@ export class Orchestrator {
       status: 'running',
       execution: { pendingFixError: undefined, startedAt: now, lastHeartbeatAt: now },
     };
-    this.writeAndSync(taskId, changes);
+    const taskAfterResume = this.writeAndSync(taskId, changes);
     this.updateSelectedAttempt(taskId, {
       status: 'running',
       startedAt: now,
       lastHeartbeatAt: now,
     });
-    const delta: TaskDelta = { type: 'updated', taskId, changes };
+    const delta = updatedDelta(taskId, changes, taskAfterResume.revision, taskAfterResume.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.running', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     return [this.stateGetTask(taskId)!];
@@ -1694,13 +1688,13 @@ export class Orchestrator {
       status: 'failed',
       execution: { error: reason ?? 'Rejected', completedAt: new Date() },
     };
-    this.writeAndSync(taskId, changes);
+    const taskAfterReject = this.writeAndSync(taskId, changes);
     this.updateSelectedAttempt(taskId, {
       status: 'failed',
       error: reason ?? 'Rejected',
       completedAt: changes.execution?.completedAt,
     });
-    const delta: TaskDelta = { type: 'updated', taskId, changes };
+    const delta = updatedDelta(taskId, changes, taskAfterReject.revision, taskAfterReject.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.failed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
@@ -1821,14 +1815,14 @@ export class Orchestrator {
         commit: winner?.execution.commit,
       },
     };
-    this.writeAndSync(reconId, changes);
+    const taskAfterSelect = this.writeAndSync(reconId, changes);
     this.updateSelectedAttempt(reconId, {
       status: 'completed',
       completedAt: changes.execution?.completedAt,
       branch: winner?.execution.branch,
       commit: winner?.execution.commit,
     });
-    const delta: TaskDelta = { type: 'updated', taskId: reconId, changes };
+    const delta = updatedDelta(reconId, changes, taskAfterSelect.revision, taskAfterSelect.revision - 1);
     this.persistence.logEvent?.(reconId, 'task.completed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
@@ -1904,14 +1898,14 @@ export class Orchestrator {
         commit: combinedCommit,
       },
     };
-    this.writeAndSync(reconId, changes);
+    const taskAfterSelects = this.writeAndSync(reconId, changes);
     this.updateSelectedAttempt(reconId, {
       status: 'completed',
       completedAt: changes.execution?.completedAt,
       branch: combinedBranch,
       commit: combinedCommit,
     });
-    const delta: TaskDelta = { type: 'updated', taskId: reconId, changes };
+    const delta = updatedDelta(reconId, changes, taskAfterSelects.revision, taskAfterSelects.revision - 1);
     this.persistence.logEvent?.(reconId, 'task.completed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
@@ -2036,8 +2030,8 @@ export class Orchestrator {
             status: 'blocked',
             execution: { blockedBy: blocker },
           };
-          this.writeAndSync(id, blockedChanges);
-          const blockedDelta: TaskDelta = { type: 'updated', taskId: id, changes: blockedChanges };
+          const taskAfterBlocked = this.writeAndSync(id, blockedChanges);
+          const blockedDelta = updatedDelta(id, blockedChanges, taskAfterBlocked.revision, taskAfterBlocked.revision - 1);
           this.persistence.logEvent?.(id, 'task.blocked', blockedChanges);
           this.messageBus.publish(TASK_DELTA_CHANNEL, blockedDelta);
           return [this.stateGetTask(id)!];
@@ -2195,11 +2189,11 @@ export class Orchestrator {
       const current = this.stateGetTask(id);
       if (!current) continue;
       const changesWithGeneration = this.withBumpedExecutionGeneration(current, resetChanges);
-      this.writeAndSync(id, changesWithGeneration);
+      const taskAfterReset = this.writeAndSync(id, changesWithGeneration);
       const priorAttemptId = current.execution.selectedAttemptId;
       this.replaceSelectedAttempt(current);
       this.persistence.logEvent?.(id, 'task.pending', changesWithGeneration);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'updated', taskId: id, changes: changesWithGeneration });
+      this.messageBus.publish(TASK_DELTA_CHANNEL, updatedDelta(id, changesWithGeneration, taskAfterReset.revision, taskAfterReset.revision - 1));
 
       this.deferredTaskIds.delete(id);
       this.clearQueuedSchedulerEntries(id, priorAttemptId);
@@ -2294,7 +2288,7 @@ export class Orchestrator {
         agentSessionId: after.execution.agentSessionId ?? 'null',
         containerId: after.execution.containerId ?? 'null',
       });
-      const delta: TaskDelta = { type: 'updated', taskId: task.id, changes: changesWithGeneration };
+      const delta = updatedDelta(task.id, changesWithGeneration, after.revision, after.revision - 1);
       this.persistence.logEvent?.(task.id, 'task.pending', changesWithGeneration);
       this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
       this.clearQueuedSchedulerEntries(task.id, priorAttemptId);
@@ -2442,7 +2436,7 @@ export class Orchestrator {
       },
     };
     const changesWithGeneration = this.withBumpedExecutionGeneration(task, changes);
-    this.writeAndSync(taskId, changesWithGeneration);
+    const taskAfterConflict = this.writeAndSync(taskId, changesWithGeneration);
     const attemptId = this.replaceSelectedAttempt(task);
     this.taskRepository.updateAttempt(attemptId, {
       status: 'running',
@@ -2457,7 +2451,7 @@ export class Orchestrator {
       error: undefined,
       exitCode: undefined,
     });
-    const delta: TaskDelta = { type: 'updated', taskId: id, changes: changesWithGeneration };
+    const delta = updatedDelta(id, changesWithGeneration, taskAfterConflict.revision, taskAfterConflict.revision - 1);
     this.persistence.logEvent?.(id, 'task.fixing_with_ai', changesWithGeneration);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
@@ -2492,14 +2486,14 @@ export class Orchestrator {
         completedAt,
       },
     };
-    this.writeAndSync(taskId, changes);
+    const taskAfterRevert = this.writeAndSync(taskId, changes);
     this.updateSelectedAttempt(taskId, {
       status: 'failed',
       error: displayError,
       mergeConflict,
       completedAt,
     });
-    const delta: TaskDelta = { type: 'updated', taskId: id, changes };
+    const delta = updatedDelta(id, changes, taskAfterRevert.revision, taskAfterRevert.revision - 1);
     this.persistence.logEvent?.(id, 'task.failed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
   }
@@ -2515,8 +2509,8 @@ export class Orchestrator {
     }
 
     const cmdChanges: TaskStateChanges = { config: { command: newCommand } };
-    this.writeAndSync(taskId, cmdChanges);
-    const cmdDelta: TaskDelta = { type: 'updated', taskId, changes: cmdChanges };
+    const taskAfterCmd = this.writeAndSync(taskId, cmdChanges);
+    const cmdDelta = updatedDelta(taskId, cmdChanges, taskAfterCmd.revision, taskAfterCmd.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.updated', cmdChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, cmdDelta);
 
@@ -2534,8 +2528,8 @@ export class Orchestrator {
     }
 
     const promptChanges: TaskStateChanges = { config: { prompt: newPrompt } };
-    this.writeAndSync(taskId, promptChanges);
-    const promptDelta: TaskDelta = { type: 'updated', taskId, changes: promptChanges };
+    const taskAfterPrompt = this.writeAndSync(taskId, promptChanges);
+    const promptDelta = updatedDelta(taskId, promptChanges, taskAfterPrompt.revision, taskAfterPrompt.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.updated', promptChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, promptDelta);
 
@@ -2582,8 +2576,8 @@ export class Orchestrator {
       configPatch.remoteTargetId = undefined;
     }
     const typeChanges: TaskStateChanges = { config: configPatch };
-    this.writeAndSync(taskId, typeChanges);
-    const typeDelta: TaskDelta = { type: 'updated', taskId, changes: typeChanges };
+    const taskAfterType = this.writeAndSync(taskId, typeChanges);
+    const typeDelta = updatedDelta(taskId, typeChanges, taskAfterType.revision, taskAfterType.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.updated', typeChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, typeDelta);
 
@@ -2601,8 +2595,8 @@ export class Orchestrator {
     }
 
     const agentChanges: TaskStateChanges = { config: { executionAgent: agentName } };
-    this.writeAndSync(taskId, agentChanges);
-    const agentDelta: TaskDelta = { type: 'updated', taskId, changes: agentChanges };
+    const taskAfterAgent = this.writeAndSync(taskId, agentChanges);
+    const agentDelta = updatedDelta(taskId, agentChanges, taskAfterAgent.revision, taskAfterAgent.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.updated', agentChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, agentDelta);
 
@@ -2876,12 +2870,8 @@ export class Orchestrator {
     if (hasPromptKey) configPatch.fixPrompt = patch.fixPrompt;
     if (hasContextKey) configPatch.fixContext = patch.fixContext;
     const fixContextChanges: TaskStateChanges = { config: configPatch };
-    this.writeAndSync(taskId, fixContextChanges);
-    const fixContextDelta: TaskDelta = {
-      type: 'updated',
-      taskId,
-      changes: fixContextChanges,
-    };
+    const taskAfterFixCtx = this.writeAndSync(taskId, fixContextChanges);
+    const fixContextDelta = updatedDelta(taskId, fixContextChanges, taskAfterFixCtx.revision, taskAfterFixCtx.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.updated', fixContextChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, fixContextDelta);
 
@@ -2979,8 +2969,8 @@ export class Orchestrator {
     const policyChanges: TaskStateChanges = {
       config: { externalDependencies: nextDeps },
     };
-    this.writeAndSync(taskId, policyChanges);
-    const policyDelta: TaskDelta = { type: 'updated', taskId, changes: policyChanges };
+    const taskAfterPolicy = this.writeAndSync(taskId, policyChanges);
+    const policyDelta = updatedDelta(taskId, policyChanges, taskAfterPolicy.revision, taskAfterPolicy.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.external_dependency_policy_updated', {
       updates,
       changed,
@@ -3072,7 +3062,7 @@ export class Orchestrator {
       };
       const newTask = createTaskState(newId, src.description, newDeps, newConfig);
       this.createAndSync(newTask);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newTask });
+      this.messageBus.publish(TASK_DELTA_CHANNEL, createdDelta(newTask));
       this.persistence.logEvent?.(newId, 'task.forked_from', { sourceTaskId: src.id });
       createdNew.push(newTask);
     }
@@ -3089,7 +3079,7 @@ export class Orchestrator {
       { workflowId: newWfId, isMergeNode: true, executorType: 'merge' },
     );
     this.createAndSync(newMerge);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newMerge });
+    this.messageBus.publish(TASK_DELTA_CHANNEL, createdDelta(newMerge));
 
     this.reconcileMergeLeaves(newWfId);
 
@@ -3181,22 +3171,18 @@ export class Orchestrator {
     );
     for (const id of descendantIds) {
       const staleChanges: TaskStateChanges = { status: 'stale' };
-      this.writeAndSync(id, staleChanges);
+      const taskAfterStale = this.writeAndSync(id, staleChanges);
       this.updateSelectedAttempt(id, { status: 'superseded' });
       this.persistence.logEvent?.(id, 'task.stale', staleChanges);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, {
-        type: 'updated', taskId: id, changes: staleChanges,
-      });
+      this.messageBus.publish(TASK_DELTA_CHANNEL, updatedDelta(id, staleChanges, taskAfterStale.revision, taskAfterStale.revision - 1));
       const current = this.stateGetTask(id);
       this.clearQueuedSchedulerEntries(id, current?.execution.selectedAttemptId);
     }
     const sourceChanges: TaskStateChanges = { status: 'stale' };
-    this.writeAndSync(sourceId, sourceChanges);
+    const taskAfterSourceStale = this.writeAndSync(sourceId, sourceChanges);
     this.updateSelectedAttempt(sourceId, { status: 'superseded' });
     this.persistence.logEvent?.(sourceId, 'task.stale', sourceChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, {
-      type: 'updated', taskId: sourceId, changes: sourceChanges,
-    });
+    this.messageBus.publish(TASK_DELTA_CHANNEL, updatedDelta(sourceId, sourceChanges, taskAfterSourceStale.revision, taskAfterSourceStale.revision - 1));
     this.clearQueuedSchedulerEntries(sourceId, this.stateGetTask(sourceId)?.execution.selectedAttemptId);
 
     // 2. Create replacement tasks
@@ -3236,7 +3222,7 @@ export class Orchestrator {
       }
       const newTask = createTaskState(scopedId, rt.description, deps, rtConfig);
       this.createAndSync(newTask);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newTask });
+      this.messageBus.publish(TASK_DELTA_CHANNEL, createdDelta(newTask));
     }
 
     // 3. Reconcile merge node deps from actual graph state
@@ -3402,7 +3388,7 @@ export class Orchestrator {
 
     // 6. Publish removal deltas — drives UI cache cleanup via messageBus subscriber
     for (const task of affectedTasks) {
-      const delta: TaskDelta = { type: 'removed', taskId: task.id };
+      const delta = removedDelta(task.id, task.revision);
       this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     }
   }
@@ -3427,7 +3413,7 @@ export class Orchestrator {
 
     // 5. Publish removal deltas
     for (const task of allTasks) {
-      const delta: TaskDelta = { type: 'removed', taskId: task.id };
+      const delta = removedDelta(task.id, task.revision);
       this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     }
   }
@@ -3581,13 +3567,13 @@ export class Orchestrator {
         status: 'failed',
         execution: { error: errorMsg, completedAt: new Date() },
       };
-      this.writeAndSync(id, changes);
+      const taskAfterTerminate = this.writeAndSync(id, changes);
       this.updateSelectedAttempt(id, {
         status: 'failed',
         error: errorMsg,
         completedAt: changes.execution?.completedAt,
       });
-      const delta: TaskDelta = { type: 'updated', taskId: id, changes };
+      const delta = updatedDelta(id, changes, taskAfterTerminate.revision, taskAfterTerminate.revision - 1);
       this.persistence.logEvent?.(id, 'task.cancelled', changes);
       this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
@@ -3644,14 +3630,14 @@ export class Orchestrator {
           completedAt: new Date(),
         },
       };
-      this.writeAndSync(id, changes);
+      const taskAfterWfCancel = this.writeAndSync(id, changes);
       this.updateSelectedAttempt(id, {
         status: 'failed',
         error: 'Cancelled by user (workflow)',
         completedAt: changes.execution?.completedAt,
       });
       this.persistence.logEvent?.(id, 'task.cancelled', changes);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'updated', taskId: id, changes });
+      this.messageBus.publish(TASK_DELTA_CHANNEL, updatedDelta(id, changes, taskAfterWfCancel.revision, taskAfterWfCancel.revision - 1));
       cancelled.push(id);
     }
 
@@ -3674,8 +3660,8 @@ export class Orchestrator {
       status: 'pending',
       execution: { startedAt: undefined, lastHeartbeatAt: undefined },
     };
-    this.writeAndSync(id, changes);
-    const delta: TaskDelta = { type: 'updated', taskId: id, changes };
+    const taskAfterDefer = this.writeAndSync(id, changes);
+    const delta = updatedDelta(id, changes, taskAfterDefer.revision, taskAfterDefer.revision - 1);
     this.persistence.logEvent?.(id, 'task.deferred', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
@@ -3782,8 +3768,8 @@ export class Orchestrator {
       config: { summary: parsed.summary },
       execution,
     };
-    this.writeAndSync(taskId, changes);
-    const delta: TaskDelta = { type: 'updated', taskId, changes };
+    const taskAfterCompleted = this.writeAndSync(taskId, changes);
+    const delta = updatedDelta(taskId, changes, taskAfterCompleted.revision, taskAfterCompleted.revision - 1);
     const eventName = needsApproval ? 'task.awaiting_approval' : 'task.completed';
     this.persistence.logEvent?.(taskId, eventName, changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
@@ -3876,10 +3862,11 @@ export class Orchestrator {
       ...existing,
       status: 'failed',
       execution: { ...existing.execution, ...changes.execution },
+      revision: existing.revision + 1,
     };
     this.stateMachine.restoreTask(updated);
 
-    const delta: TaskDelta = { type: 'updated', taskId, changes };
+    const delta = updatedDelta(taskId, changes, updated.revision, updated.revision - 1);
     this.persistence.logEvent?.(taskId, eventName, changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
@@ -3937,12 +3924,12 @@ export class Orchestrator {
       status: 'needs_input',
       execution: { inputPrompt: parsed.prompt },
     };
-    this.writeAndSync(taskId, changes);
+    const taskAfterNeedsInput = this.writeAndSync(taskId, changes);
     const currentAttemptId = this.stateGetTask(taskId)?.execution.selectedAttemptId;
     if (currentAttemptId) {
       this.taskRepository.updateAttempt(currentAttemptId, { status: 'needs_input' });
     }
-    const delta: TaskDelta = { type: 'updated', taskId, changes };
+    const delta = updatedDelta(taskId, changes, taskAfterNeedsInput.revision, taskAfterNeedsInput.revision - 1);
     this.persistence.logEvent?.(taskId, 'task.needs_input', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     return [];
@@ -4069,8 +4056,8 @@ export class Orchestrator {
         const reconChanges: TaskStateChanges = {
           execution: { experimentResults },
         };
-        this.writeAndSync(recon.id, reconChanges);
-        const delta: TaskDelta = { type: 'updated', taskId: recon.id, changes: reconChanges };
+        const taskAfterRecon = this.writeAndSync(recon.id, reconChanges);
+        const delta = updatedDelta(recon.id, reconChanges, taskAfterRecon.revision, taskAfterRecon.revision - 1);
         this.persistence.logEvent?.(recon.id, 'task.experiment_results_recorded', reconChanges);
         this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
       }
@@ -4248,9 +4235,9 @@ export class Orchestrator {
         status: 'blocked',
         execution: { blockedBy: blocker },
       };
-      this.writeAndSync(task.id, changes);
+      const taskAfterBlock = this.writeAndSync(task.id, changes);
       this.scheduler.removeJob(task.id);
-      const delta: TaskDelta = { type: 'updated', taskId: task.id, changes };
+      const delta = updatedDelta(task.id, changes, taskAfterBlock.revision, taskAfterBlock.revision - 1);
       this.persistence.logEvent?.(task.id, 'task.blocked', changes);
       this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     }
@@ -4311,11 +4298,7 @@ export class Orchestrator {
       };
       const updated = this.writeAndSync(job.taskId, changes);
       this.persistence.logEvent?.(job.taskId, 'task.running', changes);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, {
-        type: 'updated',
-        taskId: job.taskId,
-        changes,
-      });
+      this.messageBus.publish(TASK_DELTA_CHANNEL, updatedDelta(job.taskId, changes, updated.revision, updated.revision - 1));
       started.push(updated);
       this.logger.info('[orchestrator] drainScheduler: started', {
         taskId: job.taskId,
@@ -4440,13 +4423,9 @@ export class Orchestrator {
           }
         : { execution: baseExecution };
 
-      this.writeAndSync(taskId, changes);
+      const taskAfterLaunch = this.writeAndSync(taskId, changes);
       this.persistence.logEvent?.(taskId, 'task.running', changes);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, {
-        type: 'updated',
-        taskId,
-        changes,
-      });
+      this.messageBus.publish(TASK_DELTA_CHANNEL, updatedDelta(taskId, changes, taskAfterLaunch.revision, taskAfterLaunch.revision - 1));
       this.logger.info('[orchestrator] markTaskRunningAfterLaunch: executing', {
         taskId,
         attemptId,
