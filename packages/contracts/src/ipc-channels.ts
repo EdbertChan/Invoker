@@ -326,6 +326,10 @@ export const IpcChannels = {
     request: [workflowId: string];
     response: void;
   },
+  'invoker:recreate-with-rebase': {} as {
+    request: [workflowId: string];
+    response: RebaseAndRetryResult;
+  },
   'invoker:rebase-and-retry': {} as {
     request: [mergeTaskId: string];
     response: RebaseAndRetryResult;
