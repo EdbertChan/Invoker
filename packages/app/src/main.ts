@@ -1585,7 +1585,7 @@ if (isHeadless) {
     return taskExecutor;
   }
 
-  async function executeHeadlessRun(payload: HeadlessRunMutationPayload): Promise<unknown> {
+  async function executeHeadlessRun(payload: HeadlessRunMutationPayload): Promise<{ workflowId: string; tasks: TaskState[] }> {
     const { parsePlanFile } = await import('./plan-parser.js');
     const plan = await parsePlanFile(payload.planPath);
     taskHandles.clear();
@@ -1599,7 +1599,7 @@ if (isHeadless) {
     return { workflowId, tasks };
   }
 
-  async function executeHeadlessResume(payload: HeadlessResumeMutationPayload): Promise<unknown> {
+  async function executeHeadlessResume(payload: HeadlessResumeMutationPayload): Promise<{ workflowId: string; tasks: TaskState[] }> {
     const { workflowId } = payload;
     orchestrator.syncFromDb(workflowId);
 

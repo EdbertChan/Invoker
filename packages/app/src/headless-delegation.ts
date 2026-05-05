@@ -122,7 +122,11 @@ export async function tryPingHeadlessOwner(
     const response = await Promise.race([
       messageBus.request('headless.owner-ping', {}),
       timeoutPromise,
-    ]) as { ownerId?: string; mode?: string };
+    ]) as { ownerId?: string; mode?: string } | null;
+    if (!response || typeof response !== 'object') {
+      delegationLog(`${traceId} response elapsedMs=${Date.now() - startedAt} ownerId=<missing> mode=<missing>`);
+      return null;
+    }
     delegationLog(
       `${traceId} response elapsedMs=${Date.now() - startedAt} ownerId=${response.ownerId ?? '<missing>'} mode=${response.mode ?? '<missing>'}`,
     );
