@@ -564,6 +564,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       'ALTER TABLE attempts ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0',
       'ALTER TABLE attempts ADD COLUMN claimed_at TEXT',
       'ALTER TABLE attempts ADD COLUMN lease_expires_at TEXT',
+      'ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 1',
     ];
     for (const sql of migrations) {
       try {
@@ -735,7 +736,8 @@ export class SQLiteAdapter implements PersistenceAdapter {
         remote_target_id,
         docker_image,
         execution_agent,
-        agent_name
+        agent_name,
+        revision
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -751,6 +753,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
         ?, ?, ?, ?,
         ?, ?,
         ?, ?, ?, ?,
+        ?,
         ?,
         ?,
         ?,
@@ -810,6 +813,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       cfg.dockerImage ?? null,
       cfg.executionAgent ?? null,
       exec.agentName ?? null,
+      task.revision ?? 1,
     ]);
   }
 
@@ -972,11 +976,21 @@ export class SQLiteAdapter implements PersistenceAdapter {
     values.push(taskId);
     const heartbeatOnly =
       setClauses.length === 1 && setClauses[0].trimStart().startsWith('last_heartbeat_at =');
+    // Atomically increment revision on every meaningful update (not heartbeat-only).
+    if (!heartbeatOnly) {
+      setClauses.push('revision = revision + 1');
+    }
     if (!heartbeatOnly && process.env.NODE_ENV !== 'test' && process.env.INVOKER_TRACE_PERSIST_SQL === '1') {
       const cols = setClauses.map((c) => c.split(/\s*=\s*/)[0]!.trim()).join(', ');
       console.log(`[persist-sql] taskId=${taskId} columns=[${cols}]`);
     }
     this.execRun(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ?`, values);
+  }
+
+  loadTask(taskId: string): TaskState | undefined {
+    const row = this.queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    if (!row) return undefined;
+    return this.reconcileTaskFromSelectedAttempt(this.rowToTask(row));
   }
 
   loadTasks(workflowId: string): TaskState[] {
@@ -1670,6 +1684,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
         selectedAttemptId: row.selected_attempt_id ?? undefined,
         autoFixAttempts: row.auto_fix_attempts ?? undefined,
       },
+      revision: row.revision ?? 1,
     };
   }
 

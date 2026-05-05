@@ -35,6 +35,7 @@ describe('SQLiteAdapter', () => {
       createdAt: new Date(),
       config: {},
       execution: {},
+      revision: 1,
       ...overrides,
     };
   }
@@ -77,6 +78,69 @@ describe('SQLiteAdapter', () => {
 
       loaded = adapter.loadTasks('wf-1');
       expect(loaded[0].execution.generation).toBe(5);
+    });
+  });
+
+  describe('task revision', () => {
+    it('saves new tasks with revision 1 by default', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      const [loaded] = adapter.loadTasks('wf-1');
+      expect(loaded.revision).toBe(1);
+    });
+
+    it('round-trips an explicit revision value on save', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1', { revision: 5 }));
+
+      const [loaded] = adapter.loadTasks('wf-1');
+      expect(loaded.revision).toBe(5);
+    });
+
+    it('increments revision atomically on updateTask', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      adapter.updateTask('t1', { status: 'running' });
+
+      const [loaded] = adapter.loadTasks('wf-1');
+      expect(loaded.revision).toBe(2);
+    });
+
+    it('increments revision on each update', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      adapter.updateTask('t1', { status: 'running' });
+      adapter.updateTask('t1', { status: 'completed' });
+
+      const [loaded] = adapter.loadTasks('wf-1');
+      expect(loaded.revision).toBe(3);
+    });
+
+    it('does not increment revision on heartbeat-only updates', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      adapter.updateTask('t1', { execution: { lastHeartbeatAt: new Date() } });
+
+      const [loaded] = adapter.loadTasks('wf-1');
+      expect(loaded.revision).toBe(1);
+    });
+
+    it('loadTask returns revision for single-task reads', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+      adapter.updateTask('t1', { status: 'running' });
+
+      const loaded = adapter.loadTask('t1');
+      expect(loaded).toBeDefined();
+      expect(loaded!.revision).toBe(2);
+    });
+
+    it('loadTask returns undefined for missing tasks', () => {
+      expect(adapter.loadTask('nonexistent')).toBeUndefined();
     });
   });
 

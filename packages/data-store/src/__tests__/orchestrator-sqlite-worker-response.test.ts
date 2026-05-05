@@ -53,6 +53,7 @@ describe('Orchestrator + SQLite worker response persistence', () => {
       createdAt: new Date(),
       config: { workflowId: wf.id, command: 'true' },
       execution: {},
+      revision: 1,
     };
   }
 
@@ -227,6 +228,7 @@ describe('Protocol failure persistence (SQLite roundtrip)', () => {
       createdAt: new Date(),
       config: { workflowId: wf.id, command: 'true' },
       execution: {},
+      revision: 1,
     };
   }
 

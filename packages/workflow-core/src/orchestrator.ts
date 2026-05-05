@@ -158,6 +158,7 @@ export interface OrchestratorPersistence {
     mergeMode?: 'manual' | 'automatic' | 'external_review';
     generation?: number;
   }>;
+  loadTask?(taskId: string): TaskState | undefined;
   loadTasks(workflowId: string): TaskState[];
   // Attempt methods
   saveAttempt(attempt: Attempt): void;
@@ -528,6 +529,7 @@ export function taskRepositoryFromPersistence(p: OrchestratorPersistence): TaskR
     updateWorkflow: (id, c) => p.updateWorkflow?.(id, c),
     deleteWorkflow: (id) => p.deleteWorkflow?.(id),
     deleteAllWorkflows: () => p.deleteAllWorkflows?.(),
+    loadTask: (id) => p.loadTask ? p.loadTask(id) : undefined,
     saveTask: (wfId, t) => p.saveTask(wfId, t),
     updateTask: (id, c) => p.updateTask(id, c),
     logEvent: (id, et, pl) => p.logEvent?.(id, et, pl),

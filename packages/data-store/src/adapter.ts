@@ -75,6 +75,7 @@ export interface PersistenceAdapter {
   // Tasks
   saveTask(workflowId: string, task: TaskState): void;
   updateTask(taskId: string, changes: TaskStateChanges): void;
+  loadTask(taskId: string): TaskState | undefined;
   loadTasks(workflowId: string): TaskState[];
   getAllTaskIds(): string[];
   getAllTaskBranches(): string[];

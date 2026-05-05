@@ -86,6 +86,11 @@ export interface TaskRepository {
   /** Delete every workflow and task in the store. */
   deleteAllWorkflows(): void;
 
+  // ── Task reads ──
+
+  /** Load a single task by ID for authoritative recovery. */
+  loadTask(taskId: string): TaskState | undefined;
+
   // ── Task writes ──
 
   /** Insert a new task into a workflow. */
