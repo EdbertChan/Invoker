@@ -107,13 +107,13 @@ resolve_persisted_workflow_id() {
         | jq -r --arg n "$workflow_name" '[.[] | select(.name == $n)] | sort_by(.createdAt) | last | .id // empty'
     )"
     if [[ -n "$wf_id" ]]; then
-      log_chain "resolve_persisted_workflow_id name=\"$workflow_name\" found=\"$wf_id\" attempt=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))"
+      log_chain "resolve_persisted_workflow_id name=\"$workflow_name\" found=\"$wf_id\" attempt=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))" >&2
       printf '%s' "$wf_id"
       return 0
     fi
     sleep 0.2
   done
-  log_chain "resolve_persisted_workflow_id name=\"$workflow_name\" failed attempts=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))"
+  log_chain "resolve_persisted_workflow_id name=\"$workflow_name\" failed attempts=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))" >&2
   return 1
 }
 
@@ -132,13 +132,13 @@ resolve_workflow_feature_branch() {
         | head -1
     )"
     if [[ -n "$feature_branch" ]]; then
-      log_chain "resolve_workflow_feature_branch workflowId=\"$workflow_id\" feature=\"$feature_branch\" attempt=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))"
+      log_chain "resolve_workflow_feature_branch workflowId=\"$workflow_id\" feature=\"$feature_branch\" attempt=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))" >&2
       printf '%s' "$feature_branch"
       return 0
     fi
     sleep 0.2
   done
-  log_chain "resolve_workflow_feature_branch workflowId=\"$workflow_id\" failed attempts=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))"
+  log_chain "resolve_workflow_feature_branch workflowId=\"$workflow_id\" failed attempts=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))" >&2
   return 1
 }
 
