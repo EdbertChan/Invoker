@@ -310,9 +310,10 @@ export class RepoPool {
     }
 
     const allowReuse = opts?.forceFresh !== true;
+    const isPathActive = (p: string) => active.has(canonicalPathForComparison(p));
     const reuseCandidate = allowReuse ? findManagedWorktreeForBranch(porcelain, branch, managedPrefixes) : undefined;
     let exactBranchCandidate: { path: string; headMatchesTargetBranch: boolean } | undefined;
-    if (reuseCandidate && existsSync(reuseCandidate)) {
+    if (reuseCandidate && existsSync(reuseCandidate) && !isPathActive(reuseCandidate)) {
       try {
         const head = (await this.execGit(['rev-parse', '--abbrev-ref', 'HEAD'], reuseCandidate)).trim();
         exactBranchCandidate = {
@@ -329,7 +330,7 @@ export class RepoPool {
       | undefined;
     if (allowReuse && actionId) {
       const actionIdHit = findManagedWorktreeByActionId(porcelain, actionId, managedPrefixes);
-      if (actionIdHit && existsSync(actionIdHit.path)) {
+      if (actionIdHit && existsSync(actionIdHit.path) && !isPathActive(actionIdHit.path)) {
         let baseIsAncestorOfHead = true;
         if (base) {
           try {
@@ -358,7 +359,7 @@ export class RepoPool {
         parsedTargetBranch.contentHash,
         managedPrefixes,
       );
-      if (contentHit && existsSync(contentHit.path) && contentHit.branch !== branch) {
+      if (contentHit && existsSync(contentHit.path) && contentHit.branch !== branch && !isPathActive(contentHit.path)) {
         contentCandidate = { path: contentHit.path, branch: contentHit.branch };
       }
 
