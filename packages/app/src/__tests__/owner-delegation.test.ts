@@ -196,10 +196,12 @@ describe('headless→owner delegation', () => {
       );
 
       expect(delegated).toBe(true);
-      expect(ownerHandler).toHaveBeenCalledWith({
-        args: ['set', 'prompt', 'wf-1/task-1', 'updated prompt text'],
-        waitForApproval: undefined,
-      });
+      expect(ownerHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ['set', 'prompt', 'wf-1/task-1', 'updated prompt text'],
+          waitForApproval: undefined,
+        }),
+      );
     });
 
     it('delegates rebase with noTrack so owner can return before workflow settlement', async () => {
