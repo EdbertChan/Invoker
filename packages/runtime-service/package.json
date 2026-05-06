@@ -17,6 +17,13 @@
     "test:watch": "vitest",
     "clean": "rm -rf dist"
   },
+  "dependencies": {
+    "@invoker/workflow-core": "workspace:*",
+    "@invoker/execution-engine": "workspace:*",
+    "@invoker/data-store": "workspace:*",
+    "@invoker/contracts": "workspace:*",
+    "@invoker/transport": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^25.3.3",
     "tsup": "^8.0.0",

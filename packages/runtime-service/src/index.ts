@@ -1,1 +1,5 @@
-// @invoker/runtime-service - Runtime application services and use cases
+export {
+  composeRuntimeServices,
+  type ComposeOptions,
+  type RuntimeServices,
+} from './compose.js';
