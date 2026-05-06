@@ -1,0 +1,13 @@
+%% Vertical flow (TB) — narrow on GitHub / Obsidian, no horizontal scroll.
+
+flowchart TB
+  Y["YAML plan"] --> C["CommandService / shared actions"]
+  S["Desktop / Headless / Slack"] --> C
+  C --> O["Orchestrator"]
+  O --> DB[(Persisted state, single writer)]
+  DB --> G["Task graph / readiness"]
+  G --> Q["Scheduler"]
+  Q --> TR["TaskRunner"]
+  TR --> E["Executors: worktree / docker / ssh / merge"]
+  E --> A["Attempts, branches, commits, approvals"]
+  A --> DB
