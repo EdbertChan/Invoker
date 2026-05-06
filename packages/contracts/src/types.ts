@@ -52,6 +52,17 @@ export interface WorkRequestInputs {
   executionAgent?: string;
   /** When true, executors must not reuse existing task worktrees for this run. */
   freshWorkspace?: boolean;
+  /**
+   * Dormant: Tenant identity for future SaaS multi-tenant request scoping.
+   * Undefined in current single-tenant (desktop) mode.
+   * Feature state: dormant — no active codepath reads this field.
+   */
+  tenantId?: string;
+  /**
+   * Dormant: Workspace identity within a tenant for future SaaS scoping.
+   * Feature state: dormant — no active codepath reads this field.
+   */
+  workspaceId?: string;
 }
 
 export interface WorkRequest {
