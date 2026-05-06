@@ -478,6 +478,95 @@ describe('CommandService', () => {
     });
   });
 
+  // ── deleteWorkflow scoped serialization ─────────────────
+
+  describe('deleteWorkflow scoped serialization', () => {
+    it('serializes deleteWorkflow on the workflow-scoped mutex, not the global mutex', async () => {
+      const order: string[] = [];
+      let resolveDelete!: () => void;
+      const deleteGate = new Promise<void>(r => { resolveDelete = r; });
+
+      (orchestrator.deleteWorkflow as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        order.push('delete-start');
+        await deleteGate;
+        order.push('delete-end');
+      });
+      (orchestrator.cancelWorkflow as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        order.push('cancel-start');
+        order.push('cancel-end');
+        return { cancelled: [], runningCancelled: [] };
+      });
+
+      // Both target the same workflow → must serialize
+      const p1 = service.deleteWorkflow(makeEnvelope({ workflowId: 'wf-1' }, 'k1'));
+      const p2 = service.cancelWorkflow(makeEnvelope({ workflowId: 'wf-1' }, 'k2'));
+
+      resolveDelete();
+      await Promise.all([p1, p2]);
+
+      expect(order).toEqual(['delete-start', 'delete-end', 'cancel-start', 'cancel-end']);
+    });
+
+    it('deleteWorkflow on different workflows runs concurrently (not globally serialized)', async () => {
+      const order: string[] = [];
+      let resolveDelete1!: () => void;
+      let resolveDelete2!: () => void;
+      const deleteGate1 = new Promise<void>(r => { resolveDelete1 = r; });
+      const deleteGate2 = new Promise<void>(r => { resolveDelete2 = r; });
+
+      let callCount = 0;
+      (orchestrator.deleteWorkflow as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        const idx = ++callCount;
+        order.push(`delete-${idx}-start`);
+        await (idx === 1 ? deleteGate1 : deleteGate2);
+        order.push(`delete-${idx}-end`);
+      });
+
+      const p1 = service.deleteWorkflow(makeEnvelope({ workflowId: 'wf-1' }, 'k1'));
+      const p2 = service.deleteWorkflow(makeEnvelope({ workflowId: 'wf-2' }, 'k2'));
+
+      // Both should have started concurrently (different workflow mutexes)
+      await Promise.resolve();
+      expect(order).toEqual(['delete-1-start', 'delete-2-start']);
+
+      resolveDelete1();
+      resolveDelete2();
+      await Promise.all([p1, p2]);
+
+      expect(order).toEqual(['delete-1-start', 'delete-2-start', 'delete-1-end', 'delete-2-end']);
+    });
+
+    it('deleteWorkflow serializes against task-level operations on the same workflow', async () => {
+      const order: string[] = [];
+      let resolveDelete!: () => void;
+      const deleteGate = new Promise<void>(r => { resolveDelete = r; });
+
+      (orchestrator.getTask as ReturnType<typeof vi.fn>).mockReturnValue({
+        config: { workflowId: 'wf-1' },
+      });
+
+      (orchestrator.deleteWorkflow as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+        order.push('delete-start');
+        await deleteGate;
+        order.push('delete-end');
+      });
+      (orchestrator.retryTask as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        order.push('retry-start');
+        order.push('retry-end');
+        return [];
+      });
+
+      // deleteWorkflow targets wf-1; retryTask's task resolves to wf-1 via getTask
+      const p1 = service.deleteWorkflow(makeEnvelope({ workflowId: 'wf-1' }, 'k1'));
+      const p2 = service.retryTask(makeEnvelope({ taskId: 't-1' }, 'k2'));
+
+      resolveDelete();
+      await Promise.all([p1, p2]);
+
+      expect(order).toEqual(['delete-start', 'delete-end', 'retry-start', 'retry-end']);
+    });
+  });
+
   // ── Scoped serialization ─────────────────────────────────
 
   describe('scoped serialization', () => {
