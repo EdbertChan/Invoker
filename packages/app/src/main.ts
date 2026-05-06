@@ -1558,6 +1558,34 @@ if (isHeadless) {
     return cmdResult.data;
   }
 
+  /** Kill running workflow tasks and delete the workflow. Shared by GUI, headless, and API. */
+  async function performDeleteWorkflow(workflowId: string): Promise<void> {
+    logger.info(`performDeleteWorkflow begin workflow="${workflowId}"`, { module: 'kill' });
+    // Kill all running tasks belonging to the workflow (process management is outside orchestrator scope)
+    const allTasks = orchestrator.getAllTasks();
+    const workflowTasks = allTasks.filter(
+      (t) =>
+        t.config.workflowId === workflowId &&
+        (t.status === 'running' || t.status === 'fixing_with_ai'),
+    );
+    for (const task of workflowTasks) {
+      await killRunningTask(task.id);
+    }
+
+    // Serialized via CommandService: DB delete + memory clear + scheduler cleanup + removal deltas
+    const envelope = makeEnvelope('delete-workflow', 'ui', 'workflow', { workflowId });
+    const result = await commandService.deleteWorkflow(envelope);
+    if (!result.ok) throw new Error(result.error.message);
+
+    // Update workflow count and send workflows-changed
+    const workflows = persistence.listWorkflows();
+    lastKnownWorkflowCount = workflows.length;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('invoker:workflows-changed', workflows);
+    }
+    logger.info(`performDeleteWorkflow end workflow="${workflowId}"`, { module: 'kill' });
+  }
+
   async function preemptTaskSubgraph(taskId: string): Promise<void> {
     try {
       await performCancelTask(taskId);
@@ -1644,6 +1672,7 @@ if (isHeadless) {
       setTaskDispatcherExecutor: setDispatcherTaskExecutor,
       cancelTask: (taskId: string) => performCancelTask(taskId),
       cancelWorkflow: (workflowId: string) => performCancelWorkflow(workflowId),
+      deleteWorkflow: (workflowId: string) => performDeleteWorkflow(workflowId),
       waitForApproval: payload.waitForApproval,
       noTrack: payload.noTrack,
       preemptTaskSubgraph: (taskId: string) => preemptTaskSubgraph(taskId),
@@ -2247,6 +2276,7 @@ if (isHeadless) {
         killRunningTask,
         cancelTask: performCancelTask,
         cancelWorkflow: performCancelWorkflow,
+        deleteWorkflow: performDeleteWorkflow,
       });
       recordStartupMark('api-server.started');
 
@@ -2744,28 +2774,7 @@ if (isHeadless) {
         const workflowId = String(workflowIdArg);
         logger.info(`delete-workflow: "${workflowId}"`, { module: 'ipc' });
         try {
-          // Kill all running tasks belonging to the workflow (process management is outside orchestrator scope)
-          const allTasks = orchestrator.getAllTasks();
-          const workflowTasks = allTasks.filter(
-            (t) =>
-              t.config.workflowId === workflowId &&
-              (t.status === 'running' || t.status === 'fixing_with_ai'),
-          );
-          for (const task of workflowTasks) {
-            await killRunningTask(task.id);
-          }
-
-          // Serialized via CommandService: DB delete + memory clear + scheduler cleanup + removal deltas
-          const envelope = makeEnvelope('delete-workflow', 'ui', 'workflow', { workflowId });
-          const result = await commandService.deleteWorkflow(envelope);
-          if (!result.ok) throw new Error(result.error.message);
-
-          // Update workflow count and send workflows-changed
-          const workflows = persistence.listWorkflows();
-          lastKnownWorkflowCount = workflows.length;
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('invoker:workflows-changed', workflows);
-          }
+          await performDeleteWorkflow(workflowId);
         } catch (err) {
           logger.error(`delete-workflow failed: ${err}`, { module: 'ipc' });
           throw err;

@@ -1547,6 +1547,43 @@ describe('headless delegation enforcement', () => {
     });
   });
 
+  describe('delete-workflow shared bridge', () => {
+    beforeEach(() => {
+      (mockDeps.persistence as any).readOnly = false;
+    });
+
+    it('uses shared deleteWorkflow callback when available', async () => {
+      const deleteWorkflowSpy = vi.fn().mockResolvedValue(undefined);
+      mockDeps.deleteWorkflow = deleteWorkflowSpy;
+      mockDeps.commandService.deleteWorkflow = vi.fn();
+
+      await runHeadless(['delete-workflow', 'wf-1'], mockDeps);
+
+      expect(deleteWorkflowSpy).toHaveBeenCalledWith('wf-1');
+      expect(mockDeps.commandService.deleteWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('uses shared deleteWorkflow callback for the delete alias', async () => {
+      const deleteWorkflowSpy = vi.fn().mockResolvedValue(undefined);
+      mockDeps.deleteWorkflow = deleteWorkflowSpy;
+      mockDeps.commandService.deleteWorkflow = vi.fn();
+
+      await runHeadless(['delete', 'wf-1'], mockDeps);
+
+      expect(deleteWorkflowSpy).toHaveBeenCalledWith('wf-1');
+      expect(mockDeps.commandService.deleteWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('falls back to commandService.deleteWorkflow when callback is absent', async () => {
+      mockDeps.deleteWorkflow = undefined;
+      mockDeps.commandService.deleteWorkflow = vi.fn().mockResolvedValue({ ok: true });
+
+      await runHeadless(['delete-workflow', 'wf-1'], mockDeps);
+
+      expect(mockDeps.commandService.deleteWorkflow).toHaveBeenCalled();
+    });
+  });
+
   describe('delete-all winner task races', () => {
     beforeEach(() => {
       (mockDeps.persistence as any).readOnly = false;
