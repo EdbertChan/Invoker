@@ -18,9 +18,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
+# shellcheck source=lib/bulk-headless.sh
+source "$REPO_ROOT/scripts/lib/bulk-headless.sh"
 
 DRY_RUN=false
 STATUS_FILTER=""
@@ -74,30 +73,6 @@ if [[ -n "$PARALLELISM" ]] && ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid --parallel value: $PARALLELISM (expected integer >= 1)" >&2
   exit 1
 fi
-
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  # shellcheck disable=SC2086
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-headless_query() {
-  # shellcheck disable=SC2086
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-headless_mutation() {
-  node "$IPC_HELPER" exec -- "$@"
-}
-
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
 
 QUERY_ARGS=(query workflows --output label)
 if [[ -n "$STATUS_FILTER" ]]; then
@@ -192,9 +167,13 @@ if $DRY_RUN; then
   exit 0
 fi
 
+# ── Execution ────────────────────────────────────────────────────────────────
+
+LOG_DIR="$(mktemp -d -t recreate-failed-tasks-logs.XXXXXX)"
+
 launch_one_workflow() {
   local wf_id="$1"
-  local log_file="$2"
+  local log_file="$LOG_DIR/${wf_id}.log"
   local failed=0
   local task_id=""
   local cmd_out=""
@@ -231,64 +210,33 @@ launch_one_workflow() {
   return 1
 }
 
-FAILED=0
-SUCCEEDED=0
-IDX=0
+process_one_recreate_task() {
+  local wf_id="$1"
+  local result_file="$2"
+
+  if launch_one_workflow "$wf_id"; then
+    printf "%s\tSUCCEEDED\n" "$wf_id" >> "$result_file"
+  else
+    printf "%s\tFAILED\n" "$wf_id" >> "$result_file"
+  fi
+  cat "$LOG_DIR/${wf_id}.log"
+}
+
+RESULTS_FILE="$(mktemp -t recreate-failed-tasks-results.XXXXXX)"
 
 if $FOLLOW; then
-  RESULTS_FILE="$(mktemp -t recreate-failed-tasks-results.XXXXXX)"
-  LOG_DIR="$(mktemp -d -t recreate-failed-tasks-logs.XXXXXX)"
-  PIDS=()
-
-  while IFS= read -r WF_ID; do
-    [[ -z "$WF_ID" ]] && continue
-    IDX=$((IDX + 1))
-    echo "[queue $IDX/$WORKFLOW_COUNT] $WF_ID"
-    log_file="$LOG_DIR/${WF_ID}.log"
-    (
-      if launch_one_workflow "$WF_ID" "$log_file"; then
-        printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULTS_FILE"
-      else
-        printf "%s\tFAILED\n" "$WF_ID" >> "$RESULTS_FILE"
-      fi
-      cat "$log_file"
-    ) &
-    PIDS+=("$!")
-
-    while [[ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]]; do
-      sleep 0.2
-    done
-  done <<< "$WORKFLOW_IDS"
-
-  for pid in "${PIDS[@]}"; do
-    wait "$pid" || true
-  done
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
+  bulk_follow_parallel "$WORKFLOW_IDS" "$PARALLELISM" "$RESULTS_FILE" process_one_recreate_task
 else
-  LOG_DIR="$(mktemp -d -t recreate-failed-tasks-logs.XXXXXX)"
-  DISPATCHED=0
-  RESULTS_FILE="$(mktemp -t recreate-failed-tasks-results.XXXXXX)"
+  IDX=0
   PIDS=()
-
   while IFS= read -r WF_ID; do
     [[ -z "$WF_ID" ]] && continue
     IDX=$((IDX + 1))
-    log_file="$LOG_DIR/${WF_ID}.log"
     (
-      if launch_one_workflow "$WF_ID" "$log_file"; then
-        printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULTS_FILE"
-      else
-        printf "%s\tFAILED\n" "$WF_ID" >> "$RESULTS_FILE"
-      fi
+      process_one_recreate_task "$WF_ID" "$RESULTS_FILE"
     ) &
     PIDS+=("$!")
-    echo "[dispatch $IDX/$WORKFLOW_COUNT] $WF_ID log=$log_file"
+    echo "[dispatch $IDX/$WORKFLOW_COUNT] $WF_ID log=$LOG_DIR/${WF_ID}.log"
 
     while [[ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]]; do
       sleep 0.2
@@ -298,30 +246,21 @@ else
   for pid in "${PIDS[@]}"; do
     wait "$pid" || true
   done
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED)
-        DISPATCHED=$((DISPATCHED + 1))
-        ;;
-      FAILED)
-        FAILED=$((FAILED + 1))
-        ;;
-    esac
-  done < "$RESULTS_FILE"
 fi
+
+eval "$(bulk_tally_results "$RESULTS_FILE")"
 
 echo "---"
 if $FOLLOW; then
-  echo "Done. $SUCCEEDED succeeded, $FAILED failed out of $WORKFLOW_COUNT."
+  echo "Done. $TALLY_SUCCEEDED succeeded, $TALLY_FAILED failed out of $WORKFLOW_COUNT."
   echo "Logs: $LOG_DIR"
-  if [[ "$FAILED" -ne 0 ]]; then
+  if [[ "$TALLY_FAILED" -ne 0 ]]; then
     exit 1
   fi
 else
-  echo "Submitted $DISPATCHED workflow(s) with bounded concurrency. Logs: $LOG_DIR"
-  if [[ "$FAILED" -ne 0 ]]; then
-    echo "$FAILED workflow(s) failed to submit."
+  echo "Submitted $TALLY_SUCCEEDED workflow(s) with bounded concurrency. Logs: $LOG_DIR"
+  if [[ "$TALLY_FAILED" -ne 0 ]]; then
+    echo "$TALLY_FAILED workflow(s) failed to submit."
     exit 1
   fi
 fi
