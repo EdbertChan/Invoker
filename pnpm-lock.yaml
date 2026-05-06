@@ -361,6 +361,9 @@ importers:
       '@invoker/runtime-service':
         specifier: workspace:*
         version: link:../runtime-service
+      '@invoker/workflow-core':
+        specifier: workspace:*
+        version: link:../workflow-core
     devDependencies:
       '@types/node':
         specifier: ^25.3.3
