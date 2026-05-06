@@ -198,6 +198,8 @@ describe('headless→owner delegation', () => {
       expect(delegated).toBe(true);
       expect(ownerHandler).toHaveBeenCalledWith({
         args: ['set', 'prompt', 'wf-1/task-1', 'updated prompt text'],
+        noTrack: undefined,
+        traceId: expect.any(String),
         waitForApproval: undefined,
       });
     });
