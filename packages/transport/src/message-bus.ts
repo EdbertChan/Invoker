@@ -45,3 +45,27 @@ export const Channels = {
   EXPERIMENT_SPAWNED: 'experiment.spawned',
   EXPERIMENT_SELECTED: 'experiment.selected',
 } as const;
+
+/**
+ * Dormant channel names for BYO runner protocol communication.
+ *
+ * These channels define the message bus topics that a future
+ * runner-gateway would use to coordinate external runners.
+ * No active codepath subscribes to or publishes on these channels.
+ *
+ * Feature state: dormant
+ * Activation: requires a runner-gateway service that bridges
+ * external runner connections into the MessageBus.
+ */
+export const RunnerChannels = {
+  /** Runner registration request/response (request/reply pattern). */
+  RUNNER_REGISTER: 'runner.register',
+  /** Periodic heartbeat from connected runners. */
+  RUNNER_HEARTBEAT: 'runner.heartbeat',
+  /** Runner status change events (connected, disconnected, draining). */
+  RUNNER_STATUS: 'runner.status',
+  /** Task claim notifications — emitted when a runner claims a work request. */
+  RUNNER_TASK_CLAIMED: 'runner.task.claimed',
+  /** Task release — emitted when a runner releases a claimed task. */
+  RUNNER_TASK_RELEASED: 'runner.task.released',
+} as const;
