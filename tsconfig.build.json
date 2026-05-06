@@ -14,6 +14,7 @@
     { "path": "packages/workflow-core" },
     { "path": "packages/workflow-graph" },
     { "path": "packages/surfaces" },
+    { "path": "packages/svc-api" },
     { "path": "packages/app" }
   ]
 }

@@ -1,1 +1,7 @@
-// @invoker/runtime-service - Runtime application services and use cases
+export {
+  composeRuntimeServices,
+  createApiBridge,
+  type ComposeOptions,
+  type RuntimeServices,
+  type RuntimeBridgeConfig,
+} from './compose.js';

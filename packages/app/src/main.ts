@@ -65,13 +65,14 @@ import { IpcBus, Channels } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
 import {
   ExecutorRegistry, TaskRunner,
-  DockerExecutor, WorktreeExecutor, SshExecutor, GitHubMergeGateProvider, ReviewProviderRegistry,
+  GitHubMergeGateProvider, ReviewProviderRegistry,
   initializeShellEnvironment,
   RESTART_TO_BRANCH_TRACE,
   remoteFetchForPool,
   registerBuiltinAgents,
   type Executor, type ExecutorHandle,
 } from '@invoker/execution-engine';
+import { composeRuntimeServices } from '@invoker/runtime-service';
 import type { Logger } from '@invoker/contracts';
 import { FileAndDbLogger } from './logger.js';
 import type { TaskOutputData } from './types.js';
@@ -343,7 +344,6 @@ function installPackagedSkills(mode: import('@invoker/contracts').BundledSkillsI
 }
 
 async function initServices(options?: InitServicesOptions): Promise<void> {
-  messageBus = new IpcBus();
   const invokerHomeRoot = resolveInvokerHomeRoot();
   mkdirSync(invokerHomeRoot, { recursive: true });
   const readOnly = options?.readOnly === true;
@@ -352,10 +352,30 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
   if (!readOnly) {
     writerLock = acquireDbWriterLock(dbPath, `main:initServices pid=${process.pid}`);
   }
-  persistence = await SQLiteAdapter.create(dbPath, {
+
+  // Compose core services via @invoker/runtime-service
+  const services = await composeRuntimeServices({
+    dbPath,
     readOnly,
-    ownerCapability: !readOnly, // writable mode requires owner capability
+    worktreeBaseDir: path.resolve(invokerHomeRoot, 'worktrees'),
+    repoCacheDir: path.resolve(invokerHomeRoot, 'repos'),
+    maxWorktrees: DEFAULT_WORKTREE_MAX_CONCURRENCY,
+    maxConcurrency: effectiveMaxConcurrency,
+    defaultAutoFixRetries: invokerConfig.autoFixRetries,
+    executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
+    deferRunningUntilLaunch: true,
+    taskDispatcher: dispatchStartedTasks,
+    agentRegistry: options?.executionAgentRegistry,
+    startupSyncMode: 'none', // sync handled below with custom error handling
   });
+
+  // Assign composed services to module-level state
+  messageBus = services.messageBus;
+  persistence = services.persistence;
+  executorRegistry = services.executorRegistry;
+  orchestrator = services.orchestrator;
+  commandService = services.commandService;
+
   // Upgrade root logger with DB persistence now that SQLiteAdapter is ready.
   logger = new FileAndDbLogger({ module: 'main' }, { persistence });
   const shellEnv = await initializeShellEnvironment();
@@ -388,27 +408,6 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
       logger.info(`hourly snapshots enabled (interval=${hourlyMs}ms)`, { module: 'backup' });
     }
   }
-  executorRegistry = new ExecutorRegistry();
-  executorRegistry.register(
-    'worktree',
-    new WorktreeExecutor({
-      worktreeBaseDir: path.resolve(invokerHomeRoot, 'worktrees'),
-      cacheDir: path.resolve(invokerHomeRoot, 'repos'),
-      maxWorktrees: DEFAULT_WORKTREE_MAX_CONCURRENCY,
-      agentRegistry: options?.executionAgentRegistry,
-    }),
-  );
-  const taskRepository = new SqliteTaskRepository(persistence);
-  orchestrator = new Orchestrator({
-    persistence, messageBus,
-    taskRepository,
-    maxConcurrency: effectiveMaxConcurrency,
-    defaultAutoFixRetries: invokerConfig.autoFixRetries,
-    executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
-    deferRunningUntilLaunch: true,
-    taskDispatcher: dispatchStartedTasks,
-  });
-  commandService = new CommandService(orchestrator);
 
   const startupSyncMode = options?.startupSyncMode ?? 'all';
   const initLog = isHeadless
