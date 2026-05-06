@@ -78,24 +78,37 @@ function createRequestHandler(opts: HandlerOptions = {}) {
   };
 }
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+} as const;
+
 function routeHandler(req: IncomingMessage, res: ServerResponse, bridge?: RuntimeBridgeOptions): void {
   const url = req.url ?? '/';
   const method = req.method ?? 'GET';
 
+  // Handle CORS preflight for public endpoints
+  if (method === 'OPTIONS' && (url === '/health' || url === '/hello')) {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
+
   if (method !== 'GET') {
-    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.writeHead(405, { 'Content-Type': 'application/json', ...CORS_HEADERS });
     res.end(JSON.stringify({ error: 'Method Not Allowed' }));
     return;
   }
 
   if (url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 'Content-Type': 'application/json', ...CORS_HEADERS });
     res.end(JSON.stringify({ status: 'ok' }));
     return;
   }
 
   if (url === '/hello') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 'Content-Type': 'application/json', ...CORS_HEADERS });
     res.end(JSON.stringify({ message: 'hello' }));
     return;
   }
