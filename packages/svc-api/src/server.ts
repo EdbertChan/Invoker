@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import type { RuntimeServices } from '@invoker/runtime-service';
+import { createAuthMiddleware, type AuthMiddlewareOptions } from './middleware/auth.js';
+import { createTenantMiddleware, type TenantMiddlewareOptions } from './middleware/tenant-context.js';
 
 export interface ServerHandle {
   /** The underlying Node HTTP server. */
@@ -39,43 +41,76 @@ export interface StartOptions {
    * no runtime-related endpoints are registered.
    */
   runtimeBridge?: RuntimeBridgeOptions;
+
+  /**
+   * Optional auth middleware configuration.
+   * When omitted or when enabled=false, auth middleware is dormant
+   * and all requests pass through without authentication.
+   */
+  auth?: AuthMiddlewareOptions;
+
+  /**
+   * Optional tenant-context middleware configuration.
+   * When omitted or when enabled=false, tenant middleware is dormant
+   * and requests carry no tenant scoping.
+   */
+  tenant?: TenantMiddlewareOptions;
 }
 
-function createRequestHandler(bridge?: RuntimeBridgeOptions) {
-  return function handleRequest(_req: IncomingMessage, res: ServerResponse): void {
-    const url = _req.url ?? '/';
-    const method = _req.method ?? 'GET';
+interface HandlerOptions {
+  bridge?: RuntimeBridgeOptions;
+  auth?: AuthMiddlewareOptions;
+  tenant?: TenantMiddlewareOptions;
+}
 
-    if (method !== 'GET') {
-      res.writeHead(405, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Method Not Allowed' }));
-      return;
-    }
+function createRequestHandler(opts: HandlerOptions = {}) {
+  const { bridge, auth, tenant } = opts;
+  const authMiddleware = createAuthMiddleware(auth);
+  const tenantMiddleware = createTenantMiddleware(tenant);
 
-    if (url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok' }));
-      return;
-    }
-
-    if (url === '/hello') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ message: 'hello' }));
-      return;
-    }
-
-    // Runtime bridge endpoints (only active when bridge is enabled)
-    if (bridge?.enabled && url === '/runtime/status') {
-      // TODO: Add tenant/auth context validation before exposing runtime state
-      // TODO: Add rate limiting for runtime status polling
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ bridge: 'active', orchestrator: 'connected' }));
-      return;
-    }
-
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not Found' }));
+  return function handleRequest(req: IncomingMessage, res: ServerResponse): void {
+    // Run middleware pipeline: auth -> tenant -> route handler
+    authMiddleware(req, res, () => {
+      tenantMiddleware(req, res, () => {
+        routeHandler(req, res, bridge);
+      });
+    });
   };
+}
+
+function routeHandler(req: IncomingMessage, res: ServerResponse, bridge?: RuntimeBridgeOptions): void {
+  const url = req.url ?? '/';
+  const method = req.method ?? 'GET';
+
+  if (method !== 'GET') {
+    res.writeHead(405, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+    return;
+  }
+
+  if (url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok' }));
+    return;
+  }
+
+  if (url === '/hello') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ message: 'hello' }));
+    return;
+  }
+
+  // Runtime bridge endpoints (only active when bridge is enabled)
+  if (bridge?.enabled && url === '/runtime/status') {
+    // TODO: Add tenant/auth context validation before exposing runtime state
+    // TODO: Add rate limiting for runtime status polling
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ bridge: 'active', orchestrator: 'connected' }));
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not Found' }));
 }
 
 /**
@@ -83,11 +118,11 @@ function createRequestHandler(bridge?: RuntimeBridgeOptions) {
  * Returns a handle with the bound port and a stop() method.
  */
 export function startServer(options: StartOptions = {}): Promise<ServerHandle> {
-  const { port = 0, host = '127.0.0.1', runtimeBridge } = options;
+  const { port = 0, host = '127.0.0.1', runtimeBridge, auth, tenant } = options;
 
   // Bridge is dormant unless explicitly enabled
   const activeBridge = runtimeBridge?.enabled ? runtimeBridge : undefined;
-  const server = createServer(createRequestHandler(activeBridge));
+  const server = createServer(createRequestHandler({ bridge: activeBridge, auth, tenant }));
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);
