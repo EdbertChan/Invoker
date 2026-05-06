@@ -1,0 +1,195 @@
+/**
+ * Configuration loader for Invoker.
+ *
+ * Reads from ~/.invoker/config.json (user-level config).
+ * Override with INVOKER_REPO_CONFIG_PATH env var (for tests).
+ */
+
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+
+export interface InvokerConfig {
+  defaultBranch?: string;
+  /**
+   * When true, skip relaunching orphaned running tasks on GUI startup.
+   * Useful when you want to inspect state before tasks resume automatically.
+   * Default: false
+   */
+  disableAutoRunOnStartup?: boolean;
+  /**
+   * Allow plans with task IDs that overlap existing workflows.
+   * When false (default), submitting a plan whose task IDs already exist
+   * in an active workflow will be rejected with an error message.
+   * Set to true to permit intentional graph mutation.
+   */
+  allowGraphMutation?: boolean;
+  /**
+   * Global retry budget for auto-fix attempts per failed task.
+   * Default: 0 (disabled).
+   */
+  autoFixRetries?: number;
+  /**
+   * When true, successful AI-applied fixes are automatically approved.
+   * This skips the manual "Approve Fix" step for fix-with-agent and
+   * resolve-conflict flows.
+   *
+   * Default: false.
+   */
+  autoApproveAIFixes?: boolean;
+  /**
+   * Preferred execution agent for automatic fix retries.
+   * When unset, auto-fix falls back to the task's executionAgent,
+   * then to the built-in default agent.
+   */
+  autoFixAgent?: string;
+  /** Cursor CLI subprocess timeout for plan conversations in seconds. Default: 7200 (2 hours). */
+  planningTimeoutSeconds?: number;
+  /** Interval for heartbeat messages posted to Slack during planning in seconds. Default: 120 (2 minutes). Set to 0 to disable. */
+  planningHeartbeatIntervalSeconds?: number;
+  /** Maximum number of tasks that can run concurrently. Default: 3. */
+  maxConcurrency?: number;
+  /** Browser executable for opening external URLs (e.g. "firefox"). Default: Chrome. */
+  browser?: string;
+  /** Cloudflare R2 (or S3-compatible) storage for PR images. Env var fallback: R2_*. */
+  imageStorage?: {
+    provider: 'r2';
+    accountId: string;
+    bucketName: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    /** e.g. "https://bucket.r2.dev" or custom domain */
+    publicUrlBase: string;
+  };
+  /** Docker execution environment configuration. */
+  docker?: {
+    /** Docker image to use for container tasks. Default: 'invoker/agent-base:latest'. */
+    imageName?: string;
+    /**
+     * Path to a `KEY=value` secrets file (chmod 600/400) that is loaded and
+     * forwarded to the container as additional environment variables. The
+     * file's keys are appended to the container's `Env` array verbatim.
+     *
+     * Default fallback: `~/.config/invoker/secrets.env` (used only when the
+     * file actually exists). When unset and the default is missing, no extra
+     * secrets are forwarded.
+     */
+    secretsFile?: string;
+  };
+  /** Named remote SSH targets for running tasks on remote machines via SSH key auth. */
+  remoteTargets?: Record<string, {
+    host: string;
+    user: string;
+    /** Path to SSH identity file (private key). */
+    sshKeyPath: string;
+    /** SSH port. Default: 22. */
+    port?: number;
+    /**
+     * When true, use managed workspace mode: clone/fetch repo, create/reset worktrees,
+     * and provision per-task workspaces. When false (default), BYO mode: user provides
+     * pre-cloned repo path and handles all git/setup operations.
+     */
+    managedWorkspaces?: boolean;
+    /**
+     * Remote invoker home directory (e.g., ~/.invoker). Only used in managed mode.
+     * Default: ~/.invoker
+     */
+    remoteInvokerHome?: string;
+    /**
+     * Optional provision command to run in the worktree after creation (e.g., pnpm install).
+     * Only used in managed mode. Default: pnpm install --frozen-lockfile
+     */
+    provisionCommand?: string;
+  }>;
+  /**
+   * Config-owned routing policy for heavyweight shell commands.
+   * Matching tasks are auto-routed to the configured executor/target at plan submission time.
+   * Default matcher set for v1 is any command invoking `pnpm`.
+   */
+  heavyweightCommandRouting?: {
+    /** Set false to disable heavyweight auto-routing without deleting the config block. */
+    enabled?: boolean;
+    /** Destination executor type. Default: "ssh". */
+    executorType?: string;
+    /** Required destination remote target ID for heavyweight commands. */
+    remoteTargetId: string;
+    /** Optional command matchers; defaults to matching any `pnpm` invocation. */
+    matchers?: Array<{
+      pattern?: string;
+      regex?: string;
+    }>;
+  };
+  /**
+   * Pattern-based rules that enforce task execution environment conformance.
+   * When a rule matches a task command, the orchestrator validates that the task's
+   * executorType and remoteTargetId explicitly declared in the plan YAML match the
+   * rule's requirements. Rules do NOT fill in omitted fields — they enforce conformance.
+   * First matching rule wins.
+   *
+   * Each rule may specify:
+   *   - `pattern`: substring matched against the task command (like utilizationRules)
+   *   - `regex`: compiled with `new RegExp(regex)` and tested against the command
+   *
+   * If both `pattern` and `regex` are present, a rule matches if either matches.
+   * Tasks with commands matching a rule MUST explicitly declare the required executorType
+   * and remoteTargetId in the plan YAML, or plan loading will fail with a validation error.
+   * Only applies to tasks that have a command (not prompt-only tasks).
+   */
+  executorRoutingRules?: Array<{
+    /** Substring to match against the task command. */
+    pattern?: string;
+    /** Regular expression matched against the task command; compiled with new RegExp(regex). */
+    regex?: string;
+    /** Required executor type for matching commands (e.g. "ssh", "docker", "worktree"). */
+    executorType: string;
+    /** Required remote target ID for matching commands; must correspond to an entry in remoteTargets. */
+    remoteTargetId: string;
+  }>;
+}
+
+function readJsonSafe(path: string): InvokerConfig {
+  if (!existsSync(path)) {
+    return {};
+  }
+
+  const raw = readFileSync(path, 'utf-8');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid Invoker config JSON at ${path}: ${message}`);
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Invalid Invoker config at ${path}: expected a JSON object`);
+  }
+
+  return parsed as InvokerConfig;
+}
+
+export function loadConfig(): InvokerConfig {
+  if (process.env.INVOKER_REPO_CONFIG_PATH) {
+    return readJsonSafe(process.env.INVOKER_REPO_CONFIG_PATH);
+  }
+  return readJsonSafe(join(homedir(), '.invoker', 'config.json'));
+}
+
+/**
+ * Resolve the secrets file path for Docker tasks.
+ *
+ * Returns the explicit `docker.secretsFile` from config (with `~` expansion)
+ * if set; otherwise returns `~/.config/invoker/secrets.env` if that file
+ * exists; otherwise returns `undefined` (no secrets forwarded).
+ */
+export function resolveSecretsFilePath(config: InvokerConfig): string | undefined {
+  const explicit = config.docker?.secretsFile;
+  if (explicit) {
+    if (explicit === '~') return homedir();
+    if (explicit.startsWith('~/')) return resolve(homedir(), explicit.slice(2));
+    return explicit;
+  }
+  const fallback = join(homedir(), '.config', 'invoker', 'secrets.env');
+  if (existsSync(fallback)) return fallback;
+  return undefined;
+}
