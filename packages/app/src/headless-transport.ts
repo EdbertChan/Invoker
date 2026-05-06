@@ -14,6 +14,11 @@
  * owner-discovery primitives into a composable API.
  */
 
+import { resolve } from 'node:path';
+import { spawn } from 'node:child_process';
+import { homedir } from 'node:os';
+
+import { IpcBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
 
 import { isHeadlessMutatingCommand } from './headless-command-classification.js';
@@ -23,6 +28,10 @@ import {
   tryDelegateRun,
   tryDelegateResume,
 } from './headless-delegation.js';
+import {
+  spawnDetachedStandaloneOwner,
+  tryAcquireOwnerBootstrapLock,
+} from './headless-owner-bootstrap.js';
 import {
   discoverOwner,
   isOwnerReachable,
@@ -234,4 +243,106 @@ async function delegateCommand(
     return tryDelegateResume(workflowId, messageBus, options.waitForApproval, options.noTrack, timeoutMs);
   }
   return tryDelegateExec(args, messageBus, options.waitForApproval, options.noTrack, timeoutMs);
+}
+
+// ── Standard deps factory ─────────────────────────────────────
+
+const DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS = 60_000;
+
+function resolveInvokerHome(): string {
+  return process.env.INVOKER_DB_DIR ?? resolve(homedir(), '.invoker');
+}
+
+function resolveRepoRoot(): string {
+  // headless-transport.ts lives at packages/app/src/ (or dist/ after build).
+  // Repo root is three directories up from __dirname.
+  return resolve(__dirname, '..', '..', '..');
+}
+
+function electronCommandArgs(args: string[]): string[] {
+  const mainJs = resolve(__dirname, 'main.js');
+  return [
+    ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
+    mainJs,
+    '--headless',
+    ...args,
+  ];
+}
+
+function runElectronHeadless(args: string[]): Promise<number> {
+  const electronBin = resolve(
+    __dirname, '..', 'node_modules', '.bin',
+    process.platform === 'win32' ? 'electron.cmd' : 'electron',
+  );
+  const child = spawn(electronBin, electronCommandArgs(args), {
+    cwd: resolveRepoRoot(),
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      LIBGL_ALWAYS_SOFTWARE: process.platform === 'linux' ? '1' : process.env.LIBGL_ALWAYS_SOFTWARE,
+    },
+  });
+  return new Promise<number>((resolveExit, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (signal) {
+        reject(new Error(`headless electron exited with signal ${signal}`));
+        return;
+      }
+      resolveExit(code ?? 0);
+    });
+  });
+}
+
+async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void> {
+  const invokerHome = resolveInvokerHome();
+  const repoRoot = resolveRepoRoot();
+  const bootstrapLock = tryAcquireOwnerBootstrapLock(invokerHome);
+  try {
+    if (bootstrapLock) {
+      spawnDetachedStandaloneOwner(repoRoot);
+    }
+    const deadline = Date.now() + DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const owner = await discoverOwner(bus, 500);
+      if (isStandaloneCapable(owner)) {
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error('Timed out waiting for standalone owner');
+  } finally {
+    bootstrapLock?.release();
+  }
+}
+
+/** Managed deps with lifecycle. Call `disconnect()` when done. */
+export interface ManagedTransportDeps extends HeadlessTransportDeps {
+  disconnect: () => void;
+}
+
+/**
+ * Create a ready-to-use set of transport deps wired to IpcBus
+ * and the standard electron headless runner. Callers must call
+ * `disconnect()` on the returned object when finished.
+ */
+export async function createStandardTransportDeps(): Promise<ManagedTransportDeps> {
+  let bus = new IpcBus(undefined, { allowServe: false });
+  await bus.ready();
+
+  const refreshMessageBus = async (): Promise<MessageBus> => {
+    bus.disconnect();
+    bus = new IpcBus(undefined, { allowServe: false });
+    await bus.ready();
+    return bus;
+  };
+
+  return {
+    messageBus: bus,
+    runLocally: runElectronHeadless,
+    ensureStandaloneOwner: (currentBus) =>
+      ensureStandaloneOwnerViaBootstrap(currentBus ?? bus),
+    refreshMessageBus,
+    disconnect: () => bus.disconnect(),
+  };
 }
