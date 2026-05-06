@@ -6,3 +6,4 @@ export * from './logger.js';
 export * from './command-envelope.js';
 export * from './ipc-channels.js';
 export * from './runner-contracts.js';
+export * from './ui-transport.js';
