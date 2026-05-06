@@ -12,13 +12,10 @@
 import type { BundledSkillsInstallMode, BundledSkillsStatus, Logger } from '@invoker/contracts';
 import { makeEnvelope } from '@invoker/contracts';
 import type { AgentSessionData } from '@invoker/contracts';
-import type { Orchestrator, CommandService, TaskDelta, TaskState } from '@invoker/workflow-core';
-import type { SQLiteAdapter } from '@invoker/data-store';
+import type { Orchestrator, TaskDelta, TaskState } from '@invoker/workflow-core';
 import { createDeleteAllSnapshot } from './delete-all-snapshot.js';
 import { Channels } from '@invoker/transport';
-import type { MessageBus } from '@invoker/transport';
 import {
-  ExecutorRegistry,
   TaskRunner,
   GitHubMergeGateProvider,
   ReviewProviderRegistry,
@@ -27,6 +24,7 @@ import {
   assertPlanExecutionAgentsRegistered,
   type AgentRegistry,
 } from '@invoker/execution-engine';
+import type { RuntimeServices } from '@invoker/runtime-service';
 import { loadConfig, resolveSecretsFilePath, type InvokerConfig } from './config.js';
 import { backupPlan } from './plan-backup.js';
 import { startApiServer, type ApiServerDeps } from './api-server.js';
@@ -68,13 +66,8 @@ export {
 
 // ── HeadlessDeps interface ───────────────────────────────────
 
-export interface HeadlessDeps {
+export interface HeadlessDeps extends RuntimeServices {
   logger: Logger;
-  orchestrator: Orchestrator;
-  persistence: SQLiteAdapter;
-  executorRegistry: ExecutorRegistry;
-  messageBus: MessageBus;
-  commandService: CommandService;
   repoRoot: string;
   invokerConfig: InvokerConfig;
   initServices: () => Promise<void>;

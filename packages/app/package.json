@@ -63,6 +63,7 @@
     "test:e2e": "xvfb-run --auto-servernum playwright test"
   },
   "dependencies": {
+    "@invoker/runtime-service": "workspace:*",
     "@invoker/workflow-core": "workspace:*",
     "@invoker/execution-engine": "workspace:*",
     "@invoker/data-store": "workspace:*",

@@ -1,5 +1,5 @@
 {
-  "name": "@invoker/runtime-service",
+  "name": "@invoker/svc-api",
   "version": "0.0.1",
   "type": "module",
   "main": "src/index.ts",
@@ -18,11 +18,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@invoker/workflow-core": "workspace:*",
-    "@invoker/execution-engine": "workspace:*",
-    "@invoker/data-store": "workspace:*",
-    "@invoker/contracts": "workspace:*",
-    "@invoker/transport": "workspace:*"
+    "@invoker/runtime-service": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
