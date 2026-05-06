@@ -93,6 +93,43 @@ export interface RuntimeServices {
   commandService: CommandService;
 }
 
+// ── Bridge Support ───────────────────────────────────────────
+
+/**
+ * Options for creating an API bridge to the runtime services.
+ *
+ * The bridge allows external API servers (e.g. svc-api) to optionally attach
+ * to the shared runtime composition. The bridge is dormant by default and must
+ * be explicitly activated by the consumer.
+ */
+export interface RuntimeBridgeConfig {
+  /**
+   * When true, the bridge is active and the API layer may query runtime state.
+   * Defaults to false (dormant).
+   */
+  enabled: boolean;
+
+  // TODO: Add tenant isolation config when multi-tenant support is implemented
+  // TODO: Add auth token validation config for bridge-level access control
+}
+
+/**
+ * Create a bridge-compatible view of RuntimeServices.
+ *
+ * Returns the services reference unchanged — the dormant/active gating is
+ * handled by the consumer (svc-api). This function serves as a documented
+ * integration point and future location for bridge-specific transforms
+ * (e.g. read-only wrappers, tenant-scoped views).
+ */
+export function createApiBridge(
+  services: RuntimeServices,
+  _config: RuntimeBridgeConfig,
+): RuntimeServices {
+  // TODO: Wrap services in read-only proxy when tenant isolation is active
+  // TODO: Apply request-scoped auth context to orchestrator queries
+  return services;
+}
+
 // ── Factory ──────────────────────────────────────────────────
 
 /**
