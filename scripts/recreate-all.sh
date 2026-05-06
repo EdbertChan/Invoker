@@ -13,11 +13,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RUNNER="$REPO_ROOT/run.sh"
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
-STANDALONE_MODE="${INVOKER_HEADLESS_STANDALONE:-0}"
+# shellcheck source=lib/bulk-headless.sh
+source "$REPO_ROOT/scripts/lib/bulk-headless.sh"
 
 # Parse args
 DRY_RUN=false
@@ -38,38 +35,6 @@ if [[ -n "$PARALLELISM" ]] && ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid --parallel value: $PARALLELISM (expected integer >= 1)" >&2
   exit 1
 fi
-
-# Electron sandbox detection
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  # shellcheck disable=SC2086
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-# Helper: read-only query command (stderr hidden to keep parsing clean)
-headless_query() {
-  # shellcheck disable=SC2086
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-# Helper: mutating command delegated to the current owner (GUI or standalone headless)
-headless_mutation() {
-  if [[ "$STANDALONE_MODE" = "1" ]]; then
-    "$RUNNER" --headless "$@"
-    return $?
-  fi
-  node "$IPC_HELPER" exec -- "$@"
-}
-
-# Helper: extract workflow IDs from label output.
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
 
 # Query workflow IDs via CLI
 QUERY_ARGS=(query workflows --output label)
@@ -97,11 +62,8 @@ if ! $FOLLOW; then
 fi
 echo ""
 
-IDX=0
-FAILED=0
-SUCCEEDED=0
-
 if $DRY_RUN; then
+  IDX=0
   while IFS= read -r WF_ID; do
     [[ -z "$WF_ID" ]] && continue
     IDX=$((IDX + 1))
@@ -109,65 +71,44 @@ if $DRY_RUN; then
     echo "         (dry-run) would run: recreate $WF_ID"
     echo ""
   done <<< "$WORKFLOWS"
-elif $FOLLOW; then
-  RESULTS_FILE="$(mktemp -t recreate-all-results.XXXXXX)"
-  PIDS=()
 
-  process_one_workflow() {
-    local wf_id="$1"
-    local result_file="$2"
-    local cmd_out=""
-    local cmd_status=0
+  echo "---"
+  echo "Dry run complete. $TOTAL workflow(s) would be recreated."
+  exit 0
+fi
 
-    set +e
-    cmd_out="$(headless_mutation recreate "$wf_id" 2>&1)"
-    cmd_status=$?
-    set -e
+# ── Execution ────────────────────────────────────────────────────────────────
 
-    if [[ "$cmd_status" -eq 0 ]]; then
-      echo "[$wf_id] OK"
-      printf "%s\n" "$cmd_out"
-      printf "%s\tSUCCEEDED\n" "$wf_id" >> "$result_file"
-    else
-      echo "[$wf_id] FAILED (exit $cmd_status)"
-      printf "%s\n" "$cmd_out"
-      printf "%s\tFAILED\n" "$wf_id" >> "$result_file"
-    fi
-    echo ""
-  }
+RESULTS_FILE="$(mktemp -t recreate-all-results.XXXXXX)"
 
-  while IFS= read -r WF_ID; do
-    [[ -z "$WF_ID" ]] && continue
-    IDX=$((IDX + 1))
-    echo "[queue $IDX/$TOTAL] $WF_ID"
+process_one_recreate() {
+  local wf_id="$1"
+  local result_file="$2"
+  local cmd_out="" cmd_status=0
 
-    process_one_workflow "$WF_ID" "$RESULTS_FILE" &
-    PIDS+=("$!")
+  set +e
+  cmd_out="$(headless_mutation recreate "$wf_id" 2>&1)"
+  cmd_status=$?
+  set -e
 
-    while [[ "$(jobs -pr | wc -l | tr -d ' ')" -ge "$PARALLELISM" ]]; do
-      sleep 0.2
-    done
-  done <<< "$WORKFLOWS"
+  if [[ "$cmd_status" -eq 0 ]]; then
+    echo "[$wf_id] OK"
+    printf "%s\n" "$cmd_out"
+    printf "%s\tSUCCEEDED\n" "$wf_id" >> "$result_file"
+  else
+    echo "[$wf_id] FAILED (exit $cmd_status)"
+    printf "%s\n" "$cmd_out"
+    printf "%s\tFAILED\n" "$wf_id" >> "$result_file"
+  fi
+  echo ""
+}
 
-  for pid in "${PIDS[@]}"; do
-    wait "$pid" || true
-  done
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
-
-  rm -f "$RESULTS_FILE"
+if $FOLLOW; then
+  bulk_follow_parallel "$WORKFLOWS" "$PARALLELISM" "$RESULTS_FILE" process_one_recreate
 else
   LOG_DIR="$(mktemp -d -t recreate-all-logs.XXXXXX)"
-  DISPATCHED=0
-  LAUNCH_FAILED=0
-  RESULT_FILE="$(mktemp -t recreate-all-results.XXXXXX)"
   COMMANDS_FILE="$(mktemp -t recreate-all-commands.XXXXXX)"
-  OUTPUT_JSONL="$(mktemp -t recreate-all-output.XXXXXX)"
+  IDX=0
 
   while IFS= read -r WF_ID; do
     [[ -z "$WF_ID" ]] && continue
@@ -180,57 +121,30 @@ else
     while IFS= read -r WF_ID; do
       [[ -z "$WF_ID" ]] && continue
       if headless_mutation --no-track recreate "$WF_ID" > "$LOG_DIR/${WF_ID}.log" 2>&1; then
-        printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULT_FILE"
+        printf "%s\tSUCCEEDED\n" "$WF_ID" >> "$RESULTS_FILE"
       else
-        printf "%s\tFAILED\n" "$WF_ID" >> "$RESULT_FILE"
+        printf "%s\tFAILED\n" "$WF_ID" >> "$RESULTS_FILE"
       fi
     done <<< "$WORKFLOWS"
   else
-    node "$IPC_HELPER" batch-exec --no-track --parallel "$PARALLELISM" < "$COMMANDS_FILE" > "$OUTPUT_JSONL"
-    python3 - "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL" <<'PY'
-import json
-import pathlib
-import sys
-
-result_file = pathlib.Path(sys.argv[1])
-log_dir = pathlib.Path(sys.argv[2])
-output_jsonl = pathlib.Path(sys.argv[3])
-
-for raw in output_jsonl.read_text(encoding="utf-8").splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    item = json.loads(raw)
-    workflow_id = item.get("workflowId") or item.get("label") or "unknown"
-    (log_dir / f"{workflow_id}.log").write_text(raw + "\n", encoding="utf-8")
-    with result_file.open("a", encoding="utf-8") as handle:
-        handle.write(f"{workflow_id}\t{'SUCCEEDED' if item.get('ok') else 'FAILED'}\n")
-PY
+    bulk_batch_exec "$COMMANDS_FILE" "$RESULTS_FILE" "$LOG_DIR" --parallel "$PARALLELISM"
   fi
   rm -f "$COMMANDS_FILE"
-  rm -f "$OUTPUT_JSONL"
-
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) DISPATCHED=$((DISPATCHED + 1)) ;;
-      FAILED) LAUNCH_FAILED=$((LAUNCH_FAILED + 1)) ;;
-    esac
-  done < "$RESULT_FILE"
-  rm -f "$RESULT_FILE"
 fi
 
+eval "$(bulk_tally_results "$RESULTS_FILE")"
+rm -f "$RESULTS_FILE"
+
 echo "---"
-if $DRY_RUN; then
-  echo "Dry run complete. $TOTAL workflow(s) would be recreated."
-elif $FOLLOW; then
-  echo "Done. $SUCCEEDED succeeded, $FAILED failed out of $TOTAL."
-  if [[ "$FAILED" -ne 0 ]]; then
+if $FOLLOW; then
+  echo "Done. $TALLY_SUCCEEDED succeeded, $TALLY_FAILED failed out of $TOTAL."
+  if [[ "$TALLY_FAILED" -ne 0 ]]; then
     exit 1
   fi
 else
-  echo "Dispatched $DISPATCHED workflow(s) (fire-and-forget). Logs: $LOG_DIR"
-  if [[ "$LAUNCH_FAILED" -ne 0 ]]; then
-    echo "$LAUNCH_FAILED workflow(s) failed to launch."
+  echo "Dispatched $TALLY_SUCCEEDED workflow(s) (fire-and-forget). Logs: $LOG_DIR"
+  if [[ "$TALLY_FAILED" -ne 0 ]]; then
+    echo "$TALLY_FAILED workflow(s) failed to launch."
     exit 1
   fi
 fi
