@@ -1,8 +1,11 @@
 import { checkApi, type ApiCheckResult } from './api-client.js';
+import { initAuthBanner } from './auth-banner.js';
 
 // Re-export the API client for consumers that import from main
 export { checkApi } from './api-client.js';
 export type { ApiCheckResult, HelloResponse, HealthResponse } from './api-client.js';
+export { initAuthBanner } from './auth-banner.js';
+export type { AuthBannerOptions } from './auth-banner.js';
 
 /**
  * Renders the API response into the target element.
@@ -39,7 +42,13 @@ export function initHomepage(doc: Document, apiBaseUrl: string): void {
 }
 
 // Auto-init when running in the browser (not during tests)
-const apiBaseUrl = (globalThis as Record<string, unknown>).__INVOKER_API_URL as string | undefined;
+const g = globalThis as Record<string, unknown>;
+const apiBaseUrl = g.__INVOKER_API_URL as string | undefined;
 if (typeof document !== 'undefined' && apiBaseUrl) {
   initHomepage(document, apiBaseUrl);
+}
+
+// Auth banner — dormant by default; enable via globalThis.__INVOKER_AUTH_ENABLED = true
+if (typeof document !== 'undefined') {
+  initAuthBanner(document, { enabled: g.__INVOKER_AUTH_ENABLED === true });
 }
