@@ -1,0 +1,30 @@
+{
+  "name": "@invoker/graph",
+  "version": "0.0.1",
+  "deprecated": "Use @invoker/workflow-graph instead",
+  "description": "Pure action graph data structure — nodes, edges, DAG ops, mutations (compatibility layer)",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "require": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --tsconfig tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "tsup": "^8.0.0"
+  },
+  "dependencies": {
+    "@invoker/workflow-graph": "workspace:*"
+  }
+}
