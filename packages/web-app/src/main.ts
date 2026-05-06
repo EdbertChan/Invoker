@@ -1,21 +1,13 @@
-/**
- * Fetches both /hello and /health from svc-api and returns
- * a combined result object.
- */
-export async function checkApi(baseUrl: string): Promise<{ hello: unknown; health: unknown }> {
-  const [helloRes, healthRes] = await Promise.all([
-    fetch(`${baseUrl}/hello`),
-    fetch(`${baseUrl}/health`),
-  ]);
-  const hello = await helloRes.json();
-  const health = await healthRes.json();
-  return { hello, health };
-}
+import { checkApi, type ApiCheckResult } from './api-client.js';
+
+// Re-export the API client for consumers that import from main
+export { checkApi } from './api-client.js';
+export type { ApiCheckResult, HelloResponse, HealthResponse } from './api-client.js';
 
 /**
  * Renders the API response into the target element.
  */
-export function renderResponse(el: HTMLElement, data: { hello: unknown; health: unknown }): void {
+export function renderResponse(el: HTMLElement, data: ApiCheckResult): void {
   el.textContent = JSON.stringify(data, null, 2);
 }
 
@@ -28,6 +20,7 @@ export function renderError(el: HTMLElement, error: unknown): void {
 
 /**
  * Wires up the "Check API" button to fetch and display svc-api responses.
+ * Shows deterministic loading, success, and error states.
  */
 export function initHomepage(doc: Document, apiBaseUrl: string): void {
   const btn = doc.getElementById('check-api');
