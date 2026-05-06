@@ -60,6 +60,7 @@ import type {
 } from '@invoker/workflow-core';
 import { makeEnvelope } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
+import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
 import { IpcBus, Channels } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
@@ -267,8 +268,7 @@ process.on('unhandledRejection', (reason) => {
   }
 });
 
-// Repo root: 3 levels up from packages/app/dist/
-const repoRoot = path.resolve(__dirname, '..', '..', '..');
+const repoRoot = resolveRepoRoot(__dirname, { fallback: process.resourcesPath });
 const invokerConfig: InvokerConfig = (() => {
   try {
     return loadConfig();
