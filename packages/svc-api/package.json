@@ -18,7 +18,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@invoker/runtime-service": "workspace:*"
+    "@invoker/runtime-service": "workspace:*",
+    "@invoker/workflow-core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
