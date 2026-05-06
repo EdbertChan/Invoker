@@ -3,11 +3,7 @@ set -euo pipefail
 
 # Detect repo root
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
-
-# Set Electron paths
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
+source "$REPO_ROOT/scripts/headless-helpers.sh"
 
 # Parse arguments
 DRY_RUN=false
@@ -74,20 +70,7 @@ if [ "$STANDALONE_MODE" = "1" ]; then
   COMMAND_TIMEOUT_SECONDS=0
 fi
 
-# Handle Linux Electron sandbox detection
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-# Helper functions
-# Read-only queries remain quiet; mutating commands delegate to the current owner
-# so workflow-scoped mutations can run in parallel lanes.
+# Helper: run a command with an optional timeout
 run_with_optional_timeout() {
   local seconds="$1"
   shift
@@ -122,22 +105,6 @@ PY
   fi
   echo "ERROR: timeout(1), gtimeout, and python3 are unavailable; cannot enforce per-command timeout." >&2
   return 127
-}
-
-headless_query() {
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-headless_mutation() {
-  node "$IPC_HELPER" exec -- "$@"
-}
-
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
-
-headless_task_ids() {
-  headless_query "$@" | grep '/' || true
 }
 
 find_stale_workflow_ids() {
@@ -330,13 +297,10 @@ if [ "$FOLLOW" = true ]; then
     wait "$pid" || true
   done
 
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-      SKIPPED) SKIPPED=$((SKIPPED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
+  tally_results "$RESULTS_FILE"
+  SUCCEEDED=$TALLY_SUCCEEDED
+  FAILED=$TALLY_FAILED
+  SKIPPED=$TALLY_SKIPPED
 
   rm -f "$RESULTS_FILE"
 
@@ -385,34 +349,13 @@ else
     BATCH_ARGS+=(--timeout-ms "$((COMMAND_TIMEOUT_SECONDS * 1000))")
   fi
   node "$IPC_HELPER" "${BATCH_ARGS[@]}" < "$COMMANDS_FILE" > "$OUTPUT_JSONL"
-  python3 - "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL" <<'PY'
-import json
-import pathlib
-import sys
-
-result_file = pathlib.Path(sys.argv[1])
-log_dir = pathlib.Path(sys.argv[2])
-output_jsonl = pathlib.Path(sys.argv[3])
-
-for raw in output_jsonl.read_text(encoding="utf-8").splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    item = json.loads(raw)
-    workflow_id = item.get("workflowId") or item.get("label") or "unknown"
-    (log_dir / f"{workflow_id}.log").write_text(raw + "\n", encoding="utf-8")
-    with result_file.open("a", encoding="utf-8") as handle:
-        handle.write(f"{workflow_id}\t{'SUCCEEDED' if item.get('ok') else 'FAILED'}\n")
-PY
+  parse_batch_results "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL"
   rm -f "$COMMANDS_FILE"
   rm -f "$OUTPUT_JSONL"
 
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) DISPATCHED=$((DISPATCHED + 1)) ;;
-      FAILED) LAUNCH_FAILED=$((LAUNCH_FAILED + 1)) ;;
-    esac
-  done < "$RESULT_FILE"
+  tally_results "$RESULT_FILE"
+  DISPATCHED=$TALLY_SUCCEEDED
+  LAUNCH_FAILED=$TALLY_FAILED
   rm -f "$RESULT_FILE"
 
   echo "" >&2

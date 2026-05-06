@@ -13,9 +13,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
+source "$REPO_ROOT/scripts/headless-helpers.sh"
 
 # Parse args
 DRY_RUN=false
@@ -36,34 +34,6 @@ if [[ -n "$PARALLELISM" ]] && ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid --parallel value: $PARALLELISM (expected integer >= 1)" >&2
   exit 1
 fi
-
-# Electron sandbox detection
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  # shellcheck disable=SC2086
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-# Helper: read-only query command (stderr hidden to keep parsing clean)
-headless_query() {
-  # shellcheck disable=SC2086
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-# Helper: mutating command delegated to the current owner (GUI or standalone headless)
-headless_mutation() {
-  node "$IPC_HELPER" exec -- "$@"
-}
-
-# Helper: extract workflow IDs from label output.
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
 
 # Query workflow IDs via CLI
 QUERY_ARGS=(query workflows --output label)
@@ -147,12 +117,9 @@ elif $FOLLOW; then
     wait "$pid" || true
   done
 
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
+  tally_results "$RESULTS_FILE"
+  SUCCEEDED=$TALLY_SUCCEEDED
+  FAILED=$TALLY_FAILED
 
   rm -f "$RESULTS_FILE"
 else
@@ -171,34 +138,13 @@ else
   done <<< "$WORKFLOWS"
 
   node "$IPC_HELPER" batch-exec --no-track --parallel "$PARALLELISM" < "$COMMANDS_FILE" > "$OUTPUT_JSONL"
-  python3 - "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL" <<'PY'
-import json
-import pathlib
-import sys
-
-result_file = pathlib.Path(sys.argv[1])
-log_dir = pathlib.Path(sys.argv[2])
-output_jsonl = pathlib.Path(sys.argv[3])
-
-for raw in output_jsonl.read_text(encoding="utf-8").splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    item = json.loads(raw)
-    workflow_id = item.get("workflowId") or item.get("label") or "unknown"
-    (log_dir / f"{workflow_id}.log").write_text(raw + "\n", encoding="utf-8")
-    with result_file.open("a", encoding="utf-8") as handle:
-        handle.write(f"{workflow_id}\t{'SUCCEEDED' if item.get('ok') else 'FAILED'}\n")
-PY
+  parse_batch_results "$RESULT_FILE" "$LOG_DIR" "$OUTPUT_JSONL"
   rm -f "$COMMANDS_FILE"
   rm -f "$OUTPUT_JSONL"
 
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) DISPATCHED=$((DISPATCHED + 1)) ;;
-      FAILED) LAUNCH_FAILED=$((LAUNCH_FAILED + 1)) ;;
-    esac
-  done < "$RESULT_FILE"
+  tally_results "$RESULT_FILE"
+  DISPATCHED=$TALLY_SUCCEEDED
+  LAUNCH_FAILED=$TALLY_FAILED
   rm -f "$RESULT_FILE"
 fi
 

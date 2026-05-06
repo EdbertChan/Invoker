@@ -18,9 +18,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
+source "$REPO_ROOT/scripts/headless-helpers.sh"
 
 DRY_RUN=false
 STATUS_FILTER=""
@@ -74,30 +72,6 @@ if [[ -n "$PARALLELISM" ]] && ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
   echo "Invalid --parallel value: $PARALLELISM (expected integer >= 1)" >&2
   exit 1
 fi
-
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  # shellcheck disable=SC2086
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-headless_query() {
-  # shellcheck disable=SC2086
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-headless_mutation() {
-  node "$IPC_HELPER" exec -- "$@"
-}
-
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
 
 QUERY_ARGS=(query workflows --output label)
 if [[ -n "$STATUS_FILTER" ]]; then
@@ -264,12 +238,9 @@ if $FOLLOW; then
     wait "$pid" || true
   done
 
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED) SUCCEEDED=$((SUCCEEDED + 1)) ;;
-      FAILED) FAILED=$((FAILED + 1)) ;;
-    esac
-  done < "$RESULTS_FILE"
+  tally_results "$RESULTS_FILE"
+  SUCCEEDED=$TALLY_SUCCEEDED
+  FAILED=$TALLY_FAILED
 else
   LOG_DIR="$(mktemp -d -t recreate-failed-tasks-logs.XXXXXX)"
   DISPATCHED=0
@@ -299,16 +270,9 @@ else
     wait "$pid" || true
   done
 
-  while IFS=$'\t' read -r _wf result; do
-    case "$result" in
-      SUCCEEDED)
-        DISPATCHED=$((DISPATCHED + 1))
-        ;;
-      FAILED)
-        FAILED=$((FAILED + 1))
-        ;;
-    esac
-  done < "$RESULTS_FILE"
+  tally_results "$RESULTS_FILE"
+  DISPATCHED=$TALLY_SUCCEEDED
+  FAILED=$TALLY_FAILED
 fi
 
 echo "---"

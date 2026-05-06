@@ -13,9 +13,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ELECTRON="$REPO_ROOT/packages/app/node_modules/.bin/electron"
-MAIN="$REPO_ROOT/packages/app/dist/main.js"
-IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
+source "$REPO_ROOT/scripts/headless-helpers.sh"
 
 # Parse args
 DRY_RUN=false
@@ -29,39 +27,6 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
-
-# Electron sandbox detection (same as submit-plan.sh)
-unset ELECTRON_RUN_AS_NODE
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  # shellcheck disable=SC2086
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
-# Helper: read-only query command (stderr hidden to keep parsing clean)
-headless_query() {
-  # shellcheck disable=SC2086
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
-}
-
-# Helper: mutating command (stderr preserved for debugging real failures)
-headless_mutation() {
-  node "$IPC_HELPER" exec -- "$@"
-}
-
-# Helper: extract workflow IDs (filter Electron init noise)
-headless_workflow_ids() {
-  headless_query "$@" | grep -E '^wf-[0-9]+-[0-9]+$' || true
-}
-
-# Helper: extract JSONL objects (filter Electron init noise)
-headless_jsonl() {
-  headless_query "$@" | grep '^{' || true
-}
 
 # Get workflow IDs
 if [[ -n "$WF_FILTER" ]]; then
