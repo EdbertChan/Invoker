@@ -1,26 +1,11 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
 import { canonicalPathForComparison } from './worktree-discovery.js';
+import { execGitVoid } from './git-primitives.js';
 
 export interface CleanupManagedWorktreesResult {
   removed: string[];
   errors: string[];
-}
-
-function execGit(args: string[], cwd: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stderr = '';
-    child.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    child.on('error', (err) => reject(err));
-    child.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`git ${args.join(' ')} failed (${code}): ${stderr.trim()}`));
-    });
-  });
 }
 
 /**
@@ -54,7 +39,7 @@ export async function cleanupManagedWorktrees(opts: {
           `[cleanup] removing external worktree: ${canonicalWt} (git worktree remove --force from ${clonePath})`,
         );
         try {
-          await execGit(['worktree', 'remove', '--force', canonicalWt], clonePath);
+          await execGitVoid(['worktree', 'remove', '--force', canonicalWt], clonePath);
           console.log(`[cleanup] removed worktree: ${canonicalWt}`);
           removed.push(canonicalWt);
         } catch (e) {
@@ -82,7 +67,7 @@ export async function cleanupManagedWorktrees(opts: {
         const canonicalWt = canonicalPathForComparison(wtPath);
         console.log(`[cleanup] removing embedded worktree: ${canonicalWt} (from ${clonePath})`);
         try {
-          await execGit(['worktree', 'remove', '--force', canonicalWt], clonePath);
+          await execGitVoid(['worktree', 'remove', '--force', canonicalWt], clonePath);
           console.log(`[cleanup] removed embedded worktree: ${canonicalWt}`);
           removed.push(canonicalWt);
         } catch (e) {
