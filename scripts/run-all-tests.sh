@@ -85,9 +85,23 @@ suite_name() {
   basename "$suite"
 }
 
+suite_lane() {
+  local suite="$1"
+  local lane
+  lane="$(grep -m1 '^# LANE:' "$suite" 2>/dev/null | awk '{print $3}')" || true
+  printf '%s' "${lane:-unknown}"
+}
+
+suite_owner() {
+  local suite="$1"
+  local owner
+  owner="$(grep -m1 '^# OWNER:' "$suite" 2>/dev/null | awk '{print $3}')" || true
+  printf '%s' "${owner:-unknown}"
+}
+
 is_parallel_safe() {
   case "$(suite_relpath "$1")" in
-    required/05-delete-all-prod-db-guard.sh|required/07-invalid-config-json.sh|required/10-vitest-workspace.sh|required/15-owner-boundary-policy.sh|required/15-submit-workflow-chain.sh|required/20-e2e-dry-run.sh|required/21-e2e-dry-run-downstream.sh|required/22-e2e-dry-run-github.sh|required/50-verify-executor-routing.sh|optional/40-playwright-app.sh|optional/60-worktree-provisioning.sh|optional/70-ui-visual-proof-validate.sh)
+    required/00-smoke.sh|required/05-delete-all-prod-db-guard.sh|required/07-invalid-config-json.sh|required/10-vitest-workspace.sh|required/15-owner-boundary-policy.sh|required/15-submit-workflow-chain.sh|required/20-e2e-dry-run.sh|required/21-e2e-dry-run-downstream.sh|required/22-e2e-dry-run-github.sh|required/50-verify-executor-routing.sh|optional/40-playwright-app.sh|optional/60-worktree-provisioning.sh|optional/70-ui-visual-proof-validate.sh)
       return 0
       ;;
     *)
@@ -297,9 +311,11 @@ print_summary() {
   if [ "${#FAILED[@]}" -gt 0 ]; then
     echo ""
     echo "Failures:"
-    local suite
+    local suite lane owner
     for suite in "${FAILED[@]}"; do
-      printf '  %s\n' "$(suite_relpath "$suite")"
+      lane="$(suite_lane "$suite")"
+      owner="$(suite_owner "$suite")"
+      printf '  %-50s  lane=%-12s  owner=%s\n' "$(suite_relpath "$suite")" "$lane" "$owner"
     done
   fi
 }

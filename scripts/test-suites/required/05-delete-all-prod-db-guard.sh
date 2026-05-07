@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# LANE: guardrail
+# OWNER: platform
 # Guardrail: run.sh must refuse delete-all against production DB root by default.
 set -euo pipefail
 

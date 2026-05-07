@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# LANE: e2e
+# OWNER: e2e
 # Generated battle-test matrix for local + GUI-owner chaos scenarios.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
