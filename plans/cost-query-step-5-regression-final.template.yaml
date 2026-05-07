@@ -1,0 +1,140 @@
+name: "Cost Query Step 5: final regression hardening (replacement v2)"
+description: |
+  Goal:
+  - Prove final solution quality and guard against regressions with layered tests
+    and full-suite verification.
+
+  Motivation:
+  - This feature introduces parsing + attribution + CLI contracts; broad and
+    targeted tests are both needed for confidence.
+
+  Alternatives considered:
+  - Option A (chosen): targeted parser/CLI tests + full `pnpm run test:all`.
+  - Option B: broad e2e-heavy verification only.
+
+  Why chosen:
+  - Option A gives faster fault isolation while preserving integration confidence.
+
+  Implementation contract:
+  - Add tests proving chosen design avoids concrete alternative failure modes.
+  - Cover malformed/missing usage and invalid-flag behavior.
+  - Preserve prior query/session behavior.
+onFinish: pull_request
+mergeMode: external_review
+baseBranch: master
+repoUrl: git@github.com:EdbertChan/Invoker.git
+executorType: worktree
+
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+    gatePolicy: review_ready
+
+tasks:
+  - id: add-competing-design-proof-tests
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Prove correctness and design choice quality across parser, rollup, and CLI surfaces.
+      Motivation:
+      - Prevent regressions and ensure chosen architecture is objectively better than alternatives.
+      Alternative considerations:
+      - Option A (chosen): layered verification (targeted parser/query tests + full suite)
+      - Option B: broad e2e-only verification
+      Chosen design rationale:
+      - Faster fault isolation during development with final end-to-end confidence gate.
+      Implementation details:
+      - Add negative and positive contract tests (invalid flags, malformed events, fallback joins).
+      - Add targeted assertions showing provider-agnostic contract keeps signatures uniform.
+      Acceptance criteria:
+      - Tests explicitly cover why chosen approach outperforms alternatives for this feature.
+      - Regression suite includes malformed/missing usage and grouping edge cases.
+    prompt: |
+      Goal:
+      - Add regression proof that validates parser, rollup, and query contracts under the chosen design.
+      Motivation:
+      - Guard against behavioral regressions and demonstrate why normalized schema strategy is preferred.
+      Alternative considerations:
+      - Option A (chosen): layered focused tests plus full-suite terminal regression.
+      - Option B: e2e-heavy verification only.
+      Implementation details:
+      - Add targeted positive/negative tests for invalid flags, malformed events, deterministic rollups, and parser compatibility.
+      - Keep assertions focused on scriptability and provider-agnostic contract uniformity.
+      Files:
+      - packages/execution-engine/src/__tests__/codex-session.test.ts
+      - packages/app/src/__tests__/*.test.ts
+      Add or refine tests that demonstrate:
+      - schema normalization reduces branching
+      - session extraction does not regress message parsing
+      - rollups are deterministic and attributable
+      - query commands are script-friendly
+      Must ensure at least one assertion verifies deterministic output stability.
+      Include at least one negative contract test for invalid query flag combinations.
+      Include focused tests and snapshots where useful.
+    dependencies: []
+
+  - id: run-execution-engine-focused-tests
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Validate parser-related regressions in execution-engine focused test lane.
+      Motivation:
+      - Catch extraction/parser failures quickly before broader package checks.
+      Alternative considerations:
+      - Option A (chosen): dedicated execution-engine lane first.
+      - Option B: run only app lane or full-suite gate.
+      Implementation details:
+      - Execute `packages/execution-engine` tests as a standalone command task.
+      Acceptance criteria:
+      - Execution-engine focused tests pass.
+    command: "cd packages/execution-engine && pnpm test"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - add-competing-design-proof-tests
+
+  - id: run-app-focused-tests
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Validate app query/rollup regressions in focused app test lane.
+      Motivation:
+      - Isolate contact-surface and formatter failures before full-suite gate.
+      Alternative considerations:
+      - Option A (chosen): dedicated app lane after execution-engine lane.
+      - Option B: rely on full-suite gate only.
+      Implementation details:
+      - Execute `packages/app` tests after execution-engine focused tests succeed.
+      Acceptance criteria:
+      - App focused tests pass.
+    command: "cd packages/app && pnpm test"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - run-execution-engine-focused-tests
+
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Run terminal full-repo regression gate for final hardening workflow.
+      Motivation:
+      - Confirm all prior proof and regression changes integrate safely.
+      Alternative considerations:
+      - Option A (chosen): full repository suite.
+      - Option B: focused-only verification.
+      Implementation details:
+      - Execute `pnpm run test:all` after focused regression lane.
+      Acceptance criteria:
+      - Full repository regression passes.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - add-competing-design-proof-tests
+      - run-execution-engine-focused-tests
+      - run-app-focused-tests

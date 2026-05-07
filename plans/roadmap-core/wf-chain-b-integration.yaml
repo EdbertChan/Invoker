@@ -1,0 +1,65 @@
+name: "Roadmap Core Chain B Integration"
+description: |
+  Chain-level integration workflow for Roadmap Core chain B.
+  Verifies cumulative behavior after all issue workflows in the chain complete.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: https://github.com/EdbertChan/Invoker
+baseBranch: "plan/roadmap-core-wf-inv-97-long-prompt-command-handoff-hardening"
+externalDependencies:
+  - workflowId: "wf-1778135746091-45"
+    requiredStatus: review_ready
+
+tasks:
+  - id: verify-chain-b-targeted
+    description: |
+      Targeted chain B regression.
+      Goal:
+      Verify cumulative chain B behavior before final gate.
+      Motivation:
+      Preserve deterministic chain-level verification with explicit rationale.
+      Alternative considerations:
+      - rely on implicit workflow-level context only.
+      - collapse targeted verification into final regression only.
+      Implementation details:
+      - execute the scoped verification command for this task.
+      - keep dependency order explicit before final regression.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/app
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/app && pnpm test exits 0.
+    command: "cd packages/app && pnpm test"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+    dependencies: []
+
+  - id: regression-chain-b
+    description: |
+      Final chain B regression gate.
+      Goal:
+      Verify cumulative chain B behavior before final gate.
+      Motivation:
+      Preserve deterministic chain-level verification with explicit rationale.
+      Alternative considerations:
+      - rely on implicit workflow-level context only.
+      - collapse targeted verification into final regression only.
+      Implementation details:
+      - execute the scoped verification command for this task.
+      - keep dependency order explicit before final regression.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - repository
+      Change types:
+      - none
+      Acceptance criteria:
+      - pnpm run test:all exits 0.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+    dependencies:
+      - verify-chain-b-targeted

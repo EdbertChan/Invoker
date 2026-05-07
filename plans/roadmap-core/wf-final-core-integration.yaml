@@ -1,0 +1,126 @@
+name: "Roadmap Core Final Integration"
+description: |
+  Final convergence workflow for all Roadmap Core chains.
+  Runs repository-level regression after chain A/B/C/D integration workflows succeed.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: https://github.com/EdbertChan/Invoker
+baseBranch: "plan/roadmap-core-chain-a-integration"
+externalDependencies:
+  - workflowId: "wf-1778135737070-41"
+    requiredStatus: review_ready
+  - workflowId: "wf-1778135748232-46"
+    requiredStatus: review_ready
+  - workflowId: "wf-1778135755539-50"
+    requiredStatus: review_ready
+  - workflowId: "wf-1778135763077-54"
+    requiredStatus: review_ready
+
+tasks:
+  - id: verify-final-app
+    description: |
+      Cross-chain app regression precheck.
+      Goal:
+      Verify cross-chain convergence before final stack completion.
+      Motivation:
+      Preserve deterministic chain-level verification with explicit rationale.
+      Alternative considerations:
+      - rely on implicit workflow-level context only.
+      - collapse targeted verification into final regression only.
+      Implementation details:
+      - execute the scoped verification command for this task.
+      - keep dependency order explicit before final regression.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/app
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/app && pnpm test exits 0.
+    command: "cd packages/app && pnpm test"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+    dependencies: []
+
+  - id: verify-final-workflow-core
+    description: |
+      Cross-chain workflow-core regression precheck.
+      Goal:
+      Verify cross-chain convergence before final stack completion.
+      Motivation:
+      Preserve deterministic chain-level verification with explicit rationale.
+      Alternative considerations:
+      - rely on implicit workflow-level context only.
+      - collapse targeted verification into final regression only.
+      Implementation details:
+      - execute the scoped verification command for this task.
+      - keep dependency order explicit before final regression.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/workflow-core
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/workflow-core && pnpm test exits 0.
+    command: "cd packages/workflow-core && pnpm test"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+    dependencies: []
+
+  - id: verify-final-execution-engine
+    description: |
+      Cross-chain execution-engine regression precheck.
+      Goal:
+      Verify cross-chain convergence before final stack completion.
+      Motivation:
+      Preserve deterministic chain-level verification with explicit rationale.
+      Alternative considerations:
+      - rely on implicit workflow-level context only.
+      - collapse targeted verification into final regression only.
+      Implementation details:
+      - execute the scoped verification command for this task.
+      - keep dependency order explicit before final regression.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/execution-engine
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/execution-engine && pnpm test exits 0.
+    command: "cd packages/execution-engine && pnpm test"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+    dependencies: []
+
+  - id: regression-final-core
+    description: |
+      Final repository regression for Roadmap Core stack.
+      Goal:
+      Verify cross-chain convergence before final stack completion.
+      Motivation:
+      Preserve deterministic chain-level verification with explicit rationale.
+      Alternative considerations:
+      - rely on implicit workflow-level context only.
+      - collapse targeted verification into final regression only.
+      Implementation details:
+      - execute the scoped verification command for this task.
+      - keep dependency order explicit before final regression.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - repository
+      Change types:
+      - none
+      Acceptance criteria:
+      - pnpm run test:all exits 0.
+      - Submission notes include alternative-proof evidence summary for all issue workflows.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+    dependencies:
+      - verify-final-app
+      - verify-final-workflow-core
+      - verify-final-execution-engine

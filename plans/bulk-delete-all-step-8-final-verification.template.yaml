@@ -1,0 +1,114 @@
+name: "Bulk Delete-All Step 8: final integration verification"
+description: |
+  Goal:
+  Perform final integrated verification across headless and full-suite lanes.
+
+  Motivation:
+  Confirm chain-wide readiness before merge and final stack publication.
+
+  Implementation details:
+  - run a headless verification lane for command-path confidence.
+  - capture release notes documenting rationale and operator guidance.
+  - run repo-wide final gate.
+
+  Alternative considerations:
+  - run only targeted tests.
+  - run full suite only without explicit headless verification.
+
+  Competing-design proof:
+  - compare diagnosis speed and residual risk from single-lane approaches.
+
+  Why this design is better:
+  Layered verification provides both focused confidence and broad regression coverage.
+onFinish: pull_request
+mergeMode: external_review
+baseBranch: master
+repoUrl: git@github.com:EdbertChan/Invoker.git
+executorType: worktree
+
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+
+tasks:
+  - id: run-headless-verification-lane
+    description: |
+      Layer: e2e_regression
+      Feature state: active
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Goal:
+      Verify non-UI command-path behavior remains healthy in final stack state.
+      Motivation:
+      Validate headless route confidence independently of renderer behavior.
+      Files:
+      - plans/verify-executor-routing-headless.yaml
+      Change types:
+      - execute headless verification lane to ensure non-UI command paths remain stable
+      Acceptance criteria:
+      - headless verification plan submission succeeds.
+      - no regression in delete-all command routing assumptions.
+    command: "./submit-plan.sh plans/verify-executor-routing-headless.yaml"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies: []
+
+  - id: gather-release-notes
+    description: |
+      Layer: docs
+      Feature state: active
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Goal:
+      Document operational context and rollout guidance.
+      Motivation:
+      Preserve rationale and reviewer/operator instructions for this stack.
+      Prepare rollout notes covering bulk command behavior and stack publication.
+    prompt: |
+      Goal:
+      Deliver `gather-release-notes` with explicit, reviewable intent.
+      Motivation:
+      Keep implementation rationale explicit so lint and reviewers can verify intent.
+      Alternative considerations:
+      - Keep this prompt concise without rationale sections.
+      - Rely only on task description for rationale context.
+      Implementation details:
+      - Apply the file-level changes listed below and verify all acceptance expectations.
+      Update documentation in `docs/` and workflow notes so they describe:
+      - root cause proof (quadratic map-copy work in UI delta remove fan-out),
+      - bulk delete-all design rationale,
+      - operational guidance for reviewers and maintainers.
+      You must include explicit instruction that Invoker PR publication should use
+      Mergify Stacks (`mergify stack push`) once workflow commits are ready.
+    dependencies:
+      - run-headless-verification-lane
+
+  - id: post-fix-regression
+    description: |
+      Layer: e2e_regression
+      Feature state: active
+      Goal:
+      Define the expected outcome for `post-fix-regression`.
+      Motivation:
+      Preserve reviewability and explicit implementation rationale for this step.
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Layer exception: allowed
+      Rationale: final release-note packaging (`docs`) is intentionally completed
+      before the terminal full-suite gate in this final integration workflow.
+      Final regression gate required for merge-ready implementation workflows.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - run-headless-verification-lane
+      - gather-release-notes

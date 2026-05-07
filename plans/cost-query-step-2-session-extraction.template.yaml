@@ -1,0 +1,124 @@
+name: "Cost Query Step 2: extract usage from sessions (replacement v2)"
+description: |
+  Goal:
+  - Extract normalized usage events from session artifacts without changing
+    existing message/session UX.
+
+  Motivation:
+  - Cost events must come from raw transcripts to avoid migration risk and keep
+    traceability to source artifacts.
+
+  Alternatives considered:
+  - Option A (chosen): parse usage from raw session JSONL.
+  - Option B: persist denormalized usage rows during execution.
+
+  Why chosen:
+  - Option A is lower risk, avoids write-path coupling, and preserves source-of-truth.
+
+  Implementation contract:
+  - Keep parseSession()/toReadableText behavior unchanged.
+  - Add additive usage parsing path (separate from message parsing).
+  - Parse Codex token_count/usage-like lines.
+  - For missing provider usage, emit unknown-confidence placeholders.
+onFinish: pull_request
+mergeMode: external_review
+baseBranch: master
+repoUrl: git@github.com:EdbertChan/Invoker.git
+executorType: worktree
+
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+    gatePolicy: review_ready
+
+tasks:
+  - id: implement-session-usage-extraction
+    description: |
+      Layer: app_bridge
+      Feature state: active
+      Goal:
+      - Extract normalized usage events from session artifacts while preserving message behavior.
+      Motivation:
+      - Use raw transcript artifacts as source-of-truth with minimal migration risk.
+      Alternative considerations:
+      - Option A (chosen): parse usage from raw session JSONL
+      - Option B: persist denormalized usage in DB on write path
+      Chosen design rationale:
+      - Avoids migration and write-path complexity; preserves traceability to raw artifacts.
+      Implementation details:
+      - Extend driver/parser interfaces for additive usage extraction.
+      - Parse Codex token_count/usage-like entries.
+      - Emit unknown-confidence placeholders when explicit usage is missing.
+      Acceptance criteria:
+      - Codex token/usage-like events are parsed into normalized usage records.
+      - Missing provider usage yields confidence=unknown records rather than hard failure.
+      - Existing query-session human-readable message output is unchanged.
+    prompt: |
+      Goal:
+      - Add normalized usage extraction from session artifacts without changing existing message parsing behavior.
+      Motivation:
+      - Preserve source-of-truth provenance while enabling cost analytics from raw transcript data.
+      Alternative considerations:
+      - Option A (chosen): additive parsing from raw JSONL.
+      - Option B: persist denormalized usage records during write-time execution.
+      Implementation details:
+      - Extend session drivers with additive usage extraction surfaces.
+      - Parse usage/token-count events and emit unknown-confidence placeholders when explicit usage is absent.
+      Files:
+      - packages/execution-engine/src/codex-session.ts
+      - packages/execution-engine/src/codex-session-driver.ts
+      - packages/execution-engine/src/claude-session-driver.ts
+      - packages/execution-engine/src/session-driver.ts
+      - packages/execution-engine/src/__tests__/codex-session.test.ts
+      Extend session parsing/drivers to return normalized usage events with:
+      eventId, timestamp, model, input/output/cached/total tokens, confidence.
+      Ensure current parseSession/toReadableText outputs are backward compatible
+      with pre-existing fixtures (no text rendering regressions).
+      Add tests for malformed lines, missing usage, and mixed event streams.
+      Competing-design proof:
+      - Add test evidence showing no regression in message parsing.
+      - Add test evidence that usage can be recovered directly from raw JSONL fixtures.
+    dependencies: []
+
+  - id: run-session-parser-tests
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Verify session usage extraction behavior via execution-engine tests.
+      Motivation:
+      - Ensure additive extraction does not break parsing contracts.
+      Alternative considerations:
+      - Option A (chosen): focused parser lane.
+      - Option B: rely only on end-of-workflow full suite.
+      Implementation details:
+      - Execute execution-engine test lane after extraction implementation.
+      Acceptance criteria:
+      - Execution engine parser tests pass.
+    command: "cd packages/execution-engine && pnpm test"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - implement-session-usage-extraction
+
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Run terminal full-repo regression gate for extraction changes.
+      Motivation:
+      - Guard against integration regressions outside execution-engine package.
+      Alternative considerations:
+      - Option A (chosen): full repository suite.
+      - Option B: focused package tests only.
+      Implementation details:
+      - Execute `pnpm run test:all` after focused parser lane.
+      Acceptance criteria:
+      - Full repository regression passes.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - implement-session-usage-extraction
+      - run-session-parser-tests

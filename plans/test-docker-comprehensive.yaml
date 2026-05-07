@@ -1,5 +1,6 @@
 name: "Docker Comprehensive Test"
 onFinish: none
+repoUrl: git@github.com:EdbertChan/Invoker.git
 
 # Comprehensive Docker executor test suite covering:
 #   - Provisioning failures (bad image, bad clone)
@@ -35,7 +36,7 @@ tasks:
 
   # ── Success cases ──────────────────────────────────────────
   - id: docker-cmd-ok
-    description: "Docker command that succeeds"
+    description: "Docker command that succeeds and emits deterministic success output"
     executorType: docker
     dockerImage: "invoker-agent:latest"
     command: "echo 'DOCKER_CMD_OK'"
@@ -50,21 +51,21 @@ tasks:
 
   # ── Concurrent execution ───────────────────────────────────
   - id: docker-concurrent-a
-    description: "Concurrent Docker task A"
+    description: "Concurrent Docker task A validating parallel executor isolation"
     executorType: docker
     dockerImage: "invoker-agent:latest"
     command: "sleep 2 && echo 'CONCURRENT_A_DONE'"
     dependencies: []
 
   - id: docker-concurrent-b
-    description: "Concurrent Docker task B"
+    description: "Concurrent Docker task B validating parallel executor isolation"
     executorType: docker
     dockerImage: "invoker-agent:latest"
     command: "sleep 2 && echo 'CONCURRENT_B_DONE'"
     dependencies: []
 
   - id: docker-concurrent-c
-    description: "Concurrent Docker task C"
+    description: "Concurrent Docker task C validating parallel executor isolation"
     executorType: docker
     dockerImage: "invoker-agent:latest"
     command: "sleep 2 && echo 'CONCURRENT_C_DONE'"

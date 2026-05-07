@@ -1,0 +1,119 @@
+name: "Bulk Delete-All Step 3: app workflow action + IPC handler"
+description: |
+  Goal:
+  Add a reusable app-layer bulk delete-all lifecycle action and wire it through IPC.
+
+  Motivation:
+  Keep destructive lifecycle sequencing centralized (snapshot, kill, purge, clear)
+  while introducing bulk semantics via orchestrator option usage.
+
+  Implementation details:
+  - implement `deleteAllWorkflowsBulk()` in shared app actions.
+  - register `invoker:delete-all-workflows-bulk` handler in main process.
+
+  Alternative considerations:
+  - inline lifecycle logic directly in `packages/app/src/main.ts`.
+  - skip snapshot/kill sequencing in bulk path for speed.
+
+  Competing-design proof:
+  - verify duplicated lifecycle logic drifts from legacy delete-all over time.
+  - verify skipped safety sequencing regresses destructive-operation guarantees.
+
+  Why this design is better:
+  Shared lifecycle action preserves parity and reduces maintenance risk.
+onFinish: pull_request
+mergeMode: external_review
+baseBranch: master
+repoUrl: git@github.com:EdbertChan/Invoker.git
+executorType: worktree
+
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+
+tasks:
+  - id: add-bulk-delete-workflow-action
+    description: |
+      Layer: app_bridge
+      Feature state: active
+      Goal:
+      Provide a single app-bridge lifecycle path for bulk delete-all.
+      Motivation:
+      Route bulk IPC to orchestrator suppression mode without forking core safety logic.
+      Implementation details:
+      - add `deleteAllWorkflowsBulk` in shared workflow actions.
+      - wire IPC handler in `main.ts` and preserve workflows-changed emission.
+      Alternative considerations:
+      - main-only implementation with no shared app action.
+      - direct DB deletion from handler without orchestrator contract.
+      Competing-design proof:
+      - compare lifecycle parity and testability versus shared-action approach.
+      Why this design is better:
+      - centralized lifecycle path and explicit orchestrator policy handoff.
+      Files:
+      - packages/app/src/workflow-actions.ts
+      - packages/app/src/main.ts
+      Change types:
+      - add `deleteAllWorkflowsBulk` action that passes `publishRemovalDeltas: false`
+      - register `invoker:delete-all-workflows-bulk` IPC invoke handler
+      Acceptance criteria:
+      - legacy `invoker:delete-all-workflows` behavior is unchanged.
+      - bulk invoke calls the new action and emits workflows-changed refresh signal.
+    prompt: |
+      Goal:
+      Deliver `add-bulk-delete-workflow-action` with explicit, reviewable intent.
+      Motivation:
+      Keep implementation rationale explicit so lint and reviewers can verify intent.
+      Alternative considerations:
+      - Keep this prompt concise without rationale sections.
+      - Rely only on task description for rationale context.
+      Implementation details:
+      - Apply the file-level changes listed below and verify all acceptance expectations.
+      Implement `deleteAllWorkflowsBulk` in `packages/app/src/workflow-actions.ts` by
+      forwarding to orchestrator delete-all with `publishRemovalDeltas: false`.
+      Register an IPC handler in `packages/app/src/main.ts` for
+      `invoker:delete-all-workflows-bulk` that invokes the bulk action. You must ensure
+      existing cache invalidation and workflows-changed emission behavior stays intact,
+      and you must verify legacy `invoker:delete-all-workflows` behavior is unchanged.
+    dependencies: []
+
+  - id: verify-app-lifecycle-tests
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      Define the expected outcome for `verify-app-lifecycle-tests`.
+      Motivation:
+      Preserve reviewability and explicit implementation rationale for this step.
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Validate main-process and workflow action behavior.
+    command: "cd packages/app && pnpm test -- src/__tests__/delete-all-lifecycle.test.ts"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - add-bulk-delete-workflow-action
+
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      Define the expected outcome for `post-fix-regression`.
+      Motivation:
+      Preserve reviewability and explicit implementation rationale for this step.
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Final regression gate required for merge-ready implementation workflows.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - add-bulk-delete-workflow-action
+      - verify-app-lifecycle-tests

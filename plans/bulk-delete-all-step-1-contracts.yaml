@@ -1,0 +1,114 @@
+name: "Bulk Delete-All Step 1: contracts IPC surface"
+description: |
+  Goal:
+  Introduce a dedicated bulk delete-all IPC contract for UI-triggered history deletion.
+
+  Motivation:
+  Create an explicit transport boundary so bulk semantics are opt-in and legacy
+  delete-all behavior remains backward compatible for existing call sites.
+
+  Implementation details:
+  - add `invoker:delete-all-workflows-bulk` to the IPC contract map.
+  - verify preload API derivation surfaces `deleteAllWorkflowsBulk()` without manual drift.
+
+  Alternative considerations:
+  - extend `invoker:delete-all-workflows` with a payload flag `{ bulk: true }`.
+  - infer bulk mode from caller identity with no API expansion.
+
+  Competing-design proof:
+  - compare typing blast radius and ambiguity for payload-flag and caller-inference approaches.
+  - validate explicit-channel approach preserves clarity in tests and coordinator policy wiring.
+
+  Why this design is better:
+  A dedicated channel gives an unambiguous contract with the smallest compatibility risk.
+onFinish: pull_request
+mergeMode: external_review
+baseBranch: master
+repoUrl: git@github.com:EdbertChan/Invoker.git
+executorType: worktree
+
+tasks:
+  - id: add-bulk-delete-ipc-contract
+    description: |
+      Layer: api
+      Feature state: active
+      Goal:
+      Define a first-class bulk delete-all IPC contract.
+      Motivation:
+      Preserve legacy API behavior while enabling opt-in bulk semantics for UI callers.
+      Implementation details:
+      - update `packages/contracts/src/ipc-channels.ts` to include `invoker:delete-all-workflows-bulk`.
+      - confirm `packages/app/src/preload.ts` exposes `window.invoker.deleteAllWorkflowsBulk()`.
+      Alternative considerations:
+      - mutate existing channel request shape with a bulk flag.
+      - infer bulk semantics from transport caller identity.
+      Competing-design proof:
+      - verify the explicit channel avoids hidden coupling and ambiguous branch logic.
+      Why this design is better:
+      - explicit endpoint keeps behavior reviewable and testable.
+      Files:
+      - packages/contracts/src/ipc-channels.ts
+      - packages/app/src/preload.ts
+      Change types:
+      - add new invoke channel `invoker:delete-all-workflows-bulk`
+      - preserve derived preload API surface guarantees
+      Acceptance criteria:
+      - contract typing includes the new channel with request `[]` and response `void`.
+      - preload bridge includes `deleteAllWorkflowsBulk()` without manual bridge exceptions.
+    prompt: |
+      Goal:
+      Deliver `add-bulk-delete-ipc-contract` with explicit, reviewable intent.
+      Motivation:
+      Keep implementation rationale explicit so lint and reviewers can verify intent.
+      Alternative considerations:
+      - Keep this prompt concise without rationale sections.
+      - Rely only on task description for rationale context.
+      Implementation details:
+      - Apply the file-level changes listed below and verify all acceptance expectations.
+      Goal: Introduce a typed bulk delete-all IPC channel with deterministic preload exposure.
+      Motivation: Make bulk semantics explicit while preserving legacy delete-all compatibility.
+      Alternative considerations: Extend the existing delete-all channel with a bulk flag; infer bulk mode from caller identity.
+      Implementation details: Update `packages/contracts/src/ipc-channels.ts` to add `invoker:delete-all-workflows-bulk` with request `[]` and response `void`, then verify `packages/app/src/preload.ts` exposes `window.invoker.deleteAllWorkflowsBulk()` automatically without manual bridge drift.
+      Ensure existing channels and legacy delete-all behavior remain unchanged and acceptance criteria are met.
+    dependencies: []
+
+  - id: verify-contract-tests
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      Define the expected outcome for `verify-contract-tests`.
+      Motivation:
+      Preserve reviewability and explicit implementation rationale for this step.
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Verify the contract-surface change with a focused regression lane.
+    command: "cd packages/ui && pnpm test -- src/__tests__/delete-history-repro.test.ts"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - add-bulk-delete-ipc-contract
+
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      Define the expected outcome for `post-fix-regression`.
+      Motivation:
+      Preserve reviewability and explicit implementation rationale for this step.
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Final full-suite guardrail after contract-surface changes.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - add-bulk-delete-ipc-contract
+      - verify-contract-tests

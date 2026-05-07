@@ -1,0 +1,116 @@
+name: "Bulk Delete-All Step 5: mutation coordinator delete fence"
+description: |
+  Goal:
+  Preserve mutation queue safety semantics for the new bulk delete-all channel.
+
+  Motivation:
+  Ensure bulk delete-all is classified as a delete fence so preemption and
+  eviction behavior matches legacy destructive operations.
+
+  Implementation details:
+  - include bulk channel in delete-fence predicate.
+  - keep existing queue ordering and lease semantics unchanged.
+
+  Alternative considerations:
+  - assume channel inheritance with no explicit classifier update.
+  - redesign coordinator around new metadata taxonomy in this same change.
+
+  Competing-design proof:
+  - verify no-update path fails to guarantee deterministic invalidation parity.
+  - compare scope/risk of full redesign versus targeted inclusion.
+
+  Why this design is better:
+  Explicit classifier update is low-risk, deterministic, and scoped to this bugfix.
+onFinish: pull_request
+mergeMode: external_review
+baseBranch: master
+repoUrl: git@github.com:EdbertChan/Invoker.git
+executorType: worktree
+
+externalDependencies:
+  - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+    requiredStatus: completed
+
+tasks:
+  - id: classify-bulk-channel-as-delete-fence
+    description: |
+      Layer: owner_delegation
+      Feature state: active
+      Goal:
+      Preserve queue invalidation and preemption semantics for bulk delete-all.
+      Motivation:
+      Treat bulk delete-all exactly like legacy delete-all in coordinator fencing.
+      Implementation details:
+      - update delete-fence channel classification in coordinator logic.
+      Alternative considerations:
+      - no-op classifier update.
+      - generic coordinator metadata rewrite.
+      Competing-design proof:
+      - validate race/parity coverage for channel inclusion.
+      Why this design is better:
+      - smallest scoped change that enforces deterministic behavior.
+      Files:
+      - packages/app/src/workflow-mutation-coordinator.ts
+      Change types:
+      - include bulk delete-all IPC channel in delete-fence predicate
+      - preserve preemption/eviction semantics during queue mutations
+      Acceptance criteria:
+      - bulk delete-all mutation is treated as delete-fence by coordinator logic.
+      - queue ordering and cancellation behavior match legacy delete-all semantics.
+    prompt: |
+      Goal:
+      Deliver `classify-bulk-channel-as-delete-fence` with explicit, reviewable intent.
+      Motivation:
+      Keep implementation rationale explicit so lint and reviewers can verify intent.
+      Alternative considerations:
+      - Keep this prompt concise without rationale sections.
+      - Rely only on task description for rationale context.
+      Implementation details:
+      - Apply the file-level changes listed below and verify all acceptance expectations.
+      Update `packages/app/src/workflow-mutation-coordinator.ts` so the
+      delete-fence classifier includes `invoker:delete-all-workflows-bulk`.
+      You must ensure existing lease/preemption behavior remains unchanged for
+      other mutation categories and preserve deterministic queue logic. You must
+      verify no behavior regression for legacy delete-all channel classification.
+    dependencies: []
+
+  - id: verify-coordinator-tests
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      Define the expected outcome for `verify-coordinator-tests`.
+      Motivation:
+      Preserve reviewability and explicit implementation rationale for this step.
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Validate queue/delete-fence behavior.
+    command: "cd packages/app && pnpm test -- src/__tests__/persisted-workflow-mutation-coordinator.test.ts"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - classify-bulk-channel-as-delete-fence
+
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      Define the expected outcome for `post-fix-regression`.
+      Motivation:
+      Preserve reviewability and explicit implementation rationale for this step.
+      Alternative considerations:
+      - Keep this step implicit in broader workflow text only.
+      - Rely on command names without per-task rationale headings.
+      Implementation details:
+      - Execute this task exactly as specified and verify stated acceptance criteria.
+      Final regression gate required for merge-ready implementation workflows.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - classify-bulk-channel-as-delete-fence
+      - verify-coordinator-tests

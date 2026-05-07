@@ -1,0 +1,176 @@
+name: "Roadmap Core WF-INV-155: Recreate-with-rebase workflow action hardening"
+description: |
+  Implements Roadmap Core issue INV-155 as a standalone chained workflow.
+
+  Decision record and experimentation are first-class deliverables: experiment artifacts
+  must be committed during workflow execution and consumed by implementation tasks.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: https://github.com/EdbertChan/Invoker
+baseBranch: "__UPSTREAM_FEATURE_BRANCH__"
+externalDependencies:
+  - workflowId: "__WF_INV_88_WORKFLOW_ID__"
+    requiredStatus: review_ready
+
+tasks:
+  - id: experiment-inv-155
+    description: |
+      Design experiment and alternative proof task for INV-155.
+      Goal: Provide robust recreate-with-rebase action.
+      Motivation: Make base refresh behavior explicit and deterministic.
+      Alternative considerations: Single canonical endpoint vs alias-preserving migration.
+      Implementation details: 1) Introduce or adjust boundaries in `packages/app/src/api-server.ts`, `packages/app/src/workflow-mutation-facade.ts`, `packages/ui/src/__tests__/context-menu-e2e.test.tsx`. 2) Migrate call sites in deterministic order with minimal blast radius. 3) Add focused regression coverage near touched logic. 4) Persist experiment artifact at `docs/context/inv-155/experiment-brief.md` and consume it in implementation.
+      Layer: transport
+      Feature state: active
+      Files:
+      - packages/app/src/api-server.ts
+      - packages/app/src/workflow-mutation-facade.ts
+      - packages/ui/src/__tests__/context-menu-e2e.test.tsx
+      - docs/context/inv-155/experiment-brief.md
+      Change types:
+      - modify
+      - docs-only
+      Acceptance criteria:
+      - Produce measurable comparison criteria for chosen and alternative designs.
+      - Record verdict per option: Supported / Rejected / Deferred.
+      - Commit `docs/context/inv-155/experiment-brief.md` with experiment findings and explicit thresholds.
+    prompt: |
+      You must design an experiment brief for INV-155 and ensure deterministic evaluation.
+      Goal: Provide robust recreate-with-rebase action.
+      Motivation: Make base refresh behavior explicit and deterministic.
+      Implementation details: 1) Introduce or adjust boundaries in `packages/app/src/api-server.ts`, `packages/app/src/workflow-mutation-facade.ts`, `packages/ui/src/__tests__/context-menu-e2e.test.tsx`. 2) Migrate call sites in deterministic order with minimal blast radius. 3) Add focused regression coverage near touched logic. 4) Persist experiment artifact at `docs/context/inv-155/experiment-brief.md` and consume it in implementation.
+      Alternative considerations: Single canonical endpoint vs alias-preserving migration.
+      Chosen design: Canonical internal route plus temporary legacy aliases.
+      Why chosen over alternatives: Improves consistency without breaking existing callers.
+      Experiment plan: Track alias usage while validating canonical route behavior.
+      Alternative proof evidence: Use alias volume trend plus client breakage rate in replay.
+      Alternative considerations: Use experiment findings to compare retained and rejected designs before implementation decisions.
+      Decision gate: Drop aliases only after telemetry threshold and compatibility pass.
+      Concrete files to inspect and reference: `packages/app/src/api-server.ts`, `packages/app/src/workflow-mutation-facade.ts`, `packages/ui/src/__tests__/context-menu-e2e.test.tsx`.
+      You must create or update `docs/context/inv-155/experiment-brief.md` and commit it in this task.
+      Ensure each alternative has deterministic command(s), expected outputs, and pass/fail thresholds.
+    dependencies: []
+
+  - id: implement-inv-155
+    description: |
+      Implement chosen design for INV-155 after experiment framing.
+      Goal: Provide robust recreate-with-rebase action.
+      Motivation: Make base refresh behavior explicit and deterministic.
+      Alternative considerations: Single canonical endpoint vs alias-preserving migration.
+      Implementation details: 1) Introduce or adjust boundaries in `packages/app/src/api-server.ts`, `packages/app/src/workflow-mutation-facade.ts`, `packages/ui/src/__tests__/context-menu-e2e.test.tsx`. 2) Migrate call sites in deterministic order with minimal blast radius. 3) Add focused regression coverage near touched logic. 4) Persist experiment artifact at `docs/context/inv-155/experiment-brief.md` and consume it in implementation.
+      Layer: transport
+      Feature state: active
+      Files:
+      - packages/app/src/api-server.ts
+      - packages/app/src/workflow-mutation-facade.ts
+      - packages/ui/src/__tests__/context-menu-e2e.test.tsx
+      - docs/context/inv-155/experiment-brief.md
+      Change types:
+      - modify
+      Acceptance criteria:
+      - Code reflects chosen design and references measured experiment outcomes.
+      - Rejected/deferred alternatives are documented with reasons.
+      - Implementation explicitly consumes `docs/context/inv-155/experiment-brief.md` findings.
+    prompt: |
+      You must implement INV-155 using chosen design Canonical internal route plus temporary legacy aliases. and ensure acceptance criteria are verified.
+      Goal: Provide robust recreate-with-rebase action.
+      Motivation: Make base refresh behavior explicit and deterministic.
+      Implementation details: 1) Introduce or adjust boundaries in `packages/app/src/api-server.ts`, `packages/app/src/workflow-mutation-facade.ts`, `packages/ui/src/__tests__/context-menu-e2e.test.tsx`. 2) Migrate call sites in deterministic order with minimal blast radius. 3) Add focused regression coverage near touched logic. 4) Persist experiment artifact at `docs/context/inv-155/experiment-brief.md` and consume it in implementation.
+      Alternative considerations: Use experiment findings to compare retained and rejected designs before implementation decisions.
+      Decision gate: Drop aliases only after telemetry threshold and compatibility pass.
+      Concrete files to update or validate: `packages/app/src/api-server.ts`, `packages/app/src/workflow-mutation-facade.ts`, `packages/ui/src/__tests__/context-menu-e2e.test.tsx`.
+      You must read `docs/context/inv-155/experiment-brief.md` and apply its decisions/thresholds to implementation choices.
+      Ensure targeted tests are added or updated and verify expected outcomes before final regression.
+    dependencies:
+      - experiment-inv-155
+
+  - id: verify-inv-155
+    description: |
+      Targeted verification for INV-155.
+      Goal:
+      Complete verify-inv-155 with explicit rationale and deterministic verification.
+      Motivation:
+      Keep review intent explicit for command-only implementation tasks under strict atomicity lint.
+      Alternative considerations:
+      - rely on implicit workflow-level rationale only.
+      - defer rationale to neighboring tasks instead of this command task.
+      Implementation details:
+      - execute the scoped command for this task and enforce stated acceptance criteria.
+      - preserve dependency ordering and final regression determinism.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - tests
+      - docs/context/inv-155/experiment-brief.md
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/app && pnpm test exits 0.
+      - Proof verdicts are reflected in `docs/context/inv-155/experiment-brief.md` and workflow output notes.
+    command: "cd packages/app && pnpm test"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+    dependencies:
+      - implement-inv-155
+
+  - id: cleanup-experiment-artifacts-inv-155
+    description: |
+      Cleanup persisted experiment artifact for INV-155 before final regression.
+      Goal:
+      Complete cleanup-experiment-artifacts-inv-155 with explicit rationale and deterministic verification.
+      Motivation:
+      Keep review intent explicit for command-only implementation tasks under strict atomicity lint.
+      Alternative considerations:
+      - rely on implicit workflow-level rationale only.
+      - defer rationale to neighboring tasks instead of this command task.
+      Implementation details:
+      - execute the scoped command for this task and enforce stated acceptance criteria.
+      - preserve dependency ordering and final regression determinism.
+      Layer: docs
+      Feature state: active
+      Files:
+      - docs/context/inv-155/experiment-brief.md
+      Change types:
+      - delete
+      Acceptance criteria:
+      - `docs/context/inv-155/experiment-brief.md` is removed from the branch.
+      - Cleanup commit is present before final regression task.
+    command: 'rm -f docs/context/inv-155/experiment-brief.md && git add docs/context/inv-155/experiment-brief.md && git commit -m "cleanup(inv-155/experiment-brief): remove artifact after implementation handoff"'
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - experiment-inv-155
+      - implement-inv-155
+      - verify-inv-155
+
+  - id: regression-inv-155
+    description: |
+      Final regression gate for INV-155 workflow.
+      Goal:
+      Complete regression-inv-155 with explicit rationale and deterministic verification.
+      Motivation:
+      Keep review intent explicit for command-only implementation tasks under strict atomicity lint.
+      Alternative considerations:
+      - rely on implicit workflow-level rationale only.
+      - defer rationale to neighboring tasks instead of this command task.
+      Implementation details:
+      - execute the scoped command for this task and enforce stated acceptance criteria.
+      - preserve dependency ordering and final regression determinism.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - repository
+      Change types:
+      - none
+      Acceptance criteria:
+      - pnpm run test:all exits 0.
+      - Workflow notes include proof verdicts for each alternative.
+      Layer exception: allowed — final regression intentionally depends on docs cleanup to guarantee artifact removal before gate.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+    dependencies:
+      - experiment-inv-155
+      - implement-inv-155
+      - verify-inv-155
+      - cleanup-experiment-artifacts-inv-155
