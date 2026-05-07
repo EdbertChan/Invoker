@@ -6,6 +6,7 @@
 
 import type { TaskState, TaskStatus } from '@invoker/workflow-core';
 import type { TaskEvent, Workflow } from '@invoker/data-store';
+import type { CostRollup } from '@invoker/contracts';
 
 // ── ANSI Color Codes ─────────────────────────────────────────
 
@@ -231,6 +232,36 @@ export function formatWorkflowStats(stats: {
       lines.push(`  ${RED}${t.failCount}x${RESET}  ${t.description}`);
     }
   }
+
+  return lines.join('\n');
+}
+
+// ── Cost Summary ────────────────────────────────────────────
+
+/**
+ * Format a CostRollup as a colored terminal summary.
+ *
+ * Example:
+ *   Cost: $1.23 (3 events, 1 unknown confidence, 0 missing usage)
+ *   Tokens: 1500 in / 800 out / 200 cached / 2500 total
+ */
+export function formatCostSummary(rollup: CostRollup): string {
+  const lines: string[] = [];
+
+  const cost = rollup.totalEstimatedCostUsd.toFixed(2);
+  const warnings: string[] = [];
+  if (rollup.unknownConfidenceCount > 0) {
+    warnings.push(`${YELLOW}${rollup.unknownConfidenceCount} unknown confidence${RESET}`);
+  }
+  if (rollup.missingUsageCount > 0) {
+    warnings.push(`${YELLOW}${rollup.missingUsageCount} missing usage${RESET}`);
+  }
+  const warnSuffix = warnings.length > 0 ? ` (${warnings.join(', ')})` : '';
+
+  lines.push(`${BOLD}Cost:${RESET} ${GREEN}$${cost}${RESET} ${DIM}(${rollup.eventCount} events)${RESET}${warnSuffix}`);
+  lines.push(
+    `${BOLD}Tokens:${RESET} ${rollup.totals.inputTokens} in / ${rollup.totals.outputTokens} out / ${rollup.totals.cachedTokens} cached / ${rollup.totals.totalTokens} total`,
+  );
 
   return lines.join('\n');
 }
