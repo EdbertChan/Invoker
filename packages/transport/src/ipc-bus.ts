@@ -211,20 +211,10 @@ export interface SubscriberErrorEvent {
   channel: string;
   /** Error message (no payload data to avoid leakage). */
   error: string;
-  /** Number of handler errors suppressed since the last emitted event
-   *  (0 when every error is reported; >0 when rate-limited). */
-  droppedSinceLastReport: number;
 }
 
 /** Callback signature for subscriber-error observers. */
 export type SubscriberErrorObserver = (event: SubscriberErrorEvent) => void;
-
-/**
- * Default minimum interval (ms) between emitted subscriber-error events.
- * Errors that occur faster are counted but not reported until the window
- * elapses (token-bucket with capacity 1).
- */
-export const SUBSCRIBER_ERROR_RATE_LIMIT_MS = 1_000;
 
 // ---------------------------------------------------------------------------
 // Default socket path
@@ -244,8 +234,7 @@ export interface IpcBusOptions {
   /** Optional callback invoked when a malformed frame is received.
    *  Rate-limited to at most one call per {@link MALFORMED_FRAME_RATE_LIMIT_MS}. */
   onMalformedFrame?: MalformedFrameObserver;
-  /** Optional callback invoked when a subscriber handler throws.
-   *  Rate-limited to at most one call per {@link SUBSCRIBER_ERROR_RATE_LIMIT_MS}. */
+  /** Optional callback invoked when a subscriber handler throws. */
   onSubscriberError?: SubscriberErrorObserver;
 }
 
@@ -259,11 +248,6 @@ export class IpcBus implements MessageBus {
   private readonly requestDeadlineMs: number;
   private readonly onMalformedFrame: MalformedFrameObserver | undefined;
   private readonly onSubscriberError: SubscriberErrorObserver | undefined;
-
-  /** Timestamp (ms) of the last emitted subscriber-error event. */
-  private subscriberErrorLastEmitMs = 0;
-  /** Count of subscriber errors suppressed by rate-limiting since last emit. */
-  private subscriberErrorSuppressedCount = 0;
 
   // Local handler registries (same structure as LocalBus).
   private subscribers = new Map<string, Set<MessageHandler>>();
@@ -463,22 +447,14 @@ export class IpcBus implements MessageBus {
     }
   }
 
-  /** Emit a subscriber-error event, respecting the rate limit. */
+  /** Emit a structured subscriber-error event for each thrown handler. */
   private reportSubscriberError(channel: string, error: string): void {
     if (!this.onSubscriberError) return;
     const now = Date.now();
-    if (now - this.subscriberErrorLastEmitMs < SUBSCRIBER_ERROR_RATE_LIMIT_MS) {
-      this.subscriberErrorSuppressedCount++;
-      return;
-    }
-    this.subscriberErrorLastEmitMs = now;
-    const droppedSinceLastReport = this.subscriberErrorSuppressedCount;
-    this.subscriberErrorSuppressedCount = 0;
     this.onSubscriberError({
       timestamp: new Date(now).toISOString(),
       channel,
       error,
-      droppedSinceLastReport,
     });
   }
 
