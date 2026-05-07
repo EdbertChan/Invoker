@@ -141,6 +141,120 @@ export interface ExperimentResult {
   exitCode?: number;
 }
 
+// ── Normalized Cost / Usage Types ────────────────────────────
+//
+// Provider-agnostic cost and usage types. Every AI provider
+// (Anthropic, OpenAI, Codex, etc.) maps its native billing
+// event to these shapes. Formatters and queries consume only
+// these types — no provider-specific branching required.
+
+/** Token counts broken out by direction. */
+export interface TokenUsage {
+  /** Tokens consumed from the prompt/context. */
+  inputTokens: number;
+  /** Tokens generated in the completion. */
+  outputTokens: number;
+  /** Tokens read from cache (subset of inputTokens, 0 if unsupported). */
+  cacheReadTokens?: number;
+  /** Tokens written to cache during this request. */
+  cacheWriteTokens?: number;
+}
+
+/** Monetary cost in a single currency. */
+export interface CostBreakdown {
+  /** Input token cost in the smallest currency unit (e.g. USD cents). */
+  inputCost: number;
+  /** Output token cost in the smallest currency unit. */
+  outputCost: number;
+  /** Total cost (inputCost + outputCost + any surcharges). */
+  totalCost: number;
+  /** ISO 4217 currency code, defaults to 'USD'. */
+  currency?: string;
+}
+
+/** How a cost figure was determined. */
+export type CostConfidence = 'exact' | 'estimated' | 'unavailable';
+
+/** Context for estimated or unavailable costs. */
+export interface EstimationContext {
+  /** Method used to derive the estimate (e.g. 'rate_card', 'sampling'). */
+  method: string;
+  /** Human-readable reason when confidence !== 'exact'. */
+  reason?: string;
+  /** Timestamp (ISO 8601) when the rate card was last updated. */
+  rateCardUpdatedAt?: string;
+}
+
+/** Identity of the model that produced the usage. */
+export interface ModelMetadata {
+  /** Canonical model identifier (e.g. 'claude-sonnet-4-20250514'). */
+  modelId: string;
+  /** Provider name in lowercase (e.g. 'anthropic', 'openai'). */
+  provider: string;
+  /** Human-friendly model label (e.g. 'Claude Sonnet 4'). */
+  displayName?: string;
+}
+
+/** Links a cost record to the workflow/task/session that incurred it. */
+export interface CostAttribution {
+  /** Workflow that owns this cost. */
+  workflowId?: string;
+  /** Task (action) within the workflow. */
+  taskId?: string;
+  /** Attempt within the task. */
+  attemptId?: string;
+  /** Agent session that produced the usage. */
+  sessionId?: string;
+}
+
+/**
+ * A single normalized cost event. One API call (or one billing
+ * line-item) maps to exactly one NormalizedCostEvent.
+ *
+ * All fields except `id`, `timestamp`, `usage`, `model`, and
+ * `confidence` are optional so the type stays forward-compatible:
+ * new providers can populate only the fields they support.
+ */
+export interface NormalizedCostEvent {
+  /** Unique event identifier. */
+  id: string;
+  /** When the usage occurred (ISO 8601). */
+  timestamp: string;
+  /** Token usage metrics. */
+  usage: TokenUsage;
+  /** Model that produced the usage. */
+  model: ModelMetadata;
+  /** How confident we are in the cost figures. */
+  confidence: CostConfidence;
+  /** Monetary cost breakdown (absent when confidence is 'unavailable'). */
+  cost?: CostBreakdown;
+  /** Estimation details when confidence !== 'exact'. */
+  estimation?: EstimationContext;
+  /** Which workflow/task/session this cost belongs to. */
+  attribution?: CostAttribution;
+  /** Duration of the API call in milliseconds. */
+  durationMs?: number;
+}
+
+/**
+ * Aggregated cost summary across multiple events.
+ * Used by formatters to display roll-ups per task, workflow, or session.
+ */
+export interface CostSummary {
+  /** Sum of all token usage across events. */
+  totalUsage: TokenUsage;
+  /** Sum of all monetary costs across events. */
+  totalCost: CostBreakdown;
+  /** Number of events aggregated. */
+  eventCount: number;
+  /** Lowest confidence level observed in the aggregated events. */
+  worstConfidence: CostConfidence;
+  /** Distinct models observed. */
+  models: ModelMetadata[];
+  /** Time range of the aggregated events (ISO 8601). */
+  timeRange?: { start: string; end: string };
+}
+
 // ── Factory ─────────────────────────────────────────────────
 
 export function createWorkRequest(

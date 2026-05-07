@@ -6,6 +6,7 @@
 
 import type { TaskState, TaskStatus } from '@invoker/workflow-core';
 import type { TaskEvent, Workflow } from '@invoker/data-store';
+import type { NormalizedCostEvent, CostSummary } from '@invoker/contracts';
 
 // ── ANSI Color Codes ─────────────────────────────────────────
 
@@ -348,4 +349,100 @@ export function formatAsJson(data: unknown): string {
  */
 export function formatAsJsonl(items: unknown[]): string {
   return items.map(item => JSON.stringify(item)).join('\n');
+}
+
+// ── Cost Formatters ─────────────────────────────────────────
+//
+// These functions accept only NormalizedCostEvent / CostSummary.
+// No provider-specific branching — the normalization layer
+// already handled that before data reaches this point.
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+function formatCostValue(cents: number, currency = 'USD'): string {
+  const dollars = cents / 100;
+  return `$${dollars.toFixed(4)} ${currency}`;
+}
+
+const CONFIDENCE_LABELS: Record<string, string> = {
+  exact: `${GREEN}exact${RESET}`,
+  estimated: `${YELLOW}~est${RESET}`,
+  unavailable: `${DIM}n/a${RESET}`,
+};
+
+/**
+ * Format a single NormalizedCostEvent as a one-line summary.
+ *
+ * Example: "[2025-01-15T10:30:00Z] claude-sonnet-4 — 1.2k in / 0.8k out — $0.0120 USD [exact]"
+ */
+export function formatCostEvent(event: NormalizedCostEvent): string {
+  const ts = `${DIM}[${event.timestamp}]${RESET}`;
+  const model = `${BOLD}${event.model.displayName ?? event.model.modelId}${RESET}`;
+  const tokens = `${formatTokenCount(event.usage.inputTokens)} in / ${formatTokenCount(event.usage.outputTokens)} out`;
+  const cost = event.cost
+    ? formatCostValue(event.cost.totalCost, event.cost.currency)
+    : `${DIM}no cost${RESET}`;
+  const conf = CONFIDENCE_LABELS[event.confidence] ?? event.confidence;
+  return `${ts} ${model} — ${tokens} — ${cost} [${conf}]`;
+}
+
+/**
+ * Format a CostSummary as a multi-line block.
+ *
+ * Example:
+ * ```
+ * Cost summary (12 events)
+ *   Tokens     1.5M in / 0.3M out
+ *   Total      $1.2340 USD
+ *   Confidence exact
+ *   Models     claude-sonnet-4, gpt-4o
+ * ```
+ */
+export function formatCostSummary(summary: CostSummary): string {
+  const lines: string[] = [];
+
+  lines.push(`${BOLD}Cost summary${RESET} (${summary.eventCount} events)`);
+  const inp = formatTokenCount(summary.totalUsage.inputTokens);
+  const out = formatTokenCount(summary.totalUsage.outputTokens);
+  lines.push(`  Tokens     ${BOLD}${inp}${RESET} in / ${BOLD}${out}${RESET} out`);
+
+  if (summary.totalUsage.cacheReadTokens != null && summary.totalUsage.cacheReadTokens > 0) {
+    lines.push(`  Cache read ${formatTokenCount(summary.totalUsage.cacheReadTokens)}`);
+  }
+
+  const costStr = formatCostValue(summary.totalCost.totalCost, summary.totalCost.currency);
+  lines.push(`  Total      ${BOLD}${costStr}${RESET}`);
+  lines.push(`  Confidence ${CONFIDENCE_LABELS[summary.worstConfidence] ?? summary.worstConfidence}`);
+
+  const modelNames = summary.models
+    .map((m) => m.displayName ?? m.modelId)
+    .join(', ');
+  lines.push(`  Models     ${modelNames}`);
+
+  if (summary.timeRange) {
+    lines.push(`  Range      ${DIM}${summary.timeRange.start} — ${summary.timeRange.end}${RESET}`);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Serialize a NormalizedCostEvent to a plain JSON-safe object.
+ */
+export function serializeCostEvent(event: NormalizedCostEvent): Record<string, unknown> {
+  return {
+    id: event.id,
+    timestamp: event.timestamp,
+    usage: { ...event.usage },
+    model: { ...event.model },
+    confidence: event.confidence,
+    ...(event.cost != null && { cost: { ...event.cost } }),
+    ...(event.estimation != null && { estimation: { ...event.estimation } }),
+    ...(event.attribution != null && { attribution: { ...event.attribution } }),
+    ...(event.durationMs != null && { durationMs: event.durationMs }),
+  };
 }
