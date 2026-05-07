@@ -10,6 +10,14 @@ FAIL_FAST="${INVOKER_TEST_ALL_FAIL_FAST:-0}"
 RESUME="${INVOKER_TEST_ALL_RESUME:-0}"
 FORCE_RERUN="${INVOKER_TEST_ALL_FORCE_RERUN:-0}"
 JOBS="${INVOKER_TEST_ALL_JOBS:-1}"
+LANE_FILTER="${INVOKER_TEST_ALL_LANE:-}"
+
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+  esac
+done
 
 if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [ "$JOBS" -lt 1 ]; then
   echo "ERROR: INVOKER_TEST_ALL_JOBS must be a positive integer" >&2
@@ -24,9 +32,16 @@ if [ "$EXTENDED" = "1" ] && [ "$DANGEROUS" = "1" ]; then
   MODE_KEY="dangerous"
 fi
 
-STATE_FILE="${INVOKER_TEST_ALL_STATE_FILE:-$ROOT/.git/invoker-test-all-state.tsv}"
+GIT_DIR="$(cd "$ROOT" && git rev-parse --git-dir)"
+# Resolve to absolute path if relative
+case "$GIT_DIR" in
+  /*) ;;
+  *) GIT_DIR="$ROOT/$GIT_DIR" ;;
+esac
+
+STATE_FILE="${INVOKER_TEST_ALL_STATE_FILE:-$GIT_DIR/invoker-test-all-state.tsv}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
-LOG_ROOT="${ROOT}/.git/invoker-test-all-logs/${RUN_ID}"
+LOG_ROOT="${GIT_DIR}/invoker-test-all-logs/${RUN_ID}"
 mkdir -p "$(dirname "$STATE_FILE")" "$LOG_ROOT"
 touch "$STATE_FILE"
 
@@ -37,9 +52,58 @@ declare -A JOB_PREFLIGHT=()
 declare -A LOG_FILES=()
 declare -a SKIPPED_CHECKPOINT=()
 declare -a SKIPPED_UNAVAILABLE=()
+declare -a SKIPPED_LANE=()
 declare -a EXECUTED=()
 declare -a FAILED=()
 declare -a SUITES=()
+declare -A LANE_MAP=()
+declare -A OWNER_MAP=()
+
+LANE_REGISTRY="$ROOT/scripts/test-suites/lane-registry.yaml"
+
+load_lane_registry() {
+  local current_suite="" line key val
+  if [ ! -f "$LANE_REGISTRY" ]; then
+    echo "WARNING: lane registry not found at $LANE_REGISTRY" >&2
+    return 0
+  fi
+  while IFS= read -r line; do
+    # Skip comments and blank lines
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    # Suite key line: "  required/foo.sh:"
+    if [[ "$line" =~ ^[[:space:]]+(required|optional|dangerous)/[^:]+: && ! "$line" =~ "lane:" && ! "$line" =~ "owner:" ]]; then
+      current_suite="$(echo "$line" | sed 's/^[[:space:]]*//;s/:[[:space:]]*$//')"
+      continue
+    fi
+    # lane: value
+    if [[ "$line" =~ ^[[:space:]]+lane:[[:space:]]+(.*) ]]; then
+      [ -n "$current_suite" ] && LANE_MAP["$current_suite"]="${BASH_REMATCH[1]}"
+      continue
+    fi
+    # owner: value
+    if [[ "$line" =~ ^[[:space:]]+owner:[[:space:]]+(.*) ]]; then
+      val="${BASH_REMATCH[1]}"
+      # Strip surrounding quotes
+      val="${val%\"}"
+      val="${val#\"}"
+      [ -n "$current_suite" ] && OWNER_MAP["$current_suite"]="$val"
+      continue
+    fi
+  done < "$LANE_REGISTRY"
+}
+
+suite_lane() {
+  local relpath
+  relpath="$(suite_relpath "$1")"
+  printf '%s' "${LANE_MAP["$relpath"]:-unknown}"
+}
+
+suite_owner() {
+  local relpath
+  relpath="$(suite_relpath "$1")"
+  printf '%s' "${OWNER_MAP["$relpath"]:-unknown}"
+}
 
 load_state() {
   local line mode suite status
@@ -252,6 +316,15 @@ collect_suites() {
     esac
 
     while IFS= read -r suite; do
+      if [ -n "$LANE_FILTER" ]; then
+        local relpath lane
+        relpath="$(suite_relpath "$suite")"
+        lane="${LANE_MAP["$relpath"]:-}"
+        if [ "$lane" != "$LANE_FILTER" ]; then
+          SKIPPED_LANE+=( "$relpath" )
+          continue
+        fi
+      fi
       SUITES+=( "$suite" )
     done < <(find "$ROOT/scripts/test-suites/$dir" -maxdepth 1 -type f -name '*.sh' ! -name '_*' | LC_ALL=C sort)
   done
@@ -276,11 +349,13 @@ print_summary() {
   echo ""
   echo "======== Summary ========"
   echo "Mode: $MODE_KEY"
+  [ -n "$LANE_FILTER" ] && echo "Lane filter: $LANE_FILTER"
   echo "State file: $STATE_FILE"
   echo "Executed: ${#EXECUTED[@]}"
   echo "Failed: ${#FAILED[@]}"
   echo "Skipped by checkpoint: ${#SKIPPED_CHECKPOINT[@]}"
   echo "Skipped unavailable: ${#SKIPPED_UNAVAILABLE[@]}"
+  echo "Skipped by lane filter: ${#SKIPPED_LANE[@]}"
 
   if [ "${#SKIPPED_CHECKPOINT[@]}" -gt 0 ]; then
     echo ""
@@ -294,20 +369,44 @@ print_summary() {
     printf '  %s\n' "${SKIPPED_UNAVAILABLE[@]}"
   fi
 
+  if [ "${#EXECUTED[@]}" -gt 0 ]; then
+    echo ""
+    echo "Results by lane:"
+    local suite relpath lane owner status
+    for suite in "${EXECUTED[@]}"; do
+      relpath="$(suite_relpath "$suite")"
+      lane="$(suite_lane "$suite")"
+      owner="$(suite_owner "$suite")"
+      status="${STATE_MAP["$MODE_KEY|$suite"]:-unknown}"
+      printf '  %-50s lane=%-12s owner=%-20s %s\n' "$relpath" "$lane" "$owner" "$status"
+    done
+  fi
+
   if [ "${#FAILED[@]}" -gt 0 ]; then
     echo ""
     echo "Failures:"
-    local suite
+    local suite relpath lane owner
     for suite in "${FAILED[@]}"; do
-      printf '  %s\n' "$(suite_relpath "$suite")"
+      relpath="$(suite_relpath "$suite")"
+      lane="$(suite_lane "$suite")"
+      owner="$(suite_owner "$suite")"
+      printf '  %-50s lane=%-12s owner=%s\n' "$relpath" "$lane" "$owner"
     done
   fi
 }
 
+load_lane_registry
 load_state
 collect_suites
 
-echo "==> Running Invoker test suites (mode=$MODE_KEY, jobs=$JOBS, resume=$RESUME)"
+if [ "$DRY_RUN" = "1" ]; then
+  for suite in "${SUITES[@]}"; do
+    printf '  %s\n' "$(suite_relpath "$suite")"
+  done
+  exit 0
+fi
+
+echo "==> Running Invoker test suites (mode=$MODE_KEY, jobs=$JOBS, resume=$RESUME${LANE_FILTER:+, lane=$LANE_FILTER})"
 
 overall_failed=0
 for suite in "${SUITES[@]}"; do

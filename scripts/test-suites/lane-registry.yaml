@@ -1,0 +1,63 @@
+# Lane-based test ownership registry (INV-67)
+#
+# Each suite maps to exactly one lane (cross-cutting concern) and one owner
+# (the package accountable for failures). The orchestrator reads this file
+# to tag summary output and support lane-based filtering.
+#
+# Lanes: unit, policy, e2e-local, e2e-ssh, e2e-gui, e2e-docker, chaos, infra
+#
+# Usage:
+#   INVOKER_TEST_ALL_LANE=e2e-local pnpm run test:all   # run only e2e-local lane
+
+suites:
+  required/05-delete-all-prod-db-guard.sh:
+    lane: policy
+    owner: persistence
+  required/07-invalid-config-json.sh:
+    lane: policy
+    owner: core
+  required/10-vitest-workspace.sh:
+    lane: unit
+    owner: "*"
+  required/15-owner-boundary-policy.sh:
+    lane: policy
+    owner: app
+  required/15-submit-workflow-chain.sh:
+    lane: unit
+    owner: workflow-core
+  required/20-e2e-dry-run.sh:
+    lane: e2e-local
+    owner: execution-engine
+  required/21-e2e-dry-run-downstream.sh:
+    lane: e2e-local
+    owner: execution-engine
+  required/22-e2e-dry-run-github.sh:
+    lane: e2e-local
+    owner: execution-engine
+  required/50-verify-executor-routing.sh:
+    lane: e2e-local
+    owner: execution-engine
+  optional/30-e2e-ssh.sh:
+    lane: e2e-ssh
+    owner: transport
+  optional/31-e2e-ssh-merge.sh:
+    lane: e2e-ssh
+    owner: transport
+  optional/32-e2e-chaos.sh:
+    lane: chaos
+    owner: runtime-service
+  optional/33-e2e-chaos-overload.sh:
+    lane: chaos
+    owner: runtime-service
+  optional/40-playwright-app.sh:
+    lane: e2e-gui
+    owner: app
+  optional/60-worktree-provisioning.sh:
+    lane: infra
+    owner: shell
+  optional/70-ui-visual-proof-validate.sh:
+    lane: infra
+    owner: ui
+  dangerous/10-docker-comprehensive.sh:
+    lane: e2e-docker
+    owner: execution-engine

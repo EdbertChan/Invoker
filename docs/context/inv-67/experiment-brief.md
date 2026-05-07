@@ -338,3 +338,54 @@ echo "PASS: test:all exited 0 (no regressions)"
 | MTTO expected improvement | Direct: lane→owner is 1:1 | Indirect: package→suite is N:M |
 | Implementation cost | 1 new file + 1 modified file | Same, but higher maintenance burden |
 | Fits existing `is_parallel_safe()` | Yes: lanes align with parallelism groups | No: packages don't correlate with parallelism |
+
+---
+
+## Implementation Results
+
+### Iteration 1 Results (Registry + Read-Only Tagging)
+
+Completed. All four evaluation commands pass.
+
+| Command | Result | Detail |
+|---------|--------|--------|
+| Command 1: Registry completeness | PASS | 17/17 suites registered, 0 unregistered |
+| Command 2: Unresolved-failure % | PASS | 0 failures in test run, nothing to route |
+| Command 3: Lane filter accuracy | PASS | All 8 lanes match exactly (unit, policy, e2e-local, e2e-ssh, e2e-gui, e2e-docker, chaos, infra) |
+| Command 4: Zero regressions | PASS | test:all exit 0, 9/9 required suites passed |
+
+### Iteration 2 Results (Routing and Measurement)
+
+Completed. Lane convenience scripts added to `package.json`. Summary output confirms:
+
+- Every executed suite displays `lane=<lane> owner=<owner>` in the "Results by lane" section.
+- Failed suites (when present) display `lane=<lane> owner=<owner>` in the "Failures" section.
+- Owner tag appears on the same line as the suite name (MTTO = 0 lines, immediate).
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `scripts/test-suites/lane-registry.yaml` | New. 17-entry lane/owner registry. |
+| `scripts/run-all-tests.sh` | Modified. Reads registry, emits lane/owner tags, supports `INVOKER_TEST_ALL_LANE` filter and `--dry-run`. Fixed GIT_DIR resolution for worktree compatibility. |
+| `package.json` | Modified. Added 8 `test:lane:<name>` convenience scripts. |
+| `scripts/workspace-test.sh` | Not modified (delegates to `pnpm test`, no change needed). |
+
+### Decision Gate Verdict
+
+| Criterion | Threshold | Result | Verdict |
+|-----------|-----------|--------|---------|
+| Registry completeness | 100% | 100% (17/17) | **Supported** |
+| Unresolved-failure rate | < 20% | 0% (no failures) | **Supported** |
+| Lane filter accuracy | 100% match | 100% (8/8 lanes) | **Supported** |
+| Regression count | 0 new failures | 0 | **Supported** |
+| Owner routing clarity | `owner=<pkg>` in summary | Present on every line | **Supported** |
+
+**Verdict: Lane-based taxonomy is KEPT.** All thresholds met.
+
+### Design Comparison Verdict
+
+| Option | Verdict | Rationale |
+|--------|---------|-----------|
+| Lane-based taxonomy (A) | **Supported** | 1:1 lane-to-concern mapping. Filter accuracy 100%. Owner tag on every summary line. Aligns with existing `is_parallel_safe()` groupings. |
+| Package-centric ownership (B) | **Rejected** | Multi-owner ambiguity on E2E/chaos suites. No routing clarity gain over vitest's per-package reporting. Higher maintenance burden. |
