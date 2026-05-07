@@ -6,6 +6,7 @@
 
 import type { TaskState, TaskStatus } from '@invoker/workflow-core';
 import type { TaskEvent, Workflow } from '@invoker/data-store';
+import type { CostRollup } from '@invoker/contracts';
 
 // ── ANSI Color Codes ─────────────────────────────────────────
 
@@ -230,6 +231,34 @@ export function formatWorkflowStats(stats: {
     for (const t of stats.mostFailedTasks) {
       lines.push(`  ${RED}${t.failCount}x${RESET}  ${t.description}`);
     }
+  }
+
+  return lines.join('\n');
+}
+
+// ── Cost Summary ────────────────────────────────────────────
+
+/**
+ * Format a CostRollup as a human-readable summary.
+ * Accepts the normalized rollup type — no provider branching needed.
+ */
+export function formatCostSummary(rollup: CostRollup): string {
+  const lines: string[] = [];
+
+  lines.push(`${BOLD}Cost summary${RESET}`);
+  lines.push('');
+  lines.push(`  Events     ${BOLD}${rollup.eventCount}${RESET}`);
+  lines.push(`  Input      ${BOLD}${rollup.totalInputTokens.toLocaleString()}${RESET} tokens`);
+  lines.push(`  Output     ${BOLD}${rollup.totalOutputTokens.toLocaleString()}${RESET} tokens`);
+  lines.push(`  Cached     ${BOLD}${rollup.totalCachedTokens.toLocaleString()}${RESET} tokens`);
+  lines.push(`  Total      ${BOLD}${rollup.totalTokens.toLocaleString()}${RESET} tokens`);
+  lines.push(`  Est. cost  ${BOLD}$${rollup.totalEstimatedCostUsd.toFixed(4)}${RESET}`);
+
+  if (rollup.unknownConfidenceCount > 0) {
+    lines.push(`  ${YELLOW}${rollup.unknownConfidenceCount} event(s) with unknown confidence${RESET}`);
+  }
+  if (rollup.missingUsageCount > 0) {
+    lines.push(`  ${DIM}${rollup.missingUsageCount} event(s) with missing usage${RESET}`);
   }
 
   return lines.join('\n');
