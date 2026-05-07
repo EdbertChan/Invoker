@@ -141,6 +141,77 @@ export interface ExperimentResult {
   exitCode?: number;
 }
 
+// ── Normalized Cost/Usage Types ─────────────────────────────
+//
+// Provider-agnostic contract for cost and token-usage data.
+// Parsers for each provider (Claude, Codex, etc.) map raw events
+// into these shapes so consumers never branch on provider format.
+
+/** Event source provider. Extensible union — add new providers here. */
+export type CostSource = 'claude' | 'codex' | 'openai' | 'unknown';
+
+/** Confidence in the cost estimate. */
+export type CostConfidence = 'exact' | 'estimated' | 'unknown';
+
+/** Identity: which event, session, agent, and provider produced this record. */
+export interface CostIdentity {
+  eventId: string;
+  agentSessionId: string;
+  agentName: string;
+  source: CostSource;
+}
+
+/** Attribution: which workflow/task/attempt generated the cost. */
+export interface CostAttribution {
+  workflowId: string;
+  taskId: string;
+  attemptId: string;
+  executorType: string;
+}
+
+/** Usage: token counts from the model invocation. */
+export interface CostUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  totalTokens: number;
+}
+
+/** Pricing/meta: model identification, pricing version, and estimated cost. */
+export interface CostPricing {
+  model: string;
+  pricingVersion: string;
+  estimatedCostUsd: number;
+  confidence: CostConfidence;
+}
+
+/**
+ * A single normalized cost event combining identity, attribution, usage,
+ * and pricing. Every provider parser must produce this shape.
+ */
+export interface NormalizedCostEvent {
+  identity: CostIdentity;
+  attribution: CostAttribution;
+  usage: CostUsage;
+  pricing: CostPricing;
+  /** ISO 8601 timestamp of when the event occurred. */
+  timestamp: string;
+}
+
+/** Rollup totals aggregated across multiple cost events. */
+export interface CostRollup {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCachedTokens: number;
+  totalTokens: number;
+  totalEstimatedCostUsd: number;
+  eventCount: number;
+  /** Number of events where confidence was 'unknown'. */
+  unknownConfidenceCount: number;
+  /** Number of events where usage fields were missing/zero. */
+  missingUsageCount: number;
+}
+
 // ── Factory ─────────────────────────────────────────────────
 
 export function createWorkRequest(
