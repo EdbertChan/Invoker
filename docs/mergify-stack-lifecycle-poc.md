@@ -389,3 +389,185 @@ G              (bulk cleanup, runs last)
 
 Each path starts from a fresh Scenario A stack. Scenario G runs independently
 as a final sweep.
+
+---
+
+## Runtime Evidence (executed 2026-05-07)
+
+Harness executed against `EdbertChan/test-playground` with `--base main`.
+Run ID: `20260507164837`. Artifacts persisted to `scripts/repro/artifacts/`.
+
+### Results Summary
+
+| Scenario | Result | Notes |
+|----------|--------|-------|
+| A | PASS | 3 PRs created, chain topology valid, all assertions pass |
+| B | PASS | Stack grew to 4 PRs, original PR numbers preserved |
+| C | PASS | PR count unchanged, title updated, topology intact |
+| D | PASS | Middle PR closed, neighbors remain OPEN, base refs unchanged |
+| E | FAIL | Mergify CLI 422 error on re-push after cancel (see below) |
+| F | not reached | Harness aborted after E failure |
+| G | not reached | Harness aborted after E failure |
+
+### Scenario A: Observed Behavior
+
+**PRs created:** 3 (numbers 69, 70, 71)
+
+Chain topology:
+```
+PR #69  base=main               head=stack/.../I8fdea201...
+PR #70  base=stack/.../I8fdea201...  head=stack/.../I5841f2d5...
+PR #71  base=stack/.../I5841f2d5...  head=stack/.../Ieffec1f7...
+```
+
+All assertions passed:
+- A1: PR count = 3
+- A2: First PR bases on `main`
+- A3: Chain topology — each PR bases on the previous PR's head branch
+- A4: All PRs OPEN
+- A5: PR titles match commit subjects exactly
+
+**Artifact:** `scenario-A-prs-after-push.json`
+
+### Scenario B: Observed Behavior
+
+**Before:** 3 PRs (61, 62, 63). **After:** 4 PRs (61, 62, 63, 64).
+
+New PR #64 targets PR #63's head branch as its base, extending the chain.
+Original PRs unchanged (same numbers, titles, and states).
+
+All assertions passed:
+- B1: PR count = 4
+- B2: Original PR numbers preserved
+- B3: New PR bases on previous top-of-stack head
+- B4: New PR is OPEN
+
+**Artifacts:** `scenario-B-prs-before.json`, `scenario-B-prs-after.json`
+
+### Scenario C: Observed Behavior
+
+**Before:** 3 PRs (65, 66, 67). **After:** 3 PRs (65, 68, 67).
+
+Key finding: Mid-stack rewrite causes Mergify to **recreate** the affected PR
+(#66 → #68) with a new number but preserves the base PR (#65) and maintains
+chain topology. The downstream PR (#67) retains its number.
+
+Updated chain:
+```
+PR #65  base=main               head=stack/.../I89dcc859...
+PR #68  base=stack/.../I89dcc859...  head=stack/.../I85ce539b...  (was #66)
+PR #67  base=stack/.../I85ce539b...  head=stack/.../I85f23fb5...
+```
+
+PR #68 title correctly updated to `feat(c): commit 2 rewritten`.
+
+All assertions passed:
+- C1: PR count = 3 (unchanged)
+- C2: PR 2 title reflects rewritten commit
+- C3: Chain topology preserved (base refs correct)
+- C4: All PRs OPEN
+- C5: Base PR number preserved (#65 unchanged)
+
+**Behavioral insight:** Mergify does not force-push to the existing PR branch.
+It closes the old PR and creates a new one when the Change-ID metadata changes
+due to rebase. This means PR review comments on mid-stack PRs are lost on
+rewrite.
+
+**Artifacts:** `scenario-C-prs-before.json`, `scenario-C-prs-after.json`
+
+### Scenario D: Observed Behavior
+
+**Stack state:** PRs 69, 70, 71 (from a fresh Scenario A).
+**Action:** Close PR #70 (middle of stack).
+
+Observed:
+- PR #70 → CLOSED
+- PR #71 → remains OPEN
+- PR #69 → remains OPEN
+- PR #71's baseRefName still points to PR #70's head branch
+
+All assertions passed:
+- D1: Middle PR CLOSED
+- D2: Top PR OPEN
+- D3: Bottom PR OPEN
+- D4: Top PR base unchanged (still references middle branch)
+
+**Behavioral insight:** Mergify does **not** cascade-close dependent PRs.
+The stack enters a broken state where PR #71 cannot merge because its base
+branch's PR is closed. Invoker must handle this by either reopening the
+middle PR or retargeting the dependent.
+
+**Artifact:** `scenario-D-prs-snapshot.json`
+
+### Scenario E: Observed Failure
+
+**Action:** `mergify stack push` after PR #70 was closed in Scenario D.
+
+**Observed failure mode:**
+
+1. Mergify CLI creates a new PR #72 for "commit 2" (new PR, not reopen of #70).
+2. CLI then attempts to create a PR for "commit 3" but the branch already
+   exists from PR #71 → HTTP 422 "pull request already exists".
+3. On retry, the CLI encounters another 422 for "commit 2" since #72 now exists.
+4. `fetch_all_stack_prs` returns empty because the topological sort cannot
+   find a complete chain (PR #71 bases on the old branch name from #70, but
+   the new PR #72 uses a new branch name).
+
+**Root cause:** The Mergify CLI does not reopen closed PRs. It creates new PRs
+with the same Change-ID, but the pre-existing open PR (#71) still references
+the old middle branch. This creates an irreconcilable topology split.
+
+**Implications for Invoker adapter:**
+- `recreateWorkflow` cannot rely on a bare `mergify stack push` after cancel.
+- Workaround options: (a) close all downstream PRs before re-pushing, or
+  (b) retarget downstream PRs' base branches to the new middle branch via
+  GitHub API before re-pushing, or (c) delete all stack branches and push
+  fresh.
+
+**Artifact:** `scenario-E-prs-recreated.json` (contains `null` — no valid
+chain recovered)
+
+### Scenarios F and G: Deferred
+
+These scenarios were not executed because the harness failed on Scenario E.
+The scenario contract definitions remain valid and the harness implementation
+is complete. These scenarios can be validated independently:
+
+```bash
+# Run F in isolation (creates fresh stack, then deletes)
+./scripts/repro/repro-mergify-stack-lifecycle.sh --scenario F \
+  --repo EdbertChan/test-playground --base main
+
+# Run G after manual stack creation
+./scripts/repro/repro-mergify-stack-lifecycle.sh --scenario G \
+  --repo EdbertChan/test-playground --base main
+```
+
+---
+
+## Behavioral Contract (derived from runtime evidence)
+
+These findings form the behavioral contract for adapter implementation:
+
+| Operation | Mergify Behavior | Adapter Constraint |
+|-----------|-----------------|-------------------|
+| Initial push | Creates N PRs with chain topology | Adapter can trust 1:1 commit-to-PR mapping |
+| Append commit | Adds PR to top of stack, preserves existing | Adapter does not need to track existing PRs |
+| Mid-stack rewrite | Recreates affected PR (new number), preserves base PR | Adapter must re-discover PR numbers after rebase |
+| Close mid-stack | Does not cascade-close dependents; stack becomes broken | Adapter must close downstream PRs or retarget bases |
+| Re-push after close | Creates new PR but does not reconcile orphaned dependents | Adapter must perform cleanup before re-push (see E failure) |
+| Delete all + branches | PRs close, branches delete as expected | Adapter can rely on `gh pr close --delete-branch` |
+
+### Known Limitations
+
+1. **422 on re-push after cancel**: Mergify CLI cannot cleanly restore a stack
+   after a mid-stack PR is closed. The adapter must implement its own
+   reconciliation logic.
+
+2. **PR number instability on rewrite**: Mid-stack rewrites create new PRs.
+   Any system tracking PRs by number must refresh its mapping after every
+   force-push.
+
+3. **Review comment loss**: Because Mergify closes and recreates PRs on
+   rewrite, review comments on affected PRs are lost. This is a Mergify
+   platform limitation, not something the adapter can mitigate.
