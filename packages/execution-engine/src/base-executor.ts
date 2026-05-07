@@ -6,6 +6,7 @@ import { bashPreserveOrReset, bashMergeUpstreams, parsePreserveResult, parseMerg
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { checkStaleness } from './git-staleness-detector.js';
+import { execGit } from './git-ops.js';
 
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -363,26 +364,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
   }
 
   protected execGitSimple(args: string[], cwd: string): Promise<string> {
-    const stack = new Error().stack;
-    const callerFrames = stack?.split('\n').slice(1, 5).map(l => l.trim()).join('\n    ') ?? '(no stack)';
-    traceExecution(`[git-trace] git ${args.join(' ')}  cwd=${cwd}\n    ${callerFrames}`);
-    return new Promise((resolve, reject) => {
-      const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolve(stdout.trim());
-        else {
-          const details = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n');
-          reject(new Error(`git ${args.join(' ')} failed (code ${code}): ${details}`));
-        }
-      });
-    });
+    return execGit(args, cwd);
   }
 
   protected async buildUpstreamMergeMessage(branch: string, cwd: string): Promise<string> {

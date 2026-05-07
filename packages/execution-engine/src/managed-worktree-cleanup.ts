@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
 import { canonicalPathForComparison } from './worktree-discovery.js';
+import { execGitVoid } from './git-ops.js';
 
 export interface CleanupManagedWorktreesResult {
   removed: string[];
@@ -9,18 +9,7 @@ export interface CleanupManagedWorktreesResult {
 }
 
 function execGit(args: string[], cwd: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stderr = '';
-    child.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    child.on('error', (err) => reject(err));
-    child.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`git ${args.join(' ')} failed (${code}): ${stderr.trim()}`));
-    });
-  });
+  return execGitVoid(args, cwd);
 }
 
 /**

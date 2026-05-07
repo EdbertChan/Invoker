@@ -10,6 +10,7 @@ import { mkdirSync, readdirSync, copyFileSync, rmSync, mkdtempSync } from 'node:
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
+import { execGit, logOne, diffStat } from './git-ops.js';
 
 import { scopePlanTaskId } from '@invoker/workflow-core';
 import type { Orchestrator, TaskState, ExperimentVariant, ExecutorType } from '@invoker/workflow-core';
@@ -1074,47 +1075,11 @@ export class TaskRunner {
    * @internal Read-only git queries only. For mutations, use execGitIn.
    */
   execGitReadonly(args: string[], cwd?: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', args, {
-        cwd: cwd ?? this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(
-          `git ${args.join(' ')} failed (code ${code}): ${stderr.trim()}${stdout.trim() ? '\n' + stdout.trim() : ''}`
-        ));
-      });
-    });
+    return execGit(args, cwd ?? this.cwd);
   }
 
   /** @internal */ execGitIn(args: string[], dir: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', args, {
-        cwd: dir,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(
-          `git ${args.join(' ')} failed (code ${code}): ${stderr.trim()}${stdout.trim() ? '\n' + stdout.trim() : ''}`
-        ));
-      });
-    });
+    return execGit(args, dir);
   }
 
   /** @internal */ async createMergeWorktree(ref: string, label: string, repoUrl?: string): Promise<string> {
@@ -1856,39 +1821,11 @@ export class TaskRunner {
   }
 
   /** @internal */ gitLogMessage(commitHash: string, cwd?: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', ['log', '-1', '--format=%B', commitHash], {
-        cwd: cwd ?? this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(`git log failed (code ${code})`));
-      });
-    });
+    return logOne(commitHash, cwd ?? this.cwd);
   }
 
   /** @internal */ gitDiffStat(branch: string, cwd?: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const baseBranch = this.defaultBranch ?? 'master';
-      const child = spawn('git', ['diff', '--stat', '--stat-count=20', `${baseBranch}...${branch}`], {
-        cwd: cwd ?? this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(`git diff --stat failed (code ${code})`));
-      });
-    });
+    const baseBranch = this.defaultBranch ?? 'master';
+    return diffStat(`${baseBranch}...${branch}`, cwd ?? this.cwd, ['--stat-count=20']);
   }
 }

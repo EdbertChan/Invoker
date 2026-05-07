@@ -1,8 +1,8 @@
-import { spawn } from 'node:child_process';
 import { mkdirSync, existsSync, rmSync } from 'node:fs';
 import { normalize } from 'node:path';
 import { bashPreserveOrReset, runBashLocal } from './branch-utils.js';
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
+import { execGit as execGitOps } from './git-ops.js';
 import { planManagedWorktree } from './managed-worktree-controller.js';
 import {
   abbrevRefMatchesBranch,
@@ -536,19 +536,6 @@ export class RepoPool {
   }
 
   private execGit(args: string[], cwd: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolve(stdout.trim());
-        else reject(new Error(`git ${args.join(' ')} failed (code ${code}): ${stderr.trim()}`));
-      });
-    });
+    return execGitOps(args, cwd);
   }
 }
