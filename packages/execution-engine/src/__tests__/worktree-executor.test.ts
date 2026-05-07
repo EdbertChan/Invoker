@@ -183,6 +183,8 @@ describe('WorktreeExecutor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: fake worktree paths exist (they don't on disk, so mock existsSync).
+    vi.mocked(existsSync).mockReturnValue(true);
     executor = new WorktreeExecutor({
       cacheDir: '/fake/cache',
       worktreeBaseDir: '/fake/worktrees',
@@ -693,6 +695,52 @@ describe('WorktreeExecutor', () => {
     expect(err.branch).toBe(branch);
     expect(softRelease).toHaveBeenCalledTimes(1);
     expect(release).not.toHaveBeenCalled();
+  });
+
+  it('provisionWorktree rejects immediately when directory does not exist', async () => {
+    setupSpawnMock();
+
+    const release = vi.fn().mockResolvedValue(undefined);
+    const softRelease = vi.fn();
+    const branch = 'experiment/action-1-abc12345';
+    const worktreePath = '/nonexistent/worktree/path';
+    const pool = {
+      ensureClone: vi.fn().mockResolvedValue('/fake/cache/clone'),
+      reconcileActiveWorktrees: vi.fn(),
+      acquireWorktree: vi.fn().mockResolvedValue({
+        clonePath: '/fake/cache/clone',
+        worktreePath,
+        branch,
+        release,
+        softRelease,
+      }),
+      destroyAll: vi.fn().mockResolvedValue(undefined),
+      getClonePath: vi.fn().mockReturnValue('/fake/cache/clone'),
+    };
+    (executor as any).pool = pool;
+
+    // Let existsSync return false for the nonexistent worktree path
+    vi.mocked(existsSync).mockImplementation((p) => {
+      if (String(p) === worktreePath) return false;
+      return true;
+    });
+
+    const err = await executor.start(makeRequest()).catch((e: unknown) => e) as Error & { workspacePath?: string };
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain('directory does not exist at spawn time');
+    expect(err.workspacePath).toBe(worktreePath);
+    expect(softRelease).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+
+    // No bash spawn should have occurred for provisioning
+    const bashCalls = mockedSpawn.mock.calls.filter(
+      (call) => call[0] === '/bin/bash',
+    );
+    expect(bashCalls).toHaveLength(0);
+
+    // Restore default mock behavior for other tests
+    vi.mocked(existsSync).mockReturnValue(true);
   });
 
   it('reconciles pool slots from live executor entries before acquiring a new worktree', async () => {

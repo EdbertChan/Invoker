@@ -93,6 +93,12 @@ export function composeRuntimeServices(
  * Owner/delegation behavior is unaffected — this function only
  * composes the runtime-domain ports; orchestration and task dispatch
  * remain the caller's responsibility.
+ *
+ * INV-74 boundary: the headless startup pipeline (executor creation,
+ * auto-fix wiring, approve-hook) is now in `packages/app/src/headless-startup.ts`.
+ * This composition function provides the runtime-domain layer that the
+ * startup pipeline consumes. See headless-startup.ts for the application-layer
+ * counterpart.
  */
 export function composeHeadlessStartup(
   deps: RuntimeServiceDeps,

@@ -326,6 +326,25 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     handle.workspacePath = acquired.worktreePath;
     handle.branch = acquired.branch;
 
+    // Guard: verify the worktree directory exists before attempting provisioning.
+    // A missing directory causes pnpm/corepack to crash with uv_cwd ENOENT,
+    // producing confusing errors. Fail fast with a clear message instead.
+    if (!existsSync(acquired.worktreePath)) {
+      entry.process = null;
+      entry.phase = 'completed';
+      entry.completed = true;
+      this.softReleasePoolSlot(entry);
+      this.entries.delete(executionId);
+      const startupErr = new Error(
+        `Worktree provisioning failed in ${acquired.worktreePath} (exit 1): ` +
+        `directory does not exist at spawn time — the worktree may have been ` +
+        `deleted by a concurrent operation after pool acquisition`,
+      );
+      (startupErr as Error & { workspacePath?: string; branch?: string }).workspacePath = acquired.worktreePath;
+      (startupErr as Error & { workspacePath?: string; branch?: string }).branch = acquired.branch;
+      throw startupErr;
+    }
+
     const provisioning = this.provisionWorktree(acquired.worktreePath, executionId);
     entry.process = provisioning.child;
     try {

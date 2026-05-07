@@ -3,12 +3,18 @@
  * Kept in one place so WorktreeExecutor, SshExecutor, and docs stay aligned.
  */
 export const DEFAULT_WORKTREE_PROVISION_COMMAND =
-  'if [ ! -f package.json ] && [ ! -f pnpm-workspace.yaml ]; then \
+  'PROVISION_DIR="$(pwd)"; \
+  if [ ! -f package.json ] && [ ! -f pnpm-workspace.yaml ]; then \
     echo "[provision] No package.json/pnpm-workspace.yaml found; skipping pnpm install"; \
     exit 0; \
   fi; \
   if ! NODE_ENV=development pnpm install --frozen-lockfile; then \
     echo "[provision] frozen-lockfile install failed; refreshing lockfile and retrying"; \
+    if [ ! -d "$PROVISION_DIR" ]; then \
+      echo "[provision] FATAL: working directory $PROVISION_DIR no longer exists; cannot retry" >&2; \
+      exit 1; \
+    fi; \
+    cd "$PROVISION_DIR"; \
     NODE_ENV=development pnpm install --lockfile-only; \
     NODE_ENV=development pnpm install --frozen-lockfile; \
   fi && ( \

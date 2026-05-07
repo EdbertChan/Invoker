@@ -16,6 +16,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 // Must import after mock setup
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { WorktreeExecutor } from '../worktree-executor.js';
 import { BaseExecutor } from '../base-executor.js';
 
@@ -142,6 +143,8 @@ describe('BUG REPRO: worktree lifecycle leaks', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: fake worktree paths exist (they don't on disk, so mock existsSync).
+    vi.mocked(existsSync).mockReturnValue(true);
     executor = new WorktreeExecutor({
       cacheDir: '/fake/cache',
       worktreeBaseDir: '/fake/worktrees',
