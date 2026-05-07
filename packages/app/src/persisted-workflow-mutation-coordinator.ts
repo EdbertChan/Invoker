@@ -306,7 +306,7 @@ export class PersistedWorkflowMutationCoordinator {
     ) {
       return 'recreate';
     }
-    if (channel === 'invoker:delete-workflow' || channel === 'invoker:delete-all-workflows') {
+    if (channel === 'invoker:delete-workflow' || channel === 'invoker:delete-all-workflows' || channel === 'invoker:delete-all-workflows-bulk') {
       return 'delete';
     }
     if (channel !== 'headless.exec') {
@@ -331,6 +331,7 @@ export class PersistedWorkflowMutationCoordinator {
       || intent.channel === 'invoker:recreate-with-rebase'
       || intent.channel === 'invoker:delete-workflow'
       || intent.channel === 'invoker:delete-all-workflows'
+      || intent.channel === 'invoker:delete-all-workflows-bulk'
     ) {
       return true;
     }
