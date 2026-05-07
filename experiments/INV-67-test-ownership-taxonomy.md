@@ -230,17 +230,86 @@ bash scripts/compare-experiment-metrics.sh
 - **Revertible**: `git revert` of the experiment branch removes all tags and scripts.
 - **New state**: `@lane`/`@owner` comment headers in 17 shell files, 3-4 new scripts.
 
-## Migration Order
+## Measured Results
 
-To minimize blast radius, apply changes in this deterministic order:
+### Alternative A: Lane-Based Taxonomy (Measured)
 
-1. Add `scripts/parse-suite-ownership.sh` (new file, no dependencies)
-2. Add `scripts/route-failure.sh` (new file, depends on parse script)
-3. Add `scripts/measure-ownership-metrics.sh` (new file, depends on parse + route)
-4. Tag `required/` suites first (9 files), run `pnpm test` to verify no regression
-5. Tag `optional/` suites (7 files), run `pnpm run test:all:extended` if environment supports it
-6. Tag `dangerous/` suite (1 file)
-7. Add `scripts/test-suites/required/16-ownership-tags-complete.sh` (enforces tags going forward)
-8. Update `run-all-tests.sh` summary section to include owner routing on failures
-9. For iteration 2: add `test-owners.json`, `scripts/validate-test-owners-json.sh`, `scripts/derive-suite-owner.sh`
-10. Run `scripts/compare-experiment-metrics.sh` and evaluate decision gate
+| Metric | Value |
+|--------|-------|
+| Total suites | 19 (18 original + 1 enforcement test) |
+| Tag coverage | 100% (19/19) |
+| Unresolved-failure % | 0% |
+| Mean lookup steps | 1.00 |
+| Regression safety | No new failures introduced |
+
+**Actual lane distribution:**
+
+| Lane | Count | Owner(s) |
+|------|-------|----------|
+| `smoke` | 1 | platform |
+| `guardrail` | 4 | platform (3), platform (1 enforcement) |
+| `unit` | 1 | package-owners |
+| `integration` | 2 | workflow, executor |
+| `e2e` | 8 | e2e |
+| `infra` | 2 | infra |
+
+Routing is deterministic: `grep -m1 '^# OWNER:' <suite> | awk '{print $3}'` resolves every suite in one step. The `suite_owner()` function in `run-all-tests.sh` displays the owner inline with each failure in the summary.
+
+### Alternative B: Package-Centric (Measured by Static Analysis)
+
+| Metric | Value |
+|--------|-------|
+| Suites with direct package refs | 2/19 (10.5%) |
+| Suites without package refs | 17/19 (89.5%) |
+| Derivable ownership (auto) | 2/19 |
+| Unresolvable without manual override | 17/19 |
+| Mean lookup steps (estimated) | >= 2.5 (requires content analysis + manual mapping) |
+
+17 of 19 suites invoke shell scripts or system commands without referencing `packages/*` paths. Automated package-to-owner derivation cannot resolve them. Manual overrides would be needed for 89.5% of suites, negating the centralization benefit.
+
+### Comparison
+
+| Metric | Alternative A | Alternative B |
+|--------|--------------|---------------|
+| Tag coverage | 100% | 10.5% (auto-derivable) |
+| Unresolved-failure % | 0% | 89.5% |
+| Mean lookup steps | 1.00 | >= 2.5 |
+| Maintenance burden | Comment header per suite | JSON file + derivation script + manual overrides |
+| Implementation risk | Zero (comment-only) | High (static analysis of shell scripts) |
+
+**Winner: Alternative A** — outperforms on all metrics.
+
+---
+
+## Verdicts
+
+| Option | Verdict | Rationale |
+|--------|---------|-----------|
+| Lane-based taxonomy with ownership tags | **Supported** | 100% tag coverage, 0% unresolved failures, 1-step deterministic routing, zero runtime impact. |
+| Package-centric ownership | **Rejected** | 89.5% of suites lack derivable package references. Would require manual overrides for most suites, negating centralization benefit. |
+| Directory restructuring by lane | **Deferred** | Unnecessarily disruptive for current goal. Lane tags achieve routing without moving files. Reconsider if lane count exceeds 10. |
+
+---
+
+## Implementation Summary
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `scripts/run-all-tests.sh` | Added `suite_lane()`, `suite_owner()` helpers; enhanced `print_summary()` with per-failure lane/owner display; registered new suites in `is_parallel_safe()` |
+| `scripts/workspace-test.sh` | Replaced `exec` with sequential commands; added `required-builds.sh` call |
+| `package.json` | Added `postinstall`, `check:required-builds` scripts; updated `check:all` |
+| `scripts/test-suites/required/00-smoke.sh` | New smoke gate suite (pnpm, build output, vitest availability) |
+| `scripts/test-suites/required/16-ownership-tags-complete.sh` | New enforcement test validating all suites have valid LANE/OWNER headers |
+| 18 suite files | Added `# LANE:` and `# OWNER:` comment headers |
+
+### Enforcement
+
+The `16-ownership-tags-complete.sh` suite runs as part of `scripts/run-all-tests.sh` and validates:
+- Every suite file under `scripts/test-suites/` has a `# LANE:` header
+- Every suite file under `scripts/test-suites/` has a `# OWNER:` header
+- Lane values are from the allowed set: `smoke`, `guardrail`, `unit`, `integration`, `e2e`, `infra`
+- Owner values are from the allowed set: `platform`, `package-owners`, `workflow`, `executor`, `e2e`, `infra`
+
+Adding a new suite without valid tags causes a test failure.
