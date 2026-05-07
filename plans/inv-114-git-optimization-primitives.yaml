@@ -1,0 +1,259 @@
+name: "INV-114: Git optimization primitives — thin wrapper module"
+description: |
+  Establish reusable git invocation primitives to reduce repeated git overhead
+  in worktree and merge operations.
+
+  Problem: The execution-engine package contains 3 independent git-spawning
+  implementations with duplicated process lifecycle, error handling, and
+  output capture:
+    1. BaseExecutor.execGitSimple()  — base-executor.ts:365-386
+    2. RepoPool.execGit()            — repo-pool.ts:538-553
+    3. runBashLocal()                 — branch-utils.ts:335-362
+  Each spawns child processes identically but differs in trace logging, error
+  shape, and cwd binding. Callers bridge between them via ad-hoc closures
+  (worktree-executor.ts:137) and inconsistent type aliases (plan-base-remote.ts
+  GitExec vs git-staleness-detector.ts 2-arg signature).
+
+  Chosen design: Thin git wrapper module (not a stateful repo runtime service).
+  Why: Lower blast radius, incremental adoption, no new runtime state.
+
+  Decision gate: Escalate if wrapper misses performance or reliability targets
+  defined below.
+
+onFinish: pull_request
+mergeMode: external_review
+baseBranch: master
+repoUrl: git@github.com:example-org/acme-repo.git
+executorType: worktree
+
+tasks:
+  # ── Phase 1: Audit and baseline ──────────────────────────────────────────
+
+  - id: audit-git-call-sites
+    description: "Count and catalog all git spawn sites and type aliases in execution-engine"
+    command: |
+      cd packages/execution-engine && \
+      echo "=== execGitSimple call sites ===" && \
+      grep -rn 'execGitSimple\|this\.execGitSimple' src/ --include='*.ts' | grep -v '__tests__' | wc -l && \
+      echo "=== RepoPool.execGit call sites ===" && \
+      grep -rn 'this\.execGit\b' src/repo-pool.ts | wc -l && \
+      echo "=== runBashLocal call sites ===" && \
+      grep -rn 'runBashLocal' src/ --include='*.ts' | grep -v '__tests__' | wc -l && \
+      echo "=== GitExec type aliases ===" && \
+      grep -rn 'GitExec\|type.*Git.*Exec\|execGit.*=>.*Promise<string>' src/ --include='*.ts' | grep -v '__tests__' | wc -l && \
+      echo "=== spawn.*git direct calls ===" && \
+      grep -rn "spawn('git'" src/ --include='*.ts' | grep -v '__tests__' | wc -l && \
+      echo "AUDIT_COMPLETE"
+    dependencies: []
+
+  - id: baseline-test-suite
+    description: "Run execution-engine test suite to establish green baseline"
+    command: "cd packages/execution-engine && pnpm test"
+    dependencies: []
+
+  # ── Phase 2: Implement thin wrapper ──────────────────────────────────────
+
+  - id: implement-git-runner-module
+    description: "Create git-runner.ts with unified GitRunner interface and local implementation"
+    prompt: |
+      Create a thin git wrapper module at
+      `packages/execution-engine/src/git-runner.ts`.
+
+      Requirements:
+      1. Export a `GitRunner` interface:
+         ```ts
+         export interface GitRunner {
+           exec(args: string[], cwd: string): Promise<string>;
+         }
+         ```
+      2. Export a `LocalGitRunner` class implementing `GitRunner` that:
+         - Spawns `git` via `child_process.spawn` with stdio: ['ignore', 'pipe', 'pipe']
+         - Collects stdout/stderr as strings
+         - Resolves with trimmed stdout on exit code 0
+         - Rejects with an error that includes: args, cwd, exit code, stderr, stdout
+         - Accepts an optional `trace` callback `(msg: string) => void` in the constructor
+         - Calls `trace` before each invocation with the command and cwd
+      3. Export a convenience factory:
+         ```ts
+         export function createLocalGitRunner(trace?: (msg: string) => void): GitRunner;
+         ```
+      4. Export a `bindCwd` helper that returns a 1-arg function for compatibility
+         with the existing `GitExec` type in plan-base-remote.ts:
+         ```ts
+         export function bindCwd(runner: GitRunner, cwd: string): (args: string[]) => Promise<string>;
+         ```
+      5. Do NOT change any existing files in this task. Only create git-runner.ts.
+
+      Acceptance criteria:
+      - File exists at packages/execution-engine/src/git-runner.ts
+      - Exports GitRunner, LocalGitRunner, createLocalGitRunner, bindCwd
+      - No imports of base-executor, repo-pool, or branch-utils (zero coupling)
+    dependencies:
+      - audit-git-call-sites
+      - baseline-test-suite
+
+  - id: add-git-runner-tests
+    description: "Add unit tests for git-runner module using real git in a sandbox repo"
+    prompt: |
+      Create test file at
+      `packages/execution-engine/src/__tests__/git-runner.test.ts`.
+
+      Requirements:
+      1. Use `mkdtempSync` + `git init` sandbox pattern (same as auto-commit.test.ts).
+      2. Test cases:
+         a. `exec` resolves with stdout on `git rev-parse --git-dir`
+         b. `exec` rejects on invalid git command with exit code, stderr, and args in error
+         c. `exec` rejects when cwd does not exist
+         d. `bindCwd` returns a 1-arg function that delegates to runner.exec with bound cwd
+         e. trace callback is called before each invocation with args and cwd
+         f. concurrent calls to same runner do not interfere
+      3. Use `afterAll` to clean up temp directories.
+      4. Do NOT mock `child_process.spawn` — use real git.
+
+      Acceptance criteria:
+      - `cd packages/execution-engine && pnpm test -- --testPathPattern git-runner` passes
+      - All 6 test cases pass
+    dependencies:
+      - implement-git-runner-module
+
+  # ── Phase 3: Migrate RepoPool ───────────────────────────────────────────
+
+  - id: migrate-repo-pool-to-git-runner
+    description: "Replace RepoPool.execGit with injected GitRunner"
+    prompt: |
+      Migrate `packages/execution-engine/src/repo-pool.ts` to use `GitRunner`
+      from `git-runner.ts` instead of its private `execGit` method.
+
+      Requirements:
+      1. Add `gitRunner?: GitRunner` to `RepoPoolConfig`.
+      2. In the constructor, default to `createLocalGitRunner()` if not provided.
+      3. Replace every `this.execGit(args, cwd)` call with `this.runner.exec(args, cwd)`.
+      4. Delete the private `execGit` method entirely.
+      5. Do NOT change the public API of RepoPool (constructor config is additive).
+      6. Do NOT change any behavior — only the transport layer changes.
+
+      Verify no behavioral change by running:
+      `cd packages/execution-engine && pnpm test -- --testPathPattern repo-pool`
+
+      Acceptance criteria:
+      - repo-pool.ts no longer contains `spawn('git'` or a private `execGit` method
+      - All repo-pool tests pass unchanged
+      - `grep -c "spawn('git'" packages/execution-engine/src/repo-pool.ts` returns 0
+    dependencies:
+      - add-git-runner-tests
+
+  # ── Phase 4: Migrate BaseExecutor ───────────────────────────────────────
+
+  - id: migrate-base-executor-to-git-runner
+    description: "Replace BaseExecutor.execGitSimple with injected GitRunner"
+    prompt: |
+      Migrate `packages/execution-engine/src/base-executor.ts` to use `GitRunner`
+      from `git-runner.ts` instead of its protected `execGitSimple` method.
+
+      Requirements:
+      1. Add a protected `gitRunner: GitRunner` field to `BaseExecutor`, initialized
+         from a new optional constructor parameter (default: `createLocalGitRunner(traceExecution)`).
+      2. Replace every `this.execGitSimple(args, cwd)` call with `this.gitRunner.exec(args, cwd)`.
+      3. Keep `execGitSimple` as a deprecated pass-through that delegates to
+         `this.gitRunner.exec` so external mocks in tests keep working during migration.
+         Mark it `@deprecated`.
+      4. In `worktree-executor.ts`, replace the ad-hoc closure
+         `const runGit = (args: string[]) => this.execGitSimple(args, clonePath)`
+         with `const runGit = bindCwd(this.gitRunner, clonePath)`.
+      5. Do NOT change test files in this task.
+
+      Verify no behavioral change:
+      `cd packages/execution-engine && pnpm test`
+
+      Acceptance criteria:
+      - base-executor.ts uses this.gitRunner.exec for all git operations
+      - worktree-executor.ts uses bindCwd instead of ad-hoc closure
+      - execGitSimple still exists as @deprecated shim
+      - Full test suite passes with zero new failures
+    dependencies:
+      - migrate-repo-pool-to-git-runner
+
+  # ── Phase 5: Unify type aliases ─────────────────────────────────────────
+
+  - id: unify-git-exec-types
+    description: "Replace GitExec type alias in plan-base-remote.ts and git-staleness-detector.ts with GitRunner or bindCwd"
+    prompt: |
+      Unify the git execution type aliases across the codebase.
+
+      Current state:
+      - plan-base-remote.ts defines `GitExec = (args: string[]) => Promise<string>` (1-arg)
+      - git-staleness-detector.ts uses `(args: string[], cwd: string) => Promise<string>` (2-arg)
+      - worktree-executor.ts bridges with ad-hoc closure
+
+      Requirements:
+      1. In plan-base-remote.ts, replace the `GitExec` type alias with a re-export:
+         `export type { GitRunner } from './git-runner.js';`
+         Update all functions that accept `GitExec` to accept `(args: string[]) => Promise<string>`
+         inline OR import the return type of `bindCwd`.
+         Keep the 1-arg signature — callers already bind cwd via closure/bindCwd.
+      2. In git-staleness-detector.ts, update the `checkStaleness` signature to accept
+         `GitRunner` or keep the 2-arg function but import the type from git-runner.ts.
+      3. In syncFromRemote (base-executor.ts), update the staleness check call to use
+         `this.gitRunner` directly if checkStaleness now accepts GitRunner.
+      4. Ensure zero test failures.
+
+      Acceptance criteria:
+      - `grep -c 'type GitExec' packages/execution-engine/src/plan-base-remote.ts` returns 0
+      - All plan-base-remote and git-staleness-detector tests pass
+      - `cd packages/execution-engine && pnpm test` passes
+    dependencies:
+      - migrate-base-executor-to-git-runner
+
+  # ── Phase 6: Verification ──────────────────────────────────────────────
+
+  - id: verify-spawn-reduction
+    description: "Verify spawn('git') call sites reduced from 3 independent implementations to 1"
+    command: |
+      cd packages/execution-engine && \
+      echo "=== Remaining spawn('git') sites (expect exactly 1 in git-runner.ts) ===" && \
+      SPAWN_COUNT=$(grep -rn "spawn('git'" src/ --include='*.ts' | grep -v '__tests__' | wc -l) && \
+      echo "spawn_git_count=$SPAWN_COUNT" && \
+      echo "=== Remaining spawn('git') locations ===" && \
+      grep -rn "spawn('git'" src/ --include='*.ts' | grep -v '__tests__' && \
+      echo "=== Verify git-runner.ts is the sole source ===" && \
+      NON_RUNNER=$(grep -rn "spawn('git'" src/ --include='*.ts' | grep -v '__tests__' | grep -v 'git-runner.ts' | wc -l) && \
+      echo "non_runner_spawn_count=$NON_RUNNER" && \
+      if [ "$SPAWN_COUNT" -eq 1 ] && [ "$NON_RUNNER" -eq 0 ]; then \
+        echo "THRESHOLD_MET: spawn consolidated to single module"; \
+      else \
+        echo "THRESHOLD_MISSED: expected 1 spawn site in git-runner.ts, found $SPAWN_COUNT total ($NON_RUNNER outside runner)"; \
+        exit 1; \
+      fi
+    dependencies:
+      - unify-git-exec-types
+
+  - id: verify-type-alias-count
+    description: "Verify GitExec type aliases eliminated (threshold: 0 remaining)"
+    command: |
+      cd packages/execution-engine && \
+      ALIAS_COUNT=$(grep -rn 'type GitExec' src/ --include='*.ts' | grep -v '__tests__' | wc -l) && \
+      echo "git_exec_alias_count=$ALIAS_COUNT" && \
+      if [ "$ALIAS_COUNT" -eq 0 ]; then \
+        echo "THRESHOLD_MET: no legacy GitExec type aliases remain"; \
+      else \
+        echo "THRESHOLD_MISSED: expected 0 GitExec aliases, found $ALIAS_COUNT"; \
+        grep -rn 'type GitExec' src/ --include='*.ts' | grep -v '__tests__'; \
+        exit 1; \
+      fi
+    dependencies:
+      - unify-git-exec-types
+
+  - id: verify-full-test-suite
+    description: "Run full execution-engine test suite — zero regressions"
+    command: "cd packages/execution-engine && pnpm test"
+    dependencies:
+      - verify-spawn-reduction
+      - verify-type-alias-count
+
+  - id: verify-cross-package-tests
+    description: "Run full repository test suite to catch cross-package regressions"
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies:
+      - verify-full-test-suite
