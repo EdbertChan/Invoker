@@ -1,4 +1,6 @@
 export { RESTART_TO_BRANCH_TRACE } from './exec-trace.js';
+export { execGit, execGitVoid } from './git-primitives.js';
+export type { GitExecOpts } from './git-primitives.js';
 export { remoteFetchForPool } from './remote-fetch-policy.js';
 export {
   syncPlanBaseRemote,

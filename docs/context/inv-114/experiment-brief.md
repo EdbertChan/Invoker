@@ -271,8 +271,55 @@ cd packages/execution-engine && pnpm test
 
 Before declaring the experiment complete, the following artifacts must exist:
 
-- [ ] Baseline measurements recorded (Metrics 1-3, Phase 1).
-- [ ] `git-primitives.ts` module with unit tests.
-- [ ] At least 2 callsite migrations completed (managed-worktree-cleanup + repo-pool).
-- [ ] Post-migration measurements recorded (Metrics 1-5, Phase 3).
-- [ ] Decision documented: accept Alternative A or escalate to Alternative B.
+- [x] Baseline measurements recorded (Metrics 1-3, Phase 1).
+- [x] `git-primitives.ts` module with unit tests.
+- [x] At least 2 callsite migrations completed (managed-worktree-cleanup + repo-pool).
+- [x] Post-migration measurements recorded (Metrics 1-5, Phase 3).
+- [x] Decision documented: accept Alternative A or escalate to Alternative B.
+
+## Implementation Results
+
+### Phase 1: Baseline Measurements
+
+| Metric | Value |
+|--------|-------|
+| Direct `spawn('git')` callsites (production) | 8 |
+| Independent `execGit` implementations | 4 |
+| Bare `git rev-parse` latency | avg=4.8ms, p95=7.0ms |
+
+### Phase 2: Implementation Summary
+
+Created `packages/execution-engine/src/git-primitives.ts` with two exports:
+- `execGit(args, cwd, opts?)` — spawn-based, consistent error handling (stderr+stdout), optional tracing with stack frames
+- `execGitVoid(args, cwd)` — void-return delegate for cleanup operations
+
+Migrated 4 callsite groups in deterministic order:
+1. `managed-worktree-cleanup.ts` — replaced module-level `execGit` with `execGitVoid` (2 callsites)
+2. `repo-pool.ts` — replaced private `execGit` body with `execGitPrimitive` delegate (30+ indirect callsites)
+3. `base-executor.ts` — replaced `execGitSimple` body with `execGitPrimitive` delegate using `traceStack: true` (26 indirect callsites)
+4. `task-runner.ts` — replaced `execGitReadonly`, `execGitIn`, `gitLogMessage`, `gitDiffStat` with `execGitPrimitive` delegates (35+ indirect callsites)
+
+Unit tests: 9 tests covering success, failure, spawn error, tracing with/without stack.
+
+### Phase 3: Post-Migration Measurements
+
+| Metric | Pre | Post | Threshold | Status |
+|--------|-----|------|-----------|--------|
+| Direct `spawn('git')` in prod code | 8 | 1 (in git-primitives.ts only) | 0-1 | PASS |
+| Independent `execGit` implementations | 4 | 1 (3 remaining are thin delegates) | 1 | PASS |
+| Wrapper latency overhead | — | avg=4.8ms (0ms overhead), p95=6.5ms | +5ms avg max | PASS |
+| git-primitives unit tests | — | 9/9 pass | 0 failures | PASS |
+| Full test suite regression | 842 pass | 842 pass | 0 new failures | PASS |
+
+### Decision
+
+**Verdict: Accept Alternative A (Thin Git Wrapper Module).**
+
+All Phase 3 metrics pass. The wrapper adds zero measurable latency overhead.
+All 4 independent `execGit` implementations are consolidated into `git-primitives.execGit`.
+No fetch deduplication was needed during migration. Alternative B is deferred.
+
+| Option | Verdict |
+|--------|---------|
+| Alternative A: Thin Git Wrapper Module | **Supported** — implemented and validated |
+| Alternative B: Stateful Repo Runtime Service | **Deferred** — not needed; can layer on top of A later if fetch dedup required |

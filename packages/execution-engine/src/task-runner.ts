@@ -18,6 +18,7 @@ import type { WorkRequest, WorkResponse, ActionType, Logger } from '@invoker/con
 import type { Executor, ExecutorHandle } from './executor.js';
 import { BaseExecutor } from './base-executor.js';
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
+import { execGit as execGitPrimitive } from './git-primitives.js';
 import { ResourceLimitError } from './repo-pool.js';
 import type { ExecutorRegistry } from './registry.js';
 import type { AgentRegistry } from './agent-registry.js';
@@ -1074,47 +1075,11 @@ export class TaskRunner {
    * @internal Read-only git queries only. For mutations, use execGitIn.
    */
   execGitReadonly(args: string[], cwd?: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', args, {
-        cwd: cwd ?? this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(
-          `git ${args.join(' ')} failed (code ${code}): ${stderr.trim()}${stdout.trim() ? '\n' + stdout.trim() : ''}`
-        ));
-      });
-    });
+    return execGitPrimitive(args, cwd ?? this.cwd);
   }
 
   /** @internal */ execGitIn(args: string[], dir: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', args, {
-        cwd: dir,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(
-          `git ${args.join(' ')} failed (code ${code}): ${stderr.trim()}${stdout.trim() ? '\n' + stdout.trim() : ''}`
-        ));
-      });
-    });
+    return execGitPrimitive(args, dir);
   }
 
   /** @internal */ async createMergeWorktree(ref: string, label: string, repoUrl?: string): Promise<string> {
@@ -1856,39 +1821,11 @@ export class TaskRunner {
   }
 
   /** @internal */ gitLogMessage(commitHash: string, cwd?: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', ['log', '-1', '--format=%B', commitHash], {
-        cwd: cwd ?? this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(`git log failed (code ${code})`));
-      });
-    });
+    return execGitPrimitive(['log', '-1', '--format=%B', commitHash], cwd ?? this.cwd);
   }
 
   /** @internal */ gitDiffStat(branch: string, cwd?: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const baseBranch = this.defaultBranch ?? 'master';
-      const child = spawn('git', ['diff', '--stat', '--stat-count=20', `${baseBranch}...${branch}`], {
-        cwd: cwd ?? this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(`git diff --stat failed (code ${code})`));
-      });
-    });
+    const baseBranch = this.defaultBranch ?? 'master';
+    return execGitPrimitive(['diff', '--stat', '--stat-count=20', `${baseBranch}...${branch}`], cwd ?? this.cwd);
   }
 }
