@@ -9,7 +9,6 @@ Default workflow:
 
 ## Rules
 
-- Do not rely on upstream/fork remote combinations.
 - Keep branch base and publish target on `origin`.
 - Create PR branches from `origin/<baseBranch>`.
 - Push branches to `origin`.
