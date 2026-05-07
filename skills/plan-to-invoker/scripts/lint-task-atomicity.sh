@@ -33,6 +33,10 @@ function parse_metadata(desc_lower,    tmp, parts) {
   feature_state = ""
   layer_exception_allowed = 0
   has_acceptance_criteria = (desc_lower ~ /acceptance criteria:/)
+  has_goal_heading = (desc_lower ~ /(^|\n)[ \t]*goal:/)
+  has_motivation_heading = (desc_lower ~ /(^|\n)[ \t]*motivation:/)
+  has_alternatives_heading = (desc_lower ~ /(^|\n)[ \t]*(alternative considerations|alternatives):/)
+  has_implementation_heading = (desc_lower ~ /(^|\n)[ \t]*(implementation details|implementation):/)
 
   tmp = desc_lower
   sub(/^.*layer:[ \t]*/, "", tmp)
@@ -135,6 +139,21 @@ function flush_task(    wc, and_count, valid_id, d, desc_lower, idx) {
 
     if (feature_state == "dormant" && has_acceptance_criteria == 0) {
       errors[++errn] = "Task \"" id "\" uses Feature state dormant but omits \"Acceptance criteria:\" in description"
+    }
+
+    if (has_prompt) {
+      if (has_goal_heading == 0) {
+        errors[++errn] = "Task \"" id "\" missing required \"Goal:\" section in description for prompt-based implementation tasks"
+      }
+      if (has_motivation_heading == 0) {
+        errors[++errn] = "Task \"" id "\" missing required \"Motivation:\" section in description for prompt-based implementation tasks"
+      }
+      if (has_alternatives_heading == 0) {
+        errors[++errn] = "Task \"" id "\" missing required \"Alternative considerations:\" (or \"Alternatives:\") section in description for prompt-based implementation tasks"
+      }
+      if (has_implementation_heading == 0) {
+        errors[++errn] = "Task \"" id "\" missing required \"Implementation details:\" (or \"Implementation:\") section in description for prompt-based implementation tasks"
+      }
     }
   }
 

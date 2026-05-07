@@ -29,6 +29,8 @@ Grep-only checks are Phase 1a only; behavioral claims require executed Phase 1b 
 
 **Dependency-first layered decomposition (required for implementation plans):** For plans whose `onFinish` is not `none`, every implementation task must include `Layer:` and `Feature state:` headings in `description`. Use normalized layer names (`persistence`, `domain`, `transport`, `api`, `contact_surface`, `app_bridge`, `owner_delegation`, `ui_activation`, `app_regression`, `e2e_regression`, `ui`, `docs`) and feature state values (`active` or `dormant`). `dormant` tasks must still include `Acceptance criteria:` in `description`. Verify-only plans (`onFinish: none`) are exempt from this hard requirement.
 
+**Implementation-rationale headings (required for prompt-based implementation tasks):** For plans whose `onFinish` is not `none`, each task with a `prompt:` must include `Goal:`, `Motivation:`, `Alternative considerations:` (or `Alternatives:`), and `Implementation details:` (or `Implementation:`) in the task `description`. This is a hard requirement enforced by `lint-task-atomicity.sh` so implementation intent is explicit and reviewable in the authored workflow YAML itself.
+
 **Cross-layer dependency direction (required):** Dependency DAGs must flow from lower/foundational layers toward higher/integration layers. If a lower-layer task depends on a higher-layer task, mark an explicit exception in the task description with `Layer exception: allowed` and a rationale.
 
 **Bugfix repro:** For bug/regression plans, a shared `bash scripts/repro-<slug>.sh` (or the same `command:` before and after) is **strongly recommended**; **`skill-doctor` does not require it.** If the fix invalidates the original repro, use another explicit verification task. See `references/task-patterns.md` § *Bugfix repro*.
@@ -76,7 +78,7 @@ If `skill-doctor.sh` fails, run individual checks to isolate the problem:
    `bash skills/plan-to-invoker/scripts/validate-plan.sh <plan-file>`
 4. `step-lint-atomicity`
    `bash skills/plan-to-invoker/scripts/lint-task-atomicity.sh <plan-file>`  
-   Optional (warnings only, exit 0): append `--warn-delegation` for **best-effort** hints if `Files:` / `Change types:` / `Acceptance criteria:` are missing in descriptions. For implementation plans (`onFinish != none`), this step now hard-fails missing/invalid `Layer:` and `Feature state:` metadata and rejects invalid cross-layer dependency direction without `Layer exception: allowed`.
+   Optional (warnings only, exit 0): append `--warn-delegation` for **best-effort** hints if `Files:` / `Change types:` / `Acceptance criteria:` are missing in descriptions. For implementation plans (`onFinish != none`), this step hard-fails missing/invalid `Layer:` and `Feature state:` metadata, missing required prompt-task rationale headings (`Goal`, `Motivation`, `Alternative considerations`/`Alternatives`, `Implementation details`/`Implementation`), and invalid cross-layer dependency direction without `Layer exception: allowed`.
 5. `step-parse-verify-results`
    `bash skills/plan-to-invoker/scripts/parse-results.sh < /tmp/invoker-verify.txt`
 
