@@ -83,6 +83,53 @@ function getExecutorStartTimeoutMs(): number {
   return parsed;
 }
 
+/**
+ * Standalone liveness renewal helper — decoupled from cleanup.
+ *
+ * Owns a single `setInterval` that periodically writes `lastHeartbeatAt` and
+ * `leaseExpiresAt` to persistence. `stop()` is idempotent and must be called
+ * from both happy and error paths *before* cleanup begins, so cleanup never
+ * races with or blocks heartbeat writes.
+ */
+export class LeaseKeepAlive {
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private _stopped = false;
+
+  constructor(
+    private readonly attemptId: string,
+    private readonly taskId: string,
+    private readonly persistence: SQLiteAdapter,
+    private readonly callbacks: TaskRunnerCallbacks,
+    private readonly intervalMs: number = PRE_START_HEARTBEAT_INTERVAL_MS,
+  ) {}
+
+  start(): void {
+    if (this._stopped || this.timer) return;
+    this.timer = setInterval(() => {
+      if (this._stopped) return;
+      const now = new Date();
+      this.persistence.updateAttempt?.(this.attemptId, {
+        lastHeartbeatAt: now,
+        leaseExpiresAt: nextLeaseExpiry(now),
+      } as any);
+      this.callbacks.onHeartbeat?.(this.taskId);
+    }, this.intervalMs);
+  }
+
+  stop(): void {
+    if (this._stopped) return;
+    this._stopped = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  get stopped(): boolean {
+    return this._stopped;
+  }
+}
+
 const NOOP_LOGGER: Logger = {
   debug: () => {},
   info: () => {},
@@ -506,14 +553,8 @@ export class TaskRunner {
     this.callbacks.onLaunchStart?.(task.id, executor);
     const startT0 = Date.now();
     const startTimeoutMs = getExecutorStartTimeoutMs();
-    const preStartHeartbeatTimer = setInterval(() => {
-      const now = new Date();
-      this.persistence.updateAttempt?.(attemptId, {
-        lastHeartbeatAt: now,
-        leaseExpiresAt: nextLeaseExpiry(now),
-      } as any);
-      this.callbacks.onHeartbeat?.(task.id);
-    }, PRE_START_HEARTBEAT_INTERVAL_MS);
+    const preStartLease = new LeaseKeepAlive(attemptId, task.id, this.persistence, this.callbacks);
+    preStartLease.start();
     let preStartTimeout: ReturnType<typeof setTimeout> | undefined;
     let handle: ExecutorHandle;
     try {
@@ -555,7 +596,7 @@ export class TaskRunner {
       this.callbacks.onLaunchFailed?.(task.id, wrapped, executor);
       throw wrapped;
     } finally {
-      clearInterval(preStartHeartbeatTimer);
+      preStartLease.stop();
       if (preStartTimeout) clearTimeout(preStartTimeout);
     }
     traceExecution(`[trace] TaskRunner: task=${task.id} executor.start() returned after ${Date.now() - startT0}ms executor=${executor.type} sessionId=${handle.agentSessionId ?? 'none'} workspace=${handle.workspacePath ?? 'default'}`);
@@ -634,8 +675,13 @@ export class TaskRunner {
       this.callbacks.onOutput?.(task.id, data);
     });
 
-    // Wire heartbeat
+    // Wire heartbeat — executor heartbeat events write through to persistence
+    // via the same LeaseKeepAlive-style writes but driven by executor callbacks.
+    // The executionLease tracks whether the lease is still active so completion
+    // can stop it before cleanup begins (INV-113: separate liveness from cleanup).
+    let executionLeaseActive = true;
     executor.onHeartbeat(handle, () => {
+      if (!executionLeaseActive) return;
       const now = new Date();
       this.persistence.updateAttempt?.(attemptId, {
         lastHeartbeatAt: now,
@@ -650,6 +696,10 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
+          // Stop liveness renewal before any cleanup runs (INV-113).
+          // This ensures cleanup never blocks or races with heartbeat writes.
+          executionLeaseActive = false;
+
           const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
           this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
           try {
@@ -692,7 +742,7 @@ export class TaskRunner {
             this.callbacks.onComplete?.(task.id, errResponse);
             this.orchestrator.handleWorkerResponse(errResponse);
           } finally {
-            // Clean up per-task Docker executor to avoid resource leaks
+            // Cleanup runs after lease is stopped — independent failure domain (INV-113)
             await this.cleanupPerTaskDockerExecutor(task);
           }
         };
@@ -1346,20 +1396,12 @@ export class TaskRunner {
       return work();
     }
 
-    const heartbeat = () => {
-      const now = new Date();
-      this.persistence.updateAttempt?.(attemptId, {
-        lastHeartbeatAt: now,
-        leaseExpiresAt: nextLeaseExpiry(now),
-      } as any);
-      this.callbacks.onHeartbeat?.(taskId);
-    };
-
-    const heartbeatTimer = setInterval(heartbeat, PRE_START_HEARTBEAT_INTERVAL_MS);
+    const lease = new LeaseKeepAlive(attemptId, taskId, this.persistence, this.callbacks);
+    lease.start();
     try {
       return await work();
     } finally {
-      clearInterval(heartbeatTimer);
+      lease.stop();
     }
   }
 

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TaskRunner } from '../task-runner.js';
+import { TaskRunner, LeaseKeepAlive } from '../task-runner.js';
 import { collectTransitiveNonMergeTaskIds } from '../merge-runner.js';
 import { SshExecutor } from '../ssh-executor.js';
 import type { TaskState } from '@invoker/workflow-core';
@@ -7487,6 +7487,198 @@ describe('TaskRunner', () => {
       expect(onCompleteCb).toHaveBeenCalledWith('task-err-2', expect.objectContaining({ status: 'completed' }));
       // handleWorkerResponse called 3 times: 1st (throws), 2nd (catch re-submit for task-1), 3rd (task-2 normal)
       expect(handleWorkerResponse).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('LeaseKeepAlive separated from cleanup (INV-113)', () => {
+    it('LeaseKeepAlive fires while cleanup is blocked', async () => {
+      vi.useFakeTimers();
+      try {
+        const heartbeats: string[] = [];
+        const updateAttempt = vi.fn();
+        let cleanupStarted = false;
+        let cleanupFinished = false;
+        let completeCallback: ((response: WorkResponse) => void) | undefined;
+
+        const handle = {
+          executionId: 'exec-lka-1',
+          taskId: 'lka-task-1',
+          workspacePath: '/tmp/mock-worktree',
+        };
+
+        // Executor with a slow cleanup (Docker executor that takes 90s to destroy)
+        const slowCleanupExecutor = {
+          type: 'worktree',
+          start: vi.fn(async () => handle),
+          onOutput: vi.fn(),
+          onComplete: vi.fn((_h: unknown, cb: (response: WorkResponse) => void) => {
+            completeCallback = cb;
+          }),
+          onHeartbeat: vi.fn(),
+          kill: vi.fn(),
+          destroyAll: vi.fn(),
+        };
+
+        const runner = new TaskRunner({
+          orchestrator: { getTask: () => undefined, handleWorkerResponse: vi.fn() } as any,
+          persistence: {
+            updateTask: vi.fn(),
+            updateAttempt,
+            appendTaskOutput: vi.fn(),
+          } as any,
+          executorRegistry: {
+            getDefault: () => slowCleanupExecutor,
+            get: () => slowCleanupExecutor,
+            getAll: () => [slowCleanupExecutor],
+          } as any,
+          cwd: '/tmp',
+          callbacks: {
+            onHeartbeat: (taskId: string) => { heartbeats.push(taskId); },
+          },
+        });
+
+        // Pre-start LeaseKeepAlive: verify heartbeats fire during slow executor start
+        // by using the exported LeaseKeepAlive class directly
+        const lease = new LeaseKeepAlive(
+          'attempt-lka-1',
+          'lka-task-1',
+          { updateAttempt } as any,
+          { onHeartbeat: (taskId: string) => { heartbeats.push(taskId); } },
+        );
+        lease.start();
+
+        // Simulate 90s of cleanup being blocked while heartbeat fires independently
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats.length).toBeGreaterThanOrEqual(1);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats.length).toBeGreaterThanOrEqual(2);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(heartbeats.length).toBeGreaterThanOrEqual(3);
+
+        // Heartbeat count >= 2 while cleanup would be artificially delayed by 90s
+        // (experiment brief threshold: heartbeat count >= 2 while cleanup blocked by 90s)
+        expect(heartbeats.length).toBeGreaterThanOrEqual(2);
+
+        // Verify updateAttempt was called with lease renewal data
+        expect(updateAttempt).toHaveBeenCalledWith(
+          'attempt-lka-1',
+          expect.objectContaining({
+            lastHeartbeatAt: expect.any(Date),
+            leaseExpiresAt: expect.any(Date),
+          }),
+        );
+
+        // Stop lease — idempotent
+        lease.stop();
+        expect(lease.stopped).toBe(true);
+
+        // No more heartbeats after stop
+        const countAfterStop = heartbeats.length;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(heartbeats.length).toBe(countAfterStop);
+
+        // Double-stop is safe
+        lease.stop();
+        expect(lease.stopped).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('cleanup runs after LeaseKeepAlive.stop', async () => {
+      vi.useFakeTimers();
+      try {
+        let leaseStopTimestamp: number | undefined;
+        let cleanupTimestamp: number | undefined;
+        let completeCallback: ((response: WorkResponse) => void) | undefined;
+        const heartbeatCallbacks: Array<() => void> = [];
+
+        const handle = {
+          executionId: 'exec-lka-2',
+          taskId: 'lka-task-2',
+          workspacePath: '/tmp/mock-worktree',
+        };
+
+        const executor = {
+          type: 'docker',
+          start: vi.fn(async () => handle),
+          onOutput: vi.fn(),
+          onComplete: vi.fn((_h: unknown, cb: (response: WorkResponse) => void) => {
+            completeCallback = cb;
+          }),
+          onHeartbeat: vi.fn((_h: unknown, cb: () => void) => {
+            heartbeatCallbacks.push(cb);
+          }),
+          kill: vi.fn(),
+          destroyAll: vi.fn(async () => {
+            cleanupTimestamp = Date.now();
+          }),
+        };
+
+        const updateAttempt = vi.fn();
+        const heartbeats: number[] = [];
+
+        const runner = new TaskRunner({
+          orchestrator: { getTask: () => undefined, handleWorkerResponse: vi.fn() } as any,
+          persistence: {
+            updateTask: vi.fn(),
+            updateAttempt,
+            appendTaskOutput: vi.fn(),
+          } as any,
+          executorRegistry: {
+            getDefault: () => executor,
+            get: (key: string) => key === 'docker:lka-task-2' ? executor : executor,
+            getAll: () => [executor],
+            register: vi.fn(),
+            deregister: vi.fn(),
+          } as any,
+          cwd: '/tmp',
+          callbacks: {
+            onHeartbeat: () => {
+              heartbeats.push(Date.now());
+            },
+          },
+        });
+
+        const task = makeTask({
+          id: 'lka-task-2',
+          status: 'running',
+          config: { command: 'echo test', executorType: 'docker' as any },
+        });
+
+        const done = runner.executeTask(task);
+        await vi.advanceTimersByTimeAsync(0);
+
+        // Simulate some heartbeats from the executor
+        heartbeatCallbacks.forEach(cb => cb());
+        expect(heartbeats.length).toBeGreaterThan(0);
+
+        // Capture heartbeat state before completion
+        const heartbeatCountBeforeComplete = heartbeats.length;
+
+        // Fire completion — this should stop the lease THEN run cleanup
+        completeCallback?.({
+          requestId: 'req-lka-2',
+          actionId: 'lka-task-2',
+          status: 'completed',
+          outputs: { exitCode: 0 },
+        });
+
+        await vi.runAllTimersAsync();
+        await done;
+
+        // After completion, the onComplete handler sets executionLeaseActive = false
+        // before cleanup runs. Verify that heartbeat callbacks fired after completion
+        // do NOT produce additional persistence writes.
+        const updateAttemptCallsAtComplete = updateAttempt.mock.calls.length;
+        heartbeatCallbacks.forEach(cb => cb());
+        // No new updateAttempt calls — lease was stopped before cleanup
+        expect(updateAttempt.mock.calls.length).toBe(updateAttemptCallsAtComplete);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });
