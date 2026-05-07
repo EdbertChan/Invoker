@@ -212,6 +212,16 @@ export interface OrchestratorMessageBus {
 
 // ── Public Types ────────────────────────────────────────────
 
+export interface DeleteAllOptions {
+  /**
+   * When true (the default), a 'removed' TaskDelta is published for every
+   * task so UI caches stay in sync.  Set to false when the caller manages
+   * cache invalidation externally (e.g. bulk-delete IPC that resets the
+   * snapshot cache in one shot).
+   */
+  publishRemovalDeltas?: boolean;
+}
+
 export interface PlanDefinition {
   name: string;
   description?: string;
@@ -3481,10 +3491,16 @@ export class Orchestrator {
   }
 
   /**
-   * Delete all workflows: DB first, then scheduler, memory, and publish removal deltas.
+   * Delete all workflows: DB first, then scheduler, memory, and optionally publish removal deltas.
    * Follows the same DB→memory→publish pattern as writeAndSync().
+   *
+   * @param options.publishRemovalDeltas — When true (default), a 'removed'
+   *   delta is published per task so UI caches stay in sync.  Pass false when
+   *   the caller handles cache invalidation externally (e.g. bulk-delete).
    */
-  deleteAllWorkflows(): void {
+  deleteAllWorkflows(options?: DeleteAllOptions): void {
+    const { publishRemovalDeltas = true } = options ?? {};
+
     // 1. Collect all tasks before clearing (needed for deltas)
     const allTasks = this.stateMachine.getAllTasks();
 
@@ -3498,9 +3514,11 @@ export class Orchestrator {
     this.activeWorkflowIds.clear();
     this.stateMachine.clear();
 
-    // 5. Publish removal deltas
-    for (const task of allTasks) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildRemoveDelta(task));
+    // 5. Publish removal deltas (skip when caller opts out)
+    if (publishRemovalDeltas) {
+      for (const task of allTasks) {
+        this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildRemoveDelta(task));
+      }
     }
   }
 
