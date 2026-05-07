@@ -100,22 +100,16 @@ describe('plan-base-remote', () => {
     expect(preferred).toBe('origin');
   });
 
-  it('syncPlanBaseRemoteForRef rejects upstream-qualified refs in origin-only mode', async () => {
+  it('syncPlanBaseRemoteForRef treats legacy upstream-qualified refs as origin-backed', async () => {
     const runGit = runGitFactory(mirror);
-    await expect(syncPlanBaseRemoteForRef(runGit, 'upstream/master')).rejects.toThrow(
-      'origin-only mode',
-    );
+    await syncPlanBaseRemoteForRef(runGit, 'upstream/master');
+    const resolved = await runGit(['rev-parse', '--verify', 'origin/master^{commit}']);
+    const upstreamTip = execSync('git rev-parse master', { cwd: upstream }).toString().trim();
+    expect(resolved).toBe(upstreamTip);
   });
 
-  it('shouldResolveViaOriginTracking ignores upstream-qualified refs', () => {
+  it('shouldResolveViaOriginTracking treats legacy remote-qualified refs as origin-backed', () => {
     expect(shouldResolveViaOriginTracking('master')).toBe(true);
-    expect(shouldResolveViaOriginTracking('upstream/master')).toBe(false);
-  });
-
-  it('resolvePlanBaseRevision rejects upstream-qualified refs in origin-only mode', async () => {
-    const runGit = runGitFactory(mirror);
-    await expect(resolvePlanBaseRevision(runGit, 'upstream/master')).rejects.toThrow(
-      'origin-only mode',
-    );
+    expect(shouldResolveViaOriginTracking('upstream/master')).toBe(true);
   });
 });
