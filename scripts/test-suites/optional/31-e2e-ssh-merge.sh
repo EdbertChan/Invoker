@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# LANE: e2e
+# OWNER: e2e
 # SSH + headless cases, shard 2; exits 0 when localhost sshd is unavailable (skip).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"

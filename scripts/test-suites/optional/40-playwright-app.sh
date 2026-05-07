@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# LANE: e2e
+# OWNER: e2e
 # Playwright + Electron (packages/app/e2e). Expects built app; e2e-dry-run usually built it earlier.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"

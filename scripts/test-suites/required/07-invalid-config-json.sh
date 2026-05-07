@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# LANE: guardrail
+# OWNER: platform
 # Guardrail: malformed config JSON must fail fast instead of silently defaulting.
 set -euo pipefail
 
