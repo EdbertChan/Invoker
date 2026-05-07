@@ -3558,20 +3558,17 @@ describe('Orchestrator', () => {
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
-      const restartSpy = vi.spyOn(orchestrator, 'restartTask');
 
       orchestrator.editTaskType(taskId, 'ssh', 'remote_digital_ocean');
 
       expect(cancelSpy).toHaveBeenCalledWith(taskId);
       expect(recreateSpy).toHaveBeenCalledWith(taskId);
-      expect(restartSpy).not.toHaveBeenCalled();
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
         recreateSpy.mock.invocationCallOrder[0],
       );
 
       cancelSpy.mockRestore();
       recreateSpy.mockRestore();
-      restartSpy.mockRestore();
     });
 
     it('editing remote-target on an ACTIVE task does NOT throw', () => {

@@ -714,11 +714,6 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       await headlessRecreateWithRebase(args[1], deps);
       break;
 
-    // Deprecated aliases
-    case 'rebase-and-retry':
-      warnDeprecated('rebase-and-retry', 'rebase');
-      await headlessRebaseAndRetry(args[1], deps);
-      break;
     case 'fix':
       await headlessFix(args[1], deps, args[2]);
       break;
@@ -915,7 +910,7 @@ ${BOLD}Deprecated${RESET} (use new names above):
   edit → set command            edit-executor → set executor
   edit-agent → set agent        set-merge-mode → set merge-mode
   delete-workflow → delete
-  rebase-and-retry → rebase (task) or recreate-with-rebase (workflow)
+  rebase → rebase (task)        recreate-with-rebase → recreate-with-rebase (workflow)
 
 ${BOLD}Options:${RESET}
   --wait-for-approval    Keep running until PR approval (use with 'run' or 'resume')
@@ -1214,11 +1209,11 @@ async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Promise<vo
     taskId = restored.resolvedTaskId;
     await preemptTaskSubgraph(taskId, deps);
 
-    const envelope = makeEnvelope('restart-task', 'headless', 'task', { taskId });
+    const envelope = makeEnvelope('retry-task', 'headless', 'task', { taskId });
     const result = await deps.commandService.retryTask(envelope);
     if (!result.ok) throw new Error(result.error.message);
     const runnable = result.data.filter(t => t.status === 'running');
-    process.stdout.write(`Restarted task "${taskId}" — ${runnable.length} task(s) to execute\n`);
+    process.stdout.write(`Retried task "${taskId}" — ${runnable.length} task(s) to execute\n`);
 
     const taskExecutor = createHeadlessExecutor(deps);
     const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
@@ -1226,7 +1221,7 @@ async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Promise<vo
       orchestrator: deps.orchestrator,
       taskExecutor,
       logger: deps.logger,
-      context: 'headless.restart-task',
+      context: 'headless.retry-task',
       started: result.data,
     });
     if (runnable.length + topup.length === 0) {
@@ -1335,7 +1330,7 @@ async function headlessResolveConflict(taskId: string, deps: HeadlessDeps, agent
 }
 
 async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promise<void> {
-  if (!taskId) throw new Error('Missing arguments. Usage: --headless rebase-and-retry <taskId>');
+  if (!taskId) throw new Error('Missing arguments. Usage: --headless rebase <taskId>');
   const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'rebase');
   if (!restored) return;
   taskId = restored.resolvedTaskId;
@@ -1344,7 +1339,7 @@ async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promi
   await preemptWorkflowBeforeMutation(workflowId, {
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
-    context: 'headless.rebase-and-retry',
+    context: 'headless.rebase',
   });
 
   const te = createHeadlessExecutor(deps);
@@ -1355,7 +1350,7 @@ async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promi
     orchestrator: deps.orchestrator,
     taskExecutor: te,
     logger: deps.logger,
-    context: 'headless.rebase-and-retry',
+    context: 'headless.rebase',
     started,
   });
   if (runnable.length + topup.length === 0) {

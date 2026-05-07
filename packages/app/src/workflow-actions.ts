@@ -129,13 +129,6 @@ export function retryTask(
   return deps.orchestrator.retryTask(taskId);
 }
 
-export function restartTask(
-  taskId: string,
-  deps: Pick<ActionDeps, 'orchestrator'>,
-): TaskState[] {
-  return deps.orchestrator.recreateTask(taskId);
-}
-
 export function retryWorkflow(
   workflowId: string,
   deps: Pick<ActionDeps, 'orchestrator'>,

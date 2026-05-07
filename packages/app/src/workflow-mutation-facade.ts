@@ -29,7 +29,6 @@ import {
   recreateTask as sharedRecreateTask,
   recreateWorkflowFromFreshBase as sharedRecreateWorkflowFromFreshBase,
   recreateWithRebase as sharedRecreateWithRebase,
-  rebaseAndRetry as sharedRebaseAndRetry,
   cancelWorkflow as sharedCancelWorkflow,
   forkWorkflow as sharedForkWorkflow,
   editTaskCommand as sharedEditTaskCommand,
@@ -245,11 +244,6 @@ export class WorkflowMutationFacade {
   async recreateWithRebase(workflowId: string): Promise<MutationResult> {
     const started = await sharedRecreateWithRebase(workflowId, this.actionDeps());
     return this.finalizeWithTopup(started, 'facade.recreate-with-rebase');
-  }
-
-  async rebaseAndRetry(taskId: string): Promise<MutationResult> {
-    const started = await sharedRebaseAndRetry(taskId, this.actionDeps());
-    return this.finalizeWithTopup(started, 'facade.rebase-and-retry');
   }
 
   async cancelWorkflow(workflowId: string): Promise<CancelMutationResult> {

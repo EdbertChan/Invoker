@@ -372,7 +372,7 @@ describe('recreateWithRebase', () => {
 // app-layer wrapper surface. This is the lock-in that prevents
 // future refactors from accidentally dropping any of the five
 // canonical lifecycle wrappers (or routing a new one through a
-// legacy compat layer like `restartTask`).
+// legacy compat layer (restartTask was removed in INV-91)).
 describe('Step 17: app-layer wrappers expose the 5-cell lifecycle matrix', () => {
   it('exports retryTask, recreateTask, retryWorkflow, recreateWorkflow, recreateWorkflowFromFreshBase', () => {
     expect(typeof retryTask).toBe('function');
@@ -382,14 +382,13 @@ describe('Step 17: app-layer wrappers expose the 5-cell lifecycle matrix', () =>
     expect(typeof recreateWorkflowFromFreshBase).toBe('function');
   });
 
-  it('each wrapper routes to the matching orchestrator primitive (no restartTask path)', async () => {
+  it('each wrapper routes to the matching orchestrator primitive', async () => {
     const orchestrator = {
       retryTask: vi.fn(() => []),
       recreateTask: vi.fn(() => []),
       retryWorkflow: vi.fn(() => []),
       recreateWorkflow: vi.fn(() => []),
       recreateWorkflowFromFreshBase: vi.fn(async () => []),
-      restartTask: vi.fn(() => []),
     };
     const persistence = {
       loadWorkflow: vi.fn(() => ({ id: 'wf-1', generation: 0 })),
@@ -419,9 +418,6 @@ describe('Step 17: app-layer wrappers expose the 5-cell lifecycle matrix', () =>
       'wf-1',
       expect.objectContaining({ refreshBase: expect.any(Function) }),
     );
-    // No production wrapper in the canonical matrix may route
-    // through the deprecated `restartTask` shim.
-    expect(orchestrator.restartTask).not.toHaveBeenCalled();
   });
 });
 

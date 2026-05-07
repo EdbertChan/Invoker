@@ -1787,9 +1787,9 @@ export class Orchestrator {
    * reconciliation task's own spec. The chart's "Why" column reads
    * "Downstream execution inputs changed". `applyInvalidation('task',
    * 'retryTask', reconId, deps)` is wired to today's
-   * `Orchestrator.restartTask` via `buildInvalidationDeps` (the
+   * `Orchestrator.retryTask` via `buildInvalidationDeps` (the
    * compatibility seam Step 1 introduced; Step 13 will rename
-   * `restartTask` → `retryTask` to close the matrix).
+   * `retryTask` → `retryTask` to close the matrix).
    *
    * Sequence (mirrors `applyInvalidation`'s contract for the
    * synchronous orchestrator-internal seam — see `invalidation-policy.ts`
@@ -1813,9 +1813,9 @@ export class Orchestrator {
    *      reconciliation task and unblocks downstream").
    *   3. **Retry-class reset of downstream (re-selection only).** When
    *      the recon was previously completed with a *different* winner,
-   *      every direct downstream consumer is reset via `restartTask`,
+   *      every direct downstream consumer is reset via `retryTask`,
    *      which is the current `retryTask` compatibility wire.
-   *      `restartTask` cascades to its own descendants and bumps each
+   *      `retryTask` cascades to its own descendants and bumps each
    *      affected task's execution generation exactly once via
    *      `withBumpedExecutionGeneration` (single source of truth for the
    *      retry reset shape — Step 7 deliberately reuses it instead of
@@ -2000,14 +2000,6 @@ export class Orchestrator {
     const started = this.autoStartReadyTasks(readyTaskIds);
     this.checkWorkflowCompletion();
     return started;
-  }
-
-  restartTask(taskId: string): TaskState[] {
-    this.logger.warn(
-      '[orchestrator] restartTask is deprecated. Routing to recreateTask. Use retryTask() for lineage-preserving reset or recreateTask() for fresh-lineage reset explicitly.',
-      { taskId },
-    );
-    return this.recreateTask(taskId);
   }
 
   retryTask(taskId: string): TaskState[] {
@@ -2693,9 +2685,9 @@ export class Orchestrator {
    * and the upstream leaf results that feed the merge node are still
    * authoritative. The "Why" column reads "Merge execution policy
    * changed". `applyInvalidation('task','retryTask', mergeNodeId, deps)`
-   * is wired to today's `Orchestrator.restartTask` via
+   * is wired to today's `Orchestrator.retryTask` via
    * `buildInvalidationDeps` (the compatibility seam Step 1 introduced;
-   * Step 13 will rename `restartTask` → `retryTask` to close the matrix).
+   * Step 13 will rename `retryTask` → `retryTask` to close the matrix).
    *
    * Why this lives on the orchestrator (Step 9 migration). Prior to
    * Step 9 the merge-mode mutation surface was an app-layer-only
@@ -2733,9 +2725,9 @@ export class Orchestrator {
    *   3. **Persist new mode.** `persistence.updateWorkflow` writes the
    *      new `mergeMode` so the retried merge attempt picks up the
    *      new policy when it next runs.
-   *   4. **Retry-class reset.** Delegate to `restartTask`, which is
+   *   4. **Retry-class reset.** Delegate to `retryTask`, which is
    *      the current `retryTask` compatibility wire (Step 13 will
-   *      rename it). `restartTask` resets the merge node to `pending`,
+   *      rename it). `retryTask` resets the merge node to `pending`,
    *      clears volatile attempt state (`agentSessionId` /
    *      `containerId` / `error` / `exitCode` / `startedAt` /
    *      `completedAt`), and bumps execution generation exactly once
@@ -2803,12 +2795,12 @@ export class Orchestrator {
     }
 
     // Persist new mode on the workflow record so the retried merge
-    // attempt picks up the new policy when restartTask reschedules it.
+    // attempt picks up the new policy when retryTask reschedules it.
     this.persistence.updateWorkflow?.(workflowId, { mergeMode });
 
-    // Step 9 retry-class reset: restartTask is today's `retryTask`
+    // Step 9 retry-class reset: retryTask is today's `retryTask`
     // compatibility wire (`buildInvalidationDeps` →
-    // `orchestrator.restartTask`). It resets the merge node to
+    // `orchestrator.retryTask`). It resets the merge node to
     // `pending`, clears volatile attempt state, and bumps execution
     // generation exactly once via `withBumpedExecutionGeneration`
     // while preserving branch/workspacePath lineage — the chart's
@@ -2846,7 +2838,7 @@ export class Orchestrator {
    * AI fix attempt is dropped, the task lineage falls back to its
    * `failed` baseline (volatile fix-attempt state — `agentSessionId`,
    * `containerId`, transient `error`/`exitCode`/timing fields —
-   * cleared by `restartTask`), and a fresh fix attempt is scheduled
+   * cleared by `retryTask`), and a fresh fix attempt is scheduled
    * with the new prompt/context. Branch / workspacePath lineage
    * survives because this is the same failed task being retried
    * through the fix loop, not a new task topology.
@@ -2865,7 +2857,7 @@ export class Orchestrator {
    *   2. **Cancel-first (Hard Invariant).** When the task is
    *      actively running an AI fix (`fixing_with_ai`) interrupt it
    *      via `cancelTask` BEFORE the new fix prompt/context is
-   *      persisted or `restartTask` resets the task. A failed task
+   *      persisted or `retryTask` resets the task. A failed task
    *      (the inactive fix-loop state) skips cancel — there is no
    *      in-flight fix attempt to interrupt and `cancelTask` would
    *      otherwise treat the failed task as already settled.
@@ -2873,7 +2865,7 @@ export class Orchestrator {
    *      `config.fixPrompt` / `config.fixContext` (only the keys
    *      present in the patch) and emits a `task.updated` delta so
    *      the retried fix attempt picks up the new prompt/context.
-   *   4. **Retry-class reset.** Delegate to `restartTask` (today's
+   *   4. **Retry-class reset.** Delegate to `retryTask` (today's
    *      `retryTask` compatibility wire — see
    *      `MUTATION_POLICIES.fixContext` and `buildInvalidationDeps`).
    *      It resets the task to `pending`, clears volatile attempt
@@ -2893,7 +2885,7 @@ export class Orchestrator {
    * Active states accepted: `failed`, `fixing_with_ai`. Other states
    * throw — the chart scopes this mutation to the fix loop.
    *
-   * NOTE: `restartTask` is intentionally used here (not
+   * NOTE: `retryTask` is intentionally used here (not
    * `recreateTask`) because Step 10 is retry-class — fix
    * prompt/context changes do NOT change the task's execution-defining
    * spec (`command` / `prompt` / `executionAgent` / `executorType` /
@@ -2932,7 +2924,7 @@ export class Orchestrator {
     // Step 10 cancel-first (chart Hard Invariant): when the task is
     // actively running an AI fix attempt (`fixing_with_ai`) interrupt
     // it BEFORE we persist the new fix prompt/context and reset the
-    // task via `restartTask`. The in-flight fix attempt's execution
+    // task via `retryTask`. The in-flight fix attempt's execution
     // input — the prompt/context — just changed, so it cannot
     // survive. A failed task (the inactive fix-loop state) skips
     // cancel: there is no in-flight fix attempt to interrupt.
@@ -2950,9 +2942,9 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', fixContextChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, fixContextDelta);
 
-    // Step 10 retry-class reset: restartTask is today's `retryTask`
+    // Step 10 retry-class reset: retryTask is today's `retryTask`
     // compatibility wire (`buildInvalidationDeps` →
-    // `orchestrator.restartTask`). It resets the task to `pending`,
+    // `orchestrator.retryTask`). It resets the task to `pending`,
     // clears volatile attempt state (`agentSessionId`, `containerId`,
     // transient `error`/`exitCode`/timing fields), and bumps
     // execution generation exactly once via

@@ -198,9 +198,9 @@ export function App() {
     if (!invoker) return;
     setContextMenu(null);
     try {
-      await invoker.restartTask(taskId);
+      await invoker.retryTask(taskId);
     } catch (err) {
-      console.error('Failed to restart task:', err);
+      console.error('Failed to retry task:', err);
     }
   }, [invoker]);
 
@@ -234,12 +234,12 @@ export function App() {
   const handleRebaseAndRetry = useCallback(async (taskId: string) => {
     setContextMenu(null);
     try {
-      const result = await window.invoker?.rebaseAndRetry(taskId);
+      const result = await window.invoker?.recreateWithRebase(taskId);
       if (result && !result.success) {
         console.error('Rebase failed for some branches:', result.errors);
       }
     } catch (err) {
-      console.error('Rebase & Retry failed:', err);
+      console.error('Recreate with rebase failed:', err);
     }
   }, []);
 

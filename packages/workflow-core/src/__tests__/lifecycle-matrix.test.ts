@@ -23,10 +23,9 @@
  *      non-invalidating outliers (`scheduleOnly` /
  *      `fixApprove` / `fixReject`) deliberately skip
  *      cancel-first per the chart.
- *   5. The Step 13 `restartTask` shim still delegates to
- *      `recreateTask` (the conservative choice; a separate
- *      lock-in lives in `restart-deprecation.test.ts` —
- *      this file just reasserts the matrix-level invariant).
+ *   5. The `restartTask` shim has been removed (INV-91). The
+ *      lock-in in `restart-deprecation.test.ts` asserts the
+ *      symbol is gone from both Orchestrator and CommandService.
  *   6. Non-invalidating mutations (`externalGatePolicy`,
  *      `fixApprove`, `fixReject`) are NOT in the retry/recreate
  *      matrix — `MUTATION_POLICIES` lists them with their own
@@ -197,31 +196,8 @@ describe('Step 17: canonical lifecycle matrix lock-in', () => {
       }
     });
 
-    it('still exposes the Step 13 deprecated restartTask shim that delegates to recreateTask', () => {
-      // The shim's behavior is locked-in by `restart-deprecation.test.ts`;
-      // here we just reassert the surface invariant so the matrix
-      // doc reads cleanly: restartTask exists, restartTask !== retryTask
-      // path, and restartTask collapses to recreateTask. See
-      // `docs/architecture/task-invalidation-chart.md` "Naming
-      // inconsistency" for the rationale.
-      expect(typeof Orchestrator.prototype.restartTask).toBe('function');
-
-      const orch = Object.create(Orchestrator.prototype) as Orchestrator;
-      const warnSpy = vi.fn();
-      (orch as unknown as { logger: { warn: typeof warnSpy } }).logger = {
-        warn: warnSpy,
-      } as never;
-      const recreateSpy = vi.spyOn(orch, 'recreateTask').mockReturnValue([]);
-      const retrySpy = vi.spyOn(orch, 'retryTask').mockReturnValue([]);
-      try {
-        orch.restartTask('t-x');
-        expect(recreateSpy).toHaveBeenCalledTimes(1);
-        expect(recreateSpy).toHaveBeenCalledWith('t-x');
-        expect(retrySpy).not.toHaveBeenCalled();
-      } finally {
-        recreateSpy.mockRestore();
-        retrySpy.mockRestore();
-      }
+    it('restartTask shim has been removed (INV-91)', () => {
+      expect((Orchestrator.prototype as unknown as Record<string, unknown>).restartTask).toBeUndefined();
     });
   });
 
