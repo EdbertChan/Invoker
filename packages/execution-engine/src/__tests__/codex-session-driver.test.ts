@@ -132,4 +132,23 @@ describe('CodexSessionDriver', () => {
     // But loading with local UUID works
     expect(driver.loadSession('local-uuid')).toBe(jsonl);
   });
+
+  it('extractUsageEvents delegates to extractCodexUsageEvents', () => {
+    const driver = new CodexSessionDriver();
+    const jsonl = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' }),
+      JSON.stringify({
+        timestamp: 'ts1',
+        type: 'turn.completed',
+        model: 'o3-mini',
+        usage: { input_tokens: 500, output_tokens: 200, total_tokens: 700 },
+      }),
+    ].join('\n');
+
+    const events = driver.extractUsageEvents(jsonl);
+    expect(events).toHaveLength(1);
+    expect(events[0].model).toBe('o3-mini');
+    expect(events[0].inputTokens).toBe(500);
+    expect(events[0].outputTokens).toBe(200);
+  });
 });

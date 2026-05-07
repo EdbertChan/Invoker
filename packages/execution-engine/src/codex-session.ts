@@ -5,10 +5,30 @@
  * Storage and retrieval are handled by CodexSessionDriver.
  */
 
+import type { CostConfidence } from '@invoker/contracts';
+
 export interface AgentMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
+}
+
+/**
+ * A single usage event extracted from a raw session JSONL stream.
+ *
+ * Contains only session-level data (tokens, model, confidence).
+ * Attribution (workflow, task, attempt) is the caller's responsibility
+ * since the session parser has no knowledge of the execution context.
+ */
+export interface SessionUsageEvent {
+  eventId: string;
+  timestamp: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  totalTokens: number;
+  confidence: CostConfidence;
 }
 
 /**
@@ -122,4 +142,71 @@ export function extractCodexSessionId(raw: string): string | undefined {
 export function toReadableText(raw: string): string {
   const messages = parseCodexSessionJsonl(raw);
   return messages.map(m => `[${m.role}] ${m.content}`).join('\n');
+}
+
+/**
+ * Extract normalized usage events from Codex session JSONL.
+ *
+ * Codex emits usage data in several forms:
+ *   - `turn.completed` with a `usage` object (prompt_tokens, completion_tokens, etc.)
+ *   - `response.completed` with a nested `response.usage` object
+ *
+ * Lines without recognizable usage data are skipped.
+ * If no explicit usage is found, returns an empty array — callers
+ * can emit an unknown-confidence placeholder if needed.
+ */
+export function extractCodexUsageEvents(raw: string): SessionUsageEvent[] {
+  const events: SessionUsageEvent[] = [];
+  let eventCounter = 0;
+
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      const ts: string = entry.timestamp ?? '';
+
+      // turn.completed carries aggregated usage for the turn
+      if (entry.type === 'turn.completed' && entry.usage) {
+        const u = entry.usage;
+        const input = u.prompt_tokens ?? u.input_tokens ?? 0;
+        const output = u.completion_tokens ?? u.output_tokens ?? 0;
+        const cached = u.cached_tokens ?? u.cache_read_input_tokens ?? 0;
+        const total = u.total_tokens ?? (input + output);
+        events.push({
+          eventId: `codex-turn-${eventCounter++}`,
+          timestamp: ts,
+          model: entry.model ?? u.model ?? 'unknown',
+          inputTokens: input,
+          outputTokens: output,
+          cachedTokens: cached,
+          totalTokens: total,
+          confidence: (input > 0 || output > 0) ? 'exact' : 'unknown',
+        });
+        continue;
+      }
+
+      // response.completed carries per-response usage
+      if (entry.type === 'response.completed' && entry.response?.usage) {
+        const u = entry.response.usage;
+        const model = entry.response.model ?? 'unknown';
+        const input = u.prompt_tokens ?? u.input_tokens ?? 0;
+        const output = u.completion_tokens ?? u.output_tokens ?? 0;
+        const cached = u.cached_tokens ?? u.cache_read_input_tokens ?? 0;
+        const total = u.total_tokens ?? (input + output);
+        events.push({
+          eventId: entry.response.id ?? `codex-resp-${eventCounter++}`,
+          timestamp: ts,
+          model,
+          inputTokens: input,
+          outputTokens: output,
+          cachedTokens: cached,
+          totalTokens: total,
+          confidence: (input > 0 || output > 0) ? 'exact' : 'unknown',
+        });
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+  return events;
 }

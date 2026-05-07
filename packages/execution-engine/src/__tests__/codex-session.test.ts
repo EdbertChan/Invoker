@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest';
 // override the sessions directory. We'll test parseCodexSessionJsonl
 // directly since it's a pure function.
 
-import { parseCodexSessionJsonl, toReadableText, extractCodexSessionId } from '../codex-session.js';
+import { parseCodexSessionJsonl, toReadableText, extractCodexSessionId, extractCodexUsageEvents } from '../codex-session.js';
 
 // ── parseCodexSessionJsonl ───────────────────────────────────
 
@@ -288,5 +288,190 @@ describe('toReadableText', () => {
 
   it('returns empty string for empty input', () => {
     expect(toReadableText('')).toBe('');
+  });
+});
+
+// ── extractCodexUsageEvents ─────────────────────────────────
+
+describe('extractCodexUsageEvents', () => {
+  it('extracts usage from turn.completed events', () => {
+    const jsonl = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'abc' }),
+      JSON.stringify({ type: 'turn.started' }),
+      JSON.stringify({
+        timestamp: '2026-04-01T12:00:00Z',
+        type: 'turn.completed',
+        model: 'o3-mini',
+        usage: { input_tokens: 500, output_tokens: 200, cached_tokens: 50, total_tokens: 700 },
+      }),
+    ].join('\n');
+
+    const events = extractCodexUsageEvents(jsonl);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({
+      eventId: 'codex-turn-0',
+      timestamp: '2026-04-01T12:00:00Z',
+      model: 'o3-mini',
+      inputTokens: 500,
+      outputTokens: 200,
+      cachedTokens: 50,
+      totalTokens: 700,
+      confidence: 'exact',
+    });
+  });
+
+  it('extracts usage from response.completed events', () => {
+    const jsonl = JSON.stringify({
+      timestamp: '2026-04-01T12:00:01Z',
+      type: 'response.completed',
+      response: {
+        id: 'resp-001',
+        model: 'gpt-4o',
+        usage: { prompt_tokens: 1000, completion_tokens: 300, total_tokens: 1300 },
+      },
+    });
+
+    const events = extractCodexUsageEvents(jsonl);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({
+      eventId: 'resp-001',
+      timestamp: '2026-04-01T12:00:01Z',
+      model: 'gpt-4o',
+      inputTokens: 1000,
+      outputTokens: 300,
+      cachedTokens: 0,
+      totalTokens: 1300,
+      confidence: 'exact',
+    });
+  });
+
+  it('handles prompt_tokens/completion_tokens aliases (OpenAI style)', () => {
+    const jsonl = JSON.stringify({
+      timestamp: 'ts1',
+      type: 'turn.completed',
+      usage: { prompt_tokens: 400, completion_tokens: 150 },
+    });
+
+    const events = extractCodexUsageEvents(jsonl);
+    expect(events).toHaveLength(1);
+    expect(events[0].inputTokens).toBe(400);
+    expect(events[0].outputTokens).toBe(150);
+    expect(events[0].totalTokens).toBe(550);
+    expect(events[0].model).toBe('unknown');
+  });
+
+  it('handles cache_read_input_tokens alias', () => {
+    const jsonl = JSON.stringify({
+      type: 'turn.completed',
+      usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 30 },
+    });
+
+    const events = extractCodexUsageEvents(jsonl);
+    expect(events[0].cachedTokens).toBe(30);
+  });
+
+  it('emits unknown confidence when all token counts are zero', () => {
+    const jsonl = JSON.stringify({
+      type: 'turn.completed',
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+
+    const events = extractCodexUsageEvents(jsonl);
+    expect(events).toHaveLength(1);
+    expect(events[0].confidence).toBe('unknown');
+    expect(events[0].totalTokens).toBe(0);
+  });
+
+  it('extracts multiple usage events from mixed stream', () => {
+    const lines = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'abc' }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'Hello' } }),
+      JSON.stringify({
+        timestamp: 'ts1',
+        type: 'response.completed',
+        response: { id: 'r1', model: 'gpt-4o', usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } },
+      }),
+      JSON.stringify({
+        timestamp: 'ts2',
+        type: 'turn.completed',
+        model: 'o3-mini',
+        usage: { input_tokens: 200, output_tokens: 80, total_tokens: 280 },
+      }),
+    ];
+
+    const events = extractCodexUsageEvents(lines.join('\n'));
+    expect(events).toHaveLength(2);
+    expect(events[0].eventId).toBe('r1');
+    expect(events[0].model).toBe('gpt-4o');
+    expect(events[1].eventId).toBe('codex-turn-0');
+    expect(events[1].model).toBe('o3-mini');
+  });
+
+  it('skips lines without usage data', () => {
+    const lines = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'abc' }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'Hi' } }),
+      JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hello' }] } }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', count: 100 } }),
+    ];
+
+    const events = extractCodexUsageEvents(lines.join('\n'));
+    expect(events).toHaveLength(0);
+  });
+
+  it('skips malformed lines gracefully', () => {
+    const lines = [
+      'not json',
+      '{"incomplete',
+      JSON.stringify({ type: 'turn.completed', timestamp: 'ts1', usage: { input_tokens: 10, output_tokens: 5 } }),
+    ];
+
+    const events = extractCodexUsageEvents(lines.join('\n'));
+    expect(events).toHaveLength(1);
+    expect(events[0].inputTokens).toBe(10);
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(extractCodexUsageEvents('')).toEqual([]);
+    expect(extractCodexUsageEvents('\n\n')).toEqual([]);
+  });
+
+  it('returns empty array when no usage events present', () => {
+    const jsonl = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'abc' }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'Hello' } }),
+    ].join('\n');
+
+    expect(extractCodexUsageEvents(jsonl)).toEqual([]);
+  });
+
+  it('does not affect parseCodexSessionJsonl output (backward compatibility)', () => {
+    const lines = [
+      JSON.stringify({ timestamp: 'ts1', type: 'event_msg', payload: { type: 'user_message', message: 'Fix bug' } }),
+      JSON.stringify({ timestamp: 'ts2', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixed.' }] } }),
+      JSON.stringify({ timestamp: 'ts3', type: 'turn.completed', usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 } }),
+    ];
+    const raw = lines.join('\n');
+
+    // Message parsing unchanged — turn.completed is still skipped
+    const msgs = parseCodexSessionJsonl(raw);
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]).toEqual({ role: 'user', content: 'Fix bug', timestamp: 'ts1' });
+    expect(msgs[1]).toEqual({ role: 'assistant', content: 'Fixed.', timestamp: 'ts2' });
+
+    // Usage extraction works independently
+    const usage = extractCodexUsageEvents(raw);
+    expect(usage).toHaveLength(1);
+    expect(usage[0].inputTokens).toBe(100);
+  });
+
+  it('does not affect toReadableText output (backward compatibility)', () => {
+    const lines = [
+      JSON.stringify({ timestamp: 'ts1', type: 'event_msg', payload: { type: 'user_message', message: 'Hello' } }),
+      JSON.stringify({ timestamp: 'ts2', type: 'turn.completed', usage: { input_tokens: 50, output_tokens: 20 } }),
+    ];
+    const raw = lines.join('\n');
+
+    expect(toReadableText(raw)).toBe('[user] Hello');
   });
 });

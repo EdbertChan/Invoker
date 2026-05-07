@@ -12,8 +12,8 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import type { AgentSessionInspection, SessionDriver, RemoteTarget } from './session-driver.js';
-import { parseCodexSessionJsonl, toReadableText, extractCodexSessionId } from './codex-session.js';
-import type { AgentMessage } from './codex-session.js';
+import { parseCodexSessionJsonl, toReadableText, extractCodexSessionId, extractCodexUsageEvents } from './codex-session.js';
+import type { AgentMessage, SessionUsageEvent } from './codex-session.js';
 
 export class CodexSessionDriver implements SessionDriver {
   private getStorageDir(): string {
@@ -78,6 +78,10 @@ export class CodexSessionDriver implements SessionDriver {
       return { state: 'running' };
     }
     return { state: 'error', reason: 'Codex session did not contain recognizable lifecycle markers' };
+  }
+
+  extractUsageEvents(raw: string): SessionUsageEvent[] {
+    return extractCodexUsageEvents(raw);
   }
 
   /**

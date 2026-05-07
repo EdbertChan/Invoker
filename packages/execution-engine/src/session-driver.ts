@@ -5,7 +5,7 @@
  * Co-registered alongside the agent via AgentRegistry.registerExecution().
  */
 
-import type { AgentMessage } from './codex-session.js';
+import type { AgentMessage, SessionUsageEvent } from './codex-session.js';
 
 export interface RemoteTarget {
   host: string;
@@ -34,4 +34,6 @@ export interface SessionDriver {
   extractSessionId?(rawStdout: string): string | undefined;
   /** Fetch session from a remote SSH host. Returns raw content or null. */
   fetchRemoteSession?(sessionId: string, target: RemoteTarget): Promise<string | null>;
+  /** Extract normalized usage events from raw session data. */
+  extractUsageEvents?(raw: string): SessionUsageEvent[];
 }

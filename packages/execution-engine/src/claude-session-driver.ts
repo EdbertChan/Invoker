@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import type { AgentSessionInspection, SessionDriver, RemoteTarget } from './session-driver.js';
-import type { AgentMessage } from './codex-session.js';
+import type { AgentMessage, SessionUsageEvent } from './codex-session.js';
 
 export class ClaudeSessionDriver implements SessionDriver {
   /**
@@ -112,6 +112,49 @@ export class ClaudeSessionDriver implements SessionDriver {
     }
 
     return { state: 'error', reason: 'Claude session ended in an unrecognized state' };
+  }
+
+  /**
+   * Extract usage events from Claude session JSONL.
+   *
+   * Claude CLI emits assistant entries with `message.usage` containing
+   * `input_tokens` and `output_tokens`. The model is on `message.model`.
+   */
+  extractUsageEvents(raw: string): SessionUsageEvent[] {
+    const events: SessionUsageEvent[] = [];
+    let eventCounter = 0;
+
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== 'assistant') continue;
+
+        const usage = entry.message?.usage;
+        if (!usage) continue;
+
+        const input = usage.input_tokens ?? 0;
+        const output = usage.output_tokens ?? 0;
+        const cached = usage.cache_read_input_tokens ?? usage.cached_tokens ?? 0;
+        const total = input + output;
+        const model = entry.message?.model ?? 'unknown';
+        const ts: string = entry.timestamp ?? '';
+
+        events.push({
+          eventId: `claude-msg-${eventCounter++}`,
+          timestamp: ts,
+          model,
+          inputTokens: input,
+          outputTokens: output,
+          cachedTokens: cached,
+          totalTokens: total,
+          confidence: (input > 0 || output > 0) ? 'exact' : 'unknown',
+        });
+      } catch {
+        // Skip malformed lines
+      }
+    }
+    return events;
   }
 
   /**
