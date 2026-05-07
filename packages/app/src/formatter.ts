@@ -6,6 +6,7 @@
 
 import type { TaskState, TaskStatus } from '@invoker/workflow-core';
 import type { TaskEvent, Workflow } from '@invoker/data-store';
+import type { CostRollup } from '@invoker/contracts';
 
 // ── ANSI Color Codes ─────────────────────────────────────────
 
@@ -348,4 +349,35 @@ export function formatAsJson(data: unknown): string {
  */
 export function formatAsJsonl(items: unknown[]): string {
   return items.map(item => JSON.stringify(item)).join('\n');
+}
+
+// ── Cost Formatting ─────────────────────────────────────────
+
+/**
+ * Format a CostRollup as a human-readable summary.
+ *
+ * The signature accepts `CostRollup` directly — no provider-specific
+ * branching required. Parsers normalize upstream; formatters consume
+ * one shape.
+ */
+export function formatCostSummary(rollup: CostRollup): string {
+  const lines: string[] = [];
+
+  lines.push(`${BOLD}Cost summary${RESET}`);
+  lines.push('');
+  lines.push(`  Events     ${BOLD}${rollup.eventCount}${RESET}`);
+  lines.push(`  Input      ${BOLD}${rollup.totalInputTokens.toLocaleString()}${RESET} tokens`);
+  lines.push(`  Output     ${BOLD}${rollup.totalOutputTokens.toLocaleString()}${RESET} tokens`);
+  lines.push(`  Cached     ${BOLD}${rollup.totalCachedTokens.toLocaleString()}${RESET} tokens`);
+  lines.push(`  Total      ${BOLD}${rollup.totalTokens.toLocaleString()}${RESET} tokens`);
+  lines.push(`  Est. cost  ${GREEN}$${rollup.totalEstimatedCostUsd.toFixed(4)}${RESET}`);
+
+  if (rollup.unknownConfidenceCount > 0) {
+    lines.push(`  ${YELLOW}⚠ ${rollup.unknownConfidenceCount} event(s) with unknown confidence${RESET}`);
+  }
+  if (rollup.missingUsageCount > 0) {
+    lines.push(`  ${YELLOW}⚠ ${rollup.missingUsageCount} event(s) with missing usage data${RESET}`);
+  }
+
+  return lines.join('\n');
 }
