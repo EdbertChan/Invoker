@@ -252,17 +252,15 @@ export const IpcChannels = {
     response: void;
   },
   /**
-   * @deprecated Step 13 (`docs/architecture/task-invalidation-roadmap.md`):
-   * `invoker:restart-task` is the legacy channel name from when
-   * `restartTask` was the overloaded "retry-or-recreate" verb the
-   * chart's "Naming inconsistency" section flagged. The channel
-   * itself is preserved for UI compatibility but its handler in
-   * `main.ts` now routes through `commandService.retryTask` →
-   * `Orchestrator.retryTask` (retry-class semantics: preserves
-   * branch/workspacePath lineage). Prefer the explicit channels —
-   * `invoker:retry-task` (when wired) for retry-class invalidation
-   * or `invoker:recreate-task` for recreate-class invalidation.
-   * Once UI is migrated this channel can be removed.
+   * @deprecated INV-91 adapter (chosen design: compatibility adapter with deprecation window).
+   * Legacy channel name from when `restartTask` was the overloaded "retry-or-recreate" verb.
+   * Handler in `main.ts` routes through `commandService.retryTask` →
+   * `Orchestrator.retryTask` (retry-class semantics: preserves branch/workspacePath lineage).
+   * Prefer explicit channels: `invoker:retry-task` or `invoker:recreate-task`.
+   *
+   * Decision gate: remove when UI is migrated and usage count reaches zero.
+   * Rejected alternative: hard-remove (INV-91 metric 4: ~14 files break simultaneously).
+   * Deferred: removal blocked until UI call site (`App.tsx:201`) migrates to `invoker:retry-task`.
    */
   'invoker:restart-task': {} as {
     request: [taskId: string];
@@ -326,6 +324,12 @@ export const IpcChannels = {
     request: [workflowId: string];
     response: void;
   },
+  /**
+   * @deprecated INV-91 adapter (chosen design: compatibility adapter with deprecation window).
+   * Legacy channel name; prefer `invoker:recreate-with-rebase`.
+   * Decision gate: remove when headless CLI `rebase-and-retry` alias is retired.
+   * Rejected alternative: hard-remove (INV-91 metric 4: ~14 files break simultaneously).
+   */
   'invoker:rebase-and-retry': {} as {
     request: [mergeTaskId: string];
     response: RebaseAndRetryResult;

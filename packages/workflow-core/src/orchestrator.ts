@@ -2002,10 +2002,23 @@ export class Orchestrator {
     return started;
   }
 
+  /**
+   * @deprecated INV-91 adapter (chosen design: compatibility adapter with deprecation window).
+   * Routes to {@link recreateTask}. Callers should migrate to explicit verbs:
+   * - {@link retryTask} for lineage-preserving reset (retry-class)
+   * - {@link recreateTask} for fresh-lineage reset (recreate-class)
+   *
+   * Decision gate: remove this shim when all call sites are migrated and
+   * `restartTask` usage count in logs reaches zero.
+   *
+   * Rejected alternative: hard-remove all deprecated symbols at once (INV-91
+   * experiment metric 4 showed ~14 production files would break simultaneously
+   * with all-or-nothing revert granularity).
+   */
   restartTask(taskId: string): TaskState[] {
     this.logger.warn(
-      '[orchestrator] restartTask is deprecated. Routing to recreateTask. Use retryTask() for lineage-preserving reset or recreateTask() for fresh-lineage reset explicitly.',
-      { taskId },
+      '[orchestrator] restartTask is deprecated (INV-91 adapter). Routing to recreateTask. Use retryTask() for lineage-preserving reset or recreateTask() for fresh-lineage reset.',
+      { taskId, deprecationTracker: 'inv-91' },
     );
     return this.recreateTask(taskId);
   }

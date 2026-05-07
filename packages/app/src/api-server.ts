@@ -19,7 +19,7 @@
  *
  * Write endpoints:
  *   POST   /api/tasks/:id/cancel
- *   POST   /api/tasks/:id/restart
+ *   POST   /api/tasks/:id/restart       @deprecated INV-91 adapter; use /retry
  *   POST   /api/tasks/:id/resolve-conflict  body: { agent? }
  *   POST   /api/tasks/:id/approve
  *   POST   /api/tasks/:id/reject       body: { reason? }
@@ -30,7 +30,7 @@
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
  *   POST   /api/workflows/:id/detach  body: { upstreamWorkflowId }
- *   POST   /api/workflows/:id/restart
+ *   POST   /api/workflows/:id/restart   @deprecated INV-91 adapter; use /recreate
  *   POST   /api/workflows/:id/recreate-with-rebase
  *   POST   /api/workflows/:id/cancel
  *   POST   /api/workflows/:id/merge-mode  body: { mode }
@@ -208,18 +208,24 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         return;
       }
 
-      // POST /api/tasks/:id/retry  (legacy: /api/tasks/:id/restart)
+      // POST /api/tasks/:id/retry
+      // INV-91 adapter: /api/tasks/:id/restart kept during deprecation window.
+      // Decision gate: remove /restart alias when usage count reaches zero.
+      // Rejected alternative: hard-remove (INV-91 metric 4: ~14 files break simultaneously).
       const retryMatch = path.match(/^\/api\/tasks\/([^/]+)\/retry$/);
       const restartMatch = path.match(/^\/api\/tasks\/([^/]+)\/restart$/);
       if (method === 'POST' && (retryMatch || restartMatch)) {
         const isLegacy = !!restartMatch;
+        if (isLegacy) {
+          apiLogger?.warn('[api] POST /api/tasks/:id/restart is deprecated (INV-91 adapter). Use /api/tasks/:id/retry.', { deprecationTracker: 'inv-91' });
+        }
         const taskId = decodeURIComponent((retryMatch ?? restartMatch)![1]);
         try {
           const result = await mutations.retryTask(taskId);
           if (isLegacy) {
             res.setHeader(
               'Deprecation',
-              'true; reason="Use /api/tasks/:id/retry or /api/tasks/:id/recreate"',
+              'true; reason="Use /api/tasks/:id/retry or /api/tasks/:id/recreate"; tracker=inv-91',
             );
           }
           json(res, 200, {
@@ -315,18 +321,24 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         return;
       }
 
-      // POST /api/workflows/:id/recreate  (legacy: /api/workflows/:id/restart)
+      // POST /api/workflows/:id/recreate
+      // INV-91 adapter: /api/workflows/:id/restart kept during deprecation window.
+      // Decision gate: remove /restart alias when usage count reaches zero.
+      // Rejected alternative: hard-remove (INV-91 metric 4: ~14 files break simultaneously).
       const wfRecreateMatch = path.match(/^\/api\/workflows\/([^/]+)\/recreate$/);
       const wfRestartMatch = path.match(/^\/api\/workflows\/([^/]+)\/restart$/);
       if (method === 'POST' && (wfRecreateMatch || wfRestartMatch)) {
         const isLegacy = !!wfRestartMatch;
+        if (isLegacy) {
+          apiLogger?.warn('[api] POST /api/workflows/:id/restart is deprecated (INV-91 adapter). Use /api/workflows/:id/recreate.', { deprecationTracker: 'inv-91' });
+        }
         const workflowId = decodeURIComponent((wfRecreateMatch ?? wfRestartMatch)![1]);
         try {
           const result = await mutations.recreateWorkflow(workflowId);
           if (isLegacy) {
             res.setHeader(
               'Deprecation',
-              'true; reason="Use /api/workflows/:id/recreate"',
+              'true; reason="Use /api/workflows/:id/recreate"; tracker=inv-91',
             );
           }
           const tasksStarted = result.started.filter(t => t.status === 'running').length;
@@ -357,11 +369,17 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         return;
       }
 
-      // POST /api/workflows/:id/recreate-with-rebase  (legacy: /api/workflows/:id/rebase-and-retry)
+      // POST /api/workflows/:id/recreate-with-rebase
+      // INV-91 adapter: /api/workflows/:id/rebase-and-retry kept during deprecation window.
+      // Decision gate: remove /rebase-and-retry alias when usage count reaches zero.
+      // Rejected alternative: hard-remove (INV-91 metric 4: ~14 files break simultaneously).
       const wfRecreateWithRebaseMatch = path.match(/^\/api\/workflows\/([^/]+)\/recreate-with-rebase$/);
       const wfRebaseAndRetryMatch = path.match(/^\/api\/workflows\/([^/]+)\/rebase-and-retry$/);
       if (method === 'POST' && (wfRecreateWithRebaseMatch || wfRebaseAndRetryMatch)) {
         const isLegacy = !!wfRebaseAndRetryMatch;
+        if (isLegacy) {
+          apiLogger?.warn('[api] POST /api/workflows/:id/rebase-and-retry is deprecated (INV-91 adapter). Use /api/workflows/:id/recreate-with-rebase.', { deprecationTracker: 'inv-91' });
+        }
         const workflowTarget = decodeURIComponent((wfRecreateWithRebaseMatch ?? wfRebaseAndRetryMatch)![1]);
         try {
           const workflowId = resolveHeadlessTargetWorkflowId(workflowTarget, persistence);
@@ -369,7 +387,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           if (isLegacy) {
             res.setHeader(
               'Deprecation',
-              'true; reason="Use /api/workflows/:id/recreate-with-rebase"',
+              'true; reason="Use /api/workflows/:id/recreate-with-rebase"; tracker=inv-91',
             );
           }
           const tasksStarted = result.started.filter(t => t.status === 'running').length;
