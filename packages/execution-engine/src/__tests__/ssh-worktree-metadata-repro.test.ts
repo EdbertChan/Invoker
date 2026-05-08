@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TaskRunner } from '../task-runner.js';
+import { ReviewProviderRegistry } from '../review-provider-registry.js';
 import type { TaskState } from '@invoker/workflow-core';
 
 function git(cmd: string, cwd: string): string {
@@ -121,6 +122,7 @@ describe('SSH worktree metadata repro', () => {
         get: () => failingExecutor,
         getAll: () => [failingExecutor],
       } as any,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: '/tmp',
     });
 
