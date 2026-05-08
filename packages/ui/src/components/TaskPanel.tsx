@@ -392,7 +392,7 @@ export function TaskPanel({
             href={task.execution.reviewUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-xs font-mono text-blue-400 hover:text-blue-300 underline truncate max-w-[200px]"
+            className="text-xs font-mono text-blue-400 hover:text-blue-300 underline break-all whitespace-normal text-right max-w-[260px]"
             title={task.execution.reviewUrl}
             data-testid="pr-url-link"
           >
