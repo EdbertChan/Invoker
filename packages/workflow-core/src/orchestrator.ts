@@ -161,6 +161,7 @@ export interface OrchestratorPersistence {
     baseBranch?: string;
     featureBranch?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
+    publicationStrategy?: 'github_pr' | 'mergify_stack';
   }): void;
   updateWorkflow?(workflowId: string, changes: { status?: string; updatedAt?: string; baseBranch?: string; generation?: number; mergeMode?: 'manual' | 'automatic' | 'external_review' }): void;
   saveTask(workflowId: string, task: TaskState): void;
@@ -223,6 +224,7 @@ export interface PlanDefinition {
   featureBranch?: string;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
   reviewProvider?: string;
+  publicationStrategy?: 'github_pr' | 'mergify_stack';
   repoUrl?: string;
   intermediateRepoUrl?: string;
   tasks: Array<{
@@ -1334,6 +1336,7 @@ export class Orchestrator {
       baseBranch: plan.baseBranch,
       featureBranch: plan.featureBranch,
       mergeMode: plan.mergeMode,
+      publicationStrategy: plan.publicationStrategy,
       createdAt,
       updatedAt: createdAt,
     });
@@ -3102,6 +3105,9 @@ export class Orchestrator {
       if (typeof m.featureBranch === 'string') baseSaveWf.featureBranch = m.featureBranch;
       if (m.mergeMode === 'manual' || m.mergeMode === 'automatic' || m.mergeMode === 'external_review') {
         baseSaveWf.mergeMode = m.mergeMode;
+      }
+      if (m.publicationStrategy === 'github_pr' || m.publicationStrategy === 'mergify_stack') {
+        baseSaveWf.publicationStrategy = m.publicationStrategy;
       }
     }
     this.persistence.saveWorkflow(baseSaveWf);
