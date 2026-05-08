@@ -1,0 +1,44 @@
+# Large-file allowlist — ratchet for known oversized production files.
+#
+# Format: <relative-path> <max-lines>
+#
+# Rules:
+#   - Caps can be LOWERED (after refactoring) but not raised.
+#   - New entries need review justification.
+#   - Goal: every file eventually drops below the default threshold (500 lines).
+#
+# To audit: bash scripts/check-large-files.sh
+
+# --- workflow orchestration (decomposition target) ---
+packages/workflow-core/src/orchestrator.ts 4700
+
+# --- app entrypoints ---
+packages/app/src/main.ts 3750
+packages/app/src/headless.ts 2600
+packages/app/src/workflow-actions.ts 1100
+packages/app/src/api-server.ts 650
+packages/app/src/headless-client.ts 510
+
+# --- data layer ---
+packages/data-store/src/sqlite-adapter.ts 2150
+
+# --- execution engine ---
+packages/execution-engine/src/task-runner.ts 2000
+packages/execution-engine/src/merge-runner.ts 1350
+packages/execution-engine/src/base-executor.ts 1000
+packages/execution-engine/src/ssh-executor.ts 850
+packages/execution-engine/src/conflict-resolver.ts 800
+packages/execution-engine/src/worktree-executor.ts 650
+packages/execution-engine/src/docker-executor.ts 650
+packages/execution-engine/src/repo-pool.ts 600
+
+# --- UI ---
+packages/ui/src/components/TaskPanel.tsx 1100
+packages/ui/src/App.tsx 800
+
+# --- surfaces ---
+packages/surfaces/src/slack/slack-surface.ts 900
+packages/surfaces/src/slack/plan-conversation.ts 550
+
+# --- transport ---
+packages/transport/src/ipc-bus.ts 750
