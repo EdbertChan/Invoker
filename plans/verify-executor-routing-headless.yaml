@@ -8,7 +8,7 @@
 name: "Verify executor routing (headless Invoker)"
 repoUrl: git@github.com:example-org/acme-repo.git
 onFinish: none
-mergeMode: manual
+approvalMode: manual
 baseBranch: master
 
 tasks:

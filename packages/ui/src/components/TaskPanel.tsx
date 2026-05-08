@@ -76,7 +76,7 @@ interface TaskPanelProps {
   onSetExternalGatePolicies?: (taskId: string, updates: ExternalGatePolicyUpdate[]) => Promise<void>;
   onSetMergeBranch?: (workflowId: string, baseBranch: string) => Promise<void>;
   approvalMode?: string;
-  onSetMergeMode?: (workflowId: string, approvalMode: string) => Promise<void>;
+  onSetApprovalMode?: (workflowId: string, approvalMode: string) => Promise<void>;
 }
 
 function formatDate(date?: Date | string): string {
@@ -177,7 +177,7 @@ export function TaskPanel({
   onSetExternalGatePolicies,
   onSetMergeBranch,
   approvalMode,
-  onSetMergeMode,
+  onSetApprovalMode,
 }: TaskPanelProps) {
   const [isEditingCommand, setIsEditingCommand] = useState(false);
   const [editCommandValue, setEditCommandValue] = useState('');
@@ -392,7 +392,7 @@ export function TaskPanel({
       {(
         (onEditType && !task.config.isMergeNode) ||
         (task.config.prompt && onEditAgent) ||
-        (task.config.isMergeNode && onSetMergeMode && task.config.workflowId)
+        (task.config.isMergeNode && onSetApprovalMode && task.config.workflowId)
       ) && (
         <div className="border-t border-gray-700 pt-3">
           <button
@@ -453,16 +453,16 @@ export function TaskPanel({
                 </div>
               )}
 
-              {/* Merge mode selector (merge gates only) */}
-              {task.config.isMergeNode && onSetMergeMode && task.config.workflowId && (
+              {/* Approval mode selector (merge gates only) */}
+              {task.config.isMergeNode && onSetApprovalMode && task.config.workflowId && (
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-400">Merge mode</span>
+                  <span className="text-sm text-gray-400">Approval mode</span>
                   <select
                     value={approvalMode ?? 'manual'}
-                    onChange={(e) => onSetMergeMode(task.config.workflowId!, e.target.value)}
+                    onChange={(e) => onSetApprovalMode(task.config.workflowId!, e.target.value)}
                     disabled={task.status === 'running' || task.status === 'fixing_with_ai'}
                     className="bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                    data-testid="merge-mode-select"
+                    data-testid="approval-mode-select"
                   >
                     <option value="manual">Manual</option>
                     <option value="automatic">Automatic</option>

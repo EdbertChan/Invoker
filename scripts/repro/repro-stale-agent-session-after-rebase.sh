@@ -82,7 +82,7 @@ cat >"$PLAN_FILE" <<EOF
 name: repro stale agent session after rebase
 repoUrl: ${REPO_URL}
 onFinish: none
-mergeMode: manual
+approvalMode: manual
 baseBranch: main
 
 tasks:

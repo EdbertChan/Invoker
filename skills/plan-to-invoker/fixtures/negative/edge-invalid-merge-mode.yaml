@@ -1,11 +1,11 @@
-# Edge case: Invalid mergeMode enum value
-# Expected error: invalid_enum_value (field: mergeMode)
+# Edge case: Invalid approvalMode enum value
+# Expected error: invalid_enum_value (field: approvalMode)
 #
-# mergeMode must be one of: github, manual
+# approvalMode must be one of: external_review, manual, automatic
 
-name: "Invalid mergeMode enum"
+name: "Invalid approvalMode enum"
 repoUrl: git@github.com:example-org/acme-repo.git
-mergeMode: invalid_mode
+approvalMode: invalid_mode
 
 tasks:
   - id: test-task

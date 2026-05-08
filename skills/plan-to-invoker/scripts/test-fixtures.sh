@@ -277,7 +277,7 @@ test_lint_valid_final_test_all() {
 name: "Valid final test-all gate"
 description: "Implementation plan with terminal full-suite regression"
 onFinish: pull_request
-mergeMode: github
+approvalMode: external_review
 repoUrl: git@github.com:example-org/acme-repo.git
 tasks:
   - id: implement-surface
@@ -364,7 +364,7 @@ test_lint_rejects_non_test_all_final_gate() {
 name: "Invalid final gate command"
 description: "Implementation plan with old package-scoped final regression"
 onFinish: pull_request
-mergeMode: github
+approvalMode: external_review
 repoUrl: git@github.com:example-org/acme-repo.git
 tasks:
   - id: implement-surface
@@ -438,7 +438,7 @@ test_lint_rejects_final_gate_missing_dependencies() {
 name: "Invalid final gate dependencies"
 description: "Implementation plan whose final regression does not depend on every earlier task"
 onFinish: pull_request
-mergeMode: github
+approvalMode: external_review
 repoUrl: git@github.com:example-org/acme-repo.git
 tasks:
   - id: implement-surface
@@ -539,7 +539,7 @@ test_lint_requires_design_sections_for_prompt_tasks() {
 name: "Invalid prompt task missing design sections"
 description: "Implementation plan missing structured rationale headings"
 onFinish: pull_request
-mergeMode: external_review
+approvalMode: external_review
 repoUrl: git@github.com:example-org/acme-repo.git
 tasks:
   - id: implement-bridge
@@ -605,7 +605,7 @@ test_lint_accepts_design_sections_for_prompt_tasks() {
 name: "Valid prompt task with design sections"
 description: "Implementation plan with required design headings"
 onFinish: pull_request
-mergeMode: external_review
+approvalMode: external_review
 repoUrl: git@github.com:example-org/acme-repo.git
 tasks:
   - id: implement-bridge
@@ -667,7 +667,7 @@ test_lint_requires_design_sections_for_command_tasks() {
 name: "Invalid command task missing design sections"
 description: "Implementation plan with command step missing rationale headings"
 onFinish: pull_request
-mergeMode: external_review
+approvalMode: external_review
 repoUrl: git@github.com:example-org/acme-repo.git
 tasks:
   - id: run-focused-verification

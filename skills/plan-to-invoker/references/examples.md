@@ -80,11 +80,11 @@ Omit or use `TBD` under `Files:` when scope is unknown; revise tasks as the plan
 
 ---
 
-## 7. Publication strategy selection (`github_pr` vs `mergify_stack`)
+## 7. Review strategy selection (`github_pr` vs `mergify_stack`)
 
-The execution engine resolves the publication provider through a **strategy router** (`packages/execution-engine/src/publication-strategy-router.ts`). The workflow's `publicationStrategy` field selects which `MergeGateProvider` handles review creation and approval polling.
+The execution engine resolves the review provider through a **strategy router** (`packages/execution-engine/src/publication-strategy-router.ts`). The workflow's `reviewStrategy` field selects which `MergeGateProvider` handles review creation and approval polling.
 
-| `publicationStrategy` | Provider | Behavior |
+| `reviewStrategy` | Provider | Behavior |
 |---|---|---|
 | `github_pr` (default) | `GitHubMergeGateProvider` | Creates a standard GitHub PR, polls review approval |
 | `mergify_stack` (opt-in) | `MergifyStackProvider` | Runs `mergify stack push`, resolves stacked PR, polls approval |
@@ -92,9 +92,9 @@ The execution engine resolves the publication provider through a **strategy rout
 When the target repo is Invoker itself, keep the plan shape normal:
 
 - `onFinish: pull_request`
-- `mergeMode: github`
+- `approvalMode: external_review`
 
-The workflow's `publicationStrategy` is set to `mergify_stack` at the persistence level. Once the branch's commit stack is ready, the engine publishes via `mergify stack push`.
+The workflow's `reviewStrategy` is set to `mergify_stack` at the persistence level. Once the branch's commit stack is ready, the engine publishes via `mergify stack push`.
 
 **See**: `fixtures/positive/06-invoker-dogfood-mergify-stack.yaml`
 
@@ -113,7 +113,7 @@ The workflow's `publicationStrategy` is set to `mergify_stack` at the persistenc
 
 Counterexample:
 
-- If the target repo is an external repo such as `EdbertChan/test-playground`, do **not** set `publicationStrategy: mergify_stack`.
+- If the target repo is an external repo such as `EdbertChan/test-playground`, do **not** set `reviewStrategy: mergify_stack`.
 - Keep `github_pr` (default) unless that repo independently uses Mergify Stacks.
 
 ## 8. Policy matrix / architecture document
@@ -156,7 +156,7 @@ Use this pattern when a change is too large for a single reviewable workflow. Fo
 - Feature implementation → implement → test → verify, `onFinish: merge`
 - Multi-step refactors → `executorType: worktree`, chained dependencies
 - Large refactors → `onFinish: pull_request`, diamond DAGs
-- Publication strategy → `github_pr` (default) for standard PRs; `mergify_stack` (explicit opt-in) for stacked publication via `MergifyStackProvider`
+- Review strategy → `github_pr` (default) for standard PRs; `mergify_stack` (explicit opt-in) for stacked publication via `MergifyStackProvider`
 - Policy matrix / architecture docs → preserve row-level coverage with `coverage-map.json` and `stack-manifest.json`
 - Dependency-first layered decomposition → enforce `Layer:` + `Feature state:` metadata, preserve dependency direction, allow explicit dormant tasks
 

@@ -104,11 +104,11 @@ Reference:
 
 - `docs/pr-branching-workflow.md`
 
-## Publication strategy
+## Review strategy
 
-The execution engine resolves the publication provider via `publicationStrategy` on the workflow. This skill handles the PR authoring step; the engine handles provider dispatch.
+The execution engine resolves the review provider via `reviewStrategy` on the workflow. This skill handles the PR authoring step; the engine handles provider dispatch.
 
-| `publicationStrategy` | PR creation | When to use |
+| `reviewStrategy` | PR creation | When to use |
 |---|---|---|
 | `github_pr` (default) | `GitHubMergeGateProvider` creates a standard GitHub PR | All repos unless they opt into Mergify Stacks |
 | `mergify_stack` (opt-in) | `MergifyStackProvider` runs `mergify stack push` | Invoker-on-Invoker (`EdbertChan/Invoker`, `Neko-Catpital-Labs/Invoker`) or repos that independently use Mergify Stacks |

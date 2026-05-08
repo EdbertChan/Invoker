@@ -35,7 +35,7 @@ Positive fixtures demonstrate valid plan patterns:
 - **03-multi-step-refactor-worktrees.yaml** - Multi-step refactor using worktrees
 - **04-large-refactor-pull-request.yaml** - Complex plan with diamond dependencies and `onFinish: pull_request`
 - **05-ui-change-with-visual-proof.yaml** - UI workflow that pairs visual proof with a final full-suite regression gate
-- **06-invoker-dogfood-mergify-stack.yaml** - Invoker-on-Invoker PR publication example using `publicationStrategy: mergify_stack` (resolved by `publication-strategy-router.ts`), with a final full-suite regression gate
+- **06-invoker-dogfood-mergify-stack.yaml** - Invoker-on-Invoker PR publication example using `reviewStrategy: mergify_stack` (resolved by `publication-strategy-router.ts`), with a final full-suite regression gate
 - **07-prompt-edit-layered-split-with-dormant.yaml** - Dependency-first layer split for prompt-edit bridge work, including a dormant activation slice
 - Implementation fixtures with `onFinish != none` end with a final `pnpm run test:all` task
 
@@ -65,7 +65,7 @@ Negative fixtures demonstrate anti-patterns and validation errors:
 - **edge-missing-task-id.yaml** - Task missing `id` field
 - **edge-missing-task-description.yaml** - Task missing `description` field
 - **edge-neither-command-nor-prompt.yaml** - Task with neither command nor prompt
-- **edge-invalid-merge-mode.yaml** - Invalid `mergeMode` enum value
+- **edge-invalid-merge-mode.yaml** - Invalid `approvalMode` enum value
 - **edge-invalid-on-finish.yaml** - Invalid `onFinish` enum value
 - **edge-invalid-executor-type.yaml** - Invalid `executorType` enum value
 - **edge-invalid-dependency-reference.yaml** - Dependency on non-existent task
