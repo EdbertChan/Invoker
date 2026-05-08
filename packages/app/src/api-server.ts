@@ -33,7 +33,7 @@
  *   POST   /api/workflows/:id/restart
  *   POST   /api/workflows/:id/recreate-with-rebase
  *   POST   /api/workflows/:id/cancel
- *   POST   /api/workflows/:id/merge-mode  body: { mode }
+ *   POST   /api/workflows/:id/approval-mode  body: { mode }
  *   DELETE /api/workflows/:id
  */
 
@@ -594,10 +594,10 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         return;
       }
 
-      // POST /api/workflows/:id/merge-mode
-      const wfMergeModeMatch = path.match(/^\/api\/workflows\/([^/]+)\/merge-mode$/);
-      if (method === 'POST' && wfMergeModeMatch) {
-        const workflowId = decodeURIComponent(wfMergeModeMatch[1]);
+      // POST /api/workflows/:id/approval-mode
+      const wfApprovalModeMatch = path.match(/^\/api\/workflows\/([^/]+)\/approval-mode$/);
+      if (method === 'POST' && wfApprovalModeMatch) {
+        const workflowId = decodeURIComponent(wfApprovalModeMatch[1]);
         try {
           const body = await readBody(req);
           const { mode } = JSON.parse(body);
@@ -605,8 +605,8 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             json(res, 400, { error: 'Missing "mode" in request body' });
             return;
           }
-          await mutations.setWorkflowMergeMode(workflowId, mode);
-          json(res, 200, { ok: true, workflowId, action: 'merge_mode_set', mode });
+          await mutations.setWorkflowApprovalMode(workflowId, mode);
+          json(res, 200, { ok: true, workflowId, action: 'approval_mode_set', mode });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }
