@@ -1473,6 +1473,7 @@ describe('SQLiteAdapter', () => {
         (db1 as any).db.run(
           `UPDATE workflows SET merge_mode = 'external_review', publication_strategy = 'mergify_stack' WHERE id = 'wf-1'`,
         );
+        (db1 as any).dirty = true; // ensure raw SQL change is flushed to disk
         db1.close();
 
         // Re-open — migration should copy legacy → new columns
@@ -1497,6 +1498,7 @@ describe('SQLiteAdapter', () => {
         (db1 as any).db.run(
           `UPDATE workflows SET merge_mode = 'manual', publication_strategy = 'mergify_stack' WHERE id = 'wf-1'`,
         );
+        (db1 as any).dirty = true; // ensure raw SQL change is flushed to disk
         db1.close();
 
         // Re-open — migration should NOT overwrite existing new-column values
