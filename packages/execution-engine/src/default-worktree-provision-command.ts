@@ -8,8 +8,8 @@ export const DEFAULT_WORKTREE_PROVISION_COMMAND =
     exit 0; \
   fi; \
   if ! NODE_ENV=development pnpm install --frozen-lockfile; then \
-    echo "[provision] frozen-lockfile install failed; refreshing lockfile and retrying"; \
-    NODE_ENV=development pnpm install --lockfile-only; \
+    echo "[provision] frozen-lockfile install failed; cleaning node_modules and retrying"; \
+    rm -rf node_modules packages/*/node_modules; \
     NODE_ENV=development pnpm install --frozen-lockfile; \
   fi && ( \
   [ ! -f pnpm-workspace.yaml ] || ( \
