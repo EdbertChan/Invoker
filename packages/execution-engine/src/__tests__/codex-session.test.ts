@@ -430,3 +430,101 @@ describe('extractCodexUsage', () => {
     expect(usage[1].confidence).toBe('exact');
   });
 });
+
+// ── Competing Design Proof: Schema Normalization ──────────
+
+describe('competing design proof: parser normalization reduces branching', () => {
+  it('old and new Codex formats produce identical AgentMessage shape', () => {
+    // Old format (event_msg / response_item)
+    const oldFormatLines = [
+      JSON.stringify({ timestamp: 'ts1', type: 'event_msg', payload: { type: 'user_message', message: 'Run tests' } }),
+      JSON.stringify({ timestamp: 'ts2', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Tests passed.' }] } }),
+    ].join('\n');
+
+    // New format (item.completed / agent_message)
+    const newFormatLines = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'abc' }),
+      JSON.stringify({ type: 'item.completed', timestamp: 'ts1', item: { type: 'user_message', text: 'Run tests' } }),
+      JSON.stringify({ type: 'item.completed', timestamp: 'ts2', item: { type: 'agent_message', text: 'Tests passed.' } }),
+    ].join('\n');
+
+    const oldMsgs = parseCodexSessionJsonl(oldFormatLines);
+    const newMsgs = parseCodexSessionJsonl(newFormatLines);
+
+    // Both formats normalize to the same shape — consumers never branch on format
+    expect(oldMsgs).toHaveLength(2);
+    expect(newMsgs).toHaveLength(2);
+    expect(oldMsgs[0].role).toBe(newMsgs[0].role);
+    expect(oldMsgs[0].content).toBe(newMsgs[0].content);
+    expect(oldMsgs[1].role).toBe(newMsgs[1].role);
+    expect(oldMsgs[1].content).toBe(newMsgs[1].content);
+
+    // Shape contract: every message has exactly { role, content, timestamp }
+    for (const msg of [...oldMsgs, ...newMsgs]) {
+      expect(Object.keys(msg).sort()).toEqual(['content', 'role', 'timestamp']);
+    }
+  });
+
+  it('usage extraction produces identical SessionUsageEvent shape across event types', () => {
+    // turn.completed usage
+    const turnLines = [
+      JSON.stringify({ type: 'turn.completed', timestamp: '2026-01-01T00:00:00Z', model: 'gpt-4o', usage: { input_tokens: 100, output_tokens: 50 } }),
+    ].join('\n');
+
+    // thread.completed usage
+    const threadLines = [
+      JSON.stringify({ type: 'thread.completed', timestamp: '2026-01-01T00:00:00Z', usage: { input_tokens: 100, output_tokens: 50 } }),
+    ].join('\n');
+
+    // token_count usage
+    const tokenCountLines = [
+      JSON.stringify({ timestamp: '2026-01-01T00:00:00Z', type: 'event_msg', payload: { type: 'token_count', count: 150 } }),
+    ].join('\n');
+
+    const turnUsage = extractCodexUsage(turnLines);
+    const threadUsage = extractCodexUsage(threadLines);
+    const tokenCountUsage = extractCodexUsage(tokenCountLines);
+
+    // All three produce SessionUsageEvent with identical field set
+    const expectedKeys = ['cachedTokens', 'confidence', 'eventId', 'inputTokens', 'model', 'outputTokens', 'timestamp', 'totalTokens'];
+    expect(Object.keys(turnUsage[0]).sort()).toEqual(expectedKeys);
+    expect(Object.keys(threadUsage[0]).sort()).toEqual(expectedKeys);
+    expect(Object.keys(tokenCountUsage[0]).sort()).toEqual(expectedKeys);
+  });
+
+  it('message parsing is stable when usage lines are interleaved', () => {
+    // Proves that adding/removing usage events never alters message output
+    const baseMsgLines = [
+      JSON.stringify({ timestamp: 'ts1', type: 'event_msg', payload: { type: 'user_message', message: 'Hello' } }),
+      JSON.stringify({ timestamp: 'ts3', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hi' }] } }),
+    ];
+    const usageLines = [
+      JSON.stringify({ timestamp: 'ts2', type: 'event_msg', payload: { type: 'token_count', count: 50 } }),
+      JSON.stringify({ timestamp: 'ts4', type: 'turn.completed', usage: { input_tokens: 200, output_tokens: 80 } }),
+      JSON.stringify({ timestamp: 'ts5', type: 'thread.completed', usage: { input_tokens: 300, output_tokens: 100 } }),
+    ];
+
+    const msgsWithout = parseCodexSessionJsonl(baseMsgLines.join('\n'));
+    const msgsWith = parseCodexSessionJsonl([...baseMsgLines, ...usageLines].join('\n'));
+    const msgsInterleaved = parseCodexSessionJsonl(
+      [baseMsgLines[0], usageLines[0], usageLines[1], baseMsgLines[1], usageLines[2]].join('\n'),
+    );
+
+    // Message output is identical regardless of usage line presence or position
+    expect(msgsWithout).toEqual(msgsWith);
+    expect(msgsWithout).toEqual(msgsInterleaved);
+  });
+
+  it('extractCodexUsage output is deterministic for identical input', () => {
+    const raw = [
+      JSON.stringify({ type: 'turn.completed', timestamp: '2026-01-01T00:00:00Z', model: 'gpt-4o', usage: { input_tokens: 100, output_tokens: 50, cached_tokens: 10 } }),
+      JSON.stringify({ timestamp: 'ts2', type: 'event_msg', payload: { type: 'token_count', count: 75 } }),
+      JSON.stringify({ type: 'thread.completed', timestamp: '2026-01-01T00:01:00Z', usage: { input_tokens: 500, output_tokens: 200, cached_tokens: 50 } }),
+    ].join('\n');
+
+    const run1 = extractCodexUsage(raw);
+    const run2 = extractCodexUsage(raw);
+
+    expect(JSON.stringify(run1)).toBe(JSON.stringify(run2));
+  });
+});

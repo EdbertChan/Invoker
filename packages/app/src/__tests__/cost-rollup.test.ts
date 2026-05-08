@@ -288,6 +288,97 @@ describe('competing design proof: deterministic grouped outputs without provider
   });
 });
 
+// ── Competing Design Proof: Rollup Determinism & Attribution ─
+
+describe('competing design proof: rollups are deterministic and attributable', () => {
+  it('attributeSessionUsage produces provider-agnostic NormalizedCostEvent regardless of agent', () => {
+    const usageEvents = [
+      makeUsageEvent({ eventId: 'evt-1', inputTokens: 100, outputTokens: 50, model: 'opus-4' }),
+    ];
+
+    const claudeCtx = makeContext({ agentName: 'claude', source: 'anthropic', agentSessionId: 'sess-c' });
+    const codexCtx = makeContext({ agentName: 'codex', source: 'openai', agentSessionId: 'sess-o' });
+
+    const claudeResult = attributeSessionUsage(usageEvents, claudeCtx);
+    const codexResult = attributeSessionUsage(usageEvents, codexCtx);
+
+    // Same structural shape — no provider-specific fields
+    expect(Object.keys(claudeResult[0]).sort()).toEqual(Object.keys(codexResult[0]).sort());
+    expect(Object.keys(claudeResult[0].identity).sort()).toEqual(Object.keys(codexResult[0].identity).sort());
+    expect(Object.keys(claudeResult[0].usage).sort()).toEqual(Object.keys(codexResult[0].usage).sort());
+    expect(Object.keys(claudeResult[0].pricing).sort()).toEqual(Object.keys(codexResult[0].pricing).sort());
+    expect(Object.keys(claudeResult[0].attribution).sort()).toEqual(Object.keys(codexResult[0].attribution).sort());
+
+    // Usage values are identical — no provider-dependent transformation
+    expect(claudeResult[0].usage).toEqual(codexResult[0].usage);
+  });
+
+  it('rollup totals are commutative across multi-provider event streams', () => {
+    const claudeEvents = [
+      makeEvent({ eventId: 'c1', agentName: 'claude', inputTokens: 200, outputTokens: 100, cachedTokens: 20, totalTokens: 300, estimatedCostUsd: 0.010 }),
+      makeEvent({ eventId: 'c2', agentName: 'claude', inputTokens: 150, outputTokens: 75, cachedTokens: 15, totalTokens: 225, estimatedCostUsd: 0.008 }),
+    ];
+    const codexEvents = [
+      makeEvent({ eventId: 'o1', agentName: 'codex', inputTokens: 300, outputTokens: 120, cachedTokens: 30, totalTokens: 420, estimatedCostUsd: 0.012 }),
+    ];
+
+    // Forward: claude then codex
+    const forward = groupCostEvents([...claudeEvents, ...codexEvents], ['agent']);
+    // Reverse: codex then claude
+    const reverse = groupCostEvents([...codexEvents, ...claudeEvents], ['agent']);
+    // Interleaved
+    const interleaved = groupCostEvents([claudeEvents[0], codexEvents[0], claudeEvents[1]], ['agent']);
+
+    // All orderings produce identical grouped output
+    const serialize = (groups: typeof forward) => JSON.stringify(groups.map(serializeGroupedRollup));
+    expect(serialize(forward)).toBe(serialize(reverse));
+    expect(serialize(forward)).toBe(serialize(interleaved));
+  });
+
+  it('serialized rollup snapshot is stable across 100 iterations', () => {
+    const events = [
+      makeEvent({ eventId: 'e1', agentName: 'claude', model: 'opus-4', workflowId: 'wf-1', taskId: 'wf-1/a', inputTokens: 500, outputTokens: 200, cachedTokens: 50, totalTokens: 700, estimatedCostUsd: 0.025, timestamp: '2025-01-15T10:00:00Z' }),
+      makeEvent({ eventId: 'e2', agentName: 'codex', model: 'gpt-4o', workflowId: 'wf-1', taskId: 'wf-1/b', inputTokens: 300, outputTokens: 100, cachedTokens: 30, totalTokens: 400, estimatedCostUsd: 0.010, timestamp: '2025-01-15T14:00:00Z' }),
+      makeEvent({ eventId: 'e3', agentName: 'claude', model: 'sonnet-4', workflowId: 'wf-2', taskId: 'wf-2/a', inputTokens: 150, outputTokens: 60, cachedTokens: 15, totalTokens: 210, estimatedCostUsd: 0.005, timestamp: '2025-01-16T09:00:00Z' }),
+    ];
+
+    const baseline = JSON.stringify(groupCostEvents(events, ['workflow', 'agent', 'model']).map(serializeGroupedRollup));
+
+    for (let i = 0; i < 100; i++) {
+      const shuffled = [...events].sort(() => Math.random() - 0.5);
+      const result = JSON.stringify(groupCostEvents(shuffled, ['workflow', 'agent', 'model']).map(serializeGroupedRollup));
+      expect(result).toBe(baseline);
+    }
+  });
+
+  it('groupCostEvents with zero events yields empty array, not error', () => {
+    const groups = groupCostEvents([], ['workflow', 'task', 'agent']);
+    expect(groups).toEqual([]);
+    expect(JSON.stringify(groups)).toBe('[]');
+  });
+
+  it('single-event groups preserve full attribution chain', () => {
+    const event = makeEvent({
+      eventId: 'solo-1',
+      agentName: 'codex',
+      model: 'gpt-4o',
+      workflowId: 'wf-99',
+      taskId: 'wf-99/task-only',
+      timestamp: '2025-03-01T12:00:00Z',
+    });
+
+    const groups = groupCostEvents([event], ['workflow', 'task', 'agent', 'model', 'day']);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].dimensions.workflow).toBe('wf-99');
+    expect(groups[0].dimensions.task).toBe('wf-99/task-only');
+    expect(groups[0].dimensions.agent).toBe('codex');
+    expect(groups[0].dimensions.model).toBe('gpt-4o');
+    expect(groups[0].dimensions.day).toBe('2025-03-01');
+    expect(groups[0].rollup.eventCount).toBe(1);
+    expect(groups[0].rollup.inputTokens).toBe(event.usage.inputTokens);
+  });
+});
+
 // ── Session ID Resolution ──────────────────────────────────
 
 describe('resolveSessionId', () => {

@@ -383,3 +383,181 @@ describe('headless query cost-events', () => {
     ).rejects.toThrow('Unknown query flag');
   });
 });
+
+// ── Competing Design Proof: Script-Friendliness & Negative Contracts ─
+
+describe('competing design proof: query commands are script-friendly', () => {
+  let mockDeps: HeadlessDeps;
+  let stdoutSpy: any;
+
+  const tasksForWf1 = [
+    makeTask('wf-1', 'task-a'),
+    makeTask('wf-1', 'task-b'),
+  ];
+
+  const sessionData = new Map<string, string>([
+    ['sess-wf-1-task-a', makeSessionRaw([{ input: 100, output: 50 }, { input: 200, output: 80 }])],
+    ['sess-wf-1-task-b', makeSessionRaw([{ input: 300, output: 120 }])],
+  ]);
+
+  const mockDriver = {
+    processOutput: vi.fn(),
+    loadSession: vi.fn((sessionId: string) => sessionData.get(sessionId) ?? null),
+    parseSession: vi.fn(() => []),
+    inspectSession: vi.fn(() => ({ state: 'finished' as const })),
+    extractUsage: vi.fn((raw: string) => {
+      const lines = raw.split('\n').filter(Boolean);
+      return lines.map((line, i) => {
+        const entry = JSON.parse(line);
+        const u = entry.usage;
+        return {
+          eventId: `codex-turn-${i}`,
+          timestamp: '2025-01-01T00:00:00Z',
+          model: 'gpt-4o',
+          inputTokens: u.input_tokens ?? 0,
+          outputTokens: u.output_tokens ?? 0,
+          cachedTokens: u.cache_read_input_tokens ?? 0,
+          totalTokens: u.total_tokens ?? 0,
+          confidence: 'exact' as const,
+        };
+      });
+    }),
+  };
+
+  beforeEach(() => {
+    mockDeps = {
+      logger: noopLogger as any,
+      orchestrator: {} as Orchestrator,
+      persistence: {
+        readOnly: false,
+        listWorkflows: vi.fn(() => [makeWorkflow('wf-1', 'completed')]),
+        loadTasks: vi.fn(() => []),
+      } as unknown as SQLiteAdapter,
+      commandService: {} as CommandService,
+      executorRegistry: {} as any,
+      executionAgentRegistry: {
+        getSessionDriver: vi.fn(() => mockDriver),
+      } as unknown as AgentRegistry,
+      messageBus: new LocalBus() as MessageBus,
+      repoRoot: '/fake/repo',
+      invokerConfig: {} as any,
+      initServices: vi.fn(async () => {}),
+      wireSlackBot: vi.fn(async () => ({})),
+    };
+    mockDeps.orchestrator.syncFromDb = vi.fn();
+    mockDeps.orchestrator.getAllTasks = vi.fn(() => tasksForWf1 as any);
+    stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+  });
+
+  // ── Script-friendliness proofs ──
+
+  it('cost JSON output is valid for jq piping (single JSON object)', async () => {
+    await runHeadless(['query', 'cost', '--output', 'json'], mockDeps);
+    const output = stdoutSpy.mock.calls[0][0] as string;
+
+    // Must parse as a single JSON value (no trailing content, no multi-doc)
+    const parsed = JSON.parse(output);
+    expect(typeof parsed).toBe('object');
+    expect(parsed).not.toBeNull();
+    expect(Array.isArray(parsed)).toBe(false);
+  });
+
+  it('cost-events JSONL lines are each independently valid JSON', async () => {
+    await runHeadless(['query', 'cost-events', '--output', 'jsonl'], mockDeps);
+    const allOutput = stdoutSpy.mock.calls.map(c => (c[0] as string).trim()).join('\n');
+    const lines = allOutput.split('\n').filter(Boolean);
+
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+      const parsed = JSON.parse(line);
+      // Each line is a flat object, not an array or primitive
+      expect(typeof parsed).toBe('object');
+      expect(Array.isArray(parsed)).toBe(false);
+    }
+  });
+
+  it('label format outputs a single parseable token-count line', async () => {
+    await runHeadless(['query', 'cost', '--output', 'label'], mockDeps);
+    const output = stdoutSpy.mock.calls[0][0] as string;
+    const match = output.match(/^(\d+) tokens \$(\d+\.\d+)/);
+    expect(match).not.toBeNull();
+
+    const tokens = parseInt(match![1], 10);
+    const cost = parseFloat(match![2]);
+    expect(tokens).toBeGreaterThan(0);
+    expect(cost).toBeGreaterThanOrEqual(0);
+  });
+
+  it('cost JSON output has stable field ordering across runs for diff-friendliness', async () => {
+    await runHeadless(['query', 'cost', '--output', 'json'], mockDeps);
+    const output1 = stdoutSpy.mock.calls[0][0] as string;
+    const keys1 = Object.keys(JSON.parse(output1));
+
+    stdoutSpy.mockClear();
+    await runHeadless(['query', 'cost', '--output', 'json'], mockDeps);
+    const output2 = stdoutSpy.mock.calls[0][0] as string;
+    const keys2 = Object.keys(JSON.parse(output2));
+
+    // Field order is stable
+    expect(keys1).toEqual(keys2);
+    // String-level equality proves byte-for-byte determinism
+    expect(output1).toBe(output2);
+  });
+
+  it('cost-events JSON array has deterministic element order', async () => {
+    await runHeadless(['query', 'cost-events', '--output', 'json'], mockDeps);
+    const output1 = stdoutSpy.mock.calls[0][0] as string;
+
+    stdoutSpy.mockClear();
+    await runHeadless(['query', 'cost-events', '--output', 'json'], mockDeps);
+    const output2 = stdoutSpy.mock.calls[0][0] as string;
+
+    // Byte-for-byte identical output proves deterministic event ordering
+    expect(output1).toBe(output2);
+  });
+
+  // ── Negative contract tests ──
+
+  it('treats --group-by with empty string as default (all dimensions)', async () => {
+    // Empty string is falsy, so --group-by check is skipped and all dimensions apply
+    await runHeadless(['query', 'cost', '--group-by', '', '--output', 'json'], mockDeps);
+    const output = stdoutSpy.mock.calls[0][0] as string;
+    const parsed = JSON.parse(output);
+    expect(parsed.groupBy).toEqual(['workflow', 'task', 'agent', 'model', 'day']);
+  });
+
+  it('rejects --group-by with mixed valid and invalid dimensions', async () => {
+    await expect(
+      runHeadless(['query', 'cost', '--group-by', 'workflow,bogus'], mockDeps),
+    ).rejects.toThrow('Invalid --group-by dimension: "bogus"');
+  });
+
+  it('rejects --output with unsupported format for cost command', async () => {
+    await expect(
+      runHeadless(['query', 'cost', '--output', 'xml'], mockDeps),
+    ).rejects.toThrow('Invalid --output format');
+  });
+
+  it('rejects unknown flags on cost command', async () => {
+    await expect(
+      runHeadless(['query', 'cost', '--verbose'], mockDeps),
+    ).rejects.toThrow('Unknown query flag');
+  });
+
+  it('rejects combining multiple unknown flags', async () => {
+    await expect(
+      runHeadless(['query', 'cost-events', '--debug', '--trace'], mockDeps),
+    ).rejects.toThrow('Unknown query flag');
+  });
+
+  it('rejects non-existent workflow filter', async () => {
+    await expect(
+      runHeadless(['query', 'cost', '--workflow', 'wf-nonexistent', '--output', 'json'], mockDeps),
+    ).rejects.toThrow('not found');
+  });
+});
