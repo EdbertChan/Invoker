@@ -198,7 +198,7 @@ describe('resolvePublicationProvider', () => {
       const github = makeFakeProvider('github');
       registry.register(github);
 
-      // When workflow has no publicationStrategy set, should still resolve to github
+      // When workflow has no reviewStrategy set, should still resolve to github
       const provider = resolvePublicationProvider(undefined, registry);
       expect(provider).toBe(github);
     });

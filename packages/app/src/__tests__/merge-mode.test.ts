@@ -12,7 +12,7 @@ describe('normalizeMergeModeForPersistence', () => {
   });
 
   it('rejects unknown labels', () => {
-    expect(() => normalizeMergeModeForPersistence('github')).toThrow(/Invalid mergeMode/);
-    expect(() => normalizeMergeModeForPersistence('gitlab')).toThrow(/Invalid mergeMode/);
+    expect(() => normalizeMergeModeForPersistence('github')).toThrow(/Invalid approvalMode/);
+    expect(() => normalizeMergeModeForPersistence('gitlab')).toThrow(/Invalid approvalMode/);
   });
 });

@@ -667,7 +667,7 @@ export function App() {
               task={selectedTask}
               allTasks={tasks}
               baseBranch={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.baseBranch : undefined}
-              mergeMode={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.mergeMode : undefined}
+              approvalMode={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.approvalMode : undefined}
               remoteTargets={remoteTargets}
               executionAgents={executionAgents}
               onProvideInput={openInputModal}

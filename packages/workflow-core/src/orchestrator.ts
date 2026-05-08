@@ -160,10 +160,10 @@ export interface OrchestratorPersistence {
     onFinish?: string;
     baseBranch?: string;
     featureBranch?: string;
-    mergeMode?: 'manual' | 'automatic' | 'external_review';
-    publicationStrategy?: 'github_pr' | 'mergify_stack';
+    approvalMode?: 'manual' | 'automatic' | 'external_review';
+    reviewStrategy?: 'github_pr' | 'mergify_stack';
   }): void;
-  updateWorkflow?(workflowId: string, changes: { status?: string; updatedAt?: string; baseBranch?: string; generation?: number; mergeMode?: 'manual' | 'automatic' | 'external_review' }): void;
+  updateWorkflow?(workflowId: string, changes: { status?: string; updatedAt?: string; baseBranch?: string; generation?: number; approvalMode?: 'manual' | 'automatic' | 'external_review' }): void;
   saveTask(workflowId: string, task: TaskState): void;
   updateTask(taskId: string, changes: TaskStateChanges): void;
   logEvent?(taskId: string, eventType: string, payload?: unknown): void;
@@ -175,7 +175,7 @@ export interface OrchestratorPersistence {
     updatedAt: string;
     baseBranch?: string;
     onFinish?: string;
-    mergeMode?: 'manual' | 'automatic' | 'external_review';
+    approvalMode?: 'manual' | 'automatic' | 'external_review';
     generation?: number;
   }>;
   loadTasks(workflowId: string): TaskState[];
@@ -192,7 +192,7 @@ export interface OrchestratorPersistence {
   /**
    * Load a workflow by ID. Used by:
    *   - SSH validation in `editTaskType` (`repoUrl`),
-   *   - same-mode no-op detection in `editTaskMergeMode` (`mergeMode`).
+   *   - same-mode no-op detection in `editTaskMergeMode` (`approvalMode`).
    * The interface lists only the fields the orchestrator actually reads;
    * concrete adapters (e.g. `SQLiteAdapter.loadWorkflow`) return more.
    */
@@ -201,7 +201,7 @@ export interface OrchestratorPersistence {
     intermediateRepoUrl?: string;
     baseBranch?: string;
     featureBranch?: string;
-    mergeMode?: 'manual' | 'automatic' | 'external_review';
+    approvalMode?: 'manual' | 'automatic' | 'external_review';
   } | undefined;
   /** Delete a single workflow and its tasks from the DB. */
   deleteWorkflow?(workflowId: string): void;
@@ -222,9 +222,8 @@ export interface PlanDefinition {
   onFinish?: 'none' | 'merge' | 'pull_request';
   baseBranch?: string;
   featureBranch?: string;
-  mergeMode?: 'manual' | 'automatic' | 'external_review';
-  reviewProvider?: string;
-  publicationStrategy?: 'github_pr' | 'mergify_stack';
+  approvalMode?: 'manual' | 'automatic' | 'external_review';
+  reviewStrategy?: 'github_pr' | 'mergify_stack';
   repoUrl?: string;
   intermediateRepoUrl?: string;
   tasks: Array<{
@@ -250,11 +249,11 @@ export interface PlanDefinition {
   }>;
 }
 
-/** User-visible merge-node description aligned with `onFinish` / `mergeMode` (list + graph subtitle). */
-export function descriptionForMergeNode(plan: Pick<PlanDefinition, 'name' | 'onFinish' | 'mergeMode'>): string {
+/** User-visible merge-node description aligned with `onFinish` / `approvalMode` (list + graph subtitle). */
+export function descriptionForMergeNode(plan: Pick<PlanDefinition, 'name' | 'onFinish' | 'approvalMode'>): string {
   const onFinish = plan.onFinish ?? 'none';
-  const mergeMode = plan.mergeMode ?? 'manual';
-  if (mergeMode === 'external_review') {
+  const approvalMode = plan.approvalMode ?? 'manual';
+  if (approvalMode === 'external_review') {
     return `Review gate for ${plan.name}`;
   }
   if (onFinish === 'pull_request') {
@@ -664,7 +663,6 @@ export class Orchestrator {
       reviewUrl: undefined,
       reviewId: undefined,
       reviewStatus: undefined,
-      reviewProviderId: undefined,
       fixedIntegrationSha: undefined,
       fixedIntegrationRecordedAt: undefined,
       fixedIntegrationSource: undefined,
@@ -1335,8 +1333,8 @@ export class Orchestrator {
       onFinish: plan.onFinish,
       baseBranch: plan.baseBranch,
       featureBranch: plan.featureBranch,
-      mergeMode: plan.mergeMode,
-      publicationStrategy: plan.publicationStrategy,
+      approvalMode: plan.approvalMode,
+      reviewStrategy: plan.reviewStrategy,
       createdAt,
       updatedAt: createdAt,
     });
@@ -2251,7 +2249,6 @@ export class Orchestrator {
         reviewUrl: undefined,
         reviewId: undefined,
         reviewStatus: undefined,
-        reviewProviderId: undefined,
         agentSessionId: undefined,
         containerId: undefined,
       },
@@ -2318,7 +2315,6 @@ export class Orchestrator {
         reviewUrl: undefined,
         reviewId: undefined,
         reviewStatus: undefined,
-        reviewProviderId: undefined,
         agentSessionId: undefined,
         containerId: undefined,
       },
@@ -2690,7 +2686,7 @@ export class Orchestrator {
    * `docs/architecture/task-invalidation-roadmap.md` and the Decision
    * Table row "Change merge mode" in
    * `docs/architecture/task-invalidation-chart.md`
-   * (`MUTATION_POLICIES.mergeMode` → `retryTask` / task scope, scoped
+   * (`MUTATION_POLICIES.approvalMode` → `retryTask` / task scope, scoped
    * to the merge node).
    *
    * Why retry-class (not recreate-class). The chart classifies a
@@ -2720,7 +2716,7 @@ export class Orchestrator {
    * Sequence (mirrors `applyInvalidation`'s contract for the
    * synchronous orchestrator-internal seam — see
    * `invalidation-policy.ts` and the Step 5/7/8 retry-class precedents):
-   *   1. **Same-mode no-op.** If the workflow's persisted `mergeMode`
+   *   1. **Same-mode no-op.** If the workflow's persisted `approvalMode`
    *      already matches the requested value the method returns `[]`
    *      without canceling, persisting, or bumping the merge node's
    *      execution generation. This prevents a no-op rewrite from
@@ -2738,7 +2734,7 @@ export class Orchestrator {
    *      interrupt and `cancelTask` would otherwise mark a `pending`
    *      merge node as `failed`.
    *   3. **Persist new mode.** `persistence.updateWorkflow` writes the
-   *      new `mergeMode` so the retried merge attempt picks up the
+   *      new `approvalMode` so the retried merge attempt picks up the
    *      new policy when it next runs.
    *   4. **Retry-class reset.** Delegate to `restartTask`, which is
    *      the current `retryTask` compatibility wire (Step 13 will
@@ -2751,7 +2747,7 @@ export class Orchestrator {
    *      node's accumulated workspace) is the artifact the chart
    *      preserves for retry-class merge-mode mutations.
    *
-   * Public surface: `(taskId, mergeMode)` returning `TaskState[]` of
+   * Public surface: `(taskId, approvalMode)` returning `TaskState[]` of
    * newly-started tasks. `taskId` MUST be the merge node id
    * (`__merge__<workflowId>`); the workflow id is read from
    * `task.config.workflowId`. Throws if the task does not exist or is
@@ -2772,7 +2768,7 @@ export class Orchestrator {
    */
   editTaskMergeMode(
     taskId: string,
-    mergeMode: 'manual' | 'automatic' | 'external_review',
+    approvalMode: 'manual' | 'automatic' | 'external_review',
   ): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
@@ -2790,13 +2786,13 @@ export class Orchestrator {
     // Without this guard a UI/CLI re-affirm would needlessly cancel
     // active merge work and bump the merge node's execution generation.
     const wf = this.persistence.loadWorkflow?.(workflowId);
-    if (wf && wf.mergeMode === mergeMode) {
+    if (wf && wf.approvalMode === approvalMode) {
       return [];
     }
 
     // Step 9 cancel-first (chart Hard Invariant): when the merge node
     // is actively executing or waiting on external review, interrupt
-    // it BEFORE we mutate the workflow's mergeMode and reset merge
+    // it BEFORE we mutate the workflow's approvalMode and reset merge
     // state. Stale merge work (an in-flight merge run, a merge fix
     // session, or an external review wait) cannot survive a policy
     // change because the merge attempt's execution input — the merge
@@ -2811,7 +2807,7 @@ export class Orchestrator {
 
     // Persist new mode on the workflow record so the retried merge
     // attempt picks up the new policy when restartTask reschedules it.
-    this.persistence.updateWorkflow?.(workflowId, { mergeMode });
+    this.persistence.updateWorkflow?.(workflowId, { approvalMode });
 
     // Step 9 retry-class reset: restartTask is today's `retryTask`
     // compatibility wire (`buildInvalidationDeps` →
@@ -3103,11 +3099,11 @@ export class Orchestrator {
       if (typeof m.onFinish === 'string') baseSaveWf.onFinish = m.onFinish;
       if (typeof m.baseBranch === 'string') baseSaveWf.baseBranch = m.baseBranch;
       if (typeof m.featureBranch === 'string') baseSaveWf.featureBranch = m.featureBranch;
-      if (m.mergeMode === 'manual' || m.mergeMode === 'automatic' || m.mergeMode === 'external_review') {
-        baseSaveWf.mergeMode = m.mergeMode;
+      if (m.approvalMode === 'manual' || m.approvalMode === 'automatic' || m.approvalMode === 'external_review') {
+        baseSaveWf.approvalMode = m.approvalMode;
       }
-      if (m.publicationStrategy === 'github_pr' || m.publicationStrategy === 'mergify_stack') {
-        baseSaveWf.publicationStrategy = m.publicationStrategy;
+      if (m.reviewStrategy === 'github_pr' || m.reviewStrategy === 'mergify_stack') {
+        baseSaveWf.reviewStrategy = m.reviewStrategy;
       }
     }
     this.persistence.saveWorkflow(baseSaveWf);

@@ -75,8 +75,8 @@ interface TaskPanelProps {
   onEditAgent?: (taskId: string, agentName: string) => void;
   onSetExternalGatePolicies?: (taskId: string, updates: ExternalGatePolicyUpdate[]) => Promise<void>;
   onSetMergeBranch?: (workflowId: string, baseBranch: string) => Promise<void>;
-  mergeMode?: string;
-  onSetMergeMode?: (workflowId: string, mergeMode: string) => Promise<void>;
+  approvalMode?: string;
+  onSetMergeMode?: (workflowId: string, approvalMode: string) => Promise<void>;
 }
 
 function formatDate(date?: Date | string): string {
@@ -176,7 +176,7 @@ export function TaskPanel({
   onEditAgent,
   onSetExternalGatePolicies,
   onSetMergeBranch,
-  mergeMode,
+  approvalMode,
   onSetMergeMode,
 }: TaskPanelProps) {
   const [isEditingCommand, setIsEditingCommand] = useState(false);
@@ -248,7 +248,7 @@ export function TaskPanel({
     : null;
   const executorSelectValue = effectiveExecutorSelectValue(task);
 
-  const mergeGateDisplayTitle = mergeGatePanelHeading(task, mergeMode);
+  const mergeGateDisplayTitle = mergeGatePanelHeading(task, approvalMode);
   const isFixApproval = Boolean(task.execution.pendingFixError);
   const externalDeps = task.config.externalDependencies ?? [];
   const canEditGatePolicies = Boolean(
@@ -458,7 +458,7 @@ export function TaskPanel({
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-400">Merge mode</span>
                   <select
-                    value={mergeMode ?? 'manual'}
+                    value={approvalMode ?? 'manual'}
                     onChange={(e) => onSetMergeMode(task.config.workflowId!, e.target.value)}
                     disabled={task.status === 'running' || task.status === 'fixing_with_ai'}
                     className="bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"

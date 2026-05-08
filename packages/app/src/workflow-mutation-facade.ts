@@ -310,8 +310,8 @@ export class WorkflowMutationFacade {
     };
   }
 
-  async setWorkflowMergeMode(workflowId: string, mergeMode: string): Promise<void> {
-    await sharedSetWorkflowMergeMode(workflowId, mergeMode, {
+  async setWorkflowMergeMode(workflowId: string, approvalMode: string): Promise<void> {
+    await sharedSetWorkflowMergeMode(workflowId, approvalMode, {
       orchestrator: this.deps.orchestrator,
       persistence: this.deps.persistence,
       taskExecutor: this.deps.taskExecutor,

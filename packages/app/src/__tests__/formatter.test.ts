@@ -178,7 +178,7 @@ describe('serializeWorkflow', () => {
       ...baseWorkflow,
       description: 'A test workflow',
       onFinish: 'pull_request',
-      mergeMode: 'external_review',
+      approvalMode: 'external_review',
       baseBranch: 'master',
       featureBranch: 'feature/test',
       generation: 2,
@@ -186,7 +186,7 @@ describe('serializeWorkflow', () => {
     const result = serializeWorkflow(wf);
     expect(result.description).toBe('A test workflow');
     expect(result.onFinish).toBe('pull_request');
-    expect(result.mergeMode).toBe('external_review');
+    expect(result.approvalMode).toBe('external_review');
     expect(result.baseBranch).toBe('master');
     expect(result.featureBranch).toBe('feature/test');
     expect(result.generation).toBe(2);
@@ -195,7 +195,7 @@ describe('serializeWorkflow', () => {
   it('omits undefined optional fields', () => {
     const result = serializeWorkflow(baseWorkflow);
     expect(result).not.toHaveProperty('description');
-    expect(result).not.toHaveProperty('mergeMode');
+    expect(result).not.toHaveProperty('approvalMode');
     expect(result).not.toHaveProperty('generation');
   });
 

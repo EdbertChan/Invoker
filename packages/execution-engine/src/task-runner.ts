@@ -1441,7 +1441,7 @@ export class TaskRunner {
    */
   private resolveReviewProviderForWorkflow(workflowId: string | undefined): MergeGateProvider | undefined {
     const workflow = workflowId ? this.persistence.loadWorkflow(workflowId) : undefined;
-    const strategy = workflow?.publicationStrategy;
+    const strategy = workflow?.reviewStrategy;
     try {
       return resolvePublicationProvider(strategy, this.reviewProviderRegistry, this.mergeGateProvider);
     } catch {

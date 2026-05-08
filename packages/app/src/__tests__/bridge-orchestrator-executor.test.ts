@@ -18,7 +18,7 @@ import { executeGlobalTopup } from '../global-topup.js';
 const LINEAR_PLAN: PlanDefinition = {
   name: 'Linear Plan',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/linear',
   tasks: [
@@ -31,7 +31,7 @@ const LINEAR_PLAN: PlanDefinition = {
 const PARALLEL_PLAN: PlanDefinition = {
   name: 'Parallel Plan',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/parallel',
   tasks: [
@@ -44,7 +44,7 @@ const PARALLEL_PLAN: PlanDefinition = {
 const FANOUT_PLAN: PlanDefinition = {
   name: 'Fan-out Plan',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/fanout',
   tasks: [
@@ -57,7 +57,7 @@ const FANOUT_PLAN: PlanDefinition = {
 const INDEPENDENT_TWO_TASK_PLAN: PlanDefinition = {
   name: 'Independent Two Task Plan',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/independent-two',
   tasks: [
@@ -1038,7 +1038,7 @@ describe('Flow 8: restart workflow with generation lifecycle tag', () => {
 const MANUAL_MERGE_PLAN: PlanDefinition = {
   name: 'Manual Merge Plan',
   onFinish: 'merge',
-  mergeMode: 'manual',
+  approvalMode: 'manual',
   baseBranch: 'master',
   featureBranch: 'plan/manual-merge',
   tasks: [
@@ -1119,7 +1119,7 @@ describe('Flow 9: manual merge mode', () => {
     const autoPlan: PlanDefinition = {
       ...MANUAL_MERGE_PLAN,
       name: 'Auto Merge Plan',
-      mergeMode: 'automatic',
+      approvalMode: 'automatic',
       featureBranch: 'plan/auto-merge',
     };
     h.loadAndStart(autoPlan);
@@ -1152,7 +1152,7 @@ describe('Flow 9: manual merge mode', () => {
 const MANUAL_MERGE_ONFINISH_NONE_PLAN: PlanDefinition = {
   name: 'Manual OnFinish None',
   onFinish: 'none',
-  mergeMode: 'manual',
+  approvalMode: 'manual',
   baseBranch: 'master',
   featureBranch: 'plan/manual-onfinish-none',
   tasks: [{ id: 'A', description: 'Task A', command: 'echo a' }],
@@ -1191,7 +1191,7 @@ describe('Flow 9c: set-merge-mode external_review', () => {
       taskExecutor: h.executor,
     });
 
-    expect(h.persistence.loadWorkflow(wfId)!.mergeMode).toBe('external_review');
+    expect(h.persistence.loadWorkflow(wfId)!.approvalMode).toBe('external_review');
     expect(h.getTask(mergeId)!.status).toBe('review_ready');
     expect(h.getTask(mergeId)!.execution.reviewUrl).toBe('https://github.com/owner/repo/pull/99');
   });
@@ -1274,7 +1274,7 @@ describe('Flow 10: multi-experiment selection', () => {
   const EXPERIMENT_PLAN: PlanDefinition = {
     name: 'Experiment Plan',
     onFinish: 'merge',
-    mergeMode: 'automatic',
+    approvalMode: 'automatic',
     baseBranch: 'master',
     featureBranch: 'plan/experiment',
     tasks: [
@@ -1407,7 +1407,7 @@ describe('Flow: scheduler health across experiment lifecycle', () => {
   const EXPERIMENT_PLAN: PlanDefinition = {
     name: 'Scheduler Health Plan',
     onFinish: 'merge',
-    mergeMode: 'automatic',
+    approvalMode: 'automatic',
     baseBranch: 'master',
     featureBranch: 'plan/scheduler-health',
     tasks: [

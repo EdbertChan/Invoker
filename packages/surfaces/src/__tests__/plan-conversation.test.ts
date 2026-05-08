@@ -140,7 +140,7 @@ name: "Full"
 onFinish: merge
 baseBranch: develop
 featureBranch: feature/test
-mergeMode: automatic
+approvalMode: automatic
 tasks:
   - id: t1
     description: "test"
@@ -155,7 +155,7 @@ tasks:
     expect(plan.onFinish).toBe('merge');
     expect(plan.baseBranch).toBe('develop');
     expect(plan.featureBranch).toBe('feature/test');
-    expect(plan.mergeMode).toBe('automatic');
+    expect(plan.approvalMode).toBe('automatic');
     expect(plan.tasks[0].pivot).toBe(true);
     expect(plan.tasks[0].autoFix).toBe(true);
     expect(plan.tasks[0].requiresManualApproval).toBe(true);

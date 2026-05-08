@@ -1,7 +1,7 @@
 /**
  * Publication strategy router.
  *
- * Maps a workflow's `publicationStrategy` key (e.g. `'github_pr'`,
+ * Maps a workflow's `reviewStrategy` key (e.g. `'github_pr'`,
  * `'mergify_stack'`) to the concrete {@link MergeGateProvider} that
  * handles review creation and approval polling.
  *

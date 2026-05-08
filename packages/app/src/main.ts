@@ -1537,7 +1537,7 @@ if (isHeadless) {
     orchestrator.setBeforeApproveHook(async (task) => {
       if (task.config.isMergeNode && task.config.workflowId && task.execution.pendingFixError === undefined) {
         const workflow = persistence.loadWorkflow(task.config.workflowId);
-        if (workflow?.mergeMode === "external_review") return; // external review is the merge mechanism
+        if (workflow?.approvalMode === "external_review") return; // external review is the merge mechanism
         await requireTaskExecutor().approveMerge(task.config.workflowId);
       }
     });
@@ -3307,12 +3307,12 @@ if (isHeadless) {
       }
     });
 
-    registerGuiMutationHandler('invoker:set-merge-mode', async (workflowIdArg: unknown, mergeModeArg: unknown) => {
+    registerGuiMutationHandler('invoker:set-merge-mode', async (workflowIdArg: unknown, approvalModeArg: unknown) => {
       const workflowId = String(workflowIdArg);
-      const mergeMode = String(mergeModeArg);
-      logger.info(`set-merge-mode: workflow="${workflowId}" → "${mergeMode}"`, { module: 'ipc' });
+      const approvalMode = String(approvalModeArg);
+      logger.info(`set-merge-mode: workflow="${workflowId}" → "${approvalMode}"`, { module: 'ipc' });
       try {
-        await setWorkflowMergeMode(workflowId, mergeMode, {
+        await setWorkflowMergeMode(workflowId, approvalMode, {
           orchestrator,
           persistence,
           taskExecutor: requireTaskExecutor(),

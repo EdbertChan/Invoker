@@ -1505,7 +1505,7 @@ describe('setWorkflowMergeMode', () => {
     });
 
     expect(orchestrator.editTaskMergeMode).not.toHaveBeenCalled();
-    expect(persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { mergeMode: 'manual' });
+    expect(persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { approvalMode: 'manual' });
     expect(taskExecutor.executeTasks).not.toHaveBeenCalled();
   });
 
@@ -1516,7 +1516,7 @@ describe('setWorkflowMergeMode', () => {
         persistence: persistence as unknown as SQLiteAdapter,
         taskExecutor: taskExecutor as unknown as TaskRunner,
       }),
-    ).rejects.toThrow('Invalid mergeMode');
+    ).rejects.toThrow('Invalid approvalMode');
   });
 });
 

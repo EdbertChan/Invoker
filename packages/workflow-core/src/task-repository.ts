@@ -26,7 +26,7 @@ export interface WorkflowRecord {
   onFinish?: string;
   baseBranch?: string;
   featureBranch?: string;
-  mergeMode?: 'manual' | 'automatic' | 'external_review';
+  approvalMode?: 'manual' | 'automatic' | 'external_review';
 }
 
 export interface WorkflowChanges {
@@ -34,7 +34,7 @@ export interface WorkflowChanges {
   updatedAt?: string;
   baseBranch?: string;
   generation?: number;
-  mergeMode?: 'manual' | 'automatic' | 'external_review';
+  approvalMode?: 'manual' | 'automatic' | 'external_review';
 }
 
 export type AttemptChanges = Partial<

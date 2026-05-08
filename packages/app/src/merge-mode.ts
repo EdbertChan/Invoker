@@ -12,7 +12,7 @@ const VALID_INPUT = new Set(['manual', 'automatic', 'external_review']);
 export function normalizeMergeModeForPersistence(raw: string): CanonicalMergeMode {
   if (!VALID_INPUT.has(raw)) {
     throw new Error(
-      `Invalid mergeMode: "${raw}". Expected one of: ${[...VALID_INPUT].join(', ')}`,
+      `Invalid approvalMode: "${raw}". Expected one of: ${[...VALID_INPUT].join(', ')}`,
     );
   }
   if (raw === 'external_review') return 'external_review';

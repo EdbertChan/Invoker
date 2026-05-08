@@ -980,7 +980,7 @@ describe('merge gate commit topology (real git)', () => {
     const workflow = {
       id: 'wf-1',
       onFinish: 'merge',
-      mergeMode: 'manual',
+      approvalMode: 'manual',
       baseBranch: 'master',
       featureBranch: 'feat/my-workflow',
       name: 'My Workflow',
@@ -1064,7 +1064,7 @@ describe('merge gate commit topology (real git)', () => {
     const workflow = {
       id: 'wf-1',
       onFinish: 'merge',
-      mergeMode: 'automatic',
+      approvalMode: 'automatic',
       baseBranch: 'master',
       featureBranch: 'feat/auto-workflow',
       name: 'Auto Workflow',
@@ -1127,7 +1127,7 @@ describe('merge gate commit topology (real git)', () => {
     const workflow = {
       id: 'wf-d',
       onFinish: 'merge',
-      mergeMode: 'automatic',
+      approvalMode: 'automatic',
       baseBranch: 'master',
       featureBranch: 'feat/diverged-workflow',
       name: 'Diverged Workflow',
@@ -1201,7 +1201,7 @@ describe('merge gate commit topology (real git)', () => {
     const workflow = {
       id: 'wf-i',
       onFinish: 'merge',
-      mergeMode: 'manual',
+      approvalMode: 'manual',
       baseBranch: 'master',
       featureBranch: 'feat/intermediate-workflow',
       name: 'Intermediate Workflow',
@@ -1297,7 +1297,7 @@ describe('merge gate commit topology (real git)', () => {
       name: 'Hook E2E Plan',
       repoUrl: `file://${bareDir}`,
       onFinish: 'merge',
-      mergeMode: 'manual',
+      approvalMode: 'manual',
       baseBranch: 'master',
       featureBranch: 'feat/hook-e2e',
       tasks: [

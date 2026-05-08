@@ -24,7 +24,7 @@ class InMemoryPersistence implements OrchestratorPersistence {
     createdAt: string;
     updatedAt: string;
     repoUrl?: string;
-    mergeMode?: 'manual' | 'automatic' | 'external_review';
+    approvalMode?: 'manual' | 'automatic' | 'external_review';
   }>();
   tasks = new Map<string, { workflowId: string; task: TaskState }>();
   private attempts = new Map<string, Attempt[]>();
@@ -35,7 +35,7 @@ class InMemoryPersistence implements OrchestratorPersistence {
     name: string;
     status: string;
     repoUrl?: string;
-    mergeMode?: 'manual' | 'automatic' | 'external_review';
+    approvalMode?: 'manual' | 'automatic' | 'external_review';
   }): void {
     const now = new Date().toISOString();
     this.workflows.set(workflow.id, {

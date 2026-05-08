@@ -69,7 +69,7 @@ const MERGE_GATE_TEXT_VISUAL_PLAN = {
   name: 'Merge gate text visual proof',
   repoUrl: E2E_REPO_URL,
   onFinish: 'pull_request' as const,
-  mergeMode: 'external_review',
+  approvalMode: 'external_review',
   tasks: [
     {
       id: 'mg-visual-work',
@@ -624,7 +624,7 @@ test.describe('Visual proof capture', () => {
       name: 'Prereq Workflow 1',
       repoUrl: E2E_REPO_URL,
       onFinish: 'pull_request' as const,
-      mergeMode: 'external_review',
+      approvalMode: 'external_review',
       tasks: [
         { id: 'prereq-task-1', description: 'First prerequisite task', command: 'echo prereq1', dependencies: [] as string[] },
       ],
@@ -633,7 +633,7 @@ test.describe('Visual proof capture', () => {
       name: 'Prereq Workflow 2',
       repoUrl: E2E_REPO_URL,
       onFinish: 'pull_request' as const,
-      mergeMode: 'external_review',
+      approvalMode: 'external_review',
       tasks: [
         { id: 'prereq-task-2', description: 'Second prerequisite task', command: 'echo prereq2', dependencies: [] as string[] },
       ],
@@ -642,7 +642,7 @@ test.describe('Visual proof capture', () => {
       name: 'Prereq Workflow 3',
       repoUrl: E2E_REPO_URL,
       onFinish: 'pull_request' as const,
-      mergeMode: 'external_review',
+      approvalMode: 'external_review',
       tasks: [
         { id: 'prereq-task-3', description: 'Third prerequisite task', command: 'echo prereq3', dependencies: [] as string[] },
       ],

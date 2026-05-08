@@ -2081,7 +2081,7 @@ describe('TaskRunner', () => {
       const deleteCall = gitCalls.find(c => c[0] === 'branch' && c[1] === '-D' && c[2] === 'plan/feature');
       expect(deleteCall).toBeDefined();
 
-      // Default mergeMode is 'manual', so setTaskAwaitingApproval is called with metadata
+      // Default approvalMode is 'manual', so setTaskAwaitingApproval is called with metadata
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
         config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({ branch: 'plan/feature', workspacePath: '/tmp/mock-wt' }),
@@ -2258,7 +2258,7 @@ describe('TaskRunner', () => {
   });
 
   describe('manual merge mode', () => {
-    it('executeMergeNode skips final merge when mergeMode=manual', async () => {
+    it('executeMergeNode skips final merge when approvalMode=manual', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2272,7 +2272,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'manual',
+          approvalMode: 'manual',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2333,7 +2333,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode performs full merge when mergeMode=automatic', async () => {
+    it('executeMergeNode performs full merge when approvalMode=automatic', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2346,7 +2346,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'automatic',
+          approvalMode: 'automatic',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2410,7 +2410,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode skips squash-merge and creates PR when mergeMode=external_review', async () => {
+    it('executeMergeNode skips squash-merge and creates PR when approvalMode=external_review', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2424,7 +2424,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2510,7 +2510,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode goes to awaiting_approval when mergeMode=manual and onFinish=none', async () => {
+    it('executeMergeNode goes to awaiting_approval when approvalMode=manual and onFinish=none', async () => {
       const orchestrator = {
         getTask: () => null,
         getAllTasks: () => [],
@@ -2521,7 +2521,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'manual',
+          approvalMode: 'manual',
           baseBranch: 'master',
           name: 'Test Workflow',
         }),
@@ -2553,7 +2553,7 @@ describe('TaskRunner', () => {
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
     });
 
-    it('executeMergeNode auto-completes when mergeMode=automatic and onFinish=none', async () => {
+    it('executeMergeNode auto-completes when approvalMode=automatic and onFinish=none', async () => {
       const orchestrator = {
         getTask: () => null,
         getAllTasks: () => [],
@@ -2564,7 +2564,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'automatic',
+          approvalMode: 'automatic',
           baseBranch: 'master',
           name: 'Test Workflow',
         }),
@@ -2594,7 +2594,7 @@ describe('TaskRunner', () => {
       expect(orchestrator.setTaskAwaitingApproval).not.toHaveBeenCalled();
     });
 
-    it('executeMergeNode creates PR when mergeMode=external_review and onFinish=none', async () => {
+    it('executeMergeNode creates PR when approvalMode=external_review and onFinish=none', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2608,7 +2608,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2691,7 +2691,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2738,7 +2738,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode handles persisted mergeMode=external_review', async () => {
+    it('executeMergeNode handles persisted approvalMode=external_review', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2752,7 +2752,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2801,7 +2801,7 @@ describe('TaskRunner', () => {
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
     });
 
-    it('executeMergeNode goes to awaiting_approval when mergeMode=manual and no featureBranch', async () => {
+    it('executeMergeNode goes to awaiting_approval when approvalMode=manual and no featureBranch', async () => {
       const orchestrator = {
         getTask: () => null,
         getAllTasks: () => [],
@@ -2812,7 +2812,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'manual',
+          approvalMode: 'manual',
           baseBranch: 'master',
           name: 'Test Workflow',
         }),
@@ -2924,7 +2924,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2989,7 +2989,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -3129,7 +3129,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'pull_request',
-          mergeMode: 'automatic',
+          approvalMode: 'automatic',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -3201,7 +3201,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -3269,7 +3269,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'manual',
+          approvalMode: 'manual',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -4509,7 +4509,7 @@ describe('TaskRunner', () => {
       const mockExecutor = createAutoCompleteExecutor();
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'none', mergeMode: 'manual', baseBranch: 'master', featureBranch: 'feature/wf-1', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'none', approvalMode: 'manual', baseBranch: 'master', featureBranch: 'feature/wf-1', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => mockExecutor, get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
       });
@@ -4557,7 +4557,7 @@ describe('TaskRunner', () => {
       const mockExecutor = createAutoCompleteExecutor();
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'merge', mergeMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-1', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'merge', approvalMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-1', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => mockExecutor, get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
       });
@@ -4625,7 +4625,7 @@ describe('TaskRunner', () => {
         persistence: {
           loadWorkflow: () => ({
             onFinish: 'merge',
-            mergeMode: 'automatic',
+            approvalMode: 'automatic',
             baseBranch: 'master',
             featureBranch: 'feature/wf-par',
             name: 'Test',
@@ -4700,7 +4700,7 @@ describe('TaskRunner', () => {
         persistence: {
           loadWorkflow: () => ({
             onFinish: 'merge',
-            mergeMode: 'automatic',
+            approvalMode: 'automatic',
             baseBranch: 'master',
             featureBranch: 'feature/wf-chain',
             name: 'Test',
@@ -4765,7 +4765,7 @@ describe('TaskRunner', () => {
 
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'merge', mergeMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-2', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'merge', approvalMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-2', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => createAutoCompleteExecutor(), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
       });
@@ -4827,7 +4827,7 @@ describe('TaskRunner', () => {
 
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'merge', mergeMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-3', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'merge', approvalMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-3', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => createAutoCompleteExecutor(), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
       });
@@ -5412,7 +5412,7 @@ describe('TaskRunner', () => {
             loadWorkflow: () => ({
               id: 'wf-1',
               onFinish: 'merge',
-              mergeMode: 'manual',
+              approvalMode: 'manual',
               baseBranch: 'master',
               featureBranch: 'plan/feature',
               name: 'Workflow',
@@ -5499,7 +5499,7 @@ describe('TaskRunner', () => {
             loadWorkflow: () => ({
               id: 'wf-1',
               onFinish: 'merge',
-              mergeMode: 'automatic',
+              approvalMode: 'automatic',
               baseBranch: 'master',
               featureBranch: 'plan/feature',
               name: 'Workflow',
@@ -5744,7 +5744,7 @@ describe('TaskRunner', () => {
 
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'merge', mergeMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-msg', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'merge', approvalMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-msg', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => createAutoCompleteExecutor(), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
       });
@@ -6215,7 +6215,7 @@ describe('TaskRunner', () => {
 
   describe('publishAfterFix', () => {
     function setupPublishAfterFix(opts: {
-      mergeMode?: string;
+      approvalMode?: string;
       onFinish?: string;
       featureBranch?: string;
       gateWorkspacePath?: string | null;
@@ -6245,7 +6245,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: workflowId,
           onFinish: opts.onFinish ?? 'none',
-          mergeMode: opts.mergeMode ?? 'manual',
+          approvalMode: opts.approvalMode ?? 'manual',
           baseBranch: 'master',
           featureBranch: opts.featureBranch,
           name: 'Test Workflow',
@@ -6306,7 +6306,7 @@ describe('TaskRunner', () => {
       });
 
       const { executor, mergeTask, orchestrator, mergeGateProvider, gitCalls } = setupPublishAfterFix({
-        mergeMode: 'external_review',
+        approvalMode: 'external_review',
         featureBranch: 'plan/feature',
         gateWorkspacePath: '/tmp/gate-clone',
         taskBranches: [completedTask],
@@ -6370,7 +6370,7 @@ describe('TaskRunner', () => {
       });
 
       const { executor, mergeTask, orchestrator, persistence } = setupPublishAfterFix({
-        mergeMode: 'manual',
+        approvalMode: 'manual',
         onFinish: 'pull_request',
         featureBranch: 'plan/feature',
         gateWorkspacePath: '/tmp/gate-clone',
@@ -6421,7 +6421,7 @@ describe('TaskRunner', () => {
       });
 
       const { executor, mergeTask, orchestrator, gitCalls: _gitCalls } = setupPublishAfterFix({
-        mergeMode: 'external_review',
+        approvalMode: 'external_review',
         featureBranch: 'plan/feature',
         gateWorkspacePath: '/tmp/gate-clone',
         taskBranches: [completedTask],
@@ -6453,7 +6453,7 @@ describe('TaskRunner', () => {
 
     it('detach-HEAD sequence: exact order regression test', async () => {
       const { executor, mergeTask, gitCalls } = setupPublishAfterFix({
-        mergeMode: 'manual',
+        approvalMode: 'manual',
         featureBranch: 'plan/feature',
         gateWorkspacePath: '/tmp/gate-clone',
         taskBranches: [],
@@ -6485,7 +6485,7 @@ describe('TaskRunner', () => {
       });
 
       const { executor, mergeTask, orchestrator } = setupPublishAfterFix({
-        mergeMode: 'manual',
+        approvalMode: 'manual',
         featureBranch: 'plan/feature',
         gateWorkspacePath: null,
         taskBranches: [completedTask],

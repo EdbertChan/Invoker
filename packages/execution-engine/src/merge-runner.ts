@@ -335,7 +335,7 @@ export async function executeMergeNodeImpl(
     ? host.persistence.loadWorkflow(workflowId)
     : undefined;
   const onFinish = workflow?.onFinish ?? 'none';
-  const mergeMode = canonicalMergeMode(workflow?.mergeMode);
+  const approvalMode = canonicalMergeMode(workflow?.approvalMode);
   const baseBranch = workflow?.baseBranch ?? host.defaultBranch ?? await host.detectDefaultBranch();
   const featureBranch = workflow?.featureBranch;
   const visualProof = workflow?.visualProof ?? false;
@@ -349,14 +349,14 @@ export async function executeMergeNodeImpl(
     taskId: task.id,
     workflowId,
     onFinish,
-    mergeMode,
+    approvalMode,
     baseBranch,
     featureBranch: featureBranch ?? null,
     persistedWorkspaceBefore: safeGetWorkspacePath(host.persistence, task.id),
   });
   console.log(
     `[merge-gate-workspace] executeMergeNode enter task=${task.id} featureBranch=${featureBranch ?? 'none'} ` +
-      `mergeMode=${mergeMode} onFinish=${onFinish} dbWorkspacePath=${safeGetWorkspacePath(host.persistence, task.id) ?? 'NULL'}`,
+      `approvalMode=${approvalMode} onFinish=${onFinish} dbWorkspacePath=${safeGetWorkspacePath(host.persistence, task.id) ?? 'NULL'}`,
   );
 
   host.persistence.updateTask(task.id, {
@@ -376,7 +376,7 @@ export async function executeMergeNodeImpl(
     const baseCheckoutRef = await resolveBaseCheckoutRef(
       host,
       baseBranch,
-      mergeMode === 'external_review' || onFinish === 'pull_request',
+      approvalMode === 'external_review' || onFinish === 'pull_request',
     );
     gateWorkspacePath = await host.createMergeWorktree(
       baseCheckoutRef,
@@ -390,13 +390,13 @@ export async function executeMergeNodeImpl(
     console.log(`[merge-gate-workspace] gate clone skipped task=${task.id} (no featureBranch on workflow)`);
   }
 
-  if (featureBranch && (onFinish !== 'none' || mergeMode === 'external_review')) {
-    const effectiveOnFinish = mergeMode === 'automatic' ? onFinish : 'none';
+  if (featureBranch && (onFinish !== 'none' || approvalMode === 'external_review')) {
+    const effectiveOnFinish = approvalMode === 'automatic' ? onFinish : 'none';
     try {
       const baseCheckoutRef = await resolveBaseCheckoutRef(
         host,
         baseBranch,
-        mergeMode === 'external_review' || onFinish === 'pull_request',
+        approvalMode === 'external_review' || onFinish === 'pull_request',
       );
       reviewUrl = await host.consolidateAndMerge(
         effectiveOnFinish,
@@ -410,7 +410,7 @@ export async function executeMergeNodeImpl(
         baseCheckoutRef,
         task.id,
       );
-      if (mergeMode === 'manual') {
+      if (approvalMode === 'manual') {
         mergeTrace('GATE_WS_PATH_MANUAL_AWAIT', { taskId: task.id, gateWorkspacePath: gateWorkspacePath ?? null });
         console.log(
           `[merge-gate-workspace] setTaskReviewReady path=manual branch consolidate ` +
@@ -431,10 +431,10 @@ export async function executeMergeNodeImpl(
         await startReviewReadyDependents(host);
         return;
       }
-      if (mergeMode === 'external_review') {
-        const publicationStrategy = workflow?.publicationStrategy;
+      if (approvalMode === 'external_review') {
+        const reviewStrategy = workflow?.reviewStrategy;
         const reviewProvider = resolvePublicationProvider(
-          publicationStrategy,
+          reviewStrategy,
           host.reviewProviderRegistry,
           host.mergeGateProvider,
         );
@@ -517,15 +517,15 @@ export async function executeMergeNodeImpl(
       };
     }
   } else {
-    if (mergeMode === 'manual' || mergeMode === 'external_review') {
+    if (approvalMode === 'manual' || approvalMode === 'external_review') {
       mergeTrace('GATE_WS_PATH_NO_CONSOLIDATE_AWAIT', {
         taskId: task.id,
         gateWorkspacePath: gateWorkspacePath ?? null,
-        mergeMode,
+        approvalMode,
       });
       console.log(
         `[merge-gate-workspace] setTaskReviewReady path=no_consolidate_branch ` +
-          `task=${task.id} gateWorkspacePath=${gateWorkspacePath ?? 'NULL'} mergeMode=${mergeMode}`,
+          `task=${task.id} gateWorkspacePath=${gateWorkspacePath ?? 'NULL'} approvalMode=${approvalMode}`,
       );
       const gateResponse: WorkResponse = {
         requestId: `merge-${task.id}`,
@@ -572,7 +572,7 @@ export async function executeMergeNodeImpl(
     },
   });
   host.callbacks.onComplete?.(task.id, response);
-  if (mergeMode === 'manual' && response.status === 'completed') {
+  if (approvalMode === 'manual' && response.status === 'completed') {
     mergeTrace('GATE_WS_PATH_MANUAL_AFTER_SUCCESS', {
       taskId: task.id,
       gateWorkspacePath: gateWorkspacePath ?? null,
@@ -718,7 +718,7 @@ export async function publishAfterFixImpl(
     ? host.persistence.loadWorkflow(workflowId)
     : undefined;
   const onFinish = workflow?.onFinish ?? 'none';
-  const mergeMode = canonicalMergeMode(workflow?.mergeMode);
+  const approvalMode = canonicalMergeMode(workflow?.approvalMode);
   const baseBranch = workflow?.baseBranch ?? host.defaultBranch ?? await host.detectDefaultBranch();
   const featureBranch = workflow?.featureBranch;
   const visualProof = workflow?.visualProof ?? false;
@@ -731,7 +731,7 @@ export async function publishAfterFixImpl(
     taskId: task.id,
     workflowId,
     onFinish,
-    mergeMode,
+    approvalMode,
     baseBranch,
     featureBranch,
     gateWorkspacePathFromDb: gateWorkspacePath ?? null,
@@ -935,10 +935,10 @@ export async function publishAfterFixImpl(
       }
     }
 
-    if (mergeMode === 'external_review') {
-      const publicationStrategy = workflow?.publicationStrategy;
+    if (approvalMode === 'external_review') {
+      const reviewStrategy = workflow?.reviewStrategy;
       const reviewProvider = resolvePublicationProvider(
-        publicationStrategy,
+        reviewStrategy,
         host.reviewProviderRegistry,
         host.mergeGateProvider,
       );
