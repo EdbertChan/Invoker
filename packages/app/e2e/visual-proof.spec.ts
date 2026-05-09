@@ -80,6 +80,22 @@ const MERGE_GATE_TEXT_VISUAL_PLAN = {
   ],
 };
 
+/** Manual merge gate plan — uses mergeMode 'manual' so inline approve button would appear pre-removal. */
+const MERGE_GATE_NO_INLINE_APPROVE_PLAN = {
+  name: 'Merge gate no inline approve',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'merge' as const,
+  mergeMode: 'manual',
+  tasks: [
+    {
+      id: 'mg-approve-work',
+      description: 'Work task before merge gate',
+      command: 'echo ok',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
 /** Plan for queue-action-surface hardening: combines canonical states, dependency relationships, and destructive actions. */
 const QUEUE_HARDENING_PLAN = {
   name: 'Queue Hardening Visual Proof',
@@ -814,5 +830,56 @@ test.describe('Visual proof capture', () => {
 
     await captureScreenshot(page, 'queue-action-surface-hardening');
     await assertPageScreenshot(page, 'queue-action-surface-hardening');
+  });
+
+  test('merge-gate-no-inline-approve — approval action lives in TaskPanel only', async ({ page }) => {
+    // Load a manual merge-gate plan so the inline button would have appeared pre-removal
+    await page.evaluate((yaml) => window.invoker.loadPlan(yaml), yamlStringify(MERGE_GATE_NO_INLINE_APPROVE_PLAN));
+    await page.locator('.react-flow__node[data-testid$="mg-approve-work"]').first().waitFor({ state: 'visible', timeout: 15000 });
+
+    // Find the merge gate task
+    const mergeGateTaskId = await page.evaluate(async () => {
+      const result = await window.invoker.getTasks();
+      const tasks = Array.isArray(result) ? result : result.tasks;
+      const mergeTask = tasks.find((t: { id: string }) => t.id.includes('__merge__'));
+      return mergeTask?.id ?? null;
+    });
+    expect(mergeGateTaskId).toBeTruthy();
+
+    // Drive both work task and merge gate to approval state
+    const now = new Date();
+    const earlier = new Date(Date.now() - 5000);
+    await injectTaskStates(page, [
+      {
+        taskId: 'mg-approve-work',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: earlier, completedAt: now },
+        },
+      },
+      {
+        taskId: String(mergeGateTaskId),
+        changes: {
+          status: 'awaiting_approval',
+          execution: { startedAt: now },
+        },
+      },
+    ]);
+
+    // Wait for the merge gate node to reflect the approval state
+    const mergeGateNode = page.locator(`.react-flow__node[data-testid="${mergeGateTaskId}"], .react-flow__node[data-testid$="${mergeGateTaskId}"]`).first();
+    await expect(mergeGateNode).toBeVisible({ timeout: 10000 });
+
+    // Assert the DAG node does NOT render the inline approve button
+    await expect(page.getByTestId('approve-merge-button')).not.toBeVisible();
+
+    // Click the merge gate node to open the TaskPanel
+    await mergeGateNode.click();
+
+    // Assert the TaskPanel shows the approval action
+    await expect(page.getByRole('button', { name: 'Approve Merge' })).toBeVisible();
+
+    await captureScreenshot(page, 'merge-gate-no-inline-approve');
+    await assertPageScreenshot(page, 'merge-gate-no-inline-approve');
   });
 });
