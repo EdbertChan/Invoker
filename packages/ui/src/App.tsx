@@ -194,13 +194,13 @@ export function App() {
     setContextMenu({ x: event.clientX, y: event.clientY, taskId: task.id });
   }, []);
 
-  const handleRestartTask = useCallback(async (taskId: string) => {
+  const handleRetryTask = useCallback(async (taskId: string) => {
     if (!invoker) return;
     setContextMenu(null);
     try {
-      await invoker.restartTask(taskId);
+      await invoker.retryTask(taskId);
     } catch (err) {
-      console.error('Failed to restart task:', err);
+      console.error('Failed to retry task:', err);
     }
   }, [invoker]);
 
@@ -228,18 +228,6 @@ export function App() {
       await window.invoker?.replaceTask(taskId, replacements);
     } catch (err) {
       console.error('Failed to replace task:', err);
-    }
-  }, []);
-
-  const handleRebaseAndRetry = useCallback(async (taskId: string) => {
-    setContextMenu(null);
-    try {
-      const result = await window.invoker?.rebaseAndRetry(taskId);
-      if (result && !result.success) {
-        console.error('Rebase failed for some branches:', result.errors);
-      }
-    } catch (err) {
-      console.error('Rebase & Retry failed:', err);
     }
   }, []);
 
@@ -743,10 +731,9 @@ export function App() {
           x={contextMenu.x}
           y={contextMenu.y}
           task={contextMenuTask}
-          onRestart={handleRestartTask}
+          onRestart={handleRetryTask}
           onReplace={handleReplaceTask}
           onOpenTerminal={handleOpenTerminal}
-          onRebaseAndRetry={handleRebaseAndRetry}
           onRecreateWithRebase={handleRecreateWithRebase}
           onRetryWorkflow={handleRetryWorkflow}
           onRecreateTask={handleRecreateTask}

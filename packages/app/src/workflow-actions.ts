@@ -195,13 +195,6 @@ export function retryTask(
   return deps.orchestrator.retryTask(taskId);
 }
 
-export function restartTask(
-  taskId: string,
-  deps: Pick<ActionDeps, 'orchestrator'>,
-): TaskState[] {
-  return deps.orchestrator.recreateTask(taskId);
-}
-
 export function retryWorkflow(
   workflowId: string,
   deps: Pick<ActionDeps, 'orchestrator'>,
@@ -614,12 +607,12 @@ export async function selectExperiments(
  * interruption when the merge node is actively executing or waiting
  * on external review (`running` / `fixing_with_ai` /
  * `awaiting_approval` / `review_ready`), `mergeMode` persistence on
- * the workflow, and the retry-class reset via `restartTask` (today's
- * `retryTask` compatibility wire — see `MUTATION_POLICIES.mergeMode`
- * and `buildInvalidationDeps`) — now lives in
- * `Orchestrator.editTaskMergeMode`. That method is the synchronous
- * orchestrator-internal seam of `applyInvalidation`'s Hard Invariant
- * (cancel BEFORE authoritative reset) and reuses `restartTask`'s
+ * the workflow, and the retry-class reset via `retryTask` (see
+ * `MUTATION_POLICIES.mergeMode` and `buildInvalidationDeps`) — now
+ * lives in `Orchestrator.editTaskMergeMode`. That method is the
+ * synchronous orchestrator-internal seam of `applyInvalidation`'s
+ * Hard Invariant (cancel BEFORE authoritative reset) and reuses
+ * `retryTask`'s
  * reset shape so the merge node's `agentSessionId` / `containerId` /
  * `error` / `exitCode` / timing fields are cleared while
  * branch / workspacePath lineage survives — the chart's retry-class
@@ -680,12 +673,12 @@ export async function setWorkflowMergeMode(
  * cancel-first interruption when the task is in an active fix
  * session (`fixing_with_ai`), `fixPrompt` / `fixContext`
  * persistence on the task config, and the retry-class reset via
- * `restartTask` (today's `retryTask` compatibility wire — see
- * `MUTATION_POLICIES.fixContext` and `buildInvalidationDeps`) —
- * lives in `Orchestrator.editTaskFixContext`. That method is the
- * synchronous orchestrator-internal seam of `applyInvalidation`'s
- * Hard Invariant (cancel BEFORE authoritative reset) and reuses
- * `restartTask`'s reset shape so the task's `agentSessionId` /
+ * `retryTask` (see `MUTATION_POLICIES.fixContext` and
+ * `buildInvalidationDeps`) — lives in
+ * `Orchestrator.editTaskFixContext`. That method is the synchronous
+ * orchestrator-internal seam of `applyInvalidation`'s Hard Invariant
+ * (cancel BEFORE authoritative reset) and reuses `retryTask`'s
+ * reset shape so the task's `agentSessionId` /
  * `containerId` / `error` / `exitCode` / timing fields are cleared
  * while branch / workspacePath lineage survives — the chart's
  * retry-class semantics for fix-context mutations.

@@ -1106,25 +1106,6 @@ describe('headless delegation enforcement', () => {
           preparePoolSpy.mockRestore();
         });
 
-        it('deprecated alias `rebase-and-retry` routes to the same orchestrator.recreateWorkflowFromFreshBase method', async () => {
-          const { preemptWorkflowExecution, preparePoolSpy } = seedRebaseHappyPath();
-
-          const depsWithNoTrack: HeadlessDeps = {
-            ...mockDeps,
-            noTrack: true,
-            preemptWorkflowExecution,
-          } as HeadlessDeps;
-
-          await runHeadless(['rebase-and-retry', 'task-1'], depsWithNoTrack);
-
-          expect(mockDeps.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
-            'wf-1',
-            expect.objectContaining({ refreshBase: expect.any(Function) }),
-          );
-
-          preparePoolSpy.mockRestore();
-        });
-
         it('headless `recreate-with-rebase <wfId>` routes to orchestrator.recreateWorkflowFromFreshBase with workflowId directly', async () => {
           const { preemptWorkflowExecution, preparePoolSpy } = seedRebaseHappyPath();
 

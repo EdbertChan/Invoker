@@ -997,11 +997,6 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       await headlessRecreateWithRebase(args[1], deps);
       break;
 
-    // Deprecated aliases
-    case 'rebase-and-retry':
-      warnDeprecated('rebase-and-retry', 'rebase');
-      await headlessRebaseAndRetry(args[1], deps);
-      break;
     case 'fix':
       await headlessFix(args[1], deps, args[2]);
       break;
@@ -1497,11 +1492,11 @@ async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Promise<vo
     taskId = restored.resolvedTaskId;
     await preemptTaskSubgraph(taskId, deps);
 
-    const envelope = makeEnvelope('restart-task', 'headless', 'task', { taskId });
+    const envelope = makeEnvelope('retry-task', 'headless', 'task', { taskId });
     const result = await deps.commandService.retryTask(envelope);
     if (!result.ok) throw new Error(result.error.message);
     const runnable = result.data.filter(t => t.status === 'running');
-    process.stdout.write(`Restarted task "${taskId}" — ${runnable.length} task(s) to execute\n`);
+    process.stdout.write(`Retried task "${taskId}" — ${runnable.length} task(s) to execute\n`);
 
     const taskExecutor = createHeadlessExecutor(deps);
     const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
@@ -2446,9 +2441,8 @@ async function headlessDetachWorkflow(
  * cancel-first seam (`Orchestrator.editTaskMergeMode`) runs under
  * the workflow mutex; same-mode no-op detection,
  * `persistence.updateWorkflow({ mergeMode })`, and the single
- * `withBumpedExecutionGeneration` bump live in `restartTask` (today's
- * `retryTask` compatibility wire — see `MUTATION_POLICIES.mergeMode`
- * and `buildInvalidationDeps`).
+ * `withBumpedExecutionGeneration` bump live in `retryTask` (see
+ * `MUTATION_POLICIES.mergeMode` and `buildInvalidationDeps`).
  *
  * The CLI argument is still a workflow id (matches the legacy
  * `set-merge-mode <workflowId> <mode>` surface and the
@@ -2518,9 +2512,8 @@ async function headlessSetMergeMode(
  * cancel-first seam (`Orchestrator.editTaskFixContext`) runs under
  * the workflow mutex; same-content no-op detection,
  * `config.fixPrompt` / `config.fixContext` persistence, and the
- * single `withBumpedExecutionGeneration` bump live in `restartTask`
- * (today's `retryTask` compatibility wire — see
- * `MUTATION_POLICIES.fixContext` and `buildInvalidationDeps`).
+ * single `withBumpedExecutionGeneration` bump live in `retryTask`
+ * (see `MUTATION_POLICIES.fixContext` and `buildInvalidationDeps`).
  *
  * The CLI argument is a task id (matches the Step 2/3 `set command` /
  * `set prompt` headless surface). The `patch` discriminates between

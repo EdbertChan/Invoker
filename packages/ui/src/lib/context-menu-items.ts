@@ -112,20 +112,12 @@ export function getMenuItems(
   // ── Workflow-level items (grouped) ───────────────────────────
   if (hasWorkflow) {
     items.push({
-      id: 'rebase-retry',
-      label: 'Retry with Rebase',
-      enabled: true,
-      action: 'onRebaseAndRetry',
-      variant: 'warning',
-      separator: 'workflow',
-    });
-
-    items.push({
       id: 'recreate-rebase',
       label: 'Recreate with Rebase',
       enabled: true,
       action: 'onRecreateWithRebase',
       variant: 'warning',
+      separator: 'workflow',
     });
 
     items.push({
