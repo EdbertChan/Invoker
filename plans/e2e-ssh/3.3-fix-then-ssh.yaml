@@ -5,7 +5,7 @@
 name: "e2e-ssh group3 3.3 chain-cross"
 repoUrl: git@github.com:example-org/acme-repo.git
 onFinish: none
-mergeMode: manual
+approvalMode: manual
 baseBranch: HEAD
 
 tasks:

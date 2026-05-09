@@ -1260,34 +1260,34 @@ describe('SQLiteAdapter', () => {
     });
   });
 
-  describe('publicationStrategy persistence', () => {
+  describe('reviewStrategy persistence', () => {
     it('round-trips github_pr through save/load', () => {
-      adapter.saveWorkflow({ ...testWorkflow, publicationStrategy: 'github_pr' });
+      adapter.saveWorkflow({ ...testWorkflow, reviewStrategy: 'github_pr' });
 
       const loaded = adapter.loadWorkflow('wf-1');
       expect(loaded).toBeDefined();
-      expect(loaded!.publicationStrategy).toBe('github_pr');
+      expect(loaded!.reviewStrategy).toBe('github_pr');
     });
 
     it('round-trips mergify_stack through save/load', () => {
-      adapter.saveWorkflow({ ...testWorkflow, publicationStrategy: 'mergify_stack' });
+      adapter.saveWorkflow({ ...testWorkflow, reviewStrategy: 'mergify_stack' });
 
       const loaded = adapter.loadWorkflow('wf-1');
-      expect(loaded!.publicationStrategy).toBe('mergify_stack');
+      expect(loaded!.reviewStrategy).toBe('mergify_stack');
     });
 
     it('is undefined when not set (backward compatibility)', () => {
       adapter.saveWorkflow(testWorkflow);
 
       const loaded = adapter.loadWorkflow('wf-1');
-      expect(loaded!.publicationStrategy).toBeUndefined();
+      expect(loaded!.reviewStrategy).toBeUndefined();
     });
 
-    it('includes publicationStrategy in listWorkflows', () => {
-      adapter.saveWorkflow({ ...testWorkflow, publicationStrategy: 'mergify_stack' });
+    it('includes reviewStrategy in listWorkflows', () => {
+      adapter.saveWorkflow({ ...testWorkflow, reviewStrategy: 'mergify_stack' });
 
       const workflows = adapter.listWorkflows();
-      expect(workflows[0].publicationStrategy).toBe('mergify_stack');
+      expect(workflows[0].reviewStrategy).toBe('mergify_stack');
     });
   });
 
@@ -1435,7 +1435,7 @@ describe('SQLiteAdapter', () => {
         status: 'running',
         execution: { isFixingWithAI: true },
       }));
-      (adapter as any).db.run(`UPDATE workflows SET merge_mode = 'github' WHERE id = 'wf-1'`);
+      (adapter as any).db.run(`UPDATE workflows SET approval_mode = 'github' WHERE id = 'wf-1'`);
 
       const report = adapter.runCompatibilityMigration();
 
@@ -1445,7 +1445,7 @@ describe('SQLiteAdapter', () => {
         staleAutoFixExperimentTasks: 2,
       });
       const taskById = new Map(adapter.loadTasks('wf-1').map((task) => [task.id, task]));
-      expect(adapter.loadWorkflow('wf-1')?.mergeMode).toBe('external_review');
+      expect(adapter.loadWorkflow('wf-1')?.approvalMode).toBe('external_review');
       expect(taskById.get('fixing-row')?.status).toBe('fixing_with_ai');
       expect(adapter.getTaskStatus('fixing-row')).toBe('fixing_with_ai');
       expect(taskById.get('root-exp-fix-child')?.status).toBe('stale');
@@ -1458,6 +1458,58 @@ describe('SQLiteAdapter', () => {
         normalizedMergeModes: 0,
         staleAutoFixExperimentTasks: 0,
       });
+    });
+  });
+
+  describe('workflow schema rename migration (merge_mode → approval_mode, publication_strategy → review_strategy)', () => {
+    it('migrates legacy merge_mode and publication_strategy on open', async () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'sqlite-schema-rename-'));
+      const dbPath = join(tmpDir, 'invoker.db');
+      try {
+        // Create DB and insert a workflow with legacy column values
+        const db1 = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db1.saveWorkflow(testWorkflow);
+        // Simulate a pre-migration DB by writing directly to legacy columns
+        (db1 as any).db.run(
+          `UPDATE workflows SET merge_mode = 'external_review', publication_strategy = 'mergify_stack' WHERE id = 'wf-1'`,
+        );
+        (db1 as any).dirty = true; // ensure raw SQL change is flushed to disk
+        db1.close();
+
+        // Re-open — migration should copy legacy → new columns
+        const db2 = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        const loaded = db2.loadWorkflow('wf-1');
+        expect(loaded).toBeDefined();
+        expect(loaded!.approvalMode).toBe('external_review');
+        expect(loaded!.reviewStrategy).toBe('mergify_stack');
+        db2.close();
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not overwrite already-migrated approval_mode / review_strategy', async () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'sqlite-schema-rename-'));
+      const dbPath = join(tmpDir, 'invoker.db');
+      try {
+        const db1 = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db1.saveWorkflow({ ...testWorkflow, approvalMode: 'automatic', reviewStrategy: 'github_pr' });
+        // Legacy columns might still hold stale values
+        (db1 as any).db.run(
+          `UPDATE workflows SET merge_mode = 'manual', publication_strategy = 'mergify_stack' WHERE id = 'wf-1'`,
+        );
+        (db1 as any).dirty = true; // ensure raw SQL change is flushed to disk
+        db1.close();
+
+        // Re-open — migration should NOT overwrite existing new-column values
+        const db2 = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        const loaded = db2.loadWorkflow('wf-1');
+        expect(loaded!.approvalMode).toBe('automatic');
+        expect(loaded!.reviewStrategy).toBe('github_pr');
+        db2.close();
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 

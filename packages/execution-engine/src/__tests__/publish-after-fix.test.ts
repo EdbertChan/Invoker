@@ -78,7 +78,7 @@ function makeHost(hostDir: string, gateDir: string, allTasks: TaskState[]): Merg
       loadWorkflow: () => ({
         id: 'wf-int',
         onFinish: 'none',
-        mergeMode: 'manual',
+        approvalMode: 'manual',
         baseBranch: 'master',
         featureBranch: 'plan/feature',
         name: 'Integration Test',

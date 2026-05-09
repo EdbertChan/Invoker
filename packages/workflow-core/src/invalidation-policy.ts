@@ -34,7 +34,7 @@ export type MutationKey =
   | 'remoteTargetId'
   | 'selectedExperiment'
   | 'selectedExperimentSet'
-  | 'mergeMode'
+  | 'approvalMode'
   | 'fixContext'
   | 'rebaseAndRetry'
   | 'externalGatePolicy'
@@ -50,7 +50,7 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   remoteTargetId:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   selectedExperiment:    { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   selectedExperimentSet: { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
-  mergeMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
+  approvalMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   fixContext:            { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   rebaseAndRetry:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateWorkflowFromFreshBase' as const },
   // Step 15 (`docs/architecture/task-invalidation-roadmap.md`): the

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Group 4.2 — mergeMode=github creates a PR via stub gh CLI.
+# Group 4.2 — approvalMode=external_review creates a PR via stub gh CLI.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -14,7 +14,7 @@ unset ELECTRON_RUN_AS_NODE
 echo "==> case 4.2: delete-all"
 invoker_e2e_run_headless delete-all
 
-echo "==> case 4.2: submit plan (mergeMode=github)"
+echo "==> case 4.2: submit plan (approvalMode=external_review)"
 invoker_e2e_submit_plan "$INVOKER_E2E_REPO_ROOT/plans/e2e-dry-run/group4-fix-merge/4.2-github-pr.yaml"
 
 STA=$(invoker_e2e_task_status e2e-g442-taskA)
@@ -75,4 +75,4 @@ if [ "$STM" != "completed" ]; then
   exit 1
 fi
 
-echo "PASS case 4.2 (mergeMode=github: tasks completed, PR created, gate approved)"
+echo "PASS case 4.2 (approvalMode=external_review: tasks completed, PR created, gate approved)"

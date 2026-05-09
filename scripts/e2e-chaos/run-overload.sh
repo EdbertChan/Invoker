@@ -355,7 +355,7 @@ base = [
     f'name: "chaos overload {label} {kind}"',
     'repoUrl: git@github.com:example-org/acme-repo.git',
     'onFinish: none',
-    'mergeMode: manual',
+    'approvalMode: manual',
     'baseBranch: HEAD',
     '',
     'tasks:',

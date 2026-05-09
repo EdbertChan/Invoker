@@ -8,7 +8,7 @@
 
 name: "Verify test suite passes"
 onFinish: none
-mergeMode: manual
+approvalMode: manual
 repoUrl: git@github.com:example-org/acme-repo.git
 
 tasks:

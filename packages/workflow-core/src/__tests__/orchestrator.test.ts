@@ -18,7 +18,7 @@ class InMemoryPersistence implements OrchestratorPersistence {
     repoUrl?: string;
     baseBranch?: string;
     featureBranch?: string;
-    mergeMode?: 'manual' | 'automatic' | 'external_review';
+    approvalMode?: 'manual' | 'automatic' | 'external_review';
   }>();
   tasks = new Map<string, { workflowId: string; task: TaskState }>();
   private attempts = new Map<string, Attempt[]>();
@@ -32,7 +32,7 @@ class InMemoryPersistence implements OrchestratorPersistence {
     repoUrl?: string;
     baseBranch?: string;
     featureBranch?: string;
-    mergeMode?: 'manual' | 'automatic' | 'external_review';
+    approvalMode?: 'manual' | 'automatic' | 'external_review';
   }): void {
     const now = new Date().toISOString();
     this.workflows.set(workflow.id, {
@@ -54,7 +54,7 @@ class InMemoryPersistence implements OrchestratorPersistence {
       status?: string;
       updatedAt?: string;
       baseBranch?: string;
-      mergeMode?: 'manual' | 'automatic' | 'external_review';
+      approvalMode?: 'manual' | 'automatic' | 'external_review';
     },
   ): void {
     const wf = this.workflows.get(workflowId);
@@ -62,8 +62,8 @@ class InMemoryPersistence implements OrchestratorPersistence {
     if (wf && changes.status) {
       wf.status = changes.status;
     }
-    if (wf && changes.mergeMode !== undefined) {
-      wf.mergeMode = changes.mergeMode;
+    if (wf && changes.approvalMode !== undefined) {
+      wf.approvalMode = changes.approvalMode;
     }
     if (wf && changes.baseBranch !== undefined) {
       wf.baseBranch = changes.baseBranch;
@@ -74,7 +74,7 @@ class InMemoryPersistence implements OrchestratorPersistence {
     repoUrl?: string;
     baseBranch?: string;
     featureBranch?: string;
-    mergeMode?: 'manual' | 'automatic' | 'external_review';
+    approvalMode?: 'manual' | 'automatic' | 'external_review';
   } | undefined {
     const wf = this.workflows.get(workflowId);
     if (!wf) return undefined;
@@ -82,7 +82,7 @@ class InMemoryPersistence implements OrchestratorPersistence {
       repoUrl: wf.repoUrl,
       baseBranch: wf.baseBranch,
       featureBranch: wf.featureBranch,
-      mergeMode: wf.mergeMode,
+      approvalMode: wf.approvalMode,
     };
   }
 
@@ -268,32 +268,32 @@ describe('Orchestrator', () => {
   });
 
   describe('descriptionForMergeNode', () => {
-    it('uses Review gate when mergeMode is external_review', () => {
-      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'none', mergeMode: 'external_review' })).toBe(
+    it('uses Review gate when approvalMode is external_review', () => {
+      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'none', approvalMode: 'external_review' })).toBe(
         'Review gate for My plan',
       );
     });
 
     it('uses Pull request gate when onFinish is pull_request', () => {
-      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'pull_request', mergeMode: 'manual' })).toBe(
+      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'pull_request', approvalMode: 'manual' })).toBe(
         'Pull request gate for My plan',
       );
     });
 
     it('uses Merge gate when onFinish is merge and not GitHub PR mode', () => {
-      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'merge', mergeMode: 'manual' })).toBe(
+      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'merge', approvalMode: 'manual' })).toBe(
         'Merge gate for My plan',
       );
     });
 
-    it('uses Workflow gate when onFinish is none and mergeMode is manual', () => {
-      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'none', mergeMode: 'manual' })).toBe(
+    it('uses Workflow gate when onFinish is none and approvalMode is manual', () => {
+      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'none', approvalMode: 'manual' })).toBe(
         'Workflow gate for My plan',
       );
     });
 
-    it('prefers Review gate when mergeMode is external_review even if onFinish is merge', () => {
-      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'merge', mergeMode: 'external_review' })).toBe(
+    it('prefers Review gate when approvalMode is external_review even if onFinish is merge', () => {
+      expect(descriptionForMergeNode({ name: 'My plan', onFinish: 'merge', approvalMode: 'external_review' })).toBe(
         'Review gate for My plan',
       );
     });
@@ -6851,7 +6851,7 @@ describe('Orchestrator', () => {
     } {
       orchestrator.loadPlan({
         name: 'edit-merge-mode-step9',
-        mergeMode: initialMergeMode,
+        approvalMode: initialMergeMode,
         tasks: [
           { id: 'leaf', description: 'Leaf task' },
         ],
@@ -6950,7 +6950,7 @@ describe('Orchestrator', () => {
       orchestrator.editTaskMergeMode(mergeId, 'external_review');
 
       const wf = persistence.loadWorkflow(workflowId);
-      expect(wf?.mergeMode).toBe('external_review');
+      expect(wf?.approvalMode).toBe('external_review');
     });
 
     it('inactive merge nodes skip cancel-first but still route through retryTask', () => {
@@ -7028,7 +7028,7 @@ describe('Orchestrator', () => {
     } {
       orchestrator.loadPlan({
         name: 'edit-merge-mode-step9',
-        mergeMode: initialMergeMode,
+        approvalMode: initialMergeMode,
         tasks: [
           { id: 'leaf', description: 'Leaf task' },
         ],
@@ -7127,7 +7127,7 @@ describe('Orchestrator', () => {
       orchestrator.editTaskMergeMode(mergeId, 'external_review');
 
       const wf = persistence.loadWorkflow(workflowId);
-      expect(wf?.mergeMode).toBe('external_review');
+      expect(wf?.approvalMode).toBe('external_review');
     });
 
     it('inactive merge node (pending) skips cancel-first but still routes through retryTask', () => {
@@ -7429,7 +7429,7 @@ describe('Orchestrator', () => {
     it('throws when called on a merge node', () => {
       orchestrator.loadPlan({
         name: 'edit-fix-context-merge-step10',
-        mergeMode: 'manual',
+        approvalMode: 'manual',
         tasks: [{ id: 'leaf', description: 'Leaf task' }],
       });
       const workflowId = orchestrator.getWorkflowIds()[0]!;

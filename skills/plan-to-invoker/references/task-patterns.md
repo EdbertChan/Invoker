@@ -21,7 +21,7 @@ Source of truth: `packages/surfaces/src/slack/plan-conversation.ts:100-116`
 | "Modify UI component" / "Fix layout" | `prompt` + `visualProof: true` | Set `visualProof: true` at plan level; include `description` |
 | **Add visual proof E2E test case** | `prompt` | Add a test to `packages/app/e2e/visual-proof.spec.ts` that sets up the exact UI state being changed and calls `captureScreenshot(page, '<plan-slug>-<state>')`. See `skills/visual-proof/SKILL.md`. |
 | **Capture visual proof (after)** | `command` | `pnpm --filter @invoker/ui build && pnpm --filter @invoker/app build && bash scripts/ui-visual-proof.sh --label after` — depends on **all** implementation tasks |
-| **Publication strategy selection** | workflow-level `publicationStrategy` | `github_pr` (default): standard GitHub PR via `GitHubMergeGateProvider`. `mergify_stack` (opt-in): stacked publication via `MergifyStackProvider` — use for Invoker-on-Invoker or repos that independently adopt Mergify Stacks. See `references/schema.md` § *Publication Strategy Architecture*. |
+| **Review strategy selection** | workflow-level `reviewStrategy` | `github_pr` (default): standard GitHub PR via `GitHubMergeGateProvider`. `mergify_stack` (opt-in): stacked publication via `MergifyStackProvider` — use for Invoker-on-Invoker or repos that independently adopt Mergify Stacks. See `references/schema.md` § *Review Strategy Architecture*. |
 
 ## Dependency Rules
 
@@ -208,7 +208,7 @@ description: |
   Constrains ApprovalModal height to 90vh and adds internal scroll.
   Architecture: uses flex-col + overflow-y-auto pattern.
 onFinish: pull_request
-mergeMode: github
+approvalMode: external_review
 visualProof: true
 tasks:
   - id: add-visual-proof-test
@@ -248,7 +248,7 @@ tasks:
 - **Circular dependencies**: task A depends on B, B depends on A — validator catches this but don't generate it.
 - **Phantom files**: referencing files that don't exist without a task to create them first.
 - **UI plan without visual proof tasks**: `visualProof: true` without the E2E test case task and capture task means no plan-specific screenshots are captured.
-- **Over-generalized `mergify_stack` strategy**: setting `publicationStrategy: mergify_stack` on workflows targeting repos that do not use Mergify Stacks. `mergify_stack` is explicit opt-in; `github_pr` is the default for all repos. See `references/examples.md` § 7 for selection criteria.
+- **Over-generalized `mergify_stack` strategy**: setting `reviewStrategy: mergify_stack` on workflows targeting repos that do not use Mergify Stacks. `mergify_stack` is explicit opt-in; `github_pr` is the default for all repos. See `references/examples.md` § 7 for selection criteria.
 
 ## Deterministic Quality Gate
 

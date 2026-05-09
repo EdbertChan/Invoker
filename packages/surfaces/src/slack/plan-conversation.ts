@@ -85,7 +85,7 @@ A plan has this structure:
 name: "Plan Name"
 ${repoUrlLine}
 onFinish: pull_request  # "pull_request" (default), "merge", or "none"
-mergeMode: manual       # "manual" (default) or "automatic"
+approvalMode: manual       # "manual" (default) or "automatic"
 baseBranch: ${defaultBranch}        # base git branch
 featureBranch: plan/my-feature  # auto-generated from plan name if omitted
 tasks:
@@ -459,7 +459,7 @@ export function rewritePnpmTestCommand(cmd: string): string {
 /**
  * Extract and validate a YAML plan from a message containing ```yaml blocks.
  * Returns the raw YAML string (with command rewrites applied) or null if invalid.
- * Defaulting (onFinish, baseBranch, mergeMode, etc.) is NOT applied here —
+ * Defaulting (onFinish, baseBranch, approvalMode, etc.) is NOT applied here —
  * callers should pass the returned string through parsePlan() for that.
  */
 export function extractYamlPlan(text: string): string | null {
