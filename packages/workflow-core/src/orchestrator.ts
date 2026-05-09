@@ -2702,7 +2702,7 @@ export class Orchestrator {
    *
    * Why this lives on the orchestrator (Step 9 migration). Prior to
    * Step 9 the merge-mode mutation surface was an app-layer-only
-   * special case in `setWorkflowMergeMode` that restarted the merge
+   * special case in `setWorkflowApprovalMode` that restarted the merge
    * node *only* when it was already terminal or waiting
    * (`completed` / `awaiting_approval` / `review_ready`). Per the
    * chart's "Merge-mode inconsistency" section that left no general
@@ -2754,7 +2754,7 @@ export class Orchestrator {
    * not a merge node — keeping merge-mode mutation scoped to the
    * single execution policy slot the chart classifies. Backward-
    * compatible callers continue to use the workflow-scoped
-   * `setWorkflowMergeMode` wrapper which translates `workflowId →
+   * `setWorkflowApprovalMode` wrapper which translates `workflowId →
    * mergeNodeId` and delegates here.
    *
    * NOTE: `recreateTask`'s lineage-discarding reset shape is

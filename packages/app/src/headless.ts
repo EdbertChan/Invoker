@@ -41,9 +41,9 @@ import {
   recreateWorkflow as sharedRecreateWorkflow,
   recreateTask as sharedRecreateTask,
   forkWorkflow as sharedForkWorkflow,
-  setWorkflowMergeMode,
+  setWorkflowApprovalMode,
 } from './workflow-actions.js';
-import { normalizeMergeModeForPersistence } from './merge-mode.js';
+import { normalizeApprovalMode } from './approval-mode.js';
 import { openExternalTerminalForTask } from './open-terminal-for-task.js';
 import { dispatchStartedTasksWithGlobalTopup, executeGlobalTopup, finalizeMutationWithGlobalTopup } from './global-topup.js';
 import { resolveHeadlessTargetWorkflowId } from './headless-command-classification.js';
@@ -589,7 +589,7 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
 async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
   const subCommand = args[0];
   if (!subCommand) {
-    throw new Error('Missing set sub-command. Usage: --headless set <command|executor|agent|merge-mode|gate-policy>');
+    throw new Error('Missing set sub-command. Usage: --headless set <command|executor|agent|approval-mode|gate-policy>');
   }
 
   switch (subCommand) {
@@ -605,8 +605,12 @@ async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
     case 'agent':
       await headlessEditAgent(args[1], args[2], deps);
       break;
+    case 'approval-mode':
+      await headlessSetApprovalMode(args[1], args[2], deps);
+      break;
     case 'merge-mode':
-      await headlessSetMergeMode(args[1], args[2], deps);
+      warnDeprecated('set merge-mode', 'set approval-mode');
+      await headlessSetApprovalMode(args[1], args[2], deps);
       break;
     case 'fix-prompt':
       await headlessSetFixContext(args[1], { fixPrompt: args.slice(2).join(' ') }, deps);
@@ -618,7 +622,7 @@ async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
       await headlessSetGatePolicy(args.slice(1), deps);
       break;
     default:
-      throw new Error(`Unknown set sub-command: "${subCommand}". Use: command, prompt, executor, agent, merge-mode, fix-prompt, fix-context, gate-policy`);
+      throw new Error(`Unknown set sub-command: "${subCommand}". Use: command, prompt, executor, agent, approval-mode, fix-prompt, fix-context, gate-policy`);
   }
 }
 
@@ -626,7 +630,7 @@ async function headlessMigrateCompatibility(deps: HeadlessDeps): Promise<void> {
   const report = deps.persistence.runCompatibilityMigration();
   process.stdout.write(`${BOLD}Compatibility migration complete.${RESET}\n`);
   process.stdout.write(`  migratedFixingWithAiStatuses: ${report.migratedFixingWithAiStatuses}\n`);
-  process.stdout.write(`  normalizedMergeModes: ${report.normalizedMergeModes}\n`);
+  process.stdout.write(`  normalizedApprovalModes: ${report.normalizedMergeModes}\n`);
   process.stdout.write(`  staleAutoFixExperimentTasks: ${report.staleAutoFixExperimentTasks}\n`);
 }
 
@@ -816,8 +820,8 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       await headlessSet(['agent', ...args.slice(1)], deps);
       break;
     case 'set-merge-mode':
-      warnDeprecated('set-merge-mode', 'set merge-mode');
-      await headlessSet(['merge-mode', ...args.slice(1)], deps);
+      warnDeprecated('set-merge-mode', 'set approval-mode');
+      await headlessSet(['approval-mode', ...args.slice(1)], deps);
       break;
 
     case '--help':
@@ -893,7 +897,7 @@ ${BOLD}Configure:${RESET}
   set prompt <taskId> <text>                          Edit task prompt and re-run
   set executor <taskId> <type> [remoteTargetId]       Change executor type (worktree|docker|ssh)
   set agent <taskId> <agent>                          Change execution agent (claude|codex)
-  set merge-mode <workflowId> <mode>                  manual | automatic | external_review
+  set approval-mode <workflowId> <mode>                manual | automatic | external_review
   set fix-prompt <taskId> <text>                      Update fix-session prompt and retry
   set fix-context <taskId> <text>                     Update fix-session context and retry
   set gate-policy <taskId> <wfId> [depTaskId] <policy>
@@ -912,7 +916,7 @@ ${BOLD}Deprecated${RESET} (use new names above):
   list → query workflows       status → query tasks       task-status → query task
   queue → query queue           audit → query audit         session → query session
   edit → set command            edit-executor → set executor
-  edit-agent → set agent        set-merge-mode → set merge-mode
+  edit-agent → set agent        set-merge-mode → set approval-mode
   delete-workflow → delete
   rebase-and-retry → rebase (task) or recreate-with-rebase (workflow)
 
@@ -2147,9 +2151,9 @@ async function headlessDetachWorkflow(
 }
 
 /**
- * Headless `set merge-mode` — **retry-class** invalidation route per
+ * Headless `set approval-mode` — **retry-class** invalidation route per
  * Step 9 of `docs/architecture/task-invalidation-roadmap.md` (chart
- * Decision Table row "Change merge mode";
+ * Decision Table row "Change approval mode";
  * `MUTATION_POLICIES.approvalMode` → `retryTask` / task scope, scoped
  * to the merge node). Mirrors the Step 5 `set type` headless pattern
  * (retry-class, preserves branch / workspacePath lineage) rather
@@ -2167,38 +2171,38 @@ async function headlessDetachWorkflow(
  *
  * The CLI argument is still a workflow id (matches the legacy
  * `set-merge-mode <workflowId> <mode>` surface and the
- * `invoker:set-merge-mode` IPC). `approvalMode` is normalized at the
+ * `invoker:set-approval-mode` IPC). `approvalMode` is normalized at the
  * app boundary because that concerns UI/CLI input parsing, not the
  * chart's invalidation routing. The merge-task-id translation
  * (`workflowId → __merge__<workflowId>`) happens here because the
  * orchestrator seam speaks merge-node task ids. When the workflow
  * has no merge node (degenerate workflows that opted out of a merge
  * gate) we persist the new mode directly via the shared
- * `setWorkflowMergeMode` action — there is nothing to retry.
+ * `setWorkflowApprovalMode` action — there is nothing to retry.
  */
-async function headlessSetMergeMode(
+async function headlessSetApprovalMode(
   workflowId: string,
   approvalMode: string,
   deps: HeadlessDeps,
 ): Promise<void> {
   if (!workflowId || !approvalMode) {
     throw new Error(
-      'Missing arguments. Usage: --headless set-merge-mode <workflowId> <manual|automatic|external_review>',
+      'Missing arguments. Usage: --headless set approval-mode <workflowId> <manual|automatic|external_review>',
     );
   }
-  const normalized = normalizeMergeModeForPersistence(approvalMode);
+  const normalized = normalizeApprovalMode(approvalMode);
 
   const tasks = deps.persistence.loadTasks(workflowId);
   const mergeTask = tasks.find((t) => t.config.isMergeNode);
   if (!mergeTask) {
     const taskExecutor = createHeadlessExecutor(deps);
-    await setWorkflowMergeMode(workflowId, normalized, {
+    await setWorkflowApprovalMode(workflowId, normalized, {
       orchestrator: deps.orchestrator,
       persistence: deps.persistence,
       taskExecutor,
     });
     const wf = deps.persistence.loadWorkflow(workflowId);
-    process.stdout.write(`Merge mode updated for ${workflowId}: ${wf?.approvalMode ?? '?'}\n`);
+    process.stdout.write(`Approval mode updated for ${workflowId}: ${wf?.approvalMode ?? '?'}\n`);
     return;
   }
 
@@ -2217,7 +2221,7 @@ async function headlessSetMergeMode(
     await taskExecutor.executeTasks(runnable);
   }
   const wf = deps.persistence.loadWorkflow(workflowId);
-  process.stdout.write(`Merge mode updated for ${workflowId}: ${wf?.approvalMode ?? '?'}\n`);
+  process.stdout.write(`Approval mode updated for ${workflowId}: ${wf?.approvalMode ?? '?'}\n`);
 }
 
 /**
