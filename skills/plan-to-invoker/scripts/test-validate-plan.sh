@@ -80,7 +80,7 @@ test_negative_fixture_error_keys() {
     'missing_required_field:name'
     'missing_required_field:repoUrl'
     'missing_required_field:description'
-    'invalid_enum_value:mergeMode'
+    'invalid_enum_value:approvalMode'
     'missing_required_field:id'
     'command_prompt_exclusive:command|prompt'
     'missing_command_or_prompt:command|prompt'

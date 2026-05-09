@@ -1,7 +1,7 @@
 name: "e2e-dry-run group1 1.2 failure"
 repoUrl: git@github.com:example-org/acme-repo.git
 onFinish: none
-mergeMode: manual
+approvalMode: manual
 baseBranch: HEAD
 
 tasks:

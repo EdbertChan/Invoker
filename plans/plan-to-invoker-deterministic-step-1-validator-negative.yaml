@@ -6,7 +6,7 @@
 # Missing: description field when onFinish is pull_request (error: missing_required_field, field: description)
 
 onFinish: pull_request
-mergeMode: invalid_mode  # Invalid enum (error: invalid_enum_value, field: mergeMode)
+approvalMode: invalid_mode  # Invalid enum (error: invalid_enum_value, field: approvalMode)
 baseBranch: master
 
 tasks:

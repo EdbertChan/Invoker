@@ -35,7 +35,7 @@ Optional generator:
 bash skills/plan-to-invoker/scripts/generate-verify-plan.sh "<plan-name>" < assumptions.json > plans/verify-<slug>-static.yaml
 ```
 
-Hand-written YAML is fine. Tasks are `command` with `test -f`, `rg`, etc. Plan: `onFinish: none`, `mergeMode: manual`.
+Hand-written YAML is fine. Tasks are `command` with `test -f`, `rg`, etc. Plan: `onFinish: none`, `approvalMode: manual`.
 For policy-matrix sources, the generated verify scaffold must not degrade to `verify-noop`; it should include coverage verification tasks derived from `coverageItems`.
 
 #### 2a. Record row-to-workflow traceability for policy-matrix sources
@@ -145,7 +145,7 @@ Remove verification workflows before submitting the **implementation** plan if y
 
 Use verified facts + `references/task-patterns.md` to generate the implementation plan.
 
-Set `mergeMode: github` (GitHub PR / **GithubPR** merge gate) on the implementation YAML unless the user explicitly asked for `manual` or `automatic`.
+Set `approvalMode: external_review` (GitHub PR / external review gate) on the implementation YAML unless the user explicitly asked for `manual` or `automatic`.
 
 For each failed verification:
 

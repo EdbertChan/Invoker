@@ -312,8 +312,7 @@ parentRemote: origin
 baseBranch: ${base_branch}
 featureBranch: ${branch1}
 onFinish: pull_request
-mergeMode: external_review
-reviewProvider: github
+approvalMode: external_review
 tasks:
   - id: ${task1}
     description: "Append a unique repro marker to README"
@@ -330,8 +329,7 @@ parentRemote: origin
 baseBranch: ${base_branch}
 featureBranch: ${branch2}
 onFinish: pull_request
-mergeMode: external_review
-reviewProvider: github
+approvalMode: external_review
 externalDependencies:
   - workflowId: "__UPSTREAM_WORKFLOW_ID__"
     requiredStatus: completed

@@ -47,7 +47,7 @@ const yamlPath = resolveYamlModulePath(__dirname);
 const { parse: parseYaml } = await import(yamlPath);
 
 const VALID_ON_FINISH = ['none', 'merge', 'pull_request'];
-const VALID_MERGE_MODE = ['manual', 'automatic', 'github', 'external_review'];
+const VALID_APPROVAL_MODE = ['manual', 'automatic', 'external_review'];
 const VALID_EXECUTOR_TYPE = ['worktree', 'docker', 'ssh'];
 const VALID_REQUIRED_STATUS = ['completed', 'review_ready'];
 const VALID_GATE_POLICY = ['completed', 'review_ready'];
@@ -182,12 +182,12 @@ function validatePlan(yamlContent) {
     });
   }
 
-  if (raw.mergeMode !== undefined && !VALID_MERGE_MODE.includes(raw.mergeMode)) {
+  if (raw.approvalMode !== undefined && !VALID_APPROVAL_MODE.includes(raw.approvalMode)) {
     errors.push({
       errorType: 'invalid_enum_value',
-      field: 'mergeMode',
-      message: `"mergeMode" must be one of: ${VALID_MERGE_MODE.join(', ')}`,
-      value: raw.mergeMode,
+      field: 'approvalMode',
+      message: `"approvalMode" must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
+      value: raw.approvalMode,
     });
   }
 

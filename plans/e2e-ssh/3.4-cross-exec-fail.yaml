@@ -2,7 +2,7 @@
 name: "e2e-ssh group3 3.4 cross-exec-fail"
 repoUrl: git@github.com:example-org/acme-repo.git
 onFinish: none
-mergeMode: manual
+approvalMode: manual
 baseBranch: HEAD
 
 tasks:

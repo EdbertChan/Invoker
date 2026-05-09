@@ -20,7 +20,7 @@ interface ValidationError {
 }
 
 const VALID_ON_FINISH = ['none', 'merge', 'pull_request'] as const;
-const VALID_MERGE_MODE = ['manual', 'automatic', 'github', 'external_review'] as const;
+const VALID_APPROVAL_MODE = ['manual', 'automatic', 'external_review'] as const;
 const VALID_EXECUTOR_TYPE = ['worktree', 'docker', 'ssh'] as const;
 const VALID_REQUIRED_STATUS = ['completed', 'review_ready'] as const;
 const VALID_GATE_POLICY = ['completed', 'review_ready'] as const;
@@ -165,12 +165,12 @@ function validatePlan(yamlContent: string): ValidationError[] {
     });
   }
 
-  if (raw.mergeMode !== undefined && !VALID_MERGE_MODE.includes(raw.mergeMode as any)) {
+  if (raw.approvalMode !== undefined && !VALID_APPROVAL_MODE.includes(raw.approvalMode as any)) {
     errors.push({
       errorType: 'invalid_enum_value',
-      field: 'mergeMode',
-      message: `"mergeMode" must be one of: ${VALID_MERGE_MODE.join(', ')}`,
-      value: raw.mergeMode,
+      field: 'approvalMode',
+      message: `"approvalMode" must be one of: ${VALID_APPROVAL_MODE.join(', ')}`,
+      value: raw.approvalMode,
     });
   }
 
