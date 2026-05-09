@@ -28,6 +28,8 @@ import {
   setWorkflowMergeMode,
   fixWithAgentAction,
   finalizeAppliedFix,
+  resolveConflictAction,
+  isFixLineageStale,
   autoFixOnFailure,
   buildCancelInFlight,
   buildInvalidationDeps,
@@ -2006,5 +2008,373 @@ describe('deleteAllWorkflows', () => {
     });
 
     expect(result.snapshotPath).toBe('/tmp/fake-snapshot');
+  });
+});
+
+// ── Fix lineage guard tests ─────────────────────────────────
+
+describe('isFixLineageStale', () => {
+  it('returns false when lineage matches', () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        execution: { selectedAttemptId: 'att-1', generation: 3 },
+      })),
+    };
+    const result = isFixLineageStale(
+      orchestrator as unknown as Orchestrator,
+      'task-a',
+      { selectedAttemptId: 'att-1', generation: 3 },
+    );
+    expect(result).toBe(false);
+  });
+
+  it('returns true when selectedAttemptId changed', () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        execution: { selectedAttemptId: 'att-2', generation: 3 },
+      })),
+    };
+    const result = isFixLineageStale(
+      orchestrator as unknown as Orchestrator,
+      'task-a',
+      { selectedAttemptId: 'att-1', generation: 3 },
+    );
+    expect(result).toBe(true);
+  });
+
+  it('returns true when generation advanced', () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        execution: { selectedAttemptId: 'att-1', generation: 4 },
+      })),
+    };
+    const result = isFixLineageStale(
+      orchestrator as unknown as Orchestrator,
+      'task-a',
+      { selectedAttemptId: 'att-1', generation: 3 },
+    );
+    expect(result).toBe(true);
+  });
+
+  it('returns true when task is missing', () => {
+    const orchestrator = { getTask: vi.fn(() => undefined) };
+    const result = isFixLineageStale(
+      orchestrator as unknown as Orchestrator,
+      'task-a',
+      { selectedAttemptId: 'att-1', generation: 3 },
+    );
+    expect(result).toBe(true);
+  });
+});
+
+describe('fixWithAgentAction lineage guard', () => {
+  it('discards late fix result when lineage becomes stale after executor completes', async () => {
+    let getTaskCallCount = 0;
+    const orchestrator = {
+      getTask: vi.fn(() => {
+        getTaskCallCount++;
+        // First call: initial task lookup (before beginConflictResolution)
+        // Second call: captureFixLineage (after beginConflictResolution)
+        // Third call onwards: lineage check — simulate recreation by changing attempt
+        if (getTaskCallCount <= 2) {
+          return makeTask({
+            status: getTaskCallCount === 1 ? 'failed' : 'fixing_with_ai',
+            config: { workflowId: 'wf-1' },
+            execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 2 },
+          });
+        }
+        // Lineage changed — a recreate happened while executor was running
+        return makeTask({
+          status: 'running',
+          config: { workflowId: 'wf-1' },
+          execution: { selectedAttemptId: 'att-2', generation: 3 },
+        });
+      }),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockResolvedValue(undefined),
+      resolveConflict: vi.fn(),
+    };
+
+    const result = await fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, { agentName: 'claude' });
+
+    // Executor was called (the async work ran)
+    expect(taskExecutor.fixWithAgent).toHaveBeenCalled();
+    // But no state mutations happened because lineage was stale
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
+  });
+
+  it('discards late fix error when lineage becomes stale during executor failure', async () => {
+    let getTaskCallCount = 0;
+    const orchestrator = {
+      getTask: vi.fn(() => {
+        getTaskCallCount++;
+        if (getTaskCallCount <= 2) {
+          return makeTask({
+            status: getTaskCallCount === 1 ? 'failed' : 'fixing_with_ai',
+            config: { workflowId: 'wf-1' },
+            execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 2 },
+          });
+        }
+        return makeTask({
+          status: 'running',
+          config: { workflowId: 'wf-1' },
+          execution: { selectedAttemptId: 'att-2', generation: 3 },
+        });
+      }),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockRejectedValue(new Error('executor crashed')),
+      resolveConflict: vi.fn(),
+    };
+
+    // Should NOT throw — stale error is silently discarded
+    const result = await fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, { agentName: 'claude' });
+
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
+    expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
+  });
+
+  it('discards late fix result when signal is aborted', async () => {
+    const abortController = new AbortController();
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 2 },
+      })),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn(async () => {
+        // Signal aborted while executor is running
+        abortController.abort();
+      }),
+      resolveConflict: vi.fn(),
+    };
+
+    const result = await fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, {
+      agentName: 'claude',
+      signal: abortController.signal,
+    });
+
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
+  });
+});
+
+describe('resolveConflictAction lineage guard', () => {
+  it('discards late resolve-conflict result when lineage becomes stale', async () => {
+    let getTaskCallCount = 0;
+    const orchestrator = {
+      getTask: vi.fn(() => {
+        getTaskCallCount++;
+        if (getTaskCallCount <= 1) {
+          return makeTask({
+            status: 'fixing_with_ai',
+            config: { workflowId: 'wf-1' },
+            execution: { selectedAttemptId: 'att-1', generation: 2 },
+          });
+        }
+        // Lineage changed
+        return makeTask({
+          status: 'running',
+          config: { workflowId: 'wf-1' },
+          execution: { selectedAttemptId: 'att-2', generation: 3 },
+        });
+      }),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'merge conflict' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      resolveConflict: vi.fn().mockResolvedValue(undefined),
+      fixWithAgent: vi.fn(),
+    };
+
+    const result = await resolveConflictAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, 'claude');
+
+    expect(taskExecutor.resolveConflict).toHaveBeenCalled();
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(result).toEqual({ autoApproved: false, started: [] });
+  });
+
+  it('discards late resolve-conflict error when lineage becomes stale', async () => {
+    let getTaskCallCount = 0;
+    const orchestrator = {
+      getTask: vi.fn(() => {
+        getTaskCallCount++;
+        if (getTaskCallCount <= 1) {
+          return makeTask({
+            status: 'fixing_with_ai',
+            config: { workflowId: 'wf-1' },
+            execution: { selectedAttemptId: 'att-1', generation: 2 },
+          });
+        }
+        return makeTask({
+          status: 'running',
+          config: { workflowId: 'wf-1' },
+          execution: { selectedAttemptId: 'att-2', generation: 3 },
+        });
+      }),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'merge conflict' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      resolveConflict: vi.fn().mockRejectedValue(new Error('conflict resolution failed')),
+      fixWithAgent: vi.fn(),
+    };
+
+    // Should NOT throw — stale error is silently discarded
+    const result = await resolveConflictAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, 'claude');
+
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
+    expect(result).toEqual({ autoApproved: false, started: [] });
+  });
+
+  it('discards late resolve-conflict result when signal is aborted', async () => {
+    const abortController = new AbortController();
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'fixing_with_ai',
+        config: { workflowId: 'wf-1' },
+        execution: { selectedAttemptId: 'att-1', generation: 2 },
+      })),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'merge conflict' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      resolveConflict: vi.fn(async () => {
+        abortController.abort();
+      }),
+      fixWithAgent: vi.fn(),
+    };
+
+    const result = await resolveConflictAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, 'claude', abortController.signal);
+
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(result).toEqual({ autoApproved: false, started: [] });
+  });
+});
+
+describe('finalizeAppliedFix lineage guard', () => {
+  it('skips setFixAwaitingApproval when lineage is stale', async () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'fixing_with_ai',
+        config: { workflowId: 'wf-1' },
+        execution: { selectedAttemptId: 'att-2', generation: 4 },
+      })),
+      setFixAwaitingApproval: vi.fn(),
+    };
+    const taskExecutor = {};
+
+    const result = await finalizeAppliedFix('task-a', 'boom', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, { selectedAttemptId: 'att-1', generation: 3 });
+
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(result).toEqual({ autoApproved: false, started: [] });
+  });
+
+  it('proceeds normally when lineage matches', async () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'fixing_with_ai',
+        config: { workflowId: 'wf-1' },
+        execution: { selectedAttemptId: 'att-1', generation: 3 },
+      })),
+      setFixAwaitingApproval: vi.fn(),
+    };
+    const taskExecutor = {};
+
+    const result = await finalizeAppliedFix('task-a', 'boom', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, { selectedAttemptId: 'att-1', generation: 3 });
+
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
+    expect(result).toEqual({ autoApproved: false, started: [] });
+  });
+
+  it('proceeds normally when no lineage is provided (backward compat)', async () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'fixing_with_ai',
+        config: { workflowId: 'wf-1' },
+        execution: { selectedAttemptId: 'att-1', generation: 3 },
+      })),
+      setFixAwaitingApproval: vi.fn(),
+    };
+    const taskExecutor = {};
+
+    const result = await finalizeAppliedFix('task-a', 'boom', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    });
+
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
+    expect(result).toEqual({ autoApproved: false, started: [] });
   });
 });

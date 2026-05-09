@@ -644,13 +644,21 @@ export async function resolveConflictAction(
   taskId: string,
   deps: Pick<ActionDeps, 'orchestrator' | 'persistence' | 'autoApproveAIFixes'> & { taskExecutor: TaskRunner },
   agentName?: string,
+  signal?: AbortSignal,
 ): Promise<{ autoApproved: boolean; started: TaskState[] }> {
   const { orchestrator, persistence, taskExecutor } = deps;
   const { savedError } = orchestrator.beginConflictResolution(taskId);
+  const lineage = captureFixLineage(orchestrator, taskId);
   try {
     await taskExecutor.resolveConflict(taskId, savedError, agentName);
-    return await finalizeAppliedFix(taskId, savedError, deps);
+    if (signal?.aborted || isFixLineageStale(orchestrator, taskId, lineage)) {
+      return { autoApproved: false, started: [] };
+    }
+    return await finalizeAppliedFix(taskId, savedError, deps, lineage);
   } catch (err) {
+    if (signal?.aborted || isFixLineageStale(orchestrator, taskId, lineage)) {
+      return { autoApproved: false, started: [] };
+    }
     const msg = err instanceof Error ? err.message : String(err);
     persistence.appendTaskOutput(taskId, `\n[Resolve Conflict] Failed: ${msg}`);
     orchestrator.revertConflictResolution(taskId, savedError, msg);
@@ -670,6 +678,7 @@ export async function fixWithAgentAction(
     recoveryRoute?: FailureRecoveryRoute;
     recreateOutputLabel?: string;
     failureOutputLabel?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<FixWithAgentActionResult> {
   const { orchestrator, persistence, taskExecutor } = deps;
@@ -694,6 +703,7 @@ export async function fixWithAgentAction(
   }
 
   const { savedError: persistedSavedError } = orchestrator.beginConflictResolution(taskId);
+  const lineage = captureFixLineage(orchestrator, taskId);
   try {
     if (recoveryRoute.kind === 'resolveConflict') {
       await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName);
@@ -701,13 +711,19 @@ export async function fixWithAgentAction(
       const output = persistence.getTaskOutput(taskId);
       await taskExecutor.fixWithAgent(taskId, output, options.agentName, persistedSavedError);
     }
-    const result = await finalizeAppliedFix(taskId, persistedSavedError, deps);
+    if (options.signal?.aborted || isFixLineageStale(orchestrator, taskId, lineage)) {
+      return { kind: recoveryRoute.kind, autoApproved: false, started: [] };
+    }
+    const result = await finalizeAppliedFix(taskId, persistedSavedError, deps, lineage);
     return {
       kind: recoveryRoute.kind,
       autoApproved: result.autoApproved,
       started: result.started,
     };
   } catch (err) {
+    if (options.signal?.aborted || isFixLineageStale(orchestrator, taskId, lineage)) {
+      return { kind: recoveryRoute.kind, autoApproved: false, started: [] };
+    }
     const msg = err instanceof Error ? err.message : String(err);
     const errorLabel = options.failureOutputLabel
       ?? (recoveryRoute.kind === 'resolveConflict' ? 'Resolve Conflict' : `Fix with ${options.agentName ?? 'Claude'}`);
@@ -721,14 +737,67 @@ export async function finalizeAppliedFix(
   taskId: string,
   savedError: string,
   deps: Pick<ActionDeps, 'orchestrator' | 'autoApproveAIFixes'> & { taskExecutor: TaskRunner },
+  lineage?: FixLineageSnapshot,
 ): Promise<{ autoApproved: boolean; started: TaskState[] }> {
+  if (lineage && isFixLineageStale(deps.orchestrator, taskId, lineage)) {
+    return { autoApproved: false, started: [] };
+  }
   deps.orchestrator.setFixAwaitingApproval(taskId, savedError);
   if (!deps.autoApproveAIFixes) {
     return { autoApproved: false, started: [] };
   }
 
+  if (lineage && isFixLineageStale(deps.orchestrator, taskId, lineage)) {
+    return { autoApproved: false, started: [] };
+  }
   const { started } = await approveTask(taskId, deps);
   return { autoApproved: true, started };
+}
+
+// ── Fix lineage guard ────────────────────────────────────────
+
+/**
+ * Snapshot of task lineage captured immediately after
+ * `beginConflictResolution` creates a fresh attempt.
+ * Every downstream state mutation must verify the task still
+ * matches this snapshot; otherwise the result is stale.
+ */
+export interface FixLineageSnapshot {
+  readonly selectedAttemptId: string | undefined;
+  readonly generation: number;
+}
+
+/**
+ * Returns `true` when the current task lineage no longer matches
+ * the snapshot captured at fix entry — meaning a recreate, delete,
+ * or another fix has superseded this attempt.
+ */
+export function isFixLineageStale(
+  orchestrator: Pick<Orchestrator, 'getTask'>,
+  taskId: string,
+  snapshot: FixLineageSnapshot,
+): boolean {
+  const task = orchestrator.getTask(taskId);
+  if (!task) return true;
+  if (task.execution.selectedAttemptId !== snapshot.selectedAttemptId) return true;
+  if ((task.execution.generation ?? 0) !== snapshot.generation) return true;
+  return false;
+}
+
+/**
+ * Captures the current fix lineage for the given task.
+ * Call immediately after `beginConflictResolution` to record the
+ * fresh attempt and generation that downstream guards will check.
+ */
+function captureFixLineage(
+  orchestrator: Pick<Orchestrator, 'getTask'>,
+  taskId: string,
+): FixLineageSnapshot {
+  const task = orchestrator.getTask(taskId);
+  return {
+    selectedAttemptId: task?.execution.selectedAttemptId,
+    generation: task?.execution.generation ?? 0,
+  };
 }
 
 // ── Auto-fix helpers ─────────────────────────────────────────

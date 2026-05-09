@@ -212,6 +212,8 @@ function dispatchStartedTasks(tasks: TaskState[]): void {
 }
 let workflowMutationCoordinator: PersistedWorkflowMutationCoordinator | null = null;
 const workflowMutationDispatcher = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+/** AbortSignal for the currently executing workflow mutation dispatch. */
+let currentMutationSignal: AbortSignal | undefined;
 let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
 let writerLock: DbWriterLockResult | null = null;
 const workflowMutationOwnerId = `owner-${process.pid}-${Date.now()}`;
@@ -1384,6 +1386,7 @@ if (isHeadless) {
         recoveryRoute,
         recreateOutputLabel: source === 'auto-fix' ? 'Auto-fix' : 'Fix with AI',
         failureOutputLabel: source === 'auto-fix' ? 'Auto-fix' : `Fix with ${agentName ?? 'Claude'}`,
+        signal: currentMutationSignal,
       },
     );
     return result.started;
@@ -2462,12 +2465,18 @@ if (isHeadless) {
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
         persistence,
         workflowMutationOwnerId,
-        async (channel: string, args: unknown[], _signal: AbortSignal) => {
+        async (channel: string, args: unknown[], signal: AbortSignal) => {
           const handler = workflowMutationDispatcher.get(channel);
           if (!handler) {
             throw new Error(`No workflow mutation dispatcher registered for ${channel}`);
           }
-          return handler(...args);
+          const prevSignal = currentMutationSignal;
+          currentMutationSignal = signal;
+          try {
+            return await handler(...args);
+          } finally {
+            currentMutationSignal = prevSignal;
+          }
         },
         { maxConcurrentWorkflowDrains },
       );
@@ -3399,7 +3408,7 @@ if (isHeadless) {
           persistence,
           taskExecutor: requireTaskExecutor(),
           autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
-        }, agentName);
+        }, agentName, currentMutationSignal);
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
