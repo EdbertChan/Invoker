@@ -17,9 +17,17 @@ const __dirname = dirname(__filename);
 
 function resolveYamlModulePath(scriptDir) {
   const localRepoRoot = resolve(scriptDir, '../../..');
+
+  // Check packages/app/node_modules first (pnpm workspace hoisting)
   const localYamlPath = resolve(localRepoRoot, 'packages/app/node_modules/yaml/dist/index.js');
   if (existsSync(localYamlPath)) {
     return localYamlPath;
+  }
+
+  // Check root node_modules (yaml is a root devDependency)
+  const rootYamlPath = resolve(localRepoRoot, 'node_modules/yaml/dist/index.js');
+  if (existsSync(rootYamlPath)) {
+    return rootYamlPath;
   }
 
   try {
@@ -33,12 +41,16 @@ function resolveYamlModulePath(scriptDir) {
     if (existsSync(sharedYamlPath)) {
       return sharedYamlPath;
     }
+    const sharedRootYamlPath = resolve(sharedRepoRoot, 'node_modules/yaml/dist/index.js');
+    if (existsSync(sharedRootYamlPath)) {
+      return sharedRootYamlPath;
+    }
   } catch {
     // Ignore git lookup failure and fall through to the explicit error below.
   }
 
   throw new Error(
-    'Unable to resolve yaml runtime. Checked packages/app/node_modules/yaml/dist/index.js in the current worktree and the shared git checkout.',
+    'Unable to resolve yaml runtime. Checked packages/app/node_modules/yaml/dist/index.js and node_modules/yaml/dist/index.js in the current worktree and the shared git checkout.',
   );
 }
 
