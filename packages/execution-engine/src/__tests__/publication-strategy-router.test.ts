@@ -22,20 +22,12 @@ describe('resolvePublicationProvider', () => {
       expect(result).toBe(github);
     });
 
-    it('resolves from fallback when registry has no github provider', () => {
+    it('throws when registry has no github provider', () => {
       const registry = new ReviewProviderRegistry();
-      const fallback = makeFakeProvider('github');
 
-      const result = resolvePublicationProvider('github_pr', registry, fallback);
-      expect(result).toBe(fallback);
-    });
-
-    it('resolves from fallback even with a different provider name for github_pr', () => {
-      const registry = new ReviewProviderRegistry();
-      const fallback = makeFakeProvider('custom-gh');
-
-      const result = resolvePublicationProvider('github_pr', registry, fallback);
-      expect(result).toBe(fallback);
+      expect(() => resolvePublicationProvider('github_pr', registry)).toThrow(
+        /No provider registered for publication strategy "github_pr"/,
+      );
     });
 
     it('defaults to github_pr when strategy is undefined', () => {
@@ -45,13 +37,6 @@ describe('resolvePublicationProvider', () => {
 
       const result = resolvePublicationProvider(undefined, registry);
       expect(result).toBe(github);
-    });
-
-    it('defaults to github_pr with fallback when strategy is undefined', () => {
-      const fallback = makeFakeProvider('github');
-
-      const result = resolvePublicationProvider(undefined, undefined, fallback);
-      expect(result).toBe(fallback);
     });
   });
 
@@ -71,21 +56,6 @@ describe('resolvePublicationProvider', () => {
       expect(() => resolvePublicationProvider('mergify_stack', registry)).toThrow(
         /No provider registered for publication strategy "mergify_stack"/,
       );
-    });
-
-    it('throws when registry is undefined and fallback is a different provider', () => {
-      const fallback = makeFakeProvider('github');
-
-      expect(() => resolvePublicationProvider('mergify_stack', undefined, fallback)).toThrow(
-        /No provider registered for publication strategy "mergify_stack"/,
-      );
-    });
-
-    it('resolves from fallback when fallback name matches mergify_stack', () => {
-      const fallback = makeFakeProvider('mergify_stack');
-
-      const result = resolvePublicationProvider('mergify_stack', undefined, fallback);
-      expect(result).toBe(fallback);
     });
   });
 
@@ -107,22 +77,11 @@ describe('resolvePublicationProvider', () => {
     });
   });
 
-  describe('registry precedence over fallback', () => {
-    it('prefers registry provider over fallback', () => {
+  describe('empty registry', () => {
+    it('throws when registry has no matching provider', () => {
       const registry = new ReviewProviderRegistry();
-      const registryProvider = makeFakeProvider('github');
-      const fallback = makeFakeProvider('github');
-      registry.register(registryProvider);
 
-      const result = resolvePublicationProvider('github_pr', registry, fallback);
-      expect(result).toBe(registryProvider);
-      expect(result).not.toBe(fallback);
-    });
-  });
-
-  describe('no registry and no fallback', () => {
-    it('throws when both registry and fallback are undefined', () => {
-      expect(() => resolvePublicationProvider('github_pr', undefined)).toThrow(
+      expect(() => resolvePublicationProvider('github_pr', registry)).toThrow(
         /No provider registered/,
       );
     });
@@ -184,13 +143,9 @@ describe('resolvePublicationProvider', () => {
       const github = makeFakeProvider('github');
       registry.register(github);
 
-      // Also provide a fallback (legacy pattern)
-      const fallback = makeFakeProvider('github');
-
-      // Strategy resolution should prefer registry over fallback
-      const provider = resolvePublicationProvider('github_pr', registry, fallback);
+      // Strategy resolution uses registry only (no fallback)
+      const provider = resolvePublicationProvider('github_pr', registry);
       expect(provider).toBe(github);
-      expect(provider).not.toBe(fallback);
     });
 
     it('undefined strategy defaults to github_pr and resolves registered github provider', () => {

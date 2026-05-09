@@ -16,6 +16,7 @@ import { execSync } from 'node:child_process';
 import type { WorkResponse } from '@invoker/contracts';
 import type { TaskState } from '@invoker/workflow-core';
 import { TaskRunner, ExecutorRegistry, WorktreeExecutor } from '../index.js';
+import { ReviewProviderRegistry } from '../review-provider-registry.js';
 
 function createTempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'branch-chain-'));
@@ -179,6 +180,7 @@ describe('A→B→C branch chain', { timeout: 120_000 }, () => {
       orchestrator: orchestrator as any,
       persistence: persistence as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: tmpDir,
       defaultBranch: 'master',
     });
@@ -383,6 +385,7 @@ describe('A→B→C branch chain', { timeout: 120_000 }, () => {
         orchestrator: orchestrator as any,
         persistence: persistence as any,
         executorRegistry: registry,
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         cwd: tmpDir,
         defaultBranch: 'master',
       });
@@ -476,6 +479,7 @@ describe('A→B→C branch chain', { timeout: 120_000 }, () => {
         orchestrator: orchestrator as any,
         persistence: persistence as any,
         executorRegistry: registry,
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         cwd: tmpDir,
         defaultBranch: 'master',
       });
@@ -549,6 +553,7 @@ describe('A→B→C branch chain', { timeout: 120_000 }, () => {
         orchestrator: orchestrator as any,
         persistence: persistence as any,
         executorRegistry: registry,
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         cwd: tmpDir,
         defaultBranch: 'master',
       });

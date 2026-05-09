@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { TaskRunner, ExecutorRegistry } from '../index.js';
+import { ReviewProviderRegistry } from '../review-provider-registry.js';
 
 function git(cwd: string, args: string): string {
   return execSync(`git ${args}`, { cwd, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
@@ -52,6 +53,7 @@ describe('createMergeWorktree isolation (real git)', { timeout: 30_000 }, () => 
       orchestrator: { getAllTasks: () => [] } as any,
       persistence: { updateTask: () => {} } as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd,
       defaultBranch: 'master',
     });

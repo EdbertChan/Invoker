@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import type { WorkResponse } from '@invoker/contracts';
 import type { TaskState } from '@invoker/workflow-core';
-import { TaskRunner, ExecutorRegistry, WorktreeExecutor } from '@invoker/execution-engine';
+import { TaskRunner, ExecutorRegistry, WorktreeExecutor, ReviewProviderRegistry } from '@invoker/execution-engine';
 import { rebaseAndRetry, bumpGenerationAndRecreate } from '../workflow-actions.js';
 
 function createTempRepo(): string {
@@ -207,6 +207,7 @@ describe('rebase-and-retry: pool mirror cleanup before restart', { timeout: 120_
       orchestrator: orchestrator as any,
       persistence: persistence as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: tmpDir,
       defaultBranch: 'master',
     });

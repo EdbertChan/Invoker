@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createTestHarness, type TestHarness, InMemoryBus, InMemoryPersistence, MockGit } from '@invoker/test-kit';
 import { Orchestrator, type PlanDefinition, type TaskState } from '@invoker/workflow-core';
-import { TaskRunner, ExecutorRegistry, type MergeGateProvider } from '@invoker/execution-engine';
+import { TaskRunner, ExecutorRegistry, ReviewProviderRegistry, type MergeGateProvider } from '@invoker/execution-engine';
 import { setWorkflowMergeMode } from '../workflow-actions.js';
 import { executeGlobalTopup } from '../global-topup.js';
 
@@ -1162,7 +1162,7 @@ const MANUAL_MERGE_ONFINISH_NONE_PLAN: PlanDefinition = {
 
 describe('Flow 9c: set-merge-mode external_review', () => {
   const mockMergeGate: MergeGateProvider = {
-    name: 'mock',
+    name: 'github',
     createReview: async () => ({
       url: 'https://github.com/owner/repo/pull/99',
       identifier: 'owner/repo#99',
@@ -1176,7 +1176,9 @@ describe('Flow 9c: set-merge-mode external_review', () => {
   };
 
   it('switching manual gate to external_review creates PR metadata and persists external_review', async () => {
-    const h = createTestHarness({ mergeGateProvider: mockMergeGate });
+    const registry = new ReviewProviderRegistry();
+    registry.register(mockMergeGate);
+    const h = createTestHarness({ reviewProviderRegistry: registry });
     h.loadAndStart(MANUAL_MERGE_ONFINISH_NONE_PLAN);
     h.completeTask('A');
 
@@ -1208,7 +1210,7 @@ describe('Flow 9b: beforeApproveHook fires for merge nodes', () => {
     // Merge nodes now route through the executor pipeline; register a mock
     // that auto-completes so executeMergeNode can handle the finish step.
     reg.register('worktree', { type: 'worktree', start: async (req: any) => { const h = { executionId: `e-${req.actionId}`, taskId: req.actionId, workspacePath: '/tmp/mock', branch: `experiment/${req.actionId}-mock` }; setTimeout(() => (h as any)._cb?.({ requestId: req.requestId, actionId: req.actionId, status: 'completed', outputs: { exitCode: 0 } }), 0); return h; }, onComplete: (_h: any, cb: any) => { _h._cb = cb; return () => {}; }, onOutput: () => () => {}, onHeartbeat: () => () => {}, sendInput: () => {}, kill: async () => {}, getTerminalSpec: () => null, getRestoredTerminalSpec: () => { throw new Error('not impl'); }, destroyAll: async () => {} } as any);
-    const exec = new TaskRunner({ orchestrator: orch, persistence: persistence as any, executorRegistry: reg, cwd: '/tmp/test' });
+    const exec = new TaskRunner({ orchestrator: orch, persistence: persistence as any, executorRegistry: reg, reviewProviderRegistry: new ReviewProviderRegistry(), cwd: '/tmp/test' });
     const git = new MockGit();
     git.install(exec);
 

@@ -844,6 +844,7 @@ describe('diamond dependency merge', () => {
 // ── Merge gate commit topology ─────────────────────────────────
 
 import { TaskRunner, ExecutorRegistry } from '../index.js';
+import { ReviewProviderRegistry } from '../review-provider-registry.js';
 import { WorktreeExecutor } from '../worktree-executor.js';
 import { Orchestrator, type TaskState, type TaskStateChanges, type PlanDefinition, type OrchestratorPersistence, type OrchestratorMessageBus } from '@invoker/workflow-core';
 
@@ -948,6 +949,7 @@ describe('merge gate commit topology (real git)', () => {
       orchestrator: orchestrator as any,
       persistence: persistence as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: tmpDir,
     });
   }
@@ -1283,6 +1285,7 @@ describe('merge gate commit topology (real git)', () => {
       orchestrator,
       persistence: persistence as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: tmpDir,
       defaultBranch: 'master',
     });
@@ -1433,6 +1436,7 @@ describe('mergeExperimentBranches (real git)', () => {
       orchestrator: orchestrator as any,
       persistence: persistence as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: tmpDir,
       defaultBranch: 'master',
     });
