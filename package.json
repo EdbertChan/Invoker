@@ -35,7 +35,8 @@
     "check:required-builds": "bash scripts/required-builds.sh",
     "check:deps": "depcruise packages --config .dependency-cruiser.js",
     "check:types": "tsc -p tsconfig.typecheck.json",
-    "check:all": "pnpm run check:deps && pnpm run check:types && pnpm run check:required-builds && bash scripts/check-owner-boundary.sh"
+    "check:file-size": "bash scripts/check-file-size.sh",
+    "check:all": "pnpm run check:deps && pnpm run check:types && pnpm run check:required-builds && bash scripts/check-owner-boundary.sh && pnpm run check:file-size"
   },
   "engines": {
     "node": ">=22 <23"

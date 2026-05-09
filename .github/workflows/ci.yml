@@ -66,6 +66,8 @@ jobs:
             command: pnpm run check:required-builds
           - name: TypeScript Types
             command: pnpm run check:types
+          - name: File Size Guardrail
+            command: pnpm run check:file-size
 
     name: quality / ${{ matrix.name }}
 
