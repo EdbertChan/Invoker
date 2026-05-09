@@ -380,7 +380,11 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, onTaskClick, onTaskDou
   }
 
   return (
-    <div className="h-full w-full" style={{ minHeight: '300px' }}>
+    <div
+      className="h-full w-full"
+      style={{ minHeight: '300px' }}
+      data-testid="task-dag-root"
+    >
       <ReactFlow
         nodes={rfNodes}
         edges={edges}

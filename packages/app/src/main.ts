@@ -3141,6 +3141,12 @@ if (isHeadless) {
     ipcMain.handle('invoker:get-ui-perf-stats', () => ({
       ...getUiPerfStats(),
     }));
+    ipcMain.handle('invoker:reset-ui-perf-stats', () => {
+      resetUiPerfStats();
+      return {
+        ...getUiPerfStats(),
+      };
+    });
 
     registerWorkflowScopedGuiMutationHandler(
       'invoker:recreate-workflow',
