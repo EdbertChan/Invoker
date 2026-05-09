@@ -108,7 +108,6 @@ export interface TaskExecution {
   readonly reviewUrl?: string;
   readonly reviewId?: string;
   readonly reviewStatus?: string;
-  readonly reviewProviderId?: string;
   readonly mergeConflict?: {
     readonly failedBranch: string;
     readonly conflictFiles: readonly string[];
@@ -155,8 +154,7 @@ export interface WorkflowMeta {
   baseBranch?: string;
   featureBranch?: string;
   onFinish?: string;
-  mergeMode?: string;
-  reviewProvider?: string;
+  approvalMode?: string;
 }
 
 // ── Workflow Status ─────────────────────────────────────────
@@ -204,7 +202,7 @@ export interface PlanDefinition {
   tasks: PlanTask[];
   onFinish?: 'none' | 'merge' | 'pull_request';
   baseBranch?: string;
-  mergeMode?: 'manual' | 'automatic' | 'external_review';
+  approvalMode?: 'manual' | 'automatic' | 'external_review';
 }
 
 // ── Task Replacement ────────────────────────────────────────

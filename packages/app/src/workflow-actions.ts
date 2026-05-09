@@ -17,7 +17,7 @@ import type {
 import { OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { TaskRunner } from '@invoker/execution-engine';
-import { normalizeMergeModeForPersistence } from './merge-mode.js';
+import { normalizeApprovalMode } from './approval-mode.js';
 import { createDeleteAllSnapshot } from './delete-all-snapshot.js';
 
 // ── Deps interfaces ──────────────────────────────────────────
@@ -491,19 +491,19 @@ export async function selectExperiments(
  * Same sequence as GUI `invoker:resolve-conflict` and headless `resolve-conflict`.
  */
 /**
- * Persist merge mode and re-run the merge node — **retry-class**
+ * Persist approval mode and re-run the merge node — **retry-class**
  * invalidation route per Step 9 of
  * `docs/architecture/task-invalidation-roadmap.md` and the Decision
- * Table row "Change merge mode" in
+ * Table row "Change approval mode" in
  * `docs/architecture/task-invalidation-chart.md`
- * (`MUTATION_POLICIES.mergeMode` → `retryTask` / task scope, scoped
+ * (`MUTATION_POLICIES.approvalMode` → `retryTask` / task scope, scoped
  * to the merge node).
  *
  * Step 9 migrates this surface from an app-layer-only special case
  * to a proper orchestrator policy seam. Prior to Step 9 this wrapper
- * persisted the new mergeMode unconditionally and only restarted the
+ * persisted the new approvalMode unconditionally and only restarted the
  * merge node when its status was `completed` / `awaiting_approval` /
- * `review_ready` — the chart's "Merge-mode inconsistency" section
+ * `review_ready` — the chart's "Approval-mode inconsistency" section
  * explicitly flagged that as the bug ("only at the app layer, and
  * only when the merge node is already terminal or waiting … no
  * general active invalidation rule for an in-flight merge node").
@@ -511,9 +511,9 @@ export async function selectExperiments(
  * The substantive routing — same-mode no-op detection, cancel-first
  * interruption when the merge node is actively executing or waiting
  * on external review (`running` / `fixing_with_ai` /
- * `awaiting_approval` / `review_ready`), `mergeMode` persistence on
+ * `awaiting_approval` / `review_ready`), `approvalMode` persistence on
  * the workflow, and the retry-class reset via `restartTask` (today's
- * `retryTask` compatibility wire — see `MUTATION_POLICIES.mergeMode`
+ * `retryTask` compatibility wire — see `MUTATION_POLICIES.approvalMode`
  * and `buildInvalidationDeps`) — now lives in
  * `Orchestrator.editTaskMergeMode`. That method is the synchronous
  * orchestrator-internal seam of `applyInvalidation`'s Hard Invariant
@@ -521,12 +521,12 @@ export async function selectExperiments(
  * reset shape so the merge node's `agentSessionId` / `containerId` /
  * `error` / `exitCode` / timing fields are cleared while
  * branch / workspacePath lineage survives — the chart's retry-class
- * semantics for merge-mode mutations.
+ * semantics for approval-mode mutations.
  *
  * This wrapper deliberately stays a thin async delegate to keep the
- * public surface (`(workflowId, mergeMode, deps)` returning `void`)
- * backward compatible for IPC handlers (`invoker:set-merge-mode`),
- * the api-server (`POST /api/workflows/:id/merge-mode`), and Slack
+ * public surface (`(workflowId, approvalMode, deps)` returning `void`)
+ * backward compatible for IPC handlers (`invoker:set-approval-mode`),
+ * the api-server (`POST /api/workflows/:id/approval-mode`), and Slack
  * surfaces. The merge-task-id translation (`workflowId → mergeNodeId`)
  * happens here because callers speak workflow ids; the orchestrator
  * speaks merge-node task ids. When the workflow has no merge node
@@ -539,16 +539,16 @@ export async function selectExperiments(
  * Cancel-first is enforced inside the orchestrator method — this
  * wrapper MUST NOT add a parallel cancel call.
  */
-export async function setWorkflowMergeMode(
+export async function setWorkflowApprovalMode(
   workflowId: string,
-  mergeMode: string,
+  approvalMode: string,
   deps: Pick<ActionDeps, 'orchestrator' | 'persistence'> & { taskExecutor: TaskRunner },
 ): Promise<void> {
-  const normalized = normalizeMergeModeForPersistence(mergeMode);
+  const normalized = normalizeApprovalMode(approvalMode);
   const tasks = deps.persistence.loadTasks(workflowId);
   const mergeTask = tasks.find((t) => t.config.isMergeNode);
   if (!mergeTask) {
-    deps.persistence.updateWorkflow(workflowId, { mergeMode: normalized });
+    deps.persistence.updateWorkflow(workflowId, { approvalMode: normalized });
     return;
   }
   const started = deps.orchestrator.editTaskMergeMode(mergeTask.id, normalized);

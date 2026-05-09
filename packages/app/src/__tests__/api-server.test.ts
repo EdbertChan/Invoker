@@ -899,26 +899,26 @@ describe('POST /api/workflows/:id/detach', () => {
   });
 });
 
-describe('POST /api/workflows/:id/merge-mode', () => {
-  it('sets merge mode', async () => {
-    const res = await request(port, 'POST', '/api/workflows/wf-1/merge-mode', { mode: 'automatic' });
+describe('POST /api/workflows/:id/approval-mode', () => {
+  it('sets approval mode', async () => {
+    const res = await request(port, 'POST', '/api/workflows/wf-1/approval-mode', { mode: 'automatic' });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.action).toBe('merge_mode_set');
+    expect(res.body.action).toBe('approval_mode_set');
     expect(res.body.mode).toBe('automatic');
-    expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { mergeMode: 'automatic' });
+    expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { approvalMode: 'automatic' });
   });
 
   it('returns 400 when mode is missing', async () => {
-    const res = await request(port, 'POST', '/api/workflows/wf-1/merge-mode', {});
+    const res = await request(port, 'POST', '/api/workflows/wf-1/approval-mode', {});
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Missing "mode"');
   });
 
   it('returns 400 on invalid mode', async () => {
-    const res = await request(port, 'POST', '/api/workflows/wf-1/merge-mode', { mode: 'invalid' });
+    const res = await request(port, 'POST', '/api/workflows/wf-1/approval-mode', { mode: 'invalid' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('Invalid mergeMode');
+    expect(res.body.error).toContain('Invalid approvalMode');
   });
 });
 

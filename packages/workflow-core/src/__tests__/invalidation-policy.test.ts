@@ -37,7 +37,7 @@ describe('MUTATION_POLICIES', () => {
     expect(MUTATION_POLICIES.remoteTargetId.action).toBe('recreateTask');
     expect(MUTATION_POLICIES.selectedExperiment.action).toBe('recreateTask');
     expect(MUTATION_POLICIES.selectedExperimentSet.action).toBe('recreateTask');
-    expect(MUTATION_POLICIES.mergeMode.action).toBe('retryTask');
+    expect(MUTATION_POLICIES.approvalMode.action).toBe('retryTask');
     expect(MUTATION_POLICIES.fixContext.action).toBe('retryTask');
     expect(MUTATION_POLICIES.rebaseAndRetry.action).toBe('recreateWorkflowFromFreshBase');
     // Step 15: external gate policy is the chart's intentional

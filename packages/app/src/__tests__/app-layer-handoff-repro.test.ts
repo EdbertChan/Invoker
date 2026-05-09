@@ -6,7 +6,7 @@ import { dispatchStartedTasksWithGlobalTopup } from '../global-topup.js';
 const LINEAR_PLAN: PlanDefinition = {
   name: 'Linear Handoff Repro',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/linear-handoff',
   tasks: [
@@ -18,7 +18,7 @@ const LINEAR_PLAN: PlanDefinition = {
 const PARALLEL_PLAN: PlanDefinition = {
   name: 'Parallel Handoff Repro',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/parallel-handoff',
   tasks: [
@@ -62,7 +62,7 @@ describe('app-layer handoff repros', () => {
     const PROMPT_PLAN: PlanDefinition = {
       name: 'Prompt Handoff Repro',
       onFinish: 'merge',
-      mergeMode: 'automatic',
+      approvalMode: 'automatic',
       baseBranch: 'master',
       featureBranch: 'plan/prompt-handoff',
       tasks: [

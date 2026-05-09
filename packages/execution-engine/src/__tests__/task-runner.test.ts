@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TaskRunner } from '../task-runner.js';
+import { ReviewProviderRegistry } from '../review-provider-registry.js';
 import { collectTransitiveNonMergeTaskIds } from '../merge-runner.js';
 import { SshExecutor } from '../ssh-executor.js';
 import type { TaskState } from '@invoker/workflow-core';
@@ -80,6 +81,7 @@ function createExecutorWithTasks(tasks: Map<string, TaskState>): TaskRunner {
     persistence: {} as any,
     executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
     cwd: '/tmp',
+    reviewProviderRegistry: new ReviewProviderRegistry(),
   });
 }
 
@@ -149,6 +151,7 @@ describe('TaskRunner', () => {
       persistence: { updateTask: vi.fn() } as any,
       executorRegistry: registry as any,
       cwd: '/tmp',
+      reviewProviderRegistry: new ReviewProviderRegistry(),
     });
 
     const task = makeTask({
@@ -216,6 +219,7 @@ describe('TaskRunner', () => {
       persistence: { updateTask: vi.fn() } as any,
       executorRegistry: registry as any,
       cwd: '/tmp',
+      reviewProviderRegistry: new ReviewProviderRegistry(),
     });
 
     const task = makeTask({
@@ -276,6 +280,7 @@ describe('TaskRunner', () => {
       persistence: { updateTask: vi.fn() } as any,
       executorRegistry: registry as any,
       cwd: '/tmp',
+      reviewProviderRegistry: new ReviewProviderRegistry(),
     });
 
     const task = makeTask({
@@ -341,6 +346,7 @@ describe('TaskRunner', () => {
         getAll: () => [executorImpl],
       } as any,
       cwd: '/tmp',
+      reviewProviderRegistry: new ReviewProviderRegistry(),
     });
 
     const task = makeTask({
@@ -402,6 +408,7 @@ describe('TaskRunner', () => {
         getAll: () => [executorImpl],
       } as any,
       cwd: '/tmp',
+      reviewProviderRegistry: new ReviewProviderRegistry(),
     });
 
     const task = makeTask({
@@ -463,6 +470,7 @@ describe('TaskRunner', () => {
         getAll: () => [executorImpl],
       } as any,
       cwd: '/tmp',
+      reviewProviderRegistry: new ReviewProviderRegistry(),
     });
 
     const task = makeTask({
@@ -694,6 +702,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         defaultBranch: 'master',
       });
 
@@ -732,6 +741,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const task = makeTask({
@@ -771,6 +781,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -810,6 +821,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -849,6 +861,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -892,6 +905,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const task = makeTask({
@@ -941,6 +955,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -985,6 +1000,7 @@ describe('TaskRunner', () => {
         } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const child = makeTask({
@@ -1053,6 +1069,7 @@ describe('TaskRunner', () => {
           getAll: () => [capturingExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const child = makeTask({
@@ -1096,6 +1113,7 @@ describe('TaskRunner', () => {
           getAll: () => [{ type: 'worktree' }],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const child = makeTask({
@@ -1153,6 +1171,7 @@ describe('TaskRunner', () => {
           getAll: () => [capturingExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const child = makeTask({
@@ -1184,6 +1203,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const child = makeTask({
@@ -1228,6 +1248,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -1272,6 +1293,7 @@ describe('TaskRunner', () => {
           getAll: () => [{ type: 'worktree' }],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const child = makeTask({
@@ -1329,6 +1351,7 @@ describe('TaskRunner', () => {
           getAll: () => [capturingExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const child = makeTask({
@@ -1360,6 +1383,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const child = makeTask({
@@ -1411,6 +1435,7 @@ describe('TaskRunner', () => {
             getAll: () => [slowExecutor],
           } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
           callbacks: {
             onHeartbeat: (taskId: string) => { heartbeats.push(taskId); },
           },
@@ -1458,6 +1483,7 @@ describe('TaskRunner', () => {
           getAll: () => [hangingExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: {
           onLaunchStart: launchStart,
           onLaunchFailed: launchFailed,
@@ -1525,6 +1551,7 @@ describe('TaskRunner', () => {
             getAll: () => [hangingExecutor],
           } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
           callbacks: { onComplete, onLaunchStart, onLaunchFailed },
         });
 
@@ -1612,6 +1639,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const task = makeTask({
@@ -1661,6 +1689,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const task = makeTask({
@@ -1706,6 +1735,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const task = makeTask({
@@ -1750,6 +1780,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         defaultBranch: 'develop',
       });
 
@@ -1795,6 +1826,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const task = makeTask({
@@ -1956,6 +1988,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -2029,6 +2062,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete: vi.fn() },
       });
 
@@ -2081,7 +2115,7 @@ describe('TaskRunner', () => {
       const deleteCall = gitCalls.find(c => c[0] === 'branch' && c[1] === '-D' && c[2] === 'plan/feature');
       expect(deleteCall).toBeDefined();
 
-      // Default mergeMode is 'manual', so setTaskAwaitingApproval is called with metadata
+      // Default approvalMode is 'manual', so setTaskAwaitingApproval is called with metadata
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
         config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({ branch: 'plan/feature', workspacePath: '/tmp/mock-wt' }),
@@ -2106,6 +2140,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const gitCalls: string[][] = [];
@@ -2148,6 +2183,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const gitCalls: string[][] = [];
@@ -2195,6 +2231,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const gitCalls: string[][] = [];
@@ -2232,6 +2269,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const gitCalls: string[][] = [];
@@ -2258,7 +2296,7 @@ describe('TaskRunner', () => {
   });
 
   describe('manual merge mode', () => {
-    it('executeMergeNode skips final merge when mergeMode=manual', async () => {
+    it('executeMergeNode skips final merge when approvalMode=manual', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2272,7 +2310,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'manual',
+          approvalMode: 'manual',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2285,6 +2323,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -2333,7 +2372,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode performs full merge when mergeMode=automatic', async () => {
+    it('executeMergeNode performs full merge when approvalMode=automatic', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2346,7 +2385,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'automatic',
+          approvalMode: 'automatic',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2358,6 +2397,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete: vi.fn() },
       });
 
@@ -2410,7 +2450,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode skips squash-merge and creates PR when mergeMode=external_review', async () => {
+    it('executeMergeNode skips squash-merge and creates PR when approvalMode=external_review', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2424,7 +2464,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2432,6 +2472,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/42',
           identifier: 'owner/repo#42',
@@ -2444,7 +2485,7 @@ describe('TaskRunner', () => {
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
         callbacks: { onComplete },
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       const gitCalls: string[][] = [];
@@ -2510,7 +2551,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode goes to awaiting_approval when mergeMode=manual and onFinish=none', async () => {
+    it('executeMergeNode goes to awaiting_approval when approvalMode=manual and onFinish=none', async () => {
       const orchestrator = {
         getTask: () => null,
         getAllTasks: () => [],
@@ -2521,7 +2562,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'manual',
+          approvalMode: 'manual',
           baseBranch: 'master',
           name: 'Test Workflow',
         }),
@@ -2533,6 +2574,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -2553,7 +2595,7 @@ describe('TaskRunner', () => {
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
     });
 
-    it('executeMergeNode auto-completes when mergeMode=automatic and onFinish=none', async () => {
+    it('executeMergeNode auto-completes when approvalMode=automatic and onFinish=none', async () => {
       const orchestrator = {
         getTask: () => null,
         getAllTasks: () => [],
@@ -2564,7 +2606,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'automatic',
+          approvalMode: 'automatic',
           baseBranch: 'master',
           name: 'Test Workflow',
         }),
@@ -2576,6 +2618,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -2594,7 +2637,7 @@ describe('TaskRunner', () => {
       expect(orchestrator.setTaskAwaitingApproval).not.toHaveBeenCalled();
     });
 
-    it('executeMergeNode creates PR when mergeMode=external_review and onFinish=none', async () => {
+    it('executeMergeNode creates PR when approvalMode=external_review and onFinish=none', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2608,7 +2651,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2616,6 +2659,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/55',
           identifier: 'owner/repo#55',
@@ -2628,7 +2672,7 @@ describe('TaskRunner', () => {
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
         callbacks: { onComplete },
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       (executor as any).execGitReadonly = async (args: string[], cwd?: string) => {
@@ -2691,7 +2735,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2699,6 +2743,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/55',
           identifier: 'owner/repo#55',
@@ -2709,7 +2754,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       (executor as any).execGitReadonly = async (args: string[]) => {
@@ -2738,7 +2783,7 @@ describe('TaskRunner', () => {
       );
     });
 
-    it('executeMergeNode handles persisted mergeMode=external_review', async () => {
+    it('executeMergeNode handles persisted approvalMode=external_review', async () => {
       const allTasks = [
         makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
       ];
@@ -2752,7 +2797,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'none',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2760,6 +2805,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/55',
           identifier: 'owner/repo#55',
@@ -2772,7 +2818,7 @@ describe('TaskRunner', () => {
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
         callbacks: { onComplete },
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       (executor as any).execGitReadonly = async (args: string[], cwd?: string) => {
@@ -2801,7 +2847,7 @@ describe('TaskRunner', () => {
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
     });
 
-    it('executeMergeNode goes to awaiting_approval when mergeMode=manual and no featureBranch', async () => {
+    it('executeMergeNode goes to awaiting_approval when approvalMode=manual and no featureBranch', async () => {
       const orchestrator = {
         getTask: () => null,
         getAllTasks: () => [],
@@ -2812,7 +2858,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'manual',
+          approvalMode: 'manual',
           baseBranch: 'master',
           name: 'Test Workflow',
         }),
@@ -2824,6 +2870,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -2860,6 +2907,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const gitCalls: string[][] = [];
@@ -2905,6 +2953,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await expect(executor.approveMerge('wf-1')).rejects.toThrow('no merge configured');
@@ -2924,7 +2973,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2932,6 +2981,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/99',
           identifier: '99',
@@ -2942,7 +2992,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       (executor as any).execGitReadonly = async (args: string[], cwd?: string) => {
@@ -2989,7 +3039,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -2997,6 +3047,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/42',
           identifier: '42',
@@ -3007,7 +3058,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       (executor as any).execGitReadonly = async (args: string[], cwd?: string) => {
@@ -3067,6 +3118,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       (executor as any).execGitReadonly = async (args: string[], cwd?: string) => {
@@ -3129,7 +3181,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'pull_request',
-          mergeMode: 'automatic',
+          approvalMode: 'automatic',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -3142,6 +3194,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete },
       });
 
@@ -3201,7 +3254,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'external_review',
+          approvalMode: 'external_review',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -3209,6 +3262,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/42',
           identifier: '42',
@@ -3219,7 +3273,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       (executor as any).execGitReadonly = async (args: string[], cwd?: string) => {
@@ -3269,7 +3323,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: 'wf-1',
           onFinish: 'merge',
-          mergeMode: 'manual',
+          approvalMode: 'manual',
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           name: 'Test Workflow',
@@ -3281,6 +3335,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete: vi.fn() },
       });
 
@@ -3330,6 +3385,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       (executor as any).execGitReadonly = async (args: string[], cwd?: string) => {
@@ -3384,6 +3440,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         checkApproval: vi.fn().mockResolvedValue({
           approved: false,
           rejected: false,
@@ -3397,7 +3454,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       // Simulate active poller by adding to activePrPollers map
@@ -3449,7 +3506,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       // Simulate active poller
@@ -3476,6 +3533,7 @@ describe('TaskRunner', () => {
         updateTask: vi.fn(),
       };
       const mergeGateProvider = {
+        name: 'github',
         checkApproval: vi.fn(),
       };
 
@@ -3484,7 +3542,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       await executor.checkPrApprovalNow('task-with-no-poller');
@@ -3493,7 +3551,7 @@ describe('TaskRunner', () => {
       expect(persistence.updateTask).not.toHaveBeenCalled();
     });
 
-    it('is no-op when no mergeGateProvider and no registry', async () => {
+    it('is no-op when registry has no providers registered', async () => {
       const orchestrator = {
         getTask: vi.fn((id: string) => ({
           id,
@@ -3513,6 +3571,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       // Simulate active poller
@@ -3520,7 +3579,7 @@ describe('TaskRunner', () => {
 
       await executor.checkPrApprovalNow('task-1');
 
-      // Provider resolution fails (no registry, no fallback) — no approval check performed
+      // Provider resolution fails (empty registry, no matching provider) — no approval check performed
       expect(persistence.updateTask).not.toHaveBeenCalled();
       expect(orchestrator.approve).not.toHaveBeenCalled();
 
@@ -3548,6 +3607,7 @@ describe('TaskRunner', () => {
         };
         const persistence = { updateTask: vi.fn() };
         const mergeGateProvider = {
+          name: 'github',
           checkApproval: vi.fn().mockResolvedValue({
             approved: false,
             rejected: false,
@@ -3561,7 +3621,7 @@ describe('TaskRunner', () => {
           persistence: persistence as any,
           executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
           cwd: '/runner-base-cwd',
-          mergeGateProvider: mergeGateProvider as any,
+          reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
         });
 
         (executor as any).activePrPollers.set('task-ws', setInterval(() => {}, 1000));
@@ -3588,6 +3648,7 @@ describe('TaskRunner', () => {
         };
         const persistence = { updateTask: vi.fn() };
         const mergeGateProvider = {
+          name: 'github',
           checkApproval: vi.fn().mockResolvedValue({
             approved: false,
             rejected: false,
@@ -3601,7 +3662,7 @@ describe('TaskRunner', () => {
           persistence: persistence as any,
           executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
           cwd: '/runner-base-cwd',
-          mergeGateProvider: mergeGateProvider as any,
+          reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
         });
 
         (executor as any).activePrPollers.set('task-no-ws', setInterval(() => {}, 1000));
@@ -3631,6 +3692,7 @@ describe('TaskRunner', () => {
         };
         const persistence = { updateTask: vi.fn() };
         const mergeGateProvider = {
+          name: 'github',
           checkApproval: vi.fn().mockResolvedValue({
             approved: true,
             rejected: false,
@@ -3644,7 +3706,7 @@ describe('TaskRunner', () => {
           persistence: persistence as any,
           executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
           cwd: '/runner-base-cwd',
-          mergeGateProvider: mergeGateProvider as any,
+          reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
         });
 
         const interval = setInterval(() => {}, 1000);
@@ -3684,6 +3746,7 @@ describe('TaskRunner', () => {
         };
         const persistence = { updateTask: vi.fn() };
         const mergeGateProvider = {
+          name: 'github',
           checkApproval: vi.fn().mockResolvedValue({
             approved: false,
             rejected: false,
@@ -3696,7 +3759,7 @@ describe('TaskRunner', () => {
           persistence: persistence as any,
           executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
           cwd: '/runner-base-cwd',
-          mergeGateProvider: mergeGateProvider as any,
+          reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
         });
 
         await executor.checkMergeGateStatuses();
@@ -3723,6 +3786,7 @@ describe('TaskRunner', () => {
         };
         const persistence = { updateTask: vi.fn() };
         const mergeGateProvider = {
+          name: 'github',
           checkApproval: vi.fn().mockResolvedValue({
             approved: false,
             rejected: false,
@@ -3735,7 +3799,7 @@ describe('TaskRunner', () => {
           persistence: persistence as any,
           executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
           cwd: '/runner-base-cwd',
-          mergeGateProvider: mergeGateProvider as any,
+          reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
         });
 
         await executor.checkMergeGateStatuses();
@@ -3765,6 +3829,7 @@ describe('TaskRunner', () => {
         };
         const persistence = { updateTask: vi.fn() };
         const mergeGateProvider = {
+          name: 'github',
           checkApproval: vi.fn().mockResolvedValue({
             approved: true,
             rejected: false,
@@ -3777,7 +3842,7 @@ describe('TaskRunner', () => {
           persistence: persistence as any,
           executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
           cwd: '/runner-base-cwd',
-          mergeGateProvider: mergeGateProvider as any,
+          reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
         });
 
         await executor.checkMergeGateStatuses();
@@ -3810,6 +3875,7 @@ describe('TaskRunner', () => {
           };
           const persistence = { updateTask: vi.fn(), loadWorkflow: vi.fn(() => ({ id: 'wf-1' })) };
           const mergeGateProvider = {
+            name: 'github',
             checkApproval: vi.fn().mockResolvedValue({
               approved: false,
               rejected: false,
@@ -3822,7 +3888,7 @@ describe('TaskRunner', () => {
             persistence: persistence as any,
             executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
             cwd: '/runner-base-cwd',
-            mergeGateProvider: mergeGateProvider as any,
+            reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
           });
 
           (executor as any).startPrPolling('poll-task', 'owner/repo#300', 'wf-1');
@@ -3854,6 +3920,7 @@ describe('TaskRunner', () => {
           };
           const persistence = { updateTask: vi.fn(), loadWorkflow: vi.fn(() => ({ id: 'wf-1' })) };
           const mergeGateProvider = {
+            name: 'github',
             checkApproval: vi.fn().mockResolvedValue({
               approved: false,
               rejected: false,
@@ -3866,7 +3933,7 @@ describe('TaskRunner', () => {
             persistence: persistence as any,
             executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
             cwd: '/runner-base-cwd',
-            mergeGateProvider: mergeGateProvider as any,
+            reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
           });
 
           (executor as any).startPrPolling('poll-task-no-ws', 'owner/repo#301', 'wf-1');
@@ -3901,6 +3968,7 @@ describe('TaskRunner', () => {
           };
           const persistence = { updateTask: vi.fn(), loadWorkflow: vi.fn(() => ({ id: 'wf-1' })) };
           const mergeGateProvider = {
+            name: 'github',
             checkApproval: vi.fn().mockResolvedValue({
               approved: true,
               rejected: false,
@@ -3913,7 +3981,7 @@ describe('TaskRunner', () => {
             persistence: persistence as any,
             executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
             cwd: '/runner-base-cwd',
-            mergeGateProvider: mergeGateProvider as any,
+            reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
           });
 
           (executor as any).startPrPolling('poll-approved', 'owner/repo#302', 'wf-1');
@@ -3956,6 +4024,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
       return { executor, persistence };
     }
@@ -4368,6 +4437,7 @@ describe('TaskRunner', () => {
         persistence: { loadWorkflow: () => null } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         defaultBranch: 'master',
       });
 
@@ -4429,6 +4499,7 @@ describe('TaskRunner', () => {
         persistence: { loadWorkflow: () => null } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         defaultBranch: 'master',
       });
 
@@ -4474,6 +4545,7 @@ describe('TaskRunner', () => {
         persistence: { loadWorkflow: () => null } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const result = await executor.mergeExperimentBranches('pivot-reconciliation', ['pivot-exp-v1']);
@@ -4509,9 +4581,10 @@ describe('TaskRunner', () => {
       const mockExecutor = createAutoCompleteExecutor();
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'none', mergeMode: 'manual', baseBranch: 'master', featureBranch: 'feature/wf-1', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'none', approvalMode: 'manual', baseBranch: 'master', featureBranch: 'feature/wf-1', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => mockExecutor, get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       let checkoutCreateCalls = 0;
@@ -4557,9 +4630,10 @@ describe('TaskRunner', () => {
       const mockExecutor = createAutoCompleteExecutor();
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'merge', mergeMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-1', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'merge', approvalMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-1', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => mockExecutor, get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const mergedBranches: string[] = [];
@@ -4625,7 +4699,7 @@ describe('TaskRunner', () => {
         persistence: {
           loadWorkflow: () => ({
             onFinish: 'merge',
-            mergeMode: 'automatic',
+            approvalMode: 'automatic',
             baseBranch: 'master',
             featureBranch: 'feature/wf-par',
             name: 'Test',
@@ -4634,6 +4708,7 @@ describe('TaskRunner', () => {
         } as any,
         executorRegistry: { getDefault: () => mockExecutor, get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const mergedBranches: string[] = [];
@@ -4700,7 +4775,7 @@ describe('TaskRunner', () => {
         persistence: {
           loadWorkflow: () => ({
             onFinish: 'merge',
-            mergeMode: 'automatic',
+            approvalMode: 'automatic',
             baseBranch: 'master',
             featureBranch: 'feature/wf-chain',
             name: 'Test',
@@ -4709,6 +4784,7 @@ describe('TaskRunner', () => {
         } as any,
         executorRegistry: { getDefault: () => mockExecutor, get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const mergedBranches: string[] = [];
@@ -4765,9 +4841,10 @@ describe('TaskRunner', () => {
 
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'merge', mergeMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-2', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'merge', approvalMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-2', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => createAutoCompleteExecutor(), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const mergedBranches: string[] = [];
@@ -4827,9 +4904,10 @@ describe('TaskRunner', () => {
 
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'merge', mergeMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-3', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'merge', approvalMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-3', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => createAutoCompleteExecutor(), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const mergeOrder: string[] = [];
@@ -4872,6 +4950,7 @@ describe('TaskRunner', () => {
         persistence: { loadWorkflow: () => ({ onFinish: 'merge', baseBranch: 'master', featureBranch: 'feature/test', name: 'Test' }), updateTask: vi.fn(), getWorkspacePath: () => null } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const calls: string[][] = [];
@@ -4922,6 +5001,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       (executor as any).execGitReadonly = async (args: string[]) => {
@@ -4975,6 +5055,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       (executor as any).execGitReadonly = async (args: string[]) => {
@@ -5027,6 +5108,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       (executor as any).execGitReadonly = async (args: string[]) => {
@@ -5064,6 +5146,7 @@ describe('TaskRunner', () => {
         persistence: { loadWorkflow: () => null } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         defaultBranch: 'master',
       });
 
@@ -5112,6 +5195,7 @@ describe('TaskRunner', () => {
         persistence: { loadWorkflow: () => null } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         defaultBranch: 'master',
       });
 
@@ -5158,6 +5242,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await expect(executor.resolveConflict('running-task'))
@@ -5178,6 +5263,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await expect(executor.resolveConflict('failed-task'))
@@ -5191,6 +5277,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await expect(executor.resolveConflict('nonexistent'))
@@ -5225,6 +5312,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const gitCalls: string[][] = [];
@@ -5267,6 +5355,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
       await expect(executor.fixWithAgent('nonexistent', 'output')).rejects.toThrow('not found');
     });
@@ -5284,6 +5373,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
       await expect(executor.fixWithAgent('pending-task', 'output')).rejects.toThrow('not in a fixable state');
     });
@@ -5304,6 +5394,7 @@ describe('TaskRunner', () => {
         persistence: { appendTaskOutput, updateTask } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
       (executor as any).spawnAgentFix = async () => ({ stdout: 'Fixed the import', sessionId: 'test-session-123' });
       await executor.fixWithAgent('fix-task', 'error output here');
@@ -5326,6 +5417,7 @@ describe('TaskRunner', () => {
         persistence: { appendTaskOutput, updateTask } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
       (executor as any).spawnAgentFix = async () => ({ stdout: 'Fixed it', sessionId: 'sess-abc-123' });
       await executor.fixWithAgent('fix-task', 'error output');
@@ -5355,6 +5447,7 @@ describe('TaskRunner', () => {
         persistence: { appendTaskOutput, updateTask } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp/repo',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
       const gitCalls: string[][] = [];
       (executor as any).execGitReadonly = async (args: string[]) => {
@@ -5412,7 +5505,7 @@ describe('TaskRunner', () => {
             loadWorkflow: () => ({
               id: 'wf-1',
               onFinish: 'merge',
-              mergeMode: 'manual',
+              approvalMode: 'manual',
               baseBranch: 'master',
               featureBranch: 'plan/feature',
               name: 'Workflow',
@@ -5422,6 +5515,7 @@ describe('TaskRunner', () => {
           } as any,
           executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
           callbacks: { onHeartbeat, onComplete },
         });
 
@@ -5499,7 +5593,7 @@ describe('TaskRunner', () => {
             loadWorkflow: () => ({
               id: 'wf-1',
               onFinish: 'merge',
-              mergeMode: 'automatic',
+              approvalMode: 'automatic',
               baseBranch: 'master',
               featureBranch: 'plan/feature',
               name: 'Workflow',
@@ -5509,6 +5603,7 @@ describe('TaskRunner', () => {
           } as any,
           executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
           callbacks: { onHeartbeat, onComplete },
         });
 
@@ -5596,6 +5691,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: executorRegistry as any,
         cwd: repoDir,
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await runner.publishApprovedFix(task);
@@ -5648,6 +5744,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask, updateAttempt } as any,
         executorRegistry: executorRegistry as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         remoteTargetsProvider: () => ({
           'remote-1': {
             host: 'example.com',
@@ -5701,6 +5798,7 @@ describe('TaskRunner', () => {
         persistence: { updateTask, updateAttempt } as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: repoDir,
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await runner.commitApprovedFix(task);
@@ -5744,9 +5842,10 @@ describe('TaskRunner', () => {
 
       const executor = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { loadWorkflow: () => ({ onFinish: 'merge', mergeMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-msg', name: 'Test' }), updateTask: vi.fn() } as any,
+        persistence: { loadWorkflow: () => ({ onFinish: 'merge', approvalMode: 'automatic', baseBranch: 'master', featureBranch: 'feature/wf-msg', name: 'Test' }), updateTask: vi.fn() } as any,
         executorRegistry: { getDefault: () => createAutoCompleteExecutor(), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const mergeMsgs: string[] = [];
@@ -5810,6 +5909,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         defaultBranch: 'master',
       });
 
@@ -5850,6 +5950,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const ghCalls: string[][] = [];
@@ -5890,6 +5991,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const ghCalls: string[][] = [];
@@ -5929,6 +6031,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const ghCalls: string[][] = [];
@@ -5987,6 +6090,7 @@ describe('TaskRunner', () => {
             getSessionDriver: vi.fn().mockReturnValue(undefined),
           } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
         });
 
         const result = await (executor as any).authorPrBodyWithSkill({
@@ -6038,6 +6142,7 @@ describe('TaskRunner', () => {
             getSessionDriver: vi.fn().mockReturnValue(undefined),
           } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
         });
 
         await expect((executor as any).authorPrBodyWithSkill({
@@ -6090,6 +6195,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const mergeMsgs: string[] = [];
@@ -6154,6 +6260,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await expect(executor.resolveConflict('conflict-task'))
@@ -6176,6 +6283,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         remoteTargetsProvider: provider,
       });
 
@@ -6201,6 +6309,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         remoteTargetsProvider: provider,
       });
 
@@ -6215,7 +6324,7 @@ describe('TaskRunner', () => {
 
   describe('publishAfterFix', () => {
     function setupPublishAfterFix(opts: {
-      mergeMode?: string;
+      approvalMode?: string;
       onFinish?: string;
       featureBranch?: string;
       gateWorkspacePath?: string | null;
@@ -6245,7 +6354,7 @@ describe('TaskRunner', () => {
         loadWorkflow: () => ({
           id: workflowId,
           onFinish: opts.onFinish ?? 'none',
-          mergeMode: opts.mergeMode ?? 'manual',
+          approvalMode: opts.approvalMode ?? 'manual',
           baseBranch: 'master',
           featureBranch: opts.featureBranch,
           name: 'Test Workflow',
@@ -6255,6 +6364,7 @@ describe('TaskRunner', () => {
       };
 
       const mergeGateProvider = {
+        name: 'github',
         createReview: vi.fn().mockResolvedValue({
           url: 'https://github.com/owner/repo/pull/99',
           identifier: 'owner/repo#99',
@@ -6267,7 +6377,7 @@ describe('TaskRunner', () => {
         persistence: persistence as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp/host',
-        mergeGateProvider: mergeGateProvider as any,
+        reviewProviderRegistry: (() => { const r = new ReviewProviderRegistry(); r.register(mergeGateProvider as any); return r; })(),
       });
 
       (executor as any).execGitReadonly = async (args: string[]) => {
@@ -6306,7 +6416,7 @@ describe('TaskRunner', () => {
       });
 
       const { executor, mergeTask, orchestrator, mergeGateProvider, gitCalls } = setupPublishAfterFix({
-        mergeMode: 'external_review',
+        approvalMode: 'external_review',
         featureBranch: 'plan/feature',
         gateWorkspacePath: '/tmp/gate-clone',
         taskBranches: [completedTask],
@@ -6370,7 +6480,7 @@ describe('TaskRunner', () => {
       });
 
       const { executor, mergeTask, orchestrator, persistence } = setupPublishAfterFix({
-        mergeMode: 'manual',
+        approvalMode: 'manual',
         onFinish: 'pull_request',
         featureBranch: 'plan/feature',
         gateWorkspacePath: '/tmp/gate-clone',
@@ -6421,7 +6531,7 @@ describe('TaskRunner', () => {
       });
 
       const { executor, mergeTask, orchestrator, gitCalls: _gitCalls } = setupPublishAfterFix({
-        mergeMode: 'external_review',
+        approvalMode: 'external_review',
         featureBranch: 'plan/feature',
         gateWorkspacePath: '/tmp/gate-clone',
         taskBranches: [completedTask],
@@ -6453,7 +6563,7 @@ describe('TaskRunner', () => {
 
     it('detach-HEAD sequence: exact order regression test', async () => {
       const { executor, mergeTask, gitCalls } = setupPublishAfterFix({
-        mergeMode: 'manual',
+        approvalMode: 'manual',
         featureBranch: 'plan/feature',
         gateWorkspacePath: '/tmp/gate-clone',
         taskBranches: [],
@@ -6485,7 +6595,7 @@ describe('TaskRunner', () => {
       });
 
       const { executor, mergeTask, orchestrator } = setupPublishAfterFix({
-        mergeMode: 'manual',
+        approvalMode: 'manual',
         featureBranch: 'plan/feature',
         gateWorkspacePath: null,
         taskBranches: [completedTask],
@@ -6526,6 +6636,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         remoteTargetsProvider: () => remoteTargets,
       });
 
@@ -6564,6 +6675,7 @@ describe('TaskRunner', () => {
           register: vi.fn(),
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       const task1 = makeTask({
@@ -6599,6 +6711,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         remoteTargetsProvider: () => remoteTargets,
       });
 
@@ -6625,6 +6738,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         remoteTargetsProvider: () => ({}),
       });
 
@@ -6650,6 +6764,7 @@ describe('TaskRunner', () => {
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         remoteTargetsProvider: () => remoteTargets,
       });
 
@@ -6703,6 +6818,7 @@ describe('TaskRunner', () => {
           getAll: () => [badExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await executor.executeTask(task);
@@ -6770,6 +6886,7 @@ describe('TaskRunner', () => {
           getAll: () => [managedSshExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await executor.executeTask(task);
@@ -6830,6 +6947,7 @@ describe('TaskRunner', () => {
           getAll: () => [failingExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await executor.executeTask(task);
@@ -6903,6 +7021,7 @@ describe('TaskRunner', () => {
           getAll: () => [failingExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await runner.executeTask(task);
@@ -6967,6 +7086,7 @@ describe('TaskRunner', () => {
           getAll: () => [byoExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       await executor.executeTask(task);
@@ -7021,6 +7141,7 @@ describe('TaskRunner', () => {
             getAll: () => [gcExecutor],
           } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
           callbacks: {
             onHeartbeat: (taskId: string) => { heartbeats.push(taskId); },
           },
@@ -7103,6 +7224,7 @@ describe('TaskRunner', () => {
             getAll: () => [gcExecutor],
           } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
           callbacks: {
             onHeartbeat: (taskId: string) => {
               heartbeats.push({ taskId, timestamp: Date.now() });
@@ -7182,6 +7304,7 @@ describe('TaskRunner', () => {
             getAll: () => [gcExecutor],
           } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
           callbacks: {
             onHeartbeat: (taskId: string) => {
               receivedHeartbeats.push(taskId);
@@ -7267,6 +7390,7 @@ describe('TaskRunner', () => {
           getAll: () => [manualExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
       });
 
       vi.spyOn(runner as any, 'executeMergeNode').mockImplementation(async () => {
@@ -7362,6 +7486,7 @@ describe('TaskRunner', () => {
             getAll: () => [manualExecutor],
           } as any,
           cwd: '/tmp',
+          reviewProviderRegistry: new ReviewProviderRegistry(),
           callbacks: {
             onHeartbeat: (taskId: string) => { receivedHeartbeats.push(taskId); },
             onComplete: onCompleteCb,
@@ -7471,6 +7596,7 @@ describe('TaskRunner', () => {
           getAll: () => [manualExecutor],
         } as any,
         cwd: '/tmp',
+        reviewProviderRegistry: new ReviewProviderRegistry(),
         callbacks: { onComplete: onCompleteCb },
       });
 

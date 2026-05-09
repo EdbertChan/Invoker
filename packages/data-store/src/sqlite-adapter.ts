@@ -239,8 +239,8 @@ export class SQLiteAdapter implements PersistenceAdapter {
 
       this.db.run(
         `UPDATE workflows
-         SET merge_mode = 'external_review'
-         WHERE merge_mode = 'github'`,
+         SET approval_mode = 'external_review'
+         WHERE approval_mode = 'github'`,
       );
       report.normalizedMergeModes = this.db.getRowsModified();
 
@@ -587,6 +587,9 @@ export class SQLiteAdapter implements PersistenceAdapter {
       'ALTER TABLE attempts ADD COLUMN claimed_at TEXT',
       'ALTER TABLE attempts ADD COLUMN lease_expires_at TEXT',
       'ALTER TABLE tasks ADD COLUMN task_state_version INTEGER NOT NULL DEFAULT 1',
+      // Schema rename: merge_mode → approval_mode, publication_strategy → review_strategy
+      'ALTER TABLE workflows ADD COLUMN approval_mode TEXT',
+      'ALTER TABLE workflows ADD COLUMN review_strategy TEXT',
     ];
     for (const sql of migrations) {
       try {
@@ -607,6 +610,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       this.migrateTestCommands();
       this.migrateGatePolicyApprovedToCompleted();
       this.runCompatibilityMigration();
+      this.migrateWorkflowSchemaRename();
     }
   }
 
@@ -673,12 +677,33 @@ export class SQLiteAdapter implements PersistenceAdapter {
     }
   }
 
+  /**
+   * One-time migration: copy merge_mode → approval_mode and
+   * publication_strategy → review_strategy for any rows that still
+   * have data in the legacy columns but not in the new ones.
+   * Idempotent: rows already migrated are left untouched.
+   */
+  private migrateWorkflowSchemaRename(): void {
+    try {
+      this.db.run(
+        `UPDATE workflows SET approval_mode = merge_mode
+         WHERE approval_mode IS NULL AND merge_mode IS NOT NULL`,
+      );
+      this.db.run(
+        `UPDATE workflows SET review_strategy = publication_strategy
+         WHERE review_strategy IS NULL AND publication_strategy IS NOT NULL`,
+      );
+    } catch {
+      // Columns may not exist yet on first run
+    }
+  }
+
   // ── Workflows ─────────────────────────────────────────
 
   saveWorkflow(workflow: Workflow): void {
     this.execRun(`
-      INSERT OR REPLACE INTO workflows (id, name, description, visual_proof, status, plan_file, repo_url, intermediate_repo_url, branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode, review_provider, publication_strategy, generation, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO workflows (id, name, description, visual_proof, status, plan_file, repo_url, intermediate_repo_url, branch, on_finish, base_branch, parent_remote, feature_branch, approval_mode, review_strategy, generation, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       workflow.id, workflow.name,
       workflow.description ?? null,
@@ -686,15 +711,14 @@ export class SQLiteAdapter implements PersistenceAdapter {
       workflow.status,
       workflow.planFile ?? null, workflow.repoUrl ?? null, workflow.intermediateRepoUrl ?? null, workflow.branch ?? null,
       workflow.onFinish ?? null, workflow.baseBranch ?? null, null, workflow.featureBranch ?? null,
-      workflow.mergeMode ?? null,
-      workflow.reviewProvider ?? null,
-      workflow.publicationStrategy ?? null,
+      workflow.approvalMode ?? null,
+      workflow.reviewStrategy ?? null,
       workflow.generation ?? 0,
       workflow.createdAt, workflow.updatedAt,
     ]);
   }
 
-  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'status' | 'updatedAt' | 'baseBranch' | 'generation' | 'mergeMode'>>): void {
+  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'status' | 'updatedAt' | 'baseBranch' | 'generation' | 'approvalMode'>>): void {
     const setClauses: string[] = [];
     const values: unknown[] = [];
     if (changes.status !== undefined) {
@@ -709,9 +733,9 @@ export class SQLiteAdapter implements PersistenceAdapter {
       setClauses.push('generation = ?');
       values.push(changes.generation);
     }
-    if (changes.mergeMode !== undefined) {
-      setClauses.push('merge_mode = ?');
-      values.push(changes.mergeMode);
+    if (changes.approvalMode !== undefined) {
+      setClauses.push('approval_mode = ?');
+      values.push(changes.approvalMode);
     }
     setClauses.push('updated_at = ?');
     values.push(changes.updatedAt ?? new Date().toISOString());
@@ -753,7 +777,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
         action_request_id, experiments,
         created_at, launch_phase, launch_started_at, launch_completed_at, started_at, completed_at, last_heartbeat_at,
         utilization, pending_fix_error,
-        review_url, review_id, review_status, review_provider_id,
+        review_url, review_id, review_status,
         is_fixing_with_ai,
         execution_generation,
         remote_target_id,
@@ -773,8 +797,9 @@ export class SQLiteAdapter implements PersistenceAdapter {
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?,
         ?, ?,
-        ?, ?, ?, ?,
-        ?, ?,
+        ?, ?, ?,
+        ?,
+        ?,
         ?, ?, ?, ?,
         ?,
         ?,
@@ -829,7 +854,6 @@ export class SQLiteAdapter implements PersistenceAdapter {
       exec.reviewUrl ?? null,
       exec.reviewId ?? null,
       exec.reviewStatus ?? null,
-      exec.reviewProviderId ?? null,
       exec.isFixingWithAI ? 1 : 0,
       exec.generation ?? 0,
       cfg.remoteTargetId ?? null,
@@ -922,7 +946,6 @@ export class SQLiteAdapter implements PersistenceAdapter {
         reviewUrl: 'review_url',
         reviewId: 'review_id',
         reviewStatus: 'review_status',
-        reviewProviderId: 'review_provider_id',
         phase: 'launch_phase',
         generation: 'execution_generation',
         selectedAttemptId: 'selected_attempt_id',
@@ -1630,9 +1653,8 @@ export class SQLiteAdapter implements PersistenceAdapter {
       onFinish: row.on_finish ?? undefined,
       baseBranch: row.base_branch ?? undefined,
       featureBranch: row.feature_branch ?? undefined,
-      mergeMode: row.merge_mode ?? undefined,
-      reviewProvider: row.review_provider ?? undefined,
-      publicationStrategy: row.publication_strategy ?? undefined,
+      approvalMode: row.approval_mode ?? undefined,
+      reviewStrategy: row.review_strategy ?? undefined,
       generation: row.generation ?? 0,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1700,7 +1722,6 @@ export class SQLiteAdapter implements PersistenceAdapter {
         reviewUrl: row.review_url ?? undefined,
         reviewId: row.review_id ?? undefined,
         reviewStatus: row.review_status ?? undefined,
-        reviewProviderId: row.review_provider_id ?? undefined,
         phase: row.launch_phase ?? undefined,
         launchStartedAt: row.launch_started_at ? new Date(row.launch_started_at) : undefined,
         launchCompletedAt: row.launch_completed_at ? new Date(row.launch_completed_at) : undefined,

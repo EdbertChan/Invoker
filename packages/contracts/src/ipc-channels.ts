@@ -32,7 +32,7 @@ export interface WorkflowMeta {
   baseBranch?: string;
   featureBranch?: string;
   onFinish?: string;
-  mergeMode?: string;
+  approvalMode?: string;
 }
 
 export interface WorkflowStatus {
@@ -338,8 +338,8 @@ export const IpcChannels = {
     request: [workflowId: string, baseBranch: string];
     response: void;
   },
-  'invoker:set-merge-mode': {} as {
-    request: [workflowId: string, mergeMode: string];
+  'invoker:set-approval-mode': {} as {
+    request: [workflowId: string, approvalMode: string];
     response: void;
   },
   'invoker:approve-merge': {} as {

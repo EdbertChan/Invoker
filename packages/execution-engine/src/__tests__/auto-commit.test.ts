@@ -844,6 +844,7 @@ describe('diamond dependency merge', () => {
 // ── Merge gate commit topology ─────────────────────────────────
 
 import { TaskRunner, ExecutorRegistry } from '../index.js';
+import { ReviewProviderRegistry } from '../review-provider-registry.js';
 import { WorktreeExecutor } from '../worktree-executor.js';
 import { Orchestrator, type TaskState, type TaskStateChanges, type PlanDefinition, type OrchestratorPersistence, type OrchestratorMessageBus } from '@invoker/workflow-core';
 
@@ -948,6 +949,7 @@ describe('merge gate commit topology (real git)', () => {
       orchestrator: orchestrator as any,
       persistence: persistence as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: tmpDir,
     });
   }
@@ -980,7 +982,7 @@ describe('merge gate commit topology (real git)', () => {
     const workflow = {
       id: 'wf-1',
       onFinish: 'merge',
-      mergeMode: 'manual',
+      approvalMode: 'manual',
       baseBranch: 'master',
       featureBranch: 'feat/my-workflow',
       name: 'My Workflow',
@@ -1064,7 +1066,7 @@ describe('merge gate commit topology (real git)', () => {
     const workflow = {
       id: 'wf-1',
       onFinish: 'merge',
-      mergeMode: 'automatic',
+      approvalMode: 'automatic',
       baseBranch: 'master',
       featureBranch: 'feat/auto-workflow',
       name: 'Auto Workflow',
@@ -1127,7 +1129,7 @@ describe('merge gate commit topology (real git)', () => {
     const workflow = {
       id: 'wf-d',
       onFinish: 'merge',
-      mergeMode: 'automatic',
+      approvalMode: 'automatic',
       baseBranch: 'master',
       featureBranch: 'feat/diverged-workflow',
       name: 'Diverged Workflow',
@@ -1201,7 +1203,7 @@ describe('merge gate commit topology (real git)', () => {
     const workflow = {
       id: 'wf-i',
       onFinish: 'merge',
-      mergeMode: 'manual',
+      approvalMode: 'manual',
       baseBranch: 'master',
       featureBranch: 'feat/intermediate-workflow',
       name: 'Intermediate Workflow',
@@ -1283,6 +1285,7 @@ describe('merge gate commit topology (real git)', () => {
       orchestrator,
       persistence: persistence as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: tmpDir,
       defaultBranch: 'master',
     });
@@ -1297,7 +1300,7 @@ describe('merge gate commit topology (real git)', () => {
       name: 'Hook E2E Plan',
       repoUrl: `file://${bareDir}`,
       onFinish: 'merge',
-      mergeMode: 'manual',
+      approvalMode: 'manual',
       baseBranch: 'master',
       featureBranch: 'feat/hook-e2e',
       tasks: [
@@ -1433,6 +1436,7 @@ describe('mergeExperimentBranches (real git)', () => {
       orchestrator: orchestrator as any,
       persistence: persistence as any,
       executorRegistry: registry,
+      reviewProviderRegistry: new ReviewProviderRegistry(),
       cwd: tmpDir,
       defaultBranch: 'master',
     });

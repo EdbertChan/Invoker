@@ -2,7 +2,7 @@
 name: "e2e-dry-run group2 2.6 diamond success"
 repoUrl: git@github.com:example-org/acme-repo.git
 onFinish: none
-mergeMode: manual
+approvalMode: manual
 baseBranch: HEAD
 
 tasks:

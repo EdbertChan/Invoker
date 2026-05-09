@@ -115,8 +115,7 @@ export interface TaskRunnerConfig {
   /** Default branch from config (e.g. "master"). Falls back to git heuristic if unset. */
   defaultBranch?: string;
   callbacks?: TaskRunnerCallbacks;
-  mergeGateProvider?: MergeGateProvider;
-  reviewProviderRegistry?: ReviewProviderRegistry;
+  reviewProviderRegistry: ReviewProviderRegistry;
   /**
    * Provider that returns remote SSH targets keyed by target ID.
    * Called at task-execution time so config file changes take effect on retry.
@@ -151,8 +150,7 @@ export class TaskRunner {
   private maxWorktreesPerRepo: number;
   /** @internal */ defaultBranch: string | undefined;
   /** @internal */ callbacks: TaskRunnerCallbacks;
-  /** @internal */ mergeGateProvider?: MergeGateProvider;
-  /** @internal */ reviewProviderRegistry?: ReviewProviderRegistry;
+  /** @internal */ reviewProviderRegistry: ReviewProviderRegistry;
   private activePrPollers = new Map<string, ReturnType<typeof setInterval>>();
   private getRemoteTargets: () => Record<string, { host: string; user: string; sshKeyPath: string; port?: number; managedWorkspaces?: boolean; remoteInvokerHome?: string; provisionCommand?: string }>;
   private dockerConfig: { imageName?: string; secretsFile?: string };
@@ -223,7 +221,6 @@ export class TaskRunner {
     this.maxWorktreesPerRepo = config.maxWorktreesPerRepo ?? 5;
     this.defaultBranch = config.defaultBranch;
     this.callbacks = config.callbacks ?? {};
-    this.mergeGateProvider = config.mergeGateProvider;
     this.reviewProviderRegistry = config.reviewProviderRegistry;
     this.getRemoteTargets = config.remoteTargetsProvider ?? (() => ({}));
     this.dockerConfig = config.dockerConfig ?? {};
@@ -1436,14 +1433,13 @@ export class TaskRunner {
 
   /**
    * Resolve the review provider for a workflow using the publication strategy router.
-   * Falls back to the legacy `mergeGateProvider` singleton for backward compatibility.
-   * Returns `undefined` when no provider can be resolved (no registry and no fallback).
+   * Returns `undefined` when no provider is registered for the strategy.
    */
   private resolveReviewProviderForWorkflow(workflowId: string | undefined): MergeGateProvider | undefined {
     const workflow = workflowId ? this.persistence.loadWorkflow(workflowId) : undefined;
-    const strategy = workflow?.publicationStrategy;
+    const strategy = workflow?.reviewStrategy;
     try {
-      return resolvePublicationProvider(strategy, this.reviewProviderRegistry, this.mergeGateProvider);
+      return resolvePublicationProvider(strategy, this.reviewProviderRegistry);
     } catch {
       // No provider available for this strategy — return undefined so callers can skip gracefully.
       return undefined;

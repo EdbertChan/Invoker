@@ -545,7 +545,7 @@ describe('Parity: CommandService routes to correct orchestrator primitives', () 
     { name: 'editTaskPrompt', invoke: (cs) => cs.editTaskPrompt(envelope({ taskId: 'task-1', newPrompt: 'do it' })), orchestratorMethod: 'editTaskPrompt' },
     { name: 'editTaskType', invoke: (cs) => cs.editTaskType(envelope({ taskId: 'task-1', executorType: 'docker' })), orchestratorMethod: 'editTaskType' },
     { name: 'editTaskAgent', invoke: (cs) => cs.editTaskAgent(envelope({ taskId: 'task-1', agentName: 'codex' })), orchestratorMethod: 'editTaskAgent' },
-    { name: 'editTaskMergeMode', invoke: (cs) => cs.editTaskMergeMode(envelope({ taskId: 'task-1', mergeMode: 'automatic' as const })), orchestratorMethod: 'editTaskMergeMode' },
+    { name: 'editTaskMergeMode', invoke: (cs) => cs.editTaskMergeMode(envelope({ taskId: 'task-1', approvalMode: 'automatic' as const })), orchestratorMethod: 'editTaskMergeMode' },
     { name: 'selectExperiment', invoke: (cs) => cs.selectExperiment(envelope({ taskId: 'task-1', experimentId: 'exp-1' })), orchestratorMethod: 'selectExperiment' },
     { name: 'setTaskExternalGatePolicies', invoke: (cs) => cs.setTaskExternalGatePolicies(envelope({ taskId: 'task-1', updates: [] })), orchestratorMethod: 'setTaskExternalGatePolicies' },
   ];

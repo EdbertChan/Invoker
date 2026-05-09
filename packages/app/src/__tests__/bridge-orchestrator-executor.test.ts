@@ -9,8 +9,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createTestHarness, type TestHarness, InMemoryBus, InMemoryPersistence, MockGit } from '@invoker/test-kit';
 import { Orchestrator, type PlanDefinition, type TaskState } from '@invoker/workflow-core';
-import { TaskRunner, ExecutorRegistry, type MergeGateProvider } from '@invoker/execution-engine';
-import { setWorkflowMergeMode } from '../workflow-actions.js';
+import { TaskRunner, ExecutorRegistry, ReviewProviderRegistry, type MergeGateProvider } from '@invoker/execution-engine';
+import { setWorkflowApprovalMode } from '../workflow-actions.js';
 import { executeGlobalTopup } from '../global-topup.js';
 
 // ── Shared Plans ────────────────────────────────────────────
@@ -18,7 +18,7 @@ import { executeGlobalTopup } from '../global-topup.js';
 const LINEAR_PLAN: PlanDefinition = {
   name: 'Linear Plan',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/linear',
   tasks: [
@@ -31,7 +31,7 @@ const LINEAR_PLAN: PlanDefinition = {
 const PARALLEL_PLAN: PlanDefinition = {
   name: 'Parallel Plan',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/parallel',
   tasks: [
@@ -44,7 +44,7 @@ const PARALLEL_PLAN: PlanDefinition = {
 const FANOUT_PLAN: PlanDefinition = {
   name: 'Fan-out Plan',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/fanout',
   tasks: [
@@ -57,7 +57,7 @@ const FANOUT_PLAN: PlanDefinition = {
 const INDEPENDENT_TWO_TASK_PLAN: PlanDefinition = {
   name: 'Independent Two Task Plan',
   onFinish: 'merge',
-  mergeMode: 'automatic',
+  approvalMode: 'automatic',
   baseBranch: 'master',
   featureBranch: 'plan/independent-two',
   tasks: [
@@ -1038,7 +1038,7 @@ describe('Flow 8: restart workflow with generation lifecycle tag', () => {
 const MANUAL_MERGE_PLAN: PlanDefinition = {
   name: 'Manual Merge Plan',
   onFinish: 'merge',
-  mergeMode: 'manual',
+  approvalMode: 'manual',
   baseBranch: 'master',
   featureBranch: 'plan/manual-merge',
   tasks: [
@@ -1119,7 +1119,7 @@ describe('Flow 9: manual merge mode', () => {
     const autoPlan: PlanDefinition = {
       ...MANUAL_MERGE_PLAN,
       name: 'Auto Merge Plan',
-      mergeMode: 'automatic',
+      approvalMode: 'automatic',
       featureBranch: 'plan/auto-merge',
     };
     h.loadAndStart(autoPlan);
@@ -1152,7 +1152,7 @@ describe('Flow 9: manual merge mode', () => {
 const MANUAL_MERGE_ONFINISH_NONE_PLAN: PlanDefinition = {
   name: 'Manual OnFinish None',
   onFinish: 'none',
-  mergeMode: 'manual',
+  approvalMode: 'manual',
   baseBranch: 'master',
   featureBranch: 'plan/manual-onfinish-none',
   tasks: [{ id: 'A', description: 'Task A', command: 'echo a' }],
@@ -1160,9 +1160,9 @@ const MANUAL_MERGE_ONFINISH_NONE_PLAN: PlanDefinition = {
 
 // ── Flow 9c: UI external_review merge mode ───────────────────
 
-describe('Flow 9c: set-merge-mode external_review', () => {
+describe('Flow 9c: set-approval-mode external_review', () => {
   const mockMergeGate: MergeGateProvider = {
-    name: 'mock',
+    name: 'github',
     createReview: async () => ({
       url: 'https://github.com/owner/repo/pull/99',
       identifier: 'owner/repo#99',
@@ -1176,7 +1176,9 @@ describe('Flow 9c: set-merge-mode external_review', () => {
   };
 
   it('switching manual gate to external_review creates PR metadata and persists external_review', async () => {
-    const h = createTestHarness({ mergeGateProvider: mockMergeGate });
+    const registry = new ReviewProviderRegistry();
+    registry.register(mockMergeGate);
+    const h = createTestHarness({ reviewProviderRegistry: registry });
     h.loadAndStart(MANUAL_MERGE_ONFINISH_NONE_PLAN);
     h.completeTask('A');
 
@@ -1185,13 +1187,13 @@ describe('Flow 9c: set-merge-mode external_review', () => {
     await h.executor.executeTasks([h.getTask(mergeId)!]);
     expect(h.getTask(mergeId)!.status).toBe('review_ready');
 
-    await setWorkflowMergeMode(wfId, 'external_review', {
+    await setWorkflowApprovalMode(wfId, 'external_review', {
       orchestrator: h.orchestrator,
       persistence: h.persistence,
       taskExecutor: h.executor,
     });
 
-    expect(h.persistence.loadWorkflow(wfId)!.mergeMode).toBe('external_review');
+    expect(h.persistence.loadWorkflow(wfId)!.approvalMode).toBe('external_review');
     expect(h.getTask(mergeId)!.status).toBe('review_ready');
     expect(h.getTask(mergeId)!.execution.reviewUrl).toBe('https://github.com/owner/repo/pull/99');
   });
@@ -1208,7 +1210,7 @@ describe('Flow 9b: beforeApproveHook fires for merge nodes', () => {
     // Merge nodes now route through the executor pipeline; register a mock
     // that auto-completes so executeMergeNode can handle the finish step.
     reg.register('worktree', { type: 'worktree', start: async (req: any) => { const h = { executionId: `e-${req.actionId}`, taskId: req.actionId, workspacePath: '/tmp/mock', branch: `experiment/${req.actionId}-mock` }; setTimeout(() => (h as any)._cb?.({ requestId: req.requestId, actionId: req.actionId, status: 'completed', outputs: { exitCode: 0 } }), 0); return h; }, onComplete: (_h: any, cb: any) => { _h._cb = cb; return () => {}; }, onOutput: () => () => {}, onHeartbeat: () => () => {}, sendInput: () => {}, kill: async () => {}, getTerminalSpec: () => null, getRestoredTerminalSpec: () => { throw new Error('not impl'); }, destroyAll: async () => {} } as any);
-    const exec = new TaskRunner({ orchestrator: orch, persistence: persistence as any, executorRegistry: reg, cwd: '/tmp/test' });
+    const exec = new TaskRunner({ orchestrator: orch, persistence: persistence as any, executorRegistry: reg, reviewProviderRegistry: new ReviewProviderRegistry(), cwd: '/tmp/test' });
     const git = new MockGit();
     git.install(exec);
 
@@ -1274,7 +1276,7 @@ describe('Flow 10: multi-experiment selection', () => {
   const EXPERIMENT_PLAN: PlanDefinition = {
     name: 'Experiment Plan',
     onFinish: 'merge',
-    mergeMode: 'automatic',
+    approvalMode: 'automatic',
     baseBranch: 'master',
     featureBranch: 'plan/experiment',
     tasks: [
@@ -1407,7 +1409,7 @@ describe('Flow: scheduler health across experiment lifecycle', () => {
   const EXPERIMENT_PLAN: PlanDefinition = {
     name: 'Scheduler Health Plan',
     onFinish: 'merge',
-    mergeMode: 'automatic',
+    approvalMode: 'automatic',
     baseBranch: 'master',
     featureBranch: 'plan/scheduler-health',
     tasks: [

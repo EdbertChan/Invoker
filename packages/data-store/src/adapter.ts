@@ -43,9 +43,8 @@ export interface Workflow {
   onFinish?: 'none' | 'merge' | 'pull_request';
   baseBranch?: string;
   featureBranch?: string;
-  mergeMode?: 'manual' | 'automatic' | 'external_review';
-  reviewProvider?: string;
-  publicationStrategy?: 'github_pr' | 'mergify_stack';
+  approvalMode?: 'manual' | 'automatic' | 'external_review';
+  reviewStrategy?: 'github_pr' | 'mergify_stack';
   generation?: number;
   createdAt: string;
   updatedAt: string;
@@ -70,7 +69,7 @@ export interface ActivityLogEntry {
 export interface PersistenceAdapter {
   // Workflows
   saveWorkflow(workflow: Workflow): void;
-  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'status' | 'updatedAt' | 'baseBranch' | 'generation' | 'mergeMode'>>): void;
+  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'status' | 'updatedAt' | 'baseBranch' | 'generation' | 'approvalMode'>>): void;
   loadWorkflow(workflowId: string): Workflow | undefined;
   listWorkflows(): Workflow[];
 

@@ -43,11 +43,11 @@ export function mergeGatePlanTitleInsensitive(description: string): string {
 /**
  * Task panel heading for merge nodes: when the workflow finishes via GitHub PR, always show
  * `GitHub PR gate for …` if the description uses any known gate prefix — avoids "Pull request …"
- * in the title alongside Merge mode "GitHub PR" (stale DB or onFinish vs mergeMode skew).
+ * in the title alongside Merge mode "GitHub PR" (stale DB or onFinish vs approvalMode skew).
  */
-export function mergeGatePanelHeading(task: TaskState, mergeMode?: string): string {
+export function mergeGatePanelHeading(task: TaskState, approvalMode?: string): string {
   if (!task.config.isMergeNode) return task.description;
-  const externalReviewUi = mergeMode === 'external_review' || Boolean(task.execution?.reviewUrl);
+  const externalReviewUi = approvalMode === 'external_review' || Boolean(task.execution?.reviewUrl);
   if (!externalReviewUi) return task.description;
   const lower = task.description.toLowerCase();
   const hadPrefix = MERGE_DESC_PREFIXES.some(p => lower.startsWith(p.prefix.toLowerCase()));
@@ -64,7 +64,7 @@ export function mergeGatePanelHeading(task: TaskState, mergeMode?: string): stri
 export function resolveMergeGateKind(task: TaskState, wfMeta?: WorkflowMeta): MergeGateKind {
   const fromDesc = mergeGateKindFromDescription(task.description);
   if (fromDesc) return fromDesc;
-  const mm = wfMeta?.mergeMode ?? 'manual';
+  const mm = wfMeta?.approvalMode ?? 'manual';
   const of = (wfMeta?.onFinish as 'none' | 'merge' | 'pull_request' | undefined) ?? 'none';
   if (mm === 'external_review') return 'external_review';
   if (of === 'pull_request') return 'pull_request';

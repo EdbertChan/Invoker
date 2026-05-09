@@ -9,7 +9,7 @@ import { execSync } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
 import type { PlanDefinition } from '@invoker/workflow-core';
 import { loadConfig } from './config.js';
-import { normalizeMergeModeForPersistence } from './merge-mode.js';
+import { normalizeApprovalMode } from './approval-mode.js';
 
 /** Empty / whitespace `baseBranch` in YAML (`baseBranch:`) must fall through to config + remote detection like a missing key. */
 function resolveDefaultBaseBranch(plan: PlanDefinition): string {
@@ -71,9 +71,8 @@ export interface RawPlan {
   onFinish?: string;
   baseBranch?: string;
   featureBranch?: string;
-  mergeMode?: string;
-  reviewProvider?: string;
-  publicationStrategy?: string;
+  approvalMode?: string;
+  reviewStrategy?: string;
   repoUrl?: string;
   intermediateRepoUrl?: string;
   executorType?: string;
@@ -240,30 +239,26 @@ export function parsePlan(yamlContent: string): PlanDefinition {
   }
   const onFinish = (raw.onFinish as (typeof validOnFinishValues)[number]) ?? 'pull_request';
 
-  // Validate mergeMode against canonical values only.
-  const validMergeModes = ['manual', 'automatic', 'external_review'] as const;
-  if (raw.mergeMode !== undefined && !validMergeModes.includes(raw.mergeMode as any)) {
+  // Validate approvalMode against canonical values only.
+  const validApprovalModes = ['manual', 'automatic', 'external_review'] as const;
+  if (raw.approvalMode !== undefined && !validApprovalModes.includes(raw.approvalMode as any)) {
     throw new PlanParseError(
-      `"mergeMode" must be one of: ${validMergeModes.join(', ')}. Got: "${raw.mergeMode}"`,
+      `"approvalMode" must be one of: ${validApprovalModes.join(', ')}. Got: "${raw.approvalMode}"`,
     );
   }
-  const rawMergeMode = raw.mergeMode as (typeof validMergeModes)[number] | undefined;
-  const mergeMode = rawMergeMode !== undefined
-    ? normalizeMergeModeForPersistence(rawMergeMode)
+  const rawApprovalMode = raw.approvalMode as (typeof validApprovalModes)[number] | undefined;
+  const approvalMode = rawApprovalMode !== undefined
+    ? normalizeApprovalMode(rawApprovalMode)
     : undefined;
 
-  // Default reviewProvider to 'github' for external-review workflows.
-  const reviewProvider = raw.reviewProvider
-    ?? (rawMergeMode === 'external_review' ? 'github' : undefined);
-
-  // Validate publicationStrategy against allowed values.
-  const validPublicationStrategies = ['github_pr', 'mergify_stack'] as const;
-  if (raw.publicationStrategy !== undefined && !validPublicationStrategies.includes(raw.publicationStrategy as any)) {
+  // Validate reviewStrategy against allowed values.
+  const validReviewStrategies = ['github_pr', 'mergify_stack'] as const;
+  if (raw.reviewStrategy !== undefined && !validReviewStrategies.includes(raw.reviewStrategy as any)) {
     throw new PlanParseError(
-      `"publicationStrategy" must be one of: ${validPublicationStrategies.join(', ')}. Got: "${raw.publicationStrategy}"`,
+      `"reviewStrategy" must be one of: ${validReviewStrategies.join(', ')}. Got: "${raw.reviewStrategy}"`,
     );
   }
-  const publicationStrategy = (raw.publicationStrategy as (typeof validPublicationStrategies)[number]) ?? 'github_pr';
+  const reviewStrategy = (raw.reviewStrategy as (typeof validReviewStrategies)[number]) ?? 'github_pr';
 
   // Auto-generate featureBranch from plan name when not explicitly specified
   if (!raw.featureBranch) {
@@ -371,9 +366,8 @@ export function parsePlan(yamlContent: string): PlanDefinition {
     onFinish,
     baseBranch: raw.baseBranch,
     featureBranch: raw.featureBranch,
-    mergeMode,
-    reviewProvider,
-    publicationStrategy,
+    approvalMode,
+    reviewStrategy,
     repoUrl: raw.repoUrl,
     intermediateRepoUrl: raw.intermediateRepoUrl,
     tasks,

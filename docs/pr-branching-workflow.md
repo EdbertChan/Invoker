@@ -54,18 +54,18 @@ node scripts/validate-pr-body.mjs --body-file /tmp/my-pr.md
 node scripts/create-pr.mjs --title "<title>" --base master --body-file /tmp/my-pr.md
 ```
 
-## Publication Strategy
+## Review Strategy
 
-The execution engine dispatches review creation and approval polling through a **publication strategy router** (`packages/execution-engine/src/publication-strategy-router.ts`). The workflow's `publicationStrategy` field selects the provider.
+The execution engine dispatches review creation and approval polling through a **publication strategy router** (`packages/execution-engine/src/publication-strategy-router.ts`). The workflow's `reviewStrategy` field selects the provider.
 
-| `publicationStrategy` | Provider | PR creation behavior |
+| `reviewStrategy` | Provider | PR creation behavior |
 |---|---|---|
 | `github_pr` (default) | `GitHubMergeGateProvider` | Creates a standard GitHub PR against `origin`, polls review approval |
 | `mergify_stack` (opt-in) | `MergifyStackProvider` | Runs `mergify stack push` from the gate workspace, resolves the stacked PR |
 
 Both strategies operate within the `origin`-only branching policy above. `mergify_stack` publications push stack branches to `origin` and create PRs in the same repository.
 
-**When to use `mergify_stack`:** Only when the target repo uses Mergify Stacks (e.g. Invoker-on-Invoker dogfooding). All other repos should omit `publicationStrategy` to use the `github_pr` default.
+**When to use `mergify_stack`:** Only when the target repo uses Mergify Stacks (e.g. Invoker-on-Invoker dogfooding). All other repos should omit `reviewStrategy` to use the `github_pr` default.
 
 **Known `mergify_stack` limitations** (validated by lifecycle PoC in `docs/mergify-stack-lifecycle-poc.md`):
 - Mid-stack rewrites recreate affected PRs with new numbers; review comments are lost.

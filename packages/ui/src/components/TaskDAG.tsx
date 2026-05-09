@@ -100,7 +100,7 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, onTaskClick, onTaskDou
       const wfTasks = [...wfTasksRaw].sort((a, b) => a.id.localeCompare(b.id));
       const wfMeta = workflows?.get(wfGroupId);
       const wfBaseBranch = wfMeta?.baseBranch;
-      const wfMergeMode = (wfMeta?.mergeMode as 'manual' | 'automatic' | 'external_review') ?? 'manual';
+      const wfMergeMode = (wfMeta?.approvalMode as 'manual' | 'automatic' | 'external_review') ?? 'manual';
       const positions = layoutNodes(wfTasks);
 
       // Find bounding box to apply yOffset
@@ -136,7 +136,7 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, onTaskClick, onTaskDou
               showMergeModeRow,
               baseBranch: wfBaseBranch,
               featureBranch: wfMeta?.featureBranch,
-              mergeMode: wfMergeMode,
+              approvalMode: wfMergeMode,
               workflowId: wfGroupId,
               reviewUrl: task.execution?.reviewUrl,
               reviewStatus: task.execution?.reviewStatus,

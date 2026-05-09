@@ -43,7 +43,7 @@ const wfA: WorkflowMeta = {
   status: 'running',
   baseBranch: 'main',
   onFinish: 'merge',
-  mergeMode: 'manual',
+  approvalMode: 'manual',
 };
 
 // ── Scenario B: pull_request (onFinish='pull_request') ─────
@@ -71,7 +71,7 @@ const wfB: WorkflowMeta = {
   status: 'running',
   baseBranch: 'main',
   onFinish: 'pull_request',
-  mergeMode: 'manual',
+  approvalMode: 'manual',
 };
 
 // ── Scenario C: workflow (no onFinish) ─────────────────────
@@ -98,7 +98,7 @@ const wfC: WorkflowMeta = {
   name: 'Workflow',
   status: 'running',
   baseBranch: 'main',
-  mergeMode: 'manual',
+  approvalMode: 'manual',
 };
 
 describe('Merge gate approval flow (integration)', () => {
