@@ -1194,4 +1194,182 @@ describe('PersistedWorkflowMutationCoordinator', () => {
       'invoker:edit-task-agent:new-queued',
     ]);
   });
+
+  // ── AbortSignal cancellation tests ─────────────────────────────────────
+
+  it('aborts the dispatch AbortSignal when recreate-task preempts a running fix mutation', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    let capturedSignal: AbortSignal | undefined;
+    const gate = deferred();
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, _args, signal) => {
+        if (channel === 'invoker:fix-with-agent') {
+          capturedSignal = signal;
+          await gate.promise;
+        }
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await waitFor(() => adapter.listWorkflowMutationIntents('wf-1', ['running']).length === 1);
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    const recreateTask = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:recreate-task',
+      ['wf-1/target-task'],
+    );
+    await recreateTask;
+    await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
+
+    expect(capturedSignal!.aborted).toBe(true);
+  });
+
+  it('aborts the dispatch AbortSignal when delete-workflow preempts a running fix mutation', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    let capturedSignal: AbortSignal | undefined;
+    const gate = deferred();
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, _args, signal) => {
+        if (channel === 'invoker:fix-with-agent') {
+          capturedSignal = signal;
+          await gate.promise;
+        }
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await waitFor(() => adapter.listWorkflowMutationIntents('wf-1', ['running']).length === 1);
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    const deleteWf = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:delete-workflow',
+      ['wf-1'],
+    );
+    await deleteWf;
+    await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
+
+    expect(capturedSignal!.aborted).toBe(true);
+  });
+
+  it('does not abort the dispatch AbortSignal for non-preempted mutations', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    let signalAbortedDuringDispatch: boolean | undefined;
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (_channel, _args, signal) => {
+        signalAbortedDuringDispatch = signal.aborted;
+      },
+    );
+
+    await coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:edit-task-agent',
+      ['wf-1/task-1'],
+    );
+
+    expect(signalAbortedDuringDispatch).toBe(false);
+  });
+
+  it('aborts the dispatch AbortSignal when delegated headless recreate preempts a running mutation', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    let capturedSignal: AbortSignal | undefined;
+    const gate = deferred();
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (_channel, args, signal) => {
+        const payload = args[0] as { args?: string[] } | undefined;
+        const command = payload?.args?.join(' ') ?? 'unknown';
+        if (command.includes('hold-work')) {
+          capturedSignal = signal;
+          await gate.promise;
+        }
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'headless.exec',
+      [{ args: ['set', 'command', 'wf-1/task-0', 'hold-work'] }],
+    );
+    void olderRunning.catch(() => {});
+    await waitFor(() => adapter.listWorkflowMutationIntents('wf-1', ['running']).length === 1);
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    const recreateExec = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'headless.exec',
+      [{ args: ['recreate', 'wf-1'] }],
+    );
+    await recreateExec;
+    await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
+
+    expect(capturedSignal!.aborted).toBe(true);
+  });
 });
