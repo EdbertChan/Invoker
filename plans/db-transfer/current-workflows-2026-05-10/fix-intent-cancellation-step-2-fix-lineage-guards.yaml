@@ -1,0 +1,76 @@
+name: "Fix intent cancellation Step 2: fix flow lineage guards"
+description: |
+  Adds stale-lineage and cancellation guards around fix-with-agent and
+  conflict-resolution flows, stacked on top of the workflow-mutation
+  cancellation contract from step 1.
+
+  Publication intent: publish intermediate/helper branches to the fork and
+  target the final PR gate at the parent repo.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+baseBranch: plan/fix-intent-cancellation-step-1-mutation-cancellation
+featureBranch: plan/fix-intent-cancellation-step-2-fix-lineage-guards
+
+externalDependencies:
+  - workflowId: "wf-1778296183157-1"
+    requiredStatus: completed
+    gatePolicy: review_ready
+
+    taskId: "__merge__"
+tasks:
+  - id: guard-fix-with-agent-late-writes
+    description: |
+      Goal:
+      Make fix-with-agent and conflict-resolution flows discard late results
+      once the task lineage or cancellation state is stale.
+      Motivation:
+      Even with coordinator aborts, correctness still requires every late fix
+      result to no-op when the task has moved to a newer selected attempt or
+      generation.
+      Alternative considerations:
+      Relying on best-effort process termination alone is insufficient because
+      remote or agent work can still return after invalidation.
+      Implementation details:
+      Capture the starting lineage for fix/resolve flows, add explicit
+      stale/aborted checkpoints around async fix and persistence boundaries, and
+      prevent awaiting-approval or revert side effects from writing onto a newer
+      lineage.
+      Layer: owner_delegation
+      Feature state: active
+      Files:
+      - packages/app/src/workflow-actions.ts
+      - packages/app/src/main.ts
+      - packages/workflow-core/src/orchestrator.ts
+      - packages/app/src/__tests__/workflow-actions.test.ts
+      Change types:
+      - modify
+      Acceptance criteria:
+      - Stale or aborted fix results do not update task output, fix approval state, branch metadata, or conflict-resolution cleanup on a newer attempt lineage.
+    prompt: |
+      Goal:
+      Make fix-with-agent and conflict-resolution flows discard late results
+      once the task lineage or cancellation state is stale.
+      Motivation:
+      Even with coordinator aborts, correctness still requires every late fix
+      result to no-op when the task has moved to a newer selected attempt or
+      generation.
+      Alternative considerations:
+      Relying on best-effort process termination alone is insufficient because
+      remote or agent work can still return after invalidation.
+      Implementation details:
+      Modify packages/app/src/workflow-actions.ts, packages/app/src/main.ts,
+      packages/workflow-core/src/orchestrator.ts, and related tests. At
+      mutation entry, capture taskId, selectedAttemptId, and execution
+      generation. Add lineage/cancellation checkpoints before
+      conflict-resolution start, after async fix returns, before persistence
+      updates, before awaiting-approval transitions, and before revert cleanup.
+      If the mutation is aborted or the current task lineage no longer matches
+      the starting lineage, exit without changing task state, output,
+      agent-session metadata, branch/workspace metadata, or approval state.
+      Cover both the normal fix-with-agent path and representative
+      resolve-conflict cleanup paths in tests.
+      Acceptance criteria:
+      - Ensure stale or aborted fix results do not update task output, fix approval state, branch metadata, or conflict-resolution cleanup on a newer attempt lineage.
+    dependencies: []

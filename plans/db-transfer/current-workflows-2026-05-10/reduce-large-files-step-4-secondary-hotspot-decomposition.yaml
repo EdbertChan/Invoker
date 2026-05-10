@@ -1,0 +1,354 @@
+name: "Reduce Large Files Step 4: secondary hotspot decomposition"
+description: >
+  Goal:
+
+  - Decompose secondary oversized files in focused slices:
+    `headless.ts`, `task-runner.ts`, and `sqlite-adapter.ts`.
+
+  Intention:
+
+  - Reduce maintenance risk in high-churn modules while preserving current
+  runtime contracts.
+
+
+  Broad implementation:
+
+  - Extract headless command-family handlers.
+
+  - Extract task-runner execution phases.
+
+  - Extract sqlite adapter schema/query/write modules behind stable facade.
+
+
+  Alternative considerations:
+
+  - Defer secondary files indefinitely and only decompose primary hotspots.
+
+  - Attempt all secondary decompositions in one broad rewrite.
+
+
+  Competing-design proof:
+
+  - Compare reviewability and failure isolation of small domain slices vs one
+  large rewrite.
+
+  - Verify public behavior stays stable through focused package lanes.
+
+
+  Why this design is better:
+
+  - Narrow, dependency-ordered slices reduce blast radius and speed reviewer
+  feedback.
+onFinish: pull_request
+baseBranch: plan/reduce-large-files-step-3-orchestrator-ts-decomposition
+featureBranch: plan/reduce-large-files-step-4-secondary-hotspot-decomposition
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: extract-headless-command-families
+    description: >
+      Layer: owner_delegation
+
+      Feature state: active
+
+      Goal:
+
+      - Split `headless.ts` into command-family handlers while preserving
+      command contracts.
+
+      Motivation:
+
+      - Reduce complexity in owner/delegation command flows and improve
+      maintainability.
+
+      Alternative considerations:
+
+      - Keep all headless commands in one file.
+
+      - Split only query commands and defer run/approve/delete.
+
+      Chosen design rationale:
+
+      - Command families (`run/resume`, `query/list`, `approve/delete`) map to
+      clear behavior boundaries.
+
+      Implementation details:
+
+      - Introduce dedicated handler modules and route through a central
+      dispatcher.
+
+      - Preserve CLI flags, exit semantics, and delegation behavior.
+
+      Files:
+
+      - packages/app/src/headless.ts
+
+      - packages/app/src/headless/*
+
+      Change types:
+
+      - extract command-family handlers
+
+      - keep CLI contract stable
+
+      Acceptance criteria:
+
+      - Headless commands keep existing observable behavior.
+    prompt: >
+      Goal:
+
+      - Decompose `headless.ts` into command-family modules without changing CLI
+      behavior.
+
+      Motivation:
+
+      - Reduce complexity and isolate owner/delegation responsibilities.
+
+      Alternative considerations:
+
+      - Keep one-file handler implementation.
+
+      Implementation details:
+
+      - Add handler modules for run/resume, query/list, and approve/delete
+      families.
+
+      - Keep parser output, command routing, and exit behavior compatible.
+
+      Competing-design proof:
+
+      - Demonstrate unchanged behavior in focused headless tests.
+
+      Acceptance criteria (must):
+
+      - Ensure headless command outputs and exit semantics remain unchanged.
+
+      - Verify owner/delegation behavior remains compatible.
+    dependencies: []
+    externalDependencies:
+      - &a1
+        workflowId: wf-1778223504664-7
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+    executorType: worktree
+  - id: extract-task-runner-phases
+    description: >
+      Layer: domain
+
+      Feature state: active
+
+      Goal:
+
+      - Split `task-runner.ts` into prepare/dispatch/finalize execution phases.
+
+      Motivation:
+
+      - Isolate execution branching and failure handling from setup/reporting
+      concerns.
+
+      Alternative considerations:
+
+      - Keep runner in a single file and refactor inline.
+
+      - Extract only finalize/reporting and defer dispatch.
+
+      Chosen design rationale:
+
+      - Phase extraction gives clean seams and preserves current orchestration
+      integration.
+
+      Implementation details:
+
+      - Add phase modules and keep executor selection + callback semantics
+      stable.
+
+      Files:
+
+      - packages/execution-engine/src/task-runner.ts
+
+      - packages/execution-engine/src/task-runner/*
+
+      Change types:
+
+      - extract execution phase modules
+
+      - preserve orchestrator callback contracts
+
+      Acceptance criteria:
+
+      - Task execution lifecycle remains behaviorally compatible.
+    prompt: >
+      Goal:
+
+      - Decompose `task-runner.ts` into execution phases while preserving
+      lifecycle behavior.
+
+      Motivation:
+
+      - Improve readability and reduce risk for future executor updates.
+
+      Alternative considerations:
+
+      - Keep monolithic runner implementation.
+
+      Implementation details:
+
+      - Create prepare/dispatch/finalize modules and wire them through existing
+      runner surface.
+
+      - Preserve callback payload shapes and orchestrator response routing.
+
+      Competing-design proof:
+
+      - Show focused runner lanes still pass with unchanged callback semantics.
+
+      Acceptance criteria (must):
+
+      - Ensure task lifecycle callbacks remain contract-compatible.
+
+      - Verify orchestration response routing remains unchanged.
+    dependencies: []
+    externalDependencies:
+      - *a1
+    executorType: worktree
+  - id: extract-sqlite-adapter-slices
+    description: >
+      Layer: persistence
+
+      Feature state: active
+
+      Goal:
+
+      - Split `sqlite-adapter.ts` into schema/migrations, read queries, and
+      write operations modules.
+
+      Motivation:
+
+      - Keep persistence logic maintainable and reduce risk in DB-affecting
+      edits.
+
+      Alternative considerations:
+
+      - Leave persistence monolithic due to migration sensitivity.
+
+      - Extract only query helpers and defer schema/write separation.
+
+      Chosen design rationale:
+
+      - Facade-preserving decomposition improves clarity without changing
+      storage contract.
+
+      Implementation details:
+
+      - Keep `SQLiteAdapter` public surface stable while delegating internals to
+      slice modules.
+
+      Files:
+
+      - packages/data-store/src/sqlite-adapter.ts
+
+      - packages/data-store/src/sqlite-adapter/*
+
+      Change types:
+
+      - extract schema/migration helpers
+
+      - extract read/write operation helpers
+
+      Acceptance criteria:
+
+      - Adapter public contract remains stable.
+
+      - Migration and query behavior remains compatible.
+    prompt: >
+      Goal:
+
+      - Decompose `sqlite-adapter.ts` internals while preserving `SQLiteAdapter`
+      facade behavior.
+
+      Motivation:
+
+      - Reduce persistence risk and improve reviewability of DB changes.
+
+      Alternative considerations:
+
+      - Keep current monolithic adapter.
+
+      Implementation details:
+
+      - Introduce schema, query, and write helper modules behind existing
+      adapter interface.
+
+      - Preserve migration sequencing and query semantics.
+
+      Competing-design proof:
+
+      - Demonstrate no observable contract changes from caller perspective.
+
+      Acceptance criteria (must):
+
+      - Ensure `SQLiteAdapter` public methods remain unchanged.
+
+      - Verify migration and query semantics remain compatible.
+    dependencies: []
+    externalDependencies:
+      - *a1
+    executorType: worktree
+  - id: verify-secondary-hotspots-lanes
+    description: >
+      Layer: app_regression
+
+      Feature state: active
+
+      Goal:
+
+      - Verify targeted package lanes for secondary decompositions.
+
+      Motivation:
+
+      - Catch integration regressions close to changed modules.
+
+      Alternative considerations:
+
+      - Skip focused checks and rely only on final full-suite gate.
+
+      Implementation details:
+
+      - Run app headless delegation lane and execution-engine/data-store package
+      lanes.
+
+      Acceptance criteria:
+
+      - Targeted package lanes pass.
+    command: cd packages/app && pnpm test -- src/__tests__/headless-delegation.test.ts
+    dependencies:
+      - extract-headless-command-families
+      - extract-task-runner-phases
+      - extract-sqlite-adapter-slices
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Run terminal full-repository regression gate for this workflow.
+      Motivation:
+      - Ensure no cross-package regressions from secondary decomposition slices.
+      Alternative considerations:
+      - Stop at targeted package lanes only.
+      Implementation details:
+      - Execute `pnpm run test:all` after focused verification.
+      Acceptance criteria:
+      - Full repository suite passes.
+    command: pnpm run test:all
+    dependencies:
+      - extract-headless-command-families
+      - extract-task-runner-phases
+      - extract-sqlite-adapter-slices
+      - verify-secondary-hotspots-lanes
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1

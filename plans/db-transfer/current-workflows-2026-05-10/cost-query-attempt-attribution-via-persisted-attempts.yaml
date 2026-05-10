@@ -1,0 +1,199 @@
+name: Cost Query Attempt Attribution via Persisted Attempts
+description: |
+  Update the cost query and cost-events attribution path to resolve real
+  attempt IDs from persisted attempt records instead of synthesizing placeholder
+  identifiers inside the app surface.
+
+  The implementation should prefer the attempt whose `agentSessionId` matches
+  the session being attributed, then fall back to the task's
+  `selectedAttemptId`, and finally to the latest persisted attempt for the
+  task when exact session matching is unavailable. This keeps exported cost
+  events aligned with actual execution identity on `master` after the earlier
+  cost-query PR landed.
+onFinish: pull_request
+baseBranch: master
+featureBranch: plan/cost-query-attempt-attribution-via-persisted-attempts
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+tasks:
+  - id: implement-persisted-attempt-attribution
+    description: |
+      Replace synthesized attempt attribution in the cost query path with
+      persistence-backed resolution.
+      Goal:
+      Ensure `query cost` and `query cost-events` emit real attempt IDs whenever
+      persisted attempt data exists.
+      Motivation:
+      The current `${task.id}-latest` placeholder loses execution identity and
+      defeats downstream joins that expect stable persisted attempt IDs.
+      Alternative considerations:
+      - keep the placeholder format and patch downstream consumers.
+      - infer attempt identity from derived strings such as branch names or
+        workspace paths.
+      Implementation details:
+      - move attempt-id resolution to the caller that already has persistence
+        access.
+      - prefer an exact persisted `agentSessionId` match, then
+        `selectedAttemptId`, then the latest persisted attempt for the task.
+      - keep `cost-rollup.ts` pure by requiring the caller to provide the
+        chosen attempt identity rather than synthesizing it internally.
+      Files:
+      - packages/app/src/headless.ts
+      - packages/app/src/cost-rollup.ts
+      Change types:
+      - packages/app/src/headless.ts — modify
+      - packages/app/src/cost-rollup.ts — modify
+      Acceptance criteria:
+      - `query cost` and `query cost-events` attribute events with persisted
+        attempt IDs in the covered test scenarios.
+      Layer: contact_surface
+      Feature state: active
+    prompt: |
+      Goal: Deliver this prompt task outcome deterministically.
+      Motivation: Preserve real attempt identity in cost exports after the
+      cost-query feature landed on master.
+      Alternative considerations: Avoid placeholder IDs and avoid parsing
+      derived strings when persistence already carries the needed records.
+      Implementation details: Modify `packages/app/src/headless.ts` and
+      `packages/app/src/cost-rollup.ts` so cost attribution resolves attempt IDs
+      from persistence. The caller in `headless.ts` should choose the best
+      attempt for a task by preferring an exact `agentSessionId` match from
+      `deps.persistence.loadAttempts(task.id)`, then falling back to
+      `task.execution.selectedAttemptId`, then to the latest persisted attempt
+      for that task. Update `buildAttributionContext` so it consumes a
+      caller-supplied attempt ID instead of inventing `${task.id}-latest`.
+      Acceptance criteria:
+      - The attribution helper no longer synthesizes `${task.id}-latest` as the
+        primary behavior.
+      - The headless cost query path resolves attempt IDs from persisted query
+        results before falling back.
+      - Existing call sites remain deterministic and type-safe.
+    dependencies: []
+    executorType: worktree
+  - id: add-cost-query-attempt-regressions
+    description: |
+      Add regression coverage for persistence-backed attempt attribution.
+      Goal:
+      Lock in exact-session, selected-attempt, and latest-attempt fallback
+      behavior for cost export surfaces.
+      Motivation:
+      The behavior change is subtle and needs explicit assertions to prevent a
+      future return to placeholder IDs or string parsing.
+      Alternative considerations:
+      - rely only on manual query inspection.
+      - test only the pure helper without exercising headless query output.
+      Implementation details:
+      - update cost-rollup unit coverage for caller-supplied attempt IDs.
+      - extend headless query cost tests to assert emitted attempt IDs for exact
+        persisted session matches and fallback paths.
+      Files:
+      - packages/app/src/__tests__/cost-rollup.test.ts
+      - packages/app/src/__tests__/headless-query-cost.test.ts
+      Change types:
+      - packages/app/src/__tests__/cost-rollup.test.ts — modify
+      - packages/app/src/__tests__/headless-query-cost.test.ts — modify
+      Acceptance criteria:
+      - Focused app tests assert real persisted attempt IDs instead of
+        `${task.id}-latest`.
+      Layer: app_regression
+      Feature state: active
+    prompt: >
+      Goal: Deliver regression tests for the new attempt-attribution behavior.
+
+      Motivation: Ensure the app surface keeps using persisted attempts rather
+
+      than placeholder IDs or derived-string parsing.
+
+      Alternative considerations: Avoid relying on incidental snapshots or
+
+      unstated output shape.
+
+      Implementation details: Update
+      `packages/app/src/__tests__/cost-rollup.test.ts`
+
+      and `packages/app/src/__tests__/headless-query-cost.test.ts` to cover:
+
+      1. exact attempt lookup by `agentSessionId`,
+
+      2. fallback to `selectedAttemptId` when session matching is unavailable,
+
+      3. fallback to the latest persisted attempt when no selected attempt is
+         available but attempts exist,
+      4. deterministic serialized output containing the resolved attempt ID.
+
+      Acceptance criteria:
+
+      - The focused test files fail if attribution falls back to
+        `${task.id}-latest` in covered cases.
+      - The tests remain deterministic and use explicit expected attempt IDs.
+    dependencies:
+      - implement-persisted-attempt-attribution
+    executorType: worktree
+  - id: run-focused-app-cost-query-tests
+    description: >
+      Run focused app regressions for cost attribution and headless query
+
+      output.
+
+      Goal:
+
+      Verify the changed attribution logic and CLI serialization behavior in
+
+      the narrowest relevant test lane.
+
+      Motivation:
+
+      Catch attribution regressions before paying for the full-repo gate.
+
+      Alternative considerations:
+
+      - jump directly to full-suite regression.
+
+      - run only one of the affected test files.
+
+      Implementation details:
+
+      - execute the two focused app test files that cover the pure attribution
+        helper and the headless cost query surface.
+      Acceptance criteria:
+
+      - `cd packages/app && pnpm test -- src/__tests__/cost-rollup.test.ts
+      src/__tests__/headless-query-cost.test.ts`
+        exits 0.
+      Layer: app_regression
+
+      Feature state: active
+    command: cd packages/app && pnpm test -- src/__tests__/cost-rollup.test.ts
+      src/__tests__/headless-query-cost.test.ts
+    dependencies:
+      - add-cost-query-attempt-regressions
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+  - id: post-fix-regression
+    description: |
+      Run the full repository regression suite after the attribution fix.
+      Goal:
+      Confirm the cost-query attempt resolution change does not regress other
+      app, execution, or persistence behavior.
+      Motivation:
+      The attribution seam touches shared app and persistence-facing logic, so
+      the final gate should be repository-wide.
+      Alternative considerations:
+      - rely only on focused app tests.
+      - defer full-suite verification to a separate workflow.
+      Implementation details:
+      - execute `pnpm run test:all` as the terminal gate.
+      - keep this task dependent on every earlier implementation and focused
+        verification task.
+      Acceptance criteria:
+      - `pnpm run test:all` exits 0.
+      Layer: app_regression
+      Feature state: active
+    command: pnpm run test:all
+    dependencies:
+      - implement-persisted-attempt-attribution
+      - add-cost-query-attempt-regressions
+      - run-focused-app-cost-query-tests
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1

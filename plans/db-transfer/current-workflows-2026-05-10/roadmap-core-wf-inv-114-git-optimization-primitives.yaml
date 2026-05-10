@@ -1,0 +1,282 @@
+name: "Roadmap Core WF-INV-114: Git optimization primitives"
+description: >
+  Implements Roadmap Core issue INV-114 as a standalone chained workflow.
+
+  Experiment artifacts are committed, consumed by implementation, then cleaned
+  before final gate.
+onFinish: pull_request
+baseBranch: master
+featureBranch: plan/roadmap-core-wf-inv-114-git-optimization-primitives
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: experiment-inv-114
+    description: >
+      Design experiment and alternative proof task for INV-114.
+
+      Goal:
+
+      Define measurable experiment criteria and decision thresholds.
+
+      Motivation:
+
+      Keep design tradeoffs explicit before implementation changes.
+
+      Alternative considerations:
+
+      - Move directly to implementation without evidence.
+
+      - Evaluate alternatives informally without deterministic checks.
+
+      Implementation details:
+
+      - Create and commit `docs/context/inv-114/experiment-brief.md` with
+      Supported/Rejected/Deferred verdicts.
+
+      - Include deterministic commands, expected outputs, and pass/fail
+      thresholds.
+
+      Layer: transport
+
+      Feature state: active
+
+      Files:
+
+      - packages/execution-engine/src/worktree-executor.ts
+
+      - packages/execution-engine/src/worktree-discovery.ts
+
+      - packages/execution-engine/src/__tests__/task-runner.test.ts
+
+      - docs/context/inv-114/experiment-brief.md
+
+      Change types:
+
+      - modify
+
+      - docs-only
+
+      Acceptance criteria:
+
+      - `docs/context/inv-114/experiment-brief.md` exists and is committed in
+      this task.
+
+      - Alternative verdicts and thresholds are explicitly recorded.
+    prompt: >
+      Goal: Establish deterministic experiment proof for INV-114.
+
+      Motivation: Ensure architecture choices are evidence-backed and
+      reviewable.
+
+      Alternative considerations: Compare at least one competing design against
+      the selected approach.
+
+      Implementation details: Inspect
+      `packages/execution-engine/src/worktree-executor.ts`,
+      `packages/execution-engine/src/worktree-discovery.ts`,
+      `packages/execution-engine/src/__tests__/task-runner.test.ts`; create
+      `docs/context/inv-114/experiment-brief.md` with deterministic commands,
+      expected outputs, verdicts, and thresholds; then commit it.
+
+      Ensure the artifact is committed and references concrete files under test.
+    dependencies: []
+  - id: implement-inv-114
+    description: >
+      Implement chosen design for INV-114 after experiment framing.
+
+      Goal:
+
+      Deliver implementation aligned to experiment conclusions.
+
+      Motivation:
+
+      Keep implementation behavior tied to committed evidence.
+
+      Alternative considerations:
+
+      - Re-open rejected options without threshold evidence.
+
+      - Ignore artifact conclusions during code changes.
+
+      Implementation details:
+
+      - Read `docs/context/inv-114/experiment-brief.md` and apply its chosen
+      design/threshold decisions.
+
+      - Update scoped files and tests with explicit rationale.
+
+      Layer: transport
+
+      Feature state: active
+
+      Files:
+
+      - packages/execution-engine/src/worktree-executor.ts
+
+      - packages/execution-engine/src/worktree-discovery.ts
+
+      - packages/execution-engine/src/__tests__/task-runner.test.ts
+
+      - docs/context/inv-114/experiment-brief.md
+
+      Change types:
+
+      - modify
+
+      Acceptance criteria:
+
+      - Implementation references conclusions in
+      `docs/context/inv-114/experiment-brief.md`.
+
+      - Targeted tests are updated and pass.
+    prompt: >
+      Goal: Implement INV-114 using the experiment-selected design.
+
+      Motivation: Preserve consistency between committed experiment findings and
+      final code.
+
+      Alternative considerations: Keep rejected/deferred options documented and
+      avoid regressions toward them.
+
+      Implementation details: Read `docs/context/inv-114/experiment-brief.md`,
+      update `packages/execution-engine/src/worktree-executor.ts`,
+      `packages/execution-engine/src/worktree-discovery.ts`,
+      `packages/execution-engine/src/__tests__/task-runner.test.ts`, and verify
+      targeted tests before final regression.
+
+      Ensure artifact conclusions are explicitly consumed by implementation
+      changes.
+    dependencies:
+      - experiment-inv-114
+  - id: verify-inv-114
+    description: >
+      Targeted verification for INV-114.
+
+      Goal:
+
+      Confirm package-level regression safety for this workflow slice.
+
+      Motivation:
+
+      Catch scoped failures before full-suite regression.
+
+      Alternative considerations:
+
+      - Skip targeted verification and rely only on final gate.
+
+      - Use manual checks instead of deterministic command checks.
+
+      Implementation details:
+
+      - Execute targeted test command and confirm exit status is zero.
+
+      - Ensure proof notes in `docs/context/inv-114/experiment-brief.md` remain
+      consistent with outcomes.
+
+      Layer: app_regression
+
+      Feature state: active
+
+      Files:
+
+      - tests
+
+      - docs/context/inv-114/experiment-brief.md
+
+      Change types:
+
+      - test-only
+
+      Acceptance criteria:
+
+      - `cd packages/execution-engine && pnpm test` exits 0.
+
+      - Workflow notes align with artifact proof outcomes.
+    command: cd packages/execution-engine && pnpm test
+    dependencies:
+      - implement-inv-114
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+  - id: cleanup-experiment-artifacts-inv-114
+    description: >
+      Cleanup persisted experiment artifact for INV-114 before final regression.
+
+      Goal:
+
+      Remove temporary experiment document after implementation handoff is
+      complete.
+
+      Motivation:
+
+      Preserve clean branch history while keeping handoff deterministic.
+
+      Alternative considerations:
+
+      - Keep experiment artifacts indefinitely in implementation branches.
+
+      - Remove artifact without explicit commit for traceability.
+
+      Implementation details:
+
+      - Delete `docs/context/inv-114/experiment-brief.md` and commit cleanup
+      before final regression.
+
+      - Keep cleanup ordered after experiment/implement/verify tasks.
+
+      Layer: docs
+
+      Feature state: active
+
+      Files:
+
+      - docs/context/inv-114/experiment-brief.md
+
+      Change types:
+
+      - delete
+
+      Acceptance criteria:
+
+      - `docs/context/inv-114/experiment-brief.md` is removed and cleanup commit
+      exists.
+    command: 'rm -f docs/context/inv-114/experiment-brief.md && git add
+      docs/context/inv-114/experiment-brief.md && git commit -m
+      "cleanup(inv-114/experiment-brief): remove artifact after implementation
+      handoff"'
+    dependencies:
+      - experiment-inv-114
+      - implement-inv-114
+      - verify-inv-114
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+  - id: regression-inv-114
+    description: |
+      Final regression gate for INV-114 workflow.
+      Goal:
+      Validate end-to-end repository health after this workflow.
+      Motivation:
+      Prevent integration regressions before merge gate.
+      Alternative considerations:
+      - Merge with only scoped package verification.
+      - Defer full-suite validation to downstream workflows.
+      Implementation details:
+      - Run final full-suite test gate with explicit dependency coverage.
+      - Ensure workflow notes retain alternative-proof summary context.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - repository
+      Change types:
+      - none
+      Acceptance criteria:
+      - pnpm run test:all exits 0.
+    command: pnpm run test:all
+    dependencies:
+      - experiment-inv-114
+      - implement-inv-114
+      - verify-inv-114
+      - cleanup-experiment-artifacts-inv-114
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2

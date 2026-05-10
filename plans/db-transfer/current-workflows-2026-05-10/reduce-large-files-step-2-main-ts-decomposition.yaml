@@ -1,0 +1,275 @@
+name: "Reduce Large Files Step 2: main.ts decomposition"
+description: >
+  Goal:
+
+  - Decompose `packages/app/src/main.ts` into focused composition modules
+  without behavior changes.
+
+
+  Intention:
+
+  - Keep `main.ts` as a thin composition root and isolate startup, IPC, window,
+  and runner wiring.
+
+
+  Broad implementation:
+
+  - Extract bootstrap/service initialization into dedicated module.
+
+  - Extract IPC handler registration into dedicated module.
+
+  - Extract BrowserWindow lifecycle and renderer relay wiring.
+
+  - Extract TaskRunner construction and dispatcher binding.
+
+
+  Alternative considerations:
+
+  - Keep everything in one file and only add comments/regions.
+
+  - Perform a broad rewrite instead of extraction-first moves.
+
+
+  Competing-design proof:
+
+  - Demonstrate extracted modules preserve startup and delegation behavior
+  through focused app lanes.
+
+  - Show callsite surface in `main.ts` shrinks while runtime flow remains
+  equivalent.
+
+
+  Why this design is better:
+
+  - Extraction-first reduces risk and merge conflicts while preserving existing
+  contracts.
+onFinish: pull_request
+baseBranch: plan/reduce-large-files-step-1-baseline-and-guardrails
+featureBranch: plan/reduce-large-files-step-2-main-ts-decomposition
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: extract-main-bootstrap-and-ipc
+    description: >
+      Layer: app_bridge
+
+      Feature state: active
+
+      Goal:
+
+      - Extract startup/bootstrap and IPC registration out of `main.ts`.
+
+      Motivation:
+
+      - Reduce coupling between process lifecycle and command/transport
+      bindings.
+
+      Alternative considerations:
+
+      - Keep extraction deferred until later workflows.
+
+      - Refactor by rewrite rather than by seam extraction.
+
+      Chosen design rationale:
+
+      - Existing seams (`initServices`, IPC registration blocks) support
+      low-risk extraction.
+
+      Implementation details:
+
+      - Create modules for bootstrap and IPC registration under
+      `packages/app/src/`.
+
+      - Pass typed dependency bags into extracted functions.
+
+      - Keep external channel contracts unchanged.
+
+      Files:
+
+      - packages/app/src/main.ts
+
+      - packages/app/src/bootstrap/*
+
+      - packages/app/src/ipc/*
+
+      Change types:
+
+      - move initialization logic
+
+      - move IPC registration logic
+
+      Acceptance criteria:
+
+      - `main.ts` delegates bootstrap and IPC registration.
+
+      - Existing IPC behavior remains compatible.
+    prompt: >
+      Goal:
+
+      - Extract startup and IPC concerns from `main.ts` while preserving runtime
+      behavior.
+
+      Motivation:
+
+      - Keep composition root readable and reduce cross-cutting edits.
+
+      Alternative considerations:
+
+      - Leave one-file composition with only comments.
+
+      Implementation details:
+
+      - Add `bootstrap/app-bootstrap.ts` and `ipc/ipc-registration.ts`.
+
+      - Move logic from `main.ts` into these modules and invoke via typed
+      interfaces.
+
+      - Preserve channels, delegation behavior, and lifecycle sequencing.
+
+      Competing-design proof:
+
+      - Show extracted functions preserve existing startup ordering and IPC
+      registration outputs.
+
+      Acceptance criteria (must):
+
+      - Ensure `main.ts` delegates bootstrap and IPC registration through
+      extracted modules.
+
+      - Verify existing IPC channel behavior remains unchanged.
+    dependencies: []
+    externalDependencies:
+      - workflowId: wf-1778223498854-5
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+    executorType: worktree
+  - id: extract-main-window-and-runner-wiring
+    description: >
+      Layer: app_bridge
+
+      Feature state: active
+
+      Goal:
+
+      - Extract BrowserWindow lifecycle and TaskRunner wiring from `main.ts`.
+
+      Motivation:
+
+      - Decouple UI shell lifecycle from execution-engine wiring
+      responsibilities.
+
+      Alternative considerations:
+
+      - Keep runner wiring inline in `main.ts`.
+
+      - Move only window code and leave execution setup untouched.
+
+      Chosen design rationale:
+
+      - `createWindow`/lifecycle hooks and `rebuildTaskRunner` are cohesive
+      extraction seams.
+
+      Implementation details:
+
+      - Add window lifecycle module and task-runner wiring module.
+
+      - Keep callback semantics and dispatcher binding unchanged.
+
+      Files:
+
+      - packages/app/src/main.ts
+
+      - packages/app/src/window/*
+
+      - packages/app/src/execution/*
+
+      Change types:
+
+      - move window lifecycle logic
+
+      - move task-runner construction/wiring logic
+
+      Acceptance criteria:
+
+      - Main process window behavior remains unchanged.
+
+      - Task dispatch still routes through `TaskRunner.executeTasks`.
+    prompt: >
+      Goal:
+
+      - Complete `main.ts` decomposition by extracting window lifecycle and
+      task-runner wiring.
+
+      Motivation:
+
+      - Keep UI lifecycle and execution wiring maintainable and reviewable.
+
+      Alternative considerations:
+
+      - Leave `rebuildTaskRunner` in-place for convenience.
+
+      Implementation details:
+
+      - Add `window/window-lifecycle.ts` and `execution/task-runner-wiring.ts`.
+
+      - Ensure callback behavior and dispatcher assignment remain equivalent.
+
+      - Keep current renderer event forwarding behavior unchanged.
+
+      Competing-design proof:
+
+      - Demonstrate unchanged task dispatch + renderer update flow after
+      extraction.
+
+      Acceptance criteria (must):
+
+      - Ensure task dispatch still routes via `TaskRunner.executeTasks`.
+
+      - Verify BrowserWindow lifecycle behavior remains unchanged.
+    dependencies:
+      - extract-main-bootstrap-and-ipc
+    executorType: worktree
+  - id: verify-main-decomposition-lane
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Verify app bridge/orchestrator integration after `main.ts` extraction.
+      Motivation:
+      - Catch startup and delegation regressions early.
+      Alternative considerations:
+      - Rely only on final full-suite regression.
+      Implementation details:
+      - Run focused app package test lane for bridge/orchestrator integration.
+      Acceptance criteria:
+      - Focused app integration lane passes.
+    command: cd packages/app && pnpm test --
+      src/__tests__/bridge-orchestrator-executor.test.ts
+    dependencies:
+      - extract-main-window-and-runner-wiring
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Run terminal full-repository regression gate for this workflow.
+      Motivation:
+      - Ensure no cross-package regressions from `main.ts` decomposition.
+      Alternative considerations:
+      - Only run app package lanes.
+      Implementation details:
+      - Execute `pnpm run test:all` after focused verification.
+      Acceptance criteria:
+      - Full repository suite passes.
+    command: pnpm run test:all
+    dependencies:
+      - extract-main-bootstrap-and-ipc
+      - extract-main-window-and-runner-wiring
+      - verify-main-decomposition-lane
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1

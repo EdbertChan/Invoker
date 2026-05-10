@@ -1,0 +1,198 @@
+name: "Reduce Large Files Step 1: baseline and guardrails"
+description: >
+  Goal:
+
+  - Establish enforceable size guardrails before decomposition work starts.
+
+  - Create a deterministic baseline for current hotspot files and thresholds.
+
+
+  Intention:
+
+  - Prevent future re-growth of oversized files while refactors are underway.
+
+  - Keep boundary and layering checks visible in CI so decomposition stays safe.
+
+
+  Broad implementation:
+
+  - Add a script that reports oversized production files and fails above
+  threshold.
+
+  - Wire the script into repository validation commands and CI entrypoints.
+
+  - Preserve existing architecture checks and make violations actionable.
+
+
+  Alternative considerations:
+
+  - Delay guardrails until after decomposition completes.
+
+  - Rely only on reviewer judgment without automated thresholds.
+
+
+  Competing-design proof:
+
+  - Compare drift frequency with and without automated thresholds.
+
+  - Confirm CI fails deterministically when new oversized files are introduced.
+
+
+  Why this design is better:
+
+  - Guardrails first reduces refactor backslide and creates measurable progress.
+onFinish: pull_request
+baseBranch: master
+featureBranch: plan/reduce-large-files-step-1-baseline-and-guardrails
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: implement-large-file-guardrail
+    description: >
+      Layer: app_bridge
+
+      Feature state: active
+
+      Goal:
+
+      - Add a deterministic oversized-file guardrail with clear thresholds.
+
+      Motivation:
+
+      - Keep decomposition gains from regressing as new changes land.
+
+      Alternative considerations:
+
+      - Track file sizes manually in docs.
+
+      - Depend on ad-hoc review comments only.
+
+      Chosen design rationale:
+
+      - Scripted checks are fast, reproducible, and CI-enforceable.
+
+      Implementation details:
+
+      - Add a script under `scripts/` to scan production source files and
+      enforce threshold.
+
+      - Exclude generated outputs and lockfiles.
+
+      - Add baseline output so hotspots can be tracked over time.
+
+      Files:
+
+      - scripts/*
+
+      - package.json
+
+      - .github/workflows/*
+
+      Change types:
+
+      - add validation script
+
+      - wire script into repo checks
+
+      Acceptance criteria:
+
+      - Script exits non-zero when threshold is exceeded.
+
+      - Baseline report includes key hotspot files.
+    prompt: >
+      Goal:
+
+      - Implement deterministic large-file guardrails before decomposition work.
+
+      Motivation:
+
+      - Avoid refactor drift and make large-file regressions visible.
+
+      Alternative considerations:
+
+      - Manual tracking and reviewer-only enforcement.
+
+      Implementation details:
+
+      - Create a script that scans repository production sources and fails when
+      file length exceeds threshold.
+
+      - Ignore generated/build artifacts and lockfiles.
+
+      - Wire command into existing validation entrypoints for CI use.
+
+      Files:
+
+      - scripts/
+
+      - package.json
+
+      - .github/workflows/
+
+      Competing-design proof:
+
+      - Show this guardrail catches intentionally oversized sample inputs in a
+      deterministic way.
+
+      Acceptance criteria (must):
+
+      - Ensure the guardrail command fails when a production file exceeds
+      threshold.
+
+      - Verify CI wiring runs the guardrail as part of repository checks.
+    dependencies: []
+    executorType: worktree
+  - id: verify-guardrail-lane
+    description: >
+      Layer: app_regression
+
+      Feature state: active
+
+      Goal:
+
+      - Verify guardrail and baseline checks run successfully.
+
+      Motivation:
+
+      - Confirm script wiring and deterministic output before dependent
+      workflows.
+
+      Alternative considerations:
+
+      - Skip focused lane and rely only on end-of-workflow full gate.
+
+      Implementation details:
+
+      - Run the guardrail command and any focused package checks needed by
+      script changes.
+
+      Acceptance criteria:
+
+      - Guardrail command succeeds in current baseline state.
+    command: pnpm lint
+    dependencies:
+      - implement-large-file-guardrail
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Run terminal full-repository regression gate for this workflow.
+      Motivation:
+      - Ensure guardrail additions do not regress unrelated packages.
+      Alternative considerations:
+      - Limit checks to lint/build only.
+      Implementation details:
+      - Execute `pnpm run test:all` as final gate.
+      Acceptance criteria:
+      - Full repository suite passes.
+    command: pnpm run test:all
+    dependencies:
+      - implement-large-file-guardrail
+      - verify-guardrail-lane
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1

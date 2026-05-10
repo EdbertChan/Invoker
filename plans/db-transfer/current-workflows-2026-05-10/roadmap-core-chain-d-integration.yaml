@@ -1,0 +1,65 @@
+name: Roadmap Core Chain D Integration
+description: |
+  Chain-level integration workflow for Roadmap Core chain D.
+onFinish: pull_request
+baseBranch: plan/roadmap-core-wf-inv-143-workflow-submission-storm-lag-mitigation
+featureBranch: plan/roadmap-core-chain-d-integration
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: verify-chain-d-targeted
+    description: |
+      Targeted chain D regression.
+      Goal:
+      Validate cumulative chain behavior before final full-suite gate.
+      Motivation:
+      Catch integrated failures early in the chain convergence layer.
+      Alternative considerations:
+      - Skip targeted chain verification and rely only on final full suite.
+      - Use ad-hoc manual checks instead of deterministic command checks.
+      Implementation details:
+      - Run deterministic package-targeted lane for chain D.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/workflow-core
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/workflow-core && pnpm test exits 0.
+    command: cd packages/workflow-core && pnpm test
+    dependencies: []
+    externalDependencies:
+      - workflowId: wf-1778323047018-42
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+  - id: regression-chain-d
+    description: |
+      Final chain D regression gate.
+      Goal:
+      Confirm repository-wide safety after chain D integration.
+      Motivation:
+      Ensure chain merge readiness before final convergence workflow.
+      Alternative considerations:
+      - Rely only on package-level tests.
+      - Defer full regression to later stages without local gate.
+      Implementation details:
+      - Execute `pnpm run test:all` after targeted chain verification.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - repository
+      Change types:
+      - none
+      Acceptance criteria:
+      - pnpm run test:all exits 0.
+    command: pnpm run test:all
+    dependencies:
+      - verify-chain-d-targeted
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2

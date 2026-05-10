@@ -1,0 +1,71 @@
+name: "Fix intent cancellation Step 3: SSH startup lineage guards"
+description: |
+  Hardens execution-engine startup failure persistence so stale SSH launches
+  cannot write old worktree metadata back onto the live task row after the
+  selected attempt has advanced.
+
+  Publication intent: publish intermediate/helper branches to the fork and
+  target the final PR gate at the parent repo.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+baseBranch: plan/fix-intent-cancellation-step-2-fix-lineage-guards
+featureBranch: plan/fix-intent-cancellation-step-3-ssh-startup-lineage
+
+externalDependencies:
+  - workflowId: "wf-1778296187794-1"
+    requiredStatus: completed
+    gatePolicy: review_ready
+
+    taskId: "__merge__"
+tasks:
+  - id: guard-stale-startup-failure-metadata
+    description: |
+      Goal:
+      Prevent stale SSH startup failures from reattaching old workspace and
+      branch metadata to a task after the selected attempt has advanced.
+      Motivation:
+      The repro proved TaskRunner can write old `workspacePath` / `branch`
+      metadata and a failed response from attempt-1 after the task already
+      moved to attempt-2.
+      Alternative considerations:
+      Keeping the stale metadata write and only cleaning it later would still
+      allow the next SSH launch to collide on the wrong worktree owner path.
+      Implementation details:
+      Make executor startup-failure persistence attempt-aware, scope stale
+      diagnostics away from the live task row, and add coverage for stale
+      failure-response suppression on newer lineages.
+      Layer: owner_delegation
+      Feature state: active
+      Files:
+      - packages/execution-engine/src/task-runner.ts
+      - packages/execution-engine/src/__tests__/task-runner.test.ts
+      - packages/execution-engine/src/__tests__/ssh-worktree-metadata-repro.test.ts
+      Change types:
+      - modify
+      Acceptance criteria:
+      - Stale SSH startup failures do not overwrite live task execution metadata or emit a failed response against a newer selected attempt.
+    prompt: |
+      Goal:
+      Prevent stale SSH startup failures from reattaching old workspace and
+      branch metadata to a task after the selected attempt has advanced.
+      Motivation:
+      The repro proved TaskRunner can write old `workspacePath` / `branch`
+      metadata and a failed response from attempt-1 after the task already
+      moved to attempt-2.
+      Alternative considerations:
+      Keeping the stale metadata write and only cleaning it later would still
+      allow the next SSH launch to collide on the wrong worktree owner path.
+      Implementation details:
+      Modify packages/execution-engine/src/task-runner.ts and the adjacent
+      tests. Add a current-lineage guard around executor startup-failure
+      persistence so stale launches cannot write old branch/workspace metadata
+      or emit a failed worker response against the newer selected attempt.
+      Preserve useful diagnostics for the stale launch through an append-only or
+      attempt-scoped path rather than mutating the live task row. Update or
+      extend targeted task-runner and SSH repro coverage to prove the stale
+      metadata write is blocked.
+      Acceptance criteria:
+      - Ensure stale SSH startup failures do not overwrite live task execution metadata or emit a failed response against a newer selected attempt.
+    dependencies: []

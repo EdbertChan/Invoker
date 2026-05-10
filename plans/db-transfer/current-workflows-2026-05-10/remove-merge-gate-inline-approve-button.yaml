@@ -1,0 +1,380 @@
+name: Remove merge-gate inline approve button
+description: >
+  Goal:
+
+  - Remove the bright green inline approve button rendered directly on the
+  merge-gate chip/node in manual review states.
+
+
+  Motivation:
+
+  - The node-level button competes with the chip status styling and makes the
+  graph feel like an action surface instead of a navigation surface.
+
+  - Approval already exists in the TaskPanel and ApprovalModal, so the inline
+  button is redundant and visually louder than the surrounding merge-gate
+  metadata.
+
+
+  Alternatives considered:
+
+  - Option A (chosen): remove the inline node button and keep approval entry in
+  TaskPanel/modal only.
+
+  - Option B: keep the button but restyle it to a neutral treatment.
+
+  - Option C: move the action into a hover-only affordance on the node.
+
+
+  Why this design is better:
+
+  - Option A removes the green button entirely, simplifies the chip, and
+  preserves the existing approval flow after selecting the merge gate.
+
+  - It keeps the DAG focused on state and navigation while leaving irreversible
+  actions in the side panel/modal stack.
+
+
+  Publication note:
+
+  - This targets Invoker itself; after implementation commits are ready,
+  publish/update stacked PRs with `mergify stack push`.
+visualProof: true
+onFinish: pull_request
+baseBranch: plan/pending-review-gate-target-repo-ui
+featureBranch: plan/remove-merge-gate-inline-approve-button
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: add-merge-gate-no-inline-approve-visual-proof
+    description: >
+      Layer: e2e_regression
+
+      Feature state: active
+
+      Goal:
+
+      - Add visual-proof coverage for an awaiting-approval merge gate without
+      any inline node approval button.
+
+      Motivation:
+
+      - The UI change is visible and should be reviewable with a deterministic
+      screenshot path.
+
+      Alternative considerations:
+
+      - Option A (chosen): add a focused visual-proof case for the merge gate
+      approval surface.
+
+      - Option B: rely only on unit/integration tests.
+
+      Implementation details:
+
+      - Extend the existing Playwright visual-proof suite with a merge-gate case
+      that puts the gate into an approval state, asserts the node-level button
+      is absent, then selects the gate and shows the TaskPanel approval
+      affordance.
+
+      Files:
+
+      - packages/app/e2e/visual-proof.spec.ts
+
+      Change types:
+
+      - test-only
+
+      Acceptance criteria:
+
+      - The new visual-proof case captures a stable screenshot for the merge
+      gate without an inline approve button.
+
+      - The case asserts `approve-merge-button` is absent on the DAG node and
+      that selecting the gate still exposes the TaskPanel approval button.
+    prompt: >
+      Goal:
+
+      - Add a visual-proof test for the merge gate after the inline approve
+      button is removed.
+
+      Motivation:
+
+      - Reviewers need before/after screenshot evidence for the merge-gate chip
+      cleanup.
+
+      Alternative considerations:
+
+      - Option A (chosen): add a dedicated `visual-proof.spec.ts` case for the
+      approval-state merge gate.
+
+      - Option B: reuse an unrelated merge-gate snapshot.
+
+      Implementation details:
+
+      - In `packages/app/e2e/visual-proof.spec.ts`, add a new test that loads a
+      manual merge-gate workflow and drives the merge gate into an approval
+      state.
+
+      - Reuse existing helpers such as `loadPlan`, `injectTaskStates`,
+      `captureScreenshot`, and `assertPageScreenshot` where appropriate.
+
+      - Assert the DAG node does not render `approve-merge-button`.
+
+      - Click the merge-gate node so the TaskPanel opens, assert the TaskPanel
+      still shows the approval action, and capture a screenshot with a stable
+      name such as `merge-gate-no-inline-approve`.
+
+      Files:
+
+      - packages/app/e2e/visual-proof.spec.ts
+
+      Acceptance criteria:
+
+      - The test fails on a build that still renders the inline node button.
+
+      - The saved screenshot demonstrates the approval path now lives in the
+      TaskPanel instead of the chip.
+    dependencies: []
+    executorType: worktree
+  - id: remove-merge-gate-inline-approve-button
+    description: >
+      Layer: ui_activation
+
+      Feature state: active
+
+      Goal:
+
+      - Remove the inline approve button and direct approval click handler from
+      `MergeGateNode`.
+
+      Motivation:
+
+      - The green node button is the visual artifact being removed, while the
+      TaskPanel/modal path remains the canonical action surface.
+
+      Alternative considerations:
+
+      - Option A (chosen): remove the node button entirely and keep selection
+      behavior unchanged.
+
+      - Option B: keep the node action but hide it behind hover or neutral
+      styling.
+
+      Implementation details:
+
+      - Delete the inline approve button rendering and any node-local approval
+      callback/error state that only existed to support it.
+
+      - Preserve merge-gate status labels, selection behavior, and
+      `pendingFixError`-driven visual status treatment.
+
+      - Update merge-gate UI tests to assert the node button is absent while
+      TaskPanel/modal approval continues to work after selecting the merge gate.
+
+      Files:
+
+      - packages/ui/src/components/MergeGateNode.tsx
+
+      - packages/ui/src/__tests__/merge-gate-node.test.tsx
+
+      - packages/ui/src/__tests__/merge-gate-approval-flow.test.tsx
+
+      Change types:
+
+      - modify
+
+      - test-only
+
+      Acceptance criteria:
+
+      - `MergeGateNode` never renders `approve-merge-button` in manual
+      merge-gate approval states.
+
+      - Selecting a merge gate still opens the existing TaskPanel approval flow
+      and modal confirmation path.
+    prompt: >
+      Goal:
+
+      - Remove the merge-gate node's inline approve button while preserving the
+      side-panel approval flow.
+
+      Motivation:
+
+      - The graph chip should present status and selection, not a bright primary
+      action button.
+
+      Alternative considerations:
+
+      - Option A (chosen): remove the node button and rely on TaskPanel/modal
+      approval.
+
+      - Option B: keep an inline button with toned-down styling.
+
+      Implementation details:
+
+      - In `packages/ui/src/components/MergeGateNode.tsx`, remove the
+      `approve-merge-button` rendering path and any local state/callbacks that
+      only support it.
+
+      - Keep merge-gate labels, status copy, and selection visuals intact.
+
+      - In `packages/ui/src/__tests__/merge-gate-node.test.tsx`, replace
+      expectations that the button exists with assertions that it does not
+      render for manual merge-gate approval states.
+
+      - In `packages/ui/src/__tests__/merge-gate-approval-flow.test.tsx`, remove
+      inline-button assertions/clicks and keep the TaskPanel-to-modal approval
+      flow coverage after selecting the gate node.
+
+      Files:
+
+      - packages/ui/src/components/MergeGateNode.tsx
+
+      - packages/ui/src/__tests__/merge-gate-node.test.tsx
+
+      - packages/ui/src/__tests__/merge-gate-approval-flow.test.tsx
+
+      Acceptance criteria:
+
+      - The node no longer exposes direct
+      `window.invoker.approveMerge(workflowId)` UI from the DAG chip.
+
+      - Approval remains available after selecting the merge gate in the main
+      app flow.
+    dependencies: []
+    executorType: worktree
+  - id: verify-merge-gate-approval-regression
+    description: >
+      Layer: app_regression
+
+      Feature state: active
+
+      Goal:
+
+      - Run focused UI regression coverage for the merge-gate approval surface.
+
+      Motivation:
+
+      - The change removes an interaction path, so the targeted regression needs
+      to prove the surviving path still works.
+
+      Alternative considerations:
+
+      - Option A (chosen): run the targeted merge-gate component/integration
+      suite before broader regression.
+
+      - Option B: rely only on `pnpm run test:all`.
+
+      Implementation details:
+
+      - Execute the merge-gate node and app approval-flow tests from the UI
+      package.
+
+      Files:
+
+      - packages/ui/src/__tests__/merge-gate-node.test.tsx
+
+      - packages/ui/src/__tests__/merge-gate-approval-flow.test.tsx
+
+      Change types:
+
+      - none
+
+      Acceptance criteria:
+
+      - The targeted merge-gate UI tests pass.
+    command: cd packages/ui && pnpm test -- src/__tests__/merge-gate-node.test.tsx
+      src/__tests__/merge-gate-approval-flow.test.tsx
+    dependencies:
+      - remove-merge-gate-inline-approve-button
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+  - id: capture-merge-gate-visual-proof
+    description: >
+      Layer: e2e_regression
+
+      Feature state: active
+
+      Goal:
+
+      - Build the app and capture after-state screenshots for the merge-gate
+      chip cleanup.
+
+      Motivation:
+
+      - The button removal is a visible UI change that should ship with
+      deterministic screenshot evidence.
+
+      Alternative considerations:
+
+      - Option A (chosen): run the standard visual-proof capture lane after the
+      UI and E2E test changes land.
+
+      - Option B: rely on code review without screenshots.
+
+      Implementation details:
+
+      - Build the UI and app packages, then run the standard visual-proof
+      capture script with the `after` label.
+
+      Files:
+
+      - packages/app/e2e/visual-proof.spec.ts
+
+      - packages/ui/src/components/MergeGateNode.tsx
+
+      Change types:
+
+      - none
+
+      Acceptance criteria:
+
+      - The after-state visual proof run completes successfully and includes the
+      merge-gate no-inline-approve snapshot.
+    command: pnpm --filter @invoker/ui build && pnpm --filter @invoker/app build &&
+      bash scripts/ui-visual-proof.sh --label after
+    dependencies:
+      - add-merge-gate-no-inline-approve-visual-proof
+      - remove-merge-gate-inline-approve-button
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+  - id: final-regression-test-all
+    description: >
+      Layer: e2e_regression
+
+      Feature state: active
+
+      Goal:
+
+      - Run the full repository regression suite as the terminal validation
+      gate.
+
+      Motivation:
+
+      - The merge-gate component is shared app UI, so the final plan step should
+      confirm no broader regressions remain.
+
+      Alternative considerations:
+
+      - Option A (chosen): run `pnpm run test:all` after all prior tasks
+      complete.
+
+      - Option B: stop after targeted UI checks and visual proof.
+
+      Implementation details:
+
+      - Execute the repository-wide regression suite only after the
+      implementation, focused tests, and visual proof tasks finish.
+
+      Acceptance criteria:
+
+      - `pnpm run test:all` exits successfully.
+    command: pnpm run test:all
+    dependencies:
+      - add-merge-gate-no-inline-approve-visual-proof
+      - remove-merge-gate-inline-approve-button
+      - verify-merge-gate-approval-regression
+      - capture-merge-gate-visual-proof
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1

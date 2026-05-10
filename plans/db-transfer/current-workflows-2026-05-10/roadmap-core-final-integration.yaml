@@ -1,0 +1,141 @@
+name: Roadmap Core Final Integration
+description: |
+  Final convergence workflow for all Roadmap Core chains.
+onFinish: pull_request
+baseBranch: plan/roadmap-core-chain-a-integration
+featureBranch: plan/roadmap-core-final-integration
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: verify-final-app
+    description: |
+      Cross-chain app regression precheck.
+      Goal:
+      Validate app-layer convergence before final repository gate.
+      Motivation:
+      Isolate app-layer regressions prior to full-suite run.
+      Alternative considerations:
+      - Skip app precheck and rely only on final test:all.
+      - Run manual smoke checks instead of deterministic command.
+      Implementation details:
+      - Execute app package targeted test lane.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/app
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/app && pnpm test exits 0.
+    command: cd packages/app && pnpm test
+    dependencies: []
+    externalDependencies:
+      - &a1
+        workflowId: wf-1778322987782-27
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+      - &a2
+        workflowId: wf-1778323016935-33
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+      - &a3
+        workflowId: wf-1778323034025-38
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+      - &a4
+        workflowId: wf-1778323050943-43
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+  - id: verify-final-workflow-core
+    description: |
+      Cross-chain workflow-core regression precheck.
+      Goal:
+      Validate workflow-core convergence before final repository gate.
+      Motivation:
+      Catch orchestration-layer regressions before full-suite execution.
+      Alternative considerations:
+      - Merge without workflow-core package precheck.
+      - Delay workflow-core signal until final gate only.
+      Implementation details:
+      - Execute workflow-core package targeted test lane.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/workflow-core
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/workflow-core && pnpm test exits 0.
+    command: cd packages/workflow-core && pnpm test
+    dependencies: []
+    externalDependencies:
+      - *a1
+      - *a2
+      - *a3
+      - *a4
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+  - id: verify-final-execution-engine
+    description: |
+      Cross-chain execution-engine regression precheck.
+      Goal:
+      Validate execution-engine convergence before final repository gate.
+      Motivation:
+      Detect executor/runtime regressions prior to full-suite run.
+      Alternative considerations:
+      - Skip execution-engine precheck and rely only on full suite.
+      - Use partial smoke checks instead of deterministic tests.
+      Implementation details:
+      - Execute execution-engine package targeted test lane.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/execution-engine
+      Change types:
+      - test-only
+      Acceptance criteria:
+      - cd packages/execution-engine && pnpm test exits 0.
+    command: cd packages/execution-engine && pnpm test
+    dependencies: []
+    externalDependencies:
+      - *a1
+      - *a2
+      - *a3
+      - *a4
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2
+  - id: regression-final-core
+    description: |
+      Final repository regression for Roadmap Core stack.
+      Goal:
+      Validate full repository stability at stack convergence.
+      Motivation:
+      Ensure merge readiness after all chain integrations.
+      Alternative considerations:
+      - Stop at package-level prechecks only.
+      - Defer full-suite validation to post-merge CI only.
+      Implementation details:
+      - Execute final `pnpm run test:all` after all prechecks complete.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - repository
+      Change types:
+      - none
+      Acceptance criteria:
+      - pnpm run test:all exits 0.
+    command: pnpm run test:all
+    dependencies:
+      - verify-final-app
+      - verify-final-workflow-core
+      - verify-final-execution-engine
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_2

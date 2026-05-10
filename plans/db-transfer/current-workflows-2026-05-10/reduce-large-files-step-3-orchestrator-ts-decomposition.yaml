@@ -1,0 +1,267 @@
+name: "Reduce Large Files Step 3: orchestrator.ts decomposition"
+description: >
+  Goal:
+
+  - Decompose `packages/workflow-core/src/orchestrator.ts` into cohesive domain
+  collaborators.
+
+
+  Intention:
+
+  - Keep the `Orchestrator` public API stable while isolating scheduler,
+  transition, merge/experiment, and event concerns.
+
+
+  Broad implementation:
+
+  - Extract scheduling/dispatch helpers to dedicated module.
+
+  - Extract state transition/mutation helpers to dedicated module.
+
+  - Extract merge/experiment orchestration path helpers.
+
+  - Extract event and delta publication helpers.
+
+
+  Alternative considerations:
+
+  - Keep all logic in a single class file with comments.
+
+  - Split by arbitrary file size chunks without domain boundaries.
+
+
+  Competing-design proof:
+
+  - Verify dispatch ordering and lifecycle semantics remain unchanged.
+
+  - Verify delta publication contracts remain stable while internal code is
+  modularized.
+
+
+  Why this design is better:
+
+  - Domain-guided extraction improves maintainability and minimizes behavioral
+  drift.
+onFinish: pull_request
+baseBranch: plan/reduce-large-files-step-2-main-ts-decomposition
+featureBranch: plan/reduce-large-files-step-3-orchestrator-ts-decomposition
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: extract-orchestrator-scheduler-and-transitions
+    description: >
+      Layer: domain
+
+      Feature state: active
+
+      Goal:
+
+      - Extract scheduler/dispatch and transition helpers from
+      `orchestrator.ts`.
+
+      Motivation:
+
+      - Make core state progression and ready-task dispatch easier to reason
+      about.
+
+      Alternative considerations:
+
+      - Keep helpers inline inside `Orchestrator`.
+
+      - Extract only scheduler logic and defer transitions.
+
+      Chosen design rationale:
+
+      - Scheduler and transitions are the highest-impact seams and reduce file
+      complexity fastest.
+
+      Implementation details:
+
+      - Add orchestrator helper modules for scheduler and transitions.
+
+      - Keep API and call ordering stable.
+
+      Files:
+
+      - packages/workflow-core/src/orchestrator.ts
+
+      - packages/workflow-core/src/orchestrator/*
+
+      Change types:
+
+      - extract scheduler helper logic
+
+      - extract transition helper logic
+
+      Acceptance criteria:
+
+      - `Orchestrator` external methods and signatures remain unchanged.
+
+      - Ready-task dispatch behavior remains equivalent.
+    prompt: >
+      Goal:
+
+      - Extract scheduler and transition domains from `orchestrator.ts` with no
+      API change.
+
+      Motivation:
+
+      - Improve readability and reduce risk for future orchestration changes.
+
+      Alternative considerations:
+
+      - Keep monolithic orchestrator file.
+
+      Implementation details:
+
+      - Create helper modules under `packages/workflow-core/src/orchestrator/`.
+
+      - Move targeted logic while preserving lifecycle invariants and call
+      sequence.
+
+      - Keep dispatcher invocation and task state semantics identical.
+
+      Competing-design proof:
+
+      - Show post-extraction behavior for scheduling and transitions remains
+      unchanged in focused tests.
+
+      Acceptance criteria (must):
+
+      - Ensure `Orchestrator` public API signatures remain unchanged.
+
+      - Verify ready-task scheduling and dispatch behavior is preserved.
+    dependencies: []
+    externalDependencies:
+      - workflowId: wf-1778223501729-6
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+    executorType: worktree
+  - id: extract-orchestrator-merge-and-events
+    description: >
+      Layer: domain
+
+      Feature state: active
+
+      Goal:
+
+      - Extract merge/experiment and event publication concerns from
+      `orchestrator.ts`.
+
+      Motivation:
+
+      - Separate specialized merge policies and cross-cutting event publication
+      from baseline orchestration path.
+
+      Alternative considerations:
+
+      - Keep merge/event logic interleaved with core mutation flow.
+
+      - Extract only merge path and defer event publication.
+
+      Chosen design rationale:
+
+      - Merge/event concerns evolve independently and benefit from dedicated
+      modules.
+
+      Implementation details:
+
+      - Add helper modules for merge/experiment flows and delta publication.
+
+      - Preserve `TASK_DELTA` contract and publish sequencing.
+
+      Files:
+
+      - packages/workflow-core/src/orchestrator.ts
+
+      - packages/workflow-core/src/orchestrator/*
+
+      Change types:
+
+      - extract merge/experiment helper logic
+
+      - extract message bus publication helper logic
+
+      Acceptance criteria:
+
+      - Merge/experiment behavior remains compatible.
+
+      - Delta publication remains contract-compatible.
+    prompt: >
+      Goal:
+
+      - Complete orchestrator decomposition by extracting merge/experiment and
+      event publication concerns.
+
+      Motivation:
+
+      - Keep specialized branches isolated from baseline orchestration flow.
+
+      Alternative considerations:
+
+      - Leave event publication in `orchestrator.ts`.
+
+      Implementation details:
+
+      - Add merge and event helper modules and wire from orchestrator methods.
+
+      - Preserve event payload shape and ordering guarantees.
+
+      - Keep orchestrator public API and command service interactions unchanged.
+
+      Competing-design proof:
+
+      - Demonstrate merge and delta behavior remain equivalent in focused lanes.
+
+      Acceptance criteria (must):
+
+      - Ensure merge/experiment behavior remains compatible.
+
+      - Verify `TASK_DELTA` publication contract remains stable.
+    dependencies:
+      - extract-orchestrator-scheduler-and-transitions
+    executorType: worktree
+  - id: verify-orchestrator-decomposition-lane
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Verify workflow-core orchestration behavior after decomposition.
+      Motivation:
+      - Ensure core lifecycle semantics remain stable.
+      Alternative considerations:
+      - Rely only on global full-suite checks.
+      Implementation details:
+      - Run focused workflow-core orchestrator lane.
+      Acceptance criteria:
+      - Focused orchestrator lane passes.
+    command: cd packages/workflow-core && pnpm test --
+      src/__tests__/orchestrator.test.ts
+    dependencies:
+      - extract-orchestrator-merge-and-events
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+  - id: post-fix-regression
+    description: |
+      Layer: app_regression
+      Feature state: active
+      Goal:
+      - Run terminal full-repository regression gate for this workflow.
+      Motivation:
+      - Catch cross-package regressions from domain-layer decomposition.
+      Alternative considerations:
+      - Keep validation confined to workflow-core package.
+      Implementation details:
+      - Execute `pnpm run test:all` after focused orchestration checks.
+      Acceptance criteria:
+      - Full repository suite passes.
+    command: pnpm run test:all
+    dependencies:
+      - extract-orchestrator-scheduler-and-transitions
+      - extract-orchestrator-merge-and-events
+      - verify-orchestrator-decomposition-lane
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1

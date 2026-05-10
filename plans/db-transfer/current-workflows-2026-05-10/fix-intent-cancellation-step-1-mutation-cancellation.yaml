@@ -1,0 +1,74 @@
+name: "Fix intent cancellation Step 1: workflow mutation cancellation hardening"
+description: |
+  Extracts the workflow-mutation cancellation primitive into its own first
+  stack step so downstream lineage guards build on an explicit preemption
+  contract instead of one long monolithic workflow.
+
+  Publication intent: publish intermediate/helper branches to the fork and
+  target the final PR gate at the parent repo.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+baseBranch: master
+featureBranch: plan/fix-intent-cancellation-step-1-mutation-cancellation
+
+tasks:
+  - id: harden-workflow-mutation-cancellation
+    description: |
+      Goal:
+      Make workflow-mutation invalidation cancellation-aware so recreate/delete
+      fences stop superseded async fix work instead of only marking the
+      persisted intent failed.
+      Motivation:
+      The shared repro proved the old `invoker:fix-with-agent` mutation still
+      runs its side effect after `invoker:recreate-task` completes, which leaves
+      stale writes possible even when the queue correctly transfers authority.
+      Alternative considerations:
+      Special-casing only `recreate-task` would leave the same late-write bug
+      class on other hard-preempt fences such as recreate-with-rebase and
+      delete workflows.
+      Implementation details:
+      Extend the workflow-mutation dispatch contract to include cancellation
+      context, propagate invalidation through
+      PersistedWorkflowMutationCoordinator, and preserve existing queue
+      semantics for non-preempted mutations.
+      Layer: app_bridge
+      Feature state: active
+      Files:
+      - packages/app/src/persisted-workflow-mutation-coordinator.ts
+      - packages/app/src/workflow-mutation-coordinator.ts
+      - packages/app/src/workflow-preemption.ts
+      - packages/app/src/__tests__/persisted-workflow-mutation-coordinator.test.ts
+      Change types:
+      - modify
+      Acceptance criteria:
+      - Coordinator coverage proves superseded fix mutations are aborted when recreate/delete fences preempt them.
+    prompt: |
+      Goal:
+      Make workflow-mutation invalidation cancellation-aware so recreate/delete
+      fences stop superseded async fix work instead of only marking the
+      persisted intent failed.
+      Motivation:
+      The shared repro proved the old `invoker:fix-with-agent` mutation still
+      runs its side effect after `invoker:recreate-task` completes, which leaves
+      stale writes possible even when the queue correctly transfers authority.
+      Alternative considerations:
+      Special-casing only `recreate-task` would leave the same late-write bug
+      class on other hard-preempt fences such as recreate-with-rebase and
+      delete workflows.
+      Implementation details:
+      Modify packages/app/src/persisted-workflow-mutation-coordinator.ts,
+      packages/app/src/workflow-mutation-coordinator.ts,
+      packages/app/src/workflow-preemption.ts, and related tests. Extend the
+      internal dispatch contract so running mutations receive cancellation
+      context with an AbortSignal plus identifying metadata. When the
+      coordinator invalidates a running fix-like mutation because a
+      recreate/delete-class fence takes authority, abort the running context
+      immediately while keeping the persisted intent failure reason and queue
+      ordering intact for non-preempted mutations. Add targeted tests proving
+      recreate/delete fences abort superseded fix work and do not regress
+      non-preempted queue behavior.
+      Acceptance criteria:
+      - Ensure coordinator tests prove superseded fix mutations are aborted when recreate/delete fences preempt them.
+    dependencies: []

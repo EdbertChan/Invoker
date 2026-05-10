@@ -1,0 +1,77 @@
+name: "Fix intent cancellation Step 4: durable failure diagnostics"
+description: |
+  Preserves concrete startup and synthetic shutdown details in durable task
+  output after the lineage guards are in place, so later investigation does not
+  collapse to a generic terminal error.
+
+  Publication intent: publish intermediate/helper branches to the fork and
+  target the final PR gate at the parent repo.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+baseBranch: plan/fix-intent-cancellation-step-3-ssh-startup-lineage
+featureBranch: plan/fix-intent-cancellation-step-4-durable-diagnostics
+
+externalDependencies:
+  - workflowId: "wf-1778296192409-1"
+    requiredStatus: completed
+    gatePolicy: review_ready
+
+    taskId: "__merge__"
+tasks:
+  - id: persist-concrete-failure-diagnostics
+    description: |
+      Goal:
+      Preserve concrete startup and synthetic shutdown failure details in
+      durable task output instead of collapsing later inspection to
+      `Application quit`.
+      Motivation:
+      The original final-regression investigation lost the actual failing
+      test/startup details because durable output did not retain the concrete
+      failure context.
+      Alternative considerations:
+      Leaving diagnostics only in transient executor buffers would keep the same
+      observability gap even after the lineage bugs are fixed.
+      Implementation details:
+      Route startup-failure and owner-shutdown diagnostic tails through the
+      durable output append path used by the UI and API, while keeping task
+      status semantics unchanged.
+      Layer: app_bridge
+      Feature state: active
+      Layer exception: allowed
+      Layer exception rationale:
+      This observability hardening intentionally depends on the owner-delegation
+      stale-lineage guard so durable diagnostics reflect the post-fix failure
+      path rather than the pre-fix stale metadata write behavior.
+      Files:
+      - packages/app/src/main.ts
+      - packages/data-store/src/sqlite-adapter.ts
+      - packages/app/src/__tests__/main*.test.ts
+      Change types:
+      - modify
+      Acceptance criteria:
+      - Durable task output retains concrete startup/shutdown diagnostics alongside the coarse terminal error state.
+    prompt: |
+      Goal:
+      Preserve concrete startup and synthetic shutdown failure details in
+      durable task output instead of collapsing later inspection to
+      `Application quit`.
+      Motivation:
+      The original final-regression investigation lost the actual failing
+      test/startup details because durable output did not retain the concrete
+      failure context.
+      Alternative considerations:
+      Leaving diagnostics only in transient executor buffers would keep the same
+      observability gap even after the lineage bugs are fixed.
+      Implementation details:
+      Modify packages/app/src/main.ts, packages/data-store/src/sqlite-adapter.ts,
+      and the closest relevant tests. Ensure synthetic owner-shutdown failures
+      and executor startup failures append a compact diagnostic block to the
+      durable task output path used for persisted retrieval, including recent
+      output tail or concrete startup stderr/message where available. Keep the
+      task status model unchanged; this task is an observability hardening
+      change, not a new lifecycle state.
+      Acceptance criteria:
+      - Durable task output retains concrete startup/shutdown diagnostics alongside the coarse terminal error state.
+    dependencies: []

@@ -1,0 +1,129 @@
+name: "Fix intent cancellation Step 5: repro and regression verification"
+description: |
+  Runs the shared repro, focused package regressions, and the final full-suite
+  gate after the implementation stack is ready for review.
+
+  Publication intent: publish intermediate/helper branches to the fork and
+  target the final PR gate at the parent repo.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+baseBranch: plan/fix-intent-cancellation-step-4-durable-diagnostics
+featureBranch: plan/fix-intent-cancellation-step-5-verification
+
+externalDependencies:
+  - workflowId: "wf-1778296196937-1"
+    requiredStatus: completed
+    gatePolicy: review_ready
+
+    taskId: "__merge__"
+tasks:
+  - id: verify-shared-repro-fixed
+    description: |
+      Goal:
+      Re-run the shared repro in fixed mode to prove the specific stale-fix and
+      stale-SSH race conditions are closed end to end.
+      Motivation:
+      Full-suite green alone would not prove the exact races demonstrated by the
+      proof artifacts are gone.
+      Alternative considerations:
+      Relying only on newly added broad tests without the shared repro would
+      weaken continuity with the investigation evidence already captured.
+      Implementation details:
+      Execute the shared repro in fixed mode after all implementation steps are
+      ready.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - scripts/repro/repro-fix-intent-cancellation-and-stale-ssh-metadata.sh
+      Change types:
+      - none
+      Acceptance criteria:
+      - Shared repro exits 0 with `--expect fixed`.
+    command: "bash scripts/repro/repro-fix-intent-cancellation-and-stale-ssh-metadata.sh --expect fixed"
+    dependencies: []
+
+  - id: verify-app-coordinator-regression
+    description: |
+      Goal:
+      Re-run the focused app-layer coordinator regression covering
+      workflow-mutation invalidation after the fix lands.
+      Motivation:
+      The shared repro proves the end-to-end bug class, but the app-layer
+      coordinator test provides tighter regression coverage around the
+      invalidation path being hardened.
+      Alternative considerations:
+      Relying only on the shared repro would make it harder to localize future
+      regressions to the coordinator layer.
+      Implementation details:
+      Run the focused app package test that covers persisted workflow-mutation
+      invalidation after the shared repro succeeds.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/app/src/__tests__/persisted-workflow-mutation-coordinator.test.ts
+      Change types:
+      - none
+      Acceptance criteria:
+      - Focused app coordinator regression exits 0.
+    command: "cd packages/app && pnpm test -- src/__tests__/persisted-workflow-mutation-coordinator.test.ts"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies: [verify-shared-repro-fixed]
+
+  - id: verify-execution-engine-ssh-repro
+    description: |
+      Goal:
+      Re-run the focused execution-engine SSH worktree metadata regression after
+      the fix lands.
+      Motivation:
+      The shared repro proves the end-to-end bug class, but the
+      execution-engine repro test provides tighter regression coverage around
+      the TaskRunner and SSH metadata path being hardened.
+      Alternative considerations:
+      Relying only on the shared repro would make it harder to localize future
+      regressions to the execution-engine lineage guard.
+      Implementation details:
+      Run the focused execution-engine package test that covers the SSH
+      worktree metadata repro after the shared repro succeeds.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/execution-engine/src/__tests__/ssh-worktree-metadata-repro.test.ts
+      Change types:
+      - none
+      Acceptance criteria:
+      - Focused execution-engine SSH metadata repro exits 0.
+    command: "cd packages/execution-engine && pnpm test -- src/__tests__/ssh-worktree-metadata-repro.test.ts"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies: [verify-shared-repro-fixed]
+
+  - id: final-regression
+    description: |
+      Goal:
+      Run the full repository test suite as the terminal regression gate after
+      the hardening and focused repro checks land.
+      Motivation:
+      This stack changes coordinator, app, persistence, and execution-engine
+      behavior, so the submitted plan must end with the repo-wide gate rather
+      than only package-local verification.
+      Alternative considerations:
+      Stopping at focused regression tests would leave cross-package integration
+      and final-regression behavior unverified.
+      Implementation details:
+      Run the repository-wide `pnpm run test:all` suite after the earlier
+      verification tasks complete successfully.
+      Layer: e2e_regression
+      Feature state: active
+      Files:
+      - none
+      Change types:
+      - none
+      Acceptance criteria:
+      - `pnpm run test:all` exits 0 after all earlier workflow tasks complete.
+    command: "pnpm run test:all"
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+    dependencies: [verify-shared-repro-fixed, verify-app-coordinator-regression, verify-execution-engine-ssh-repro]

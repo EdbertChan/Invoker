@@ -1,0 +1,118 @@
+name: "Reduce Large Files Step 5: final verification and publication hardening"
+description: >
+  Goal:
+
+  - Perform final validation and publication hardening for the decomposition
+  chain.
+
+
+  Intention:
+
+  - Prove the complete stack is merge-ready with deterministic gates and
+  chain-aware publication.
+
+
+  Broad implementation:
+
+  - Run repository-level quality gates after all prior workflow slices land.
+
+  - Verify no architecture boundary regressions were introduced.
+
+  - Confirm chain publication path for Invoker-on-Invoker work is ready for
+  Mergify stack push.
+
+
+  Alternative considerations:
+
+  - Publish each step independently without stack-level final gate.
+
+  - Skip final repository gate and rely on earlier focused checks only.
+
+
+  Competing-design proof:
+
+  - Compare defect catch rate for stack-level final gate versus per-step-only
+  checks.
+
+  - Confirm final gate catches cross-workflow integration issues.
+
+
+  Why this design is better:
+
+  - One terminal gate across the full stack gives strongest confidence before
+  publication.
+onFinish: pull_request
+baseBranch: plan/reduce-large-files-step-4-secondary-hotspot-decomposition
+featureBranch: plan/reduce-large-files-step-5-final-verification-and-publication-hardening
+mergeMode: external_review
+reviewProvider: github
+repoUrl: https://github.com/Neko-Catpital-Labs/Invoker
+intermediateRepoUrl: https://github.com/EdbertChan/Invoker
+tasks:
+  - id: verify-boundary-and-build-gates
+    description: >
+      Layer: app_regression
+
+      Feature state: active
+
+      Goal:
+
+      - Run final boundary and build gates over the full decomposition stack.
+
+      Motivation:
+
+      - Ensure decomposition did not violate dependency direction or build
+      integrity.
+
+      Alternative considerations:
+
+      - Skip boundary checks and trust local module-level review.
+
+      Implementation details:
+
+      - Execute build and dependency-boundary checks from repo root.
+
+      Acceptance criteria:
+
+      - Build and dependency-boundary checks pass.
+    command: pnpm -r build
+    dependencies: []
+    externalDependencies:
+      - workflowId: wf-1778223508762-8
+        taskId: __merge__
+        requiredStatus: completed
+        gatePolicy: review_ready
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
+  - id: final-full-regression-gate
+    description: >
+      Layer: app_regression
+
+      Feature state: active
+
+      Goal:
+
+      - Execute required terminal full-suite regression gate for implementation
+      workflow.
+
+      Motivation:
+
+      - Validate chain is merge-ready and satisfy final policy requirement.
+
+      Alternative considerations:
+
+      - Depend on package-local lanes only.
+
+      Implementation details:
+
+      - Execute `pnpm run test:all` as the last task and make it depend on all
+      prior tasks.
+
+      Acceptance criteria:
+
+      - Full repository suite passes.
+    command: pnpm run test:all
+    dependencies:
+      - verify-boundary-and-build-gates
+    executorType: ssh
+    remoteTargetId: remote_digital_ocean_1
