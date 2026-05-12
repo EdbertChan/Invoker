@@ -1,3 +1,21 @@
+/**
+ * Orchestrator behavioural test surface.
+ *
+ * Proof anchor: `docs/context/inv-90/experiment-brief.md`.
+ *  - §4.5 pins this file at exactly 328 passing tests — the cancel-first,
+ *    gen-bump, lineage, scope-validation, and `applyInvalidation` routing
+ *    behaviours are exercised end-to-end against a real `Orchestrator`
+ *    (with `sql.js` persistence per CLAUDE.md).
+ *  - §4.6 pins four named anchor `describe` blocks here:
+ *      • `applyInvalidation routing (Step 11 "not yet wired" path is closed)`
+ *      • `selectExperiment invalidation`
+ *      • `Step 16: fix-decision is non-invalidating ...`
+ *      • `setTaskExternalGatePolicies (Step 15 non-invalidating lock-in)`
+ *    Renaming or removing any of these requires a same-commit brief update.
+ *  - Mocking the persistence layer (deferred alternative per brief §5) is
+ *    intentionally out of scope: this surface exercises real `sql.js`.
+ */
+
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { reconciliationNeedsInputWorkResponse } from './reconciliation-needs-input-shim.js';
 import { rid, sid } from './scoped-test-helpers.js';

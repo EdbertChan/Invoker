@@ -5,6 +5,15 @@
  * docs/context/inv-91/experiment-brief.md §3 row "Mutation invariants"
  * and §4.1 (experiment-lifecycle.test.ts, 30 tests, all green).
  *
+ * INV-90 invariant (invalidation policy consumption). Proof anchor:
+ * docs/context/inv-90/experiment-brief.md §4.4 — this file must
+ * reference `MUTATION_POLICIES.<key>` at ≥6 callsites (citing the
+ * policy table by name rather than redeclaring action/scope choices),
+ * and the cancel-first / gen-bump / lineage sequences in each
+ * `editTask*` must mirror `applyInvalidation`'s contract
+ * (`invalidation-policy.ts` §4.3). Rejected alternative (brief §3):
+ * per-method ad-hoc invalidation inlined in each editor.
+ *
  * ALL writes go through the persistence layer (DB) first. The in-memory
  * graph (via TaskStateMachine) is a read-only cache that is refreshed
  * from the DB. This ensures the DB is always the single source of truth.
