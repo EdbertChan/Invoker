@@ -1,3 +1,19 @@
+/**
+ * Headless owner-delegation client.
+ *
+ * This module is a pure transport surface: it forwards CLI intents to
+ * the owner process over the message bus and tracks the resulting
+ * workflow. It deliberately holds no runtime-domain ports or
+ * composition logic; those live behind the typed facade in
+ * `@invoker/runtime-service` and reach headless through `HeadlessDeps`.
+ *
+ * INV-74 invariant (EXP-3 in `docs/context/inv-74/experiment-brief.md`):
+ * this file must remain free of the runtime-service composition seam.
+ * The deterministic check is a grep over this file's contents — any new
+ * reference to the composition factory or its facade type would mean
+ * delegation has absorbed composition duties, regressing the bridge.
+ */
+
 import { resolve as resolvePath } from 'node:path';
 
 import { TransportError, TransportErrorCode, type MessageBus } from '@invoker/transport';
