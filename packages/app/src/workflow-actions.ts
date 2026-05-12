@@ -722,9 +722,13 @@ export async function resolveConflictAction(
   signal?: AbortSignal,
 ): Promise<{ autoApproved: boolean; started: TaskState[] }> {
   const { orchestrator, persistence, taskExecutor } = deps;
-  const lineage = captureTaskLineage(taskId, orchestrator);
-  assertLineageCurrent(lineage, orchestrator, signal);
+  const entryLineage = captureTaskLineage(taskId, orchestrator);
+  assertLineageCurrent(entryLineage, orchestrator, signal);
   const { savedError } = orchestrator.beginConflictResolution(taskId);
+  // `beginConflictResolution` bumps `execution.generation` and replaces
+  // `selectedAttemptId`, so re-snapshot here to get the operational baseline
+  // that every subsequent checkpoint compares against.
+  const lineage = captureTaskLineage(taskId, orchestrator);
   try {
     await taskExecutor.resolveConflict(taskId, savedError, agentName);
     assertLineageCurrent(lineage, orchestrator, signal);
@@ -762,8 +766,8 @@ export async function fixWithAgentAction(
   const task = orchestrator.getTask(taskId);
   if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
 
-  const lineage = captureTaskLineage(taskId, orchestrator);
-  assertLineageCurrent(lineage, orchestrator, options.signal);
+  const entryLineage = captureTaskLineage(taskId, orchestrator);
+  assertLineageCurrent(entryLineage, orchestrator, options.signal);
 
   const savedError = task.execution.error ?? '';
   const recoveryRoute = options.recoveryRoute ?? selectFailureRecoveryRoute(task, savedError);
@@ -783,6 +787,10 @@ export async function fixWithAgentAction(
   }
 
   const { savedError: persistedSavedError } = orchestrator.beginConflictResolution(taskId);
+  // Re-snapshot post-`beginConflictResolution`: that call bumps generation
+  // and replaces the selected attempt, so the entry snapshot can't serve as
+  // the operational baseline.
+  const lineage = captureTaskLineage(taskId, orchestrator);
   try {
     if (recoveryRoute.kind === 'resolveConflict') {
       await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName);
