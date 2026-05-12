@@ -285,6 +285,7 @@ test.describe('Visual proof capture', () => {
     await expect(page.getByRole('button', { name: 'Approve Merge' })).toBeVisible();
 
     await captureScreenshot(page, 'merge-gate-no-inline-approve');
+    await assertPageScreenshot(page, 'merge-gate-no-inline-approve');
   });
 
   test('interactive-status-hues — fixing-with-ai, needs-input, awaiting-approval', async ({ page }) => {
