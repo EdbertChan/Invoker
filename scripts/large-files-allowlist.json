@@ -1,0 +1,26 @@
+{
+  "_comment": "Baseline allowlist for the large-file guardrail (scripts/check-large-files.mjs). Each entry pins a file already over the threshold to its current line count so master stays green while decomposition is in flight. Files must shrink toward the threshold — they may not grow past maxLines. Once a file drops below the global threshold, remove its entry. Do not add new entries without an accompanying decomposition plan.",
+  "threshold": 1500,
+  "entries": [
+    {
+      "path": "packages/workflow-core/src/orchestrator.ts",
+      "maxLines": 4677
+    },
+    {
+      "path": "packages/app/src/main.ts",
+      "maxLines": 3748
+    },
+    {
+      "path": "packages/app/src/headless.ts",
+      "maxLines": 2759
+    },
+    {
+      "path": "packages/data-store/src/sqlite-adapter.ts",
+      "maxLines": 2130
+    },
+    {
+      "path": "packages/execution-engine/src/task-runner.ts",
+      "maxLines": 2068
+    }
+  ]
+}
