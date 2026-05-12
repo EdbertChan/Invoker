@@ -14,6 +14,22 @@
  * (`invalidation-policy.ts` §4.3). Rejected alternative (brief §3):
  * per-method ad-hoc invalidation inlined in each editor.
  *
+ * INV-88 invariant (persistence & lineage contract). Proof anchor:
+ * docs/context/inv-88/experiment-brief.md §3 "Selected — Single private
+ * funnels". This file must expose exactly six private funnels —
+ * `refreshFromDb`, `writeAndSync`, `resetSubgraphToPending`,
+ * `withBumpedExecutionGeneration`, `replaceSelectedAttempt`, and
+ * `getExternalDependencyBlocker` — and route every mutation through
+ * them. Static thresholds enforced by §4.2–§4.8: ≥20 `refreshFromDb()`
+ * callsites, ≥30 `writeAndSync(` callsites, ≥3
+ * `withBumpedExecutionGeneration(` callsites, `previousTaskStateVersion`
+ * stamped on both `buildUpdateDelta` and `buildRemoveDelta`,
+ * `supersedesAttemptId: current?.id` plus ≥5 `upstreamAttemptIds`
+ * occurrences, and ≥4 `getExternalDependencyBlocker(` callsites.
+ * Rejected alternative (brief §3): inline DB writes + per-method
+ * generation bumps + per-method lineage construction (cubic drift
+ * surface, impossible to audit by grep).
+ *
  * ALL writes go through the persistence layer (DB) first. The in-memory
  * graph (via TaskStateMachine) is a read-only cache that is refreshed
  * from the DB. This ensures the DB is always the single source of truth.
@@ -719,6 +735,10 @@ export class Orchestrator {
    * Refresh the in-memory graph from the database.
    * Called at the start of every public mutation to ensure
    * we see any external changes before proceeding.
+   *
+   * INV-88 funnel #1 (refresh-before-mutate). Proof anchor:
+   * docs/context/inv-88/experiment-brief.md §1 invariant 2 + §4.3
+   * (≥20 `this.refreshFromDb()` callsites enforced by grep).
    */
   private refreshFromDb(): void {
     if (this.activeWorkflowIds.size === 0) return;
@@ -742,6 +762,13 @@ export class Orchestrator {
   /**
    * Write field changes to the DB, then update the in-memory cache
    * to match. Returns the updated task state.
+   *
+   * INV-88 funnel #2 (DB-first persistence). Proof anchor:
+   * docs/context/inv-88/experiment-brief.md §1 invariant 1 + §4.4
+   * (≥30 `this.writeAndSync(` callsites enforced by grep). Every
+   * mutation routes `taskRepository.updateTask` → cache restore →
+   * delta publish through this single helper; bypassing it via
+   * direct `taskRepository.updateTask` is a §4.4 audit failure.
    */
   private writeAndSync(
     taskId: string,
@@ -790,6 +817,12 @@ export class Orchestrator {
    * Build an 'updated' TaskDelta with task-state continuity metadata.
    * `before` is the task state before the mutation, `after` is the state
    * returned by writeAndSync.
+   *
+   * INV-88 delta continuity. Proof anchor:
+   * docs/context/inv-88/experiment-brief.md §4.6 — both this builder
+   * and `buildRemoveDelta` must stamp `previousTaskStateVersion`, so
+   * clients can detect skipped/replayed deltas without out-of-band
+   * coordination.
    */
   private buildUpdateDelta(before: TaskState, after: TaskState, changes: TaskStateChanges): TaskDelta {
     return {
@@ -803,6 +836,9 @@ export class Orchestrator {
 
   /**
    * Build a 'removed' TaskDelta with the task's last known task-state version.
+   *
+   * INV-88 delta continuity. Proof anchor:
+   * docs/context/inv-88/experiment-brief.md §4.6.
    */
   private buildRemoveDelta(task: TaskState): TaskDelta {
     return {
@@ -892,6 +928,12 @@ export class Orchestrator {
   /**
    * Reset root tasks and all downstream dependents to pending using the
    * provided reset payload. Returns the affected IDs and currently-ready IDs.
+   *
+   * INV-88 funnel #3 (atomic subgraph reset). Proof anchor:
+   * docs/context/inv-88/experiment-brief.md §3 row "Generation
+   * monotonicity" — the gen-bump and attempt swap commit atomically
+   * inside `taskRepository.runInTransaction` so two writers cannot
+   * silently collide on `n+1`.
    */
   private resetSubgraphToPending(
     rootTaskIds: string[],
@@ -1029,6 +1071,18 @@ export class Orchestrator {
     return task?.execution.generation ?? 0;
   }
 
+  /**
+   * Bump the per-task execution generation by exactly one and merge it
+   * into the supplied changes payload. Returns the merged
+   * `TaskStateChanges`; callers pass the result straight to
+   * `writeAndSync`.
+   *
+   * INV-88 funnel #4 (monotonic generation). Proof anchor:
+   * docs/context/inv-88/experiment-brief.md §1 invariant 3 + §4.5
+   * (≥3 `this.withBumpedExecutionGeneration(` callsites enforced by
+   * grep). Inlining `generation: task.generation + 1` in a new retry /
+   * recreate path is a §4.5 audit failure.
+   */
   private withBumpedExecutionGeneration(task: TaskState, changes: TaskStateChanges): TaskStateChanges {
     return {
       ...changes,
@@ -1131,6 +1185,19 @@ export class Orchestrator {
     return freshAttempt.id;
   }
 
+  /**
+   * Mark the task's current selected attempt `superseded` and create a
+   * fresh attempt that records both the DAG predecessors' selected-
+   * attempt IDs (`upstreamAttemptIds`) and the supersession edge
+   * (`supersedesAttemptId: current?.id`).
+   *
+   * INV-88 funnel #5 (attempt lineage). Proof anchor:
+   * docs/context/inv-88/experiment-brief.md §1 invariant 4 + §4.7
+   * (the `supersedesAttemptId: current?.id` literal must match here,
+   * and `upstreamAttemptIds` must appear ≥5 times across the file).
+   * Constructing an attempt elsewhere — bypassing this funnel —
+   * breaks the acyclic attempt-lineage graph asserted by §4.7.
+   */
   private replaceSelectedAttempt(
     task: TaskState,
     opts: Partial<Omit<Attempt, 'id' | 'nodeId' | 'createdAt'>> = {},
@@ -4316,6 +4383,19 @@ export class Orchestrator {
     return tasks.find((t) => t.id === scopedId || t.id === normalizedTaskId);
   }
 
+  /**
+   * Resolve `task.config.externalDependencies` into a human-readable
+   * blocker string (or `undefined` when nothing is blocking). The sole
+   * resolver consulted by every code path that might start a task
+   * (`startExecution`, `retryTask`, `cancelInFlight`-adjacent paths,
+   * and `autoStartExternallyUnblockedReadyTasks`).
+   *
+   * INV-88 funnel #6 (external-dependency gating). Proof anchor:
+   * docs/context/inv-88/experiment-brief.md §1 invariant 5 + §4.8
+   * (≥4 `this.getExternalDependencyBlocker(` callsites enforced by
+   * grep). Computing blocker logic elsewhere lets the HTTP/IPC
+   * surfaces (INV-91) diverge, which is a §4.8 audit failure.
+   */
   private getExternalDependencyBlocker(task: TaskState): string | undefined {
     const deps = task.config.externalDependencies;
     if (!deps || deps.length === 0) return undefined;
