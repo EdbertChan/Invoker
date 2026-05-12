@@ -4039,7 +4039,7 @@ export class Orchestrator {
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     return [];
   }
-
+  // INV-55 brief §2A (docs/context/inv-55/experiment-brief.md): handleSpawnExperiments implements the in-place downstream remap; per-variant subgraph clone (§2B) was rejected — `isReconciliation: true` below is the single propagation surface.
   private handleSpawnExperiments(
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'spawn_experiments' }>,

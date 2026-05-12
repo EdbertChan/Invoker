@@ -1,4 +1,4 @@
-
+// INV-55 brief §2A & §3.1 rows 4–5 (docs/context/inv-55/experiment-brief.md): selectedExperiment(Set) → recreateTask is load-bearing for the in-place downstream remap design (rejected: per-variant clone, §2B).
 import type { TaskState } from '@invoker/workflow-graph';
 export type InvalidationAction =
   | 'none'

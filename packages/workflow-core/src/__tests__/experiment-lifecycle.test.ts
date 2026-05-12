@@ -1,6 +1,6 @@
 /**
  * Full experiment lifecycle integration test.
- *
+ * INV-55 brief (docs/context/inv-55/experiment-brief.md) — Verdict: Supported. Pins §2A in-place downstream remap; the 9 absence assertions on the per-variant clone task id falsify §2B (per-variant subgraph clone).
  * Proves: pivot -> spawn -> experiments complete -> reconciliation -> select -> downstream unblocks.
  * Uses the same InMemoryPersistence and InMemoryBus helpers from orchestrator.test.ts.
  */
