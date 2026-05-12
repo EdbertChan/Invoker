@@ -1612,8 +1612,8 @@ describe('TaskRunner', () => {
     });
   });
 
-  describe('pre-start heartbeat', () => {
-    it('fires onHeartbeat while awaiting a slow executor.start', async () => {
+  describe('pre-start heartbeat (INV-113 Alternative A — liveness separated from cleanup, see docs/context/inv-113/experiment-brief.md)', () => {
+    it('fires onHeartbeat while awaiting a slow executor.start (pins T2/T4 of docs/context/inv-113/experiment-brief.md)', async () => {
       vi.useFakeTimers();
       try {
         const heartbeats: string[] = [];

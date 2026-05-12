@@ -53,7 +53,7 @@ import {
   type PrAuthoringContext,
 } from './pr-authoring.js';
 
-/** Keeps `lastHeartbeatAt` fresh while `executor.start()` is awaited (SSH remote setup/provision can take minutes). Matches BaseExecutor default heartbeat cadence. */
+/** INV-113 Alternative A (Selected) per docs/context/inv-113/experiment-brief.md: liveness path is separate from cleanup. Keeps `lastHeartbeatAt` fresh while `executor.start()` awaits. */
 const PRE_START_HEARTBEAT_INTERVAL_MS = 30_000;
 const ATTEMPT_LEASE_MS = 20 * 60 * 1000;
 const DEFAULT_EXECUTOR_START_TIMEOUT_MS = 10 * 60 * 1000;
@@ -605,7 +605,7 @@ export class TaskRunner {
       this.callbacks.onLaunchFailed?.(task.id, wrapped, executor);
       throw wrapped;
     } finally {
-      clearInterval(preStartHeartbeatTimer);
+      clearInterval(preStartHeartbeatTimer); // INV-113 invariant: liveness timer is cleared before any cleanupPerTaskDockerExecutor runs (docs/context/inv-113/experiment-brief.md §2.A).
       if (preStartTimeout) clearTimeout(preStartTimeout);
     }
     traceExecution(`[trace] TaskRunner: task=${task.id} executor.start() returned after ${Date.now() - startT0}ms executor=${executor.type} sessionId=${handle.agentSessionId ?? 'none'} workspace=${handle.workspacePath ?? 'default'}`);
@@ -1785,7 +1785,7 @@ export class TaskRunner {
   }
 
   /**
-   * Destroy and deregister a per-task Docker executor if one was created for this task.
+   * Destroy and deregister a per-task Docker executor — cleanup path (INV-113 Alternative A, docs/context/inv-113/experiment-brief.md): independent from the liveness/heartbeat path so slow teardown cannot stall a heartbeat write.
    */
   private async cleanupPerTaskDockerExecutor(task: TaskState): Promise<void> {
     if (task.config.executorType !== 'docker') return;
