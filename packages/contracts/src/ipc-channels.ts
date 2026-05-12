@@ -1,6 +1,14 @@
 /**
  * IPC Channel Registry — Single source of truth for every Electron IPC channel.
  *
+ * INV-91 invariant #2 (typed, derived IPC surface). Proof anchor:
+ * docs/context/inv-91/experiment-brief.md §3 row "IPC surface drift" and
+ * §4.2/§4.3. The brief pins the channel-key count at 60 (across
+ * IpcChannels + IpcTestOnlyChannels + IpcEventChannels) and requires
+ * exactly three derived-method type aliases below
+ * (InvokeMethods / TestOnlyMethods / EventMethods). Changing those
+ * shapes requires updating the brief in the same commit.
+ *
  * Each entry maps a channel name to its request tuple and response type.
  * The `InvokerAPI` type is derived from this registry, not hand-written.
  *
