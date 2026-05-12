@@ -1,7 +1,8 @@
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve as pathResolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TaskRunner } from '../task-runner.js';
 import { collectTransitiveNonMergeTaskIds } from '../merge-runner.js';
@@ -5037,6 +5038,136 @@ describe('TaskRunner', () => {
       );
 
       expect((executor as any).runVisualProofCapture).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('visual-proof PR summary regression (wf-1778431030512-12)', () => {
+    it('scripts/ui-visual-proof.sh accepts --output-dir without "Unknown option"', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const repoRoot = pathResolve(here, '../../../..');
+      const scriptPath = pathResolve(repoRoot, 'scripts/ui-visual-proof.sh');
+      const tmp = mkdtempSync(join(tmpdir(), 'invoker-vp-script-'));
+      try {
+        const result = spawnSync(
+          'bash',
+          [scriptPath, '--label', 'after', '--output-dir', tmp, '--help'],
+          { encoding: 'utf-8' },
+        );
+        const combined = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+        expect(combined).not.toContain('Unknown option: --output-dir');
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('merge-gate external_review PR body includes ## Visual Proof and merge-gate screenshot', async () => {
+      const workflowId = 'wf-1778431030512-12';
+      const featureBranch = `experiment/${workflowId}/feature`;
+      const mergeNodeId = `__merge__${workflowId}`;
+
+      const repoTmp = mkdtempSync(join(tmpdir(), 'invoker-vp-regression-'));
+      tempWorkspaces.push(repoTmp);
+
+      const allTasks = [
+        makeTask({
+          id: 'add-merge-gate-no-inline-approve-visual-proof',
+          description: 'Add merge-gate no-inline-approve visual proof case',
+          status: 'completed',
+          config: { workflowId },
+          execution: { branch: `experiment/${workflowId}/add-no-inline` },
+        }),
+        makeTask({
+          id: 'capture-merge-gate-visual-proof',
+          description: 'Capture merge-gate visual proof snapshot',
+          status: 'completed',
+          dependencies: ['add-merge-gate-no-inline-approve-visual-proof'],
+          config: { workflowId },
+          execution: { branch: `experiment/${workflowId}/capture` },
+        }),
+      ];
+      const orchestrator = {
+        getTask: (id: string) => allTasks.find((t) => t.id === id),
+        getAllTasks: () => allTasks,
+        handleWorkerResponse: vi.fn(() => []),
+        setTaskAwaitingApproval: vi.fn(),
+      };
+      const persistence = {
+        loadWorkflow: () => ({
+          id: workflowId,
+          onFinish: 'pull_request',
+          mergeMode: 'external_review',
+          baseBranch: 'master',
+          featureBranch,
+          name: 'Merge gate cleanup',
+          visualProof: true,
+        }),
+        updateTask: vi.fn(),
+      };
+      const createReview = vi.fn().mockResolvedValue({
+        url: 'https://github.com/example/repo/pull/276',
+        identifier: '276',
+      });
+      const mergeGateProvider = { createReview };
+
+      const executor = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: persistence as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+        cwd: repoTmp,
+        mergeGateProvider: mergeGateProvider as any,
+      });
+
+      (executor as any).execGitReadonly = async () => '';
+      (executor as any).execGitIn = async () => '';
+      (executor as any).gitDiffStat = async () => '';
+      (executor as any).createMergeWorktree = async () => repoTmp;
+      (executor as any).removeMergeWorktree = async () => {};
+      (executor as any).consolidateAndMerge = vi.fn().mockResolvedValue(undefined);
+      (executor as any).startPrPolling = vi.fn();
+
+      const screenshotStates = [
+        'empty-state',
+        'dag-loaded',
+        'merge-gate-no-inline-approve',
+      ];
+      (executor as any).spawnVisualProofScript = async (
+        _script: string,
+        label: string,
+        outputDir: string,
+      ) => {
+        const dir = join(outputDir, label);
+        mkdirSync(dir, { recursive: true });
+        for (const state of screenshotStates) {
+          writeFileSync(join(dir, `${state}.png`), 'png-bytes');
+        }
+      };
+
+      (executor as any).uploadVisualProofFiles = async (files: string[]) => {
+        const map: Record<string, string> = {};
+        for (const f of files) {
+          const name = f.split('/').pop()!;
+          map[name] = `https://stub-cdn.example.com/${name}`;
+        }
+        return map;
+      };
+
+      const mergeTask = makeTask({
+        id: mergeNodeId,
+        status: 'running',
+        dependencies: ['capture-merge-gate-visual-proof'],
+        config: { isMergeNode: true, workflowId },
+      });
+
+      await (executor as any).executeMergeNode(mergeTask);
+
+      expect(createReview).toHaveBeenCalledTimes(1);
+      const reviewArgs = createReview.mock.calls[0][0] as { body?: string };
+      expect(reviewArgs.body).toBeDefined();
+      const body = reviewArgs.body!;
+      expect(body).toContain('## Visual Proof');
+      expect(body).toContain('merge-gate-no-inline-approve');
+      expect(body).toContain('https://stub-cdn.example.com/before--merge-gate-no-inline-approve.png');
+      expect(body).toContain('https://stub-cdn.example.com/after--merge-gate-no-inline-approve.png');
     });
   });
 
