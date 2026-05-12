@@ -3895,6 +3895,10 @@ describe('Orchestrator', () => {
 
   // ── DB-is-source-of-truth invariants ──────────────────
 
+  // INV-88 anchor describe block. Proof anchor:
+  // docs/context/inv-88/experiment-brief.md §4.9 — the literal
+  // describe title `'DB is source of truth'` is pinned by grep and
+  // renaming it requires a brief update in the same commit.
   describe('DB is source of truth', () => {
     it('every loadPlan task is persisted to DB', () => {
       orchestrator.loadPlan({
@@ -5818,6 +5822,10 @@ describe('Orchestrator', () => {
       });
     }
 
+    // INV-88 anchor describe block. Proof anchor:
+    // docs/context/inv-88/experiment-brief.md §4.9 — pins the
+    // generation-bump (§1 invariant 3) and attempt-lineage (§1
+    // invariant 4) behaviour under `retryWorkflow`.
     describe('retryWorkflow preserves lineage and bumps per-task execution generation', () => {
       it('keeps branch/workspacePath on the reset task', () => {
         const p = new InMemoryPersistence();
@@ -5851,6 +5859,10 @@ describe('Orchestrator', () => {
       });
     });
 
+    // INV-88 anchor describe block. Proof anchor:
+    // docs/context/inv-88/experiment-brief.md §4.9 — pins the
+    // lineage-clearing semantics of `recreateWorkflow` (the
+    // workflow-base counterpart to retry's lineage preservation).
     describe('recreateWorkflow clears lineage and preserves the workflow base', () => {
       it('clears branch/workspacePath/commit on every task', () => {
         const p = new InMemoryPersistence();
@@ -8803,6 +8815,11 @@ describe('Orchestrator', () => {
     });
   });
 
+  // INV-88 anchor describe block. Proof anchor:
+  // docs/context/inv-88/experiment-brief.md §4.9 — pins the
+  // external-dependency gating funnel `getExternalDependencyBlocker`
+  // (§1 invariant 5) and the single cascade
+  // `autoStartExternallyUnblockedReadyTasks`.
   describe('blocked task unblocking', () => {
     it('throws when a persisted merge node has detached dependencies', () => {
       orchestrator.loadPlan({
