@@ -1,6 +1,10 @@
 /**
  * Orchestrator — Single coordinator for all task state mutations.
  *
+ * INV-91 invariant #1 (single mutation coordinator). Proof anchor:
+ * docs/context/inv-91/experiment-brief.md §3 row "Mutation invariants"
+ * and §4.1 (experiment-lifecycle.test.ts, 30 tests, all green).
+ *
  * ALL writes go through the persistence layer (DB) first. The in-memory
  * graph (via TaskStateMachine) is a read-only cache that is refreshed
  * from the DB. This ensures the DB is always the single source of truth.
@@ -1793,6 +1797,11 @@ export class Orchestrator {
    * row "Edit selected experiment" in
    * `docs/architecture/task-invalidation-chart.md`
    * (`MUTATION_POLICIES.selectedExperiment` → `retryTask` / task scope).
+   *
+   * INV-91 proof anchor: this method is the cancel-first hard invariant
+   * cited in `docs/context/inv-91/experiment-brief.md` §3 (Mutation
+   * invariants) and verified by §4.1 — `experiment-lifecycle.test.ts`
+   * must pass all 30 tests (`Tests 30 passed (30)`).
    *
    * Why retry-class (not recreate-class). The chart classifies single
    * experiment selection as a downstream-input mutation: the

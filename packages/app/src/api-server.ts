@@ -1,6 +1,15 @@
 /**
  * HTTP API Server — Lightweight control plane for a running Invoker instance.
  *
+ * INV-91 invariant #3 (HTTP control plane stays a thin adapter). Proof
+ * anchor: docs/context/inv-91/experiment-brief.md §3 row "Surface for HTTP"
+ * and §4.4/§4.5/§4.6. The brief pins the endpoint-marker count at 28 and
+ * requires that this file (a) declares the 127.0.0.1 only loopback bind,
+ * (b) names `mutations: WorkflowMutationFacade` as a dependency, and
+ * (c) contains zero direct mutating calls into the orchestrator — every
+ * write must route through `mutations.*`. Updating the endpoint set
+ * requires updating the brief in the same commit.
+ *
  * Binds to 127.0.0.1 only (no external access). Default port 4100,
  * configurable via INVOKER_API_PORT env var.
  *
