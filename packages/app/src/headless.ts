@@ -7,6 +7,11 @@
  *
  * Business logic (orchestrator mutations) lives in workflow-actions.ts.
  * This file handles CLI parsing, TaskRunner lifecycle, and output formatting.
+ *
+ * INV-74 contact surface: the runtime-domain ports reach this entry point
+ * through a typed facade rather than a module-level singleton; see
+ * `docs/context/inv-74/experiment-brief.md` (EXP-2 wires the facade type
+ * into HeadlessDeps; EXP-3 keeps it out of the delegation transport).
  */
 
 import type { BundledSkillsInstallMode, BundledSkillsStatus, Logger } from '@invoker/contracts';
@@ -99,6 +104,12 @@ export interface HeadlessDeps {
   installBundledSkills?: (mode?: BundledSkillsInstallMode) => BundledSkillsStatus;
   /** Abort signal from the workflow mutation coordinator, if running inside a coordinated mutation. */
   signal?: AbortSignal;
+  /**
+   * Composed runtime-domain ports for headless startup. Pinned by EXP-2
+   * in `docs/context/inv-74/experiment-brief.md`: the facade type is
+   * imported from `@invoker/runtime-service` so headless and main share
+   * one factory rather than diverging module-level singletons.
+   */
   runtimeServices?: RuntimeServices;
 }
 

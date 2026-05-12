@@ -5,6 +5,14 @@
  * Consumers call `composeRuntimeServices(deps)` with concrete adapter
  * implementations; this module never instantiates adapters itself, so
  * app wiring stays in the application layer.
+ *
+ * INV-74 design seat: this file is the typed-facade design selected by
+ * `docs/context/inv-74/experiment-brief.md`. The alternative (a
+ * module-level mutable singleton) was rejected for losing adapter-identity
+ * guarantees, immutability, and the deterministic headless/main parity
+ * proven by EXP-3, EXP-4, and EXP-5 in the brief. Reviewers can re-run
+ * the experiments verbatim to verify any change to this file preserves
+ * the PROVEN aggregate verdict.
  */
 
 import type {
@@ -93,6 +101,11 @@ export function composeRuntimeServices(
  * Owner/delegation behavior is unaffected — this function only
  * composes the runtime-domain ports; orchestration and task dispatch
  * remain the caller's responsibility.
+ *
+ * Pinned by EXP-5 (docs/context/inv-74/experiment-brief.md): the body
+ * must be a one-line delegation that does not freeze, allocate, or
+ * construct adapters here, so headless/main parity is guaranteed by
+ * construction.
  */
 export function composeHeadlessStartup(
   deps: RuntimeServiceDeps,
