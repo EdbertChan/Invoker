@@ -101,6 +101,10 @@ export interface HeadlessDeps {
   runtimeServices?: RuntimeServices;
 }
 
+function headlessMutationContext(deps: HeadlessDeps): { signal: AbortSignal } | undefined {
+  return deps.signal ? { signal: deps.signal } : undefined;
+}
+
 // ── ANSI Helpers ─────────────────────────────────────────────
 
 const RESET = '\x1b[0m';
@@ -1640,6 +1644,7 @@ async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promi
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.rebase-and-retry',
+    mutationContext: headlessMutationContext(deps),
   });
 
   const te = createHeadlessExecutor(deps);
@@ -1681,6 +1686,7 @@ async function headlessRecreateWithRebase(workflowTarget: string, deps: Headless
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.recreate-with-rebase',
+    mutationContext: headlessMutationContext(deps),
   });
 
   const te = createHeadlessExecutor(deps);
@@ -1723,6 +1729,7 @@ async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps):
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.recreate-workflow',
+    mutationContext: headlessMutationContext(deps),
   });
   const started = sharedRecreateWorkflow(workflowId, { persistence: deps.persistence, orchestrator: deps.orchestrator });
   const runnable = started.filter(t => t.status === 'running');
@@ -1848,6 +1855,7 @@ async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDeps): Pr
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.retry-workflow',
+    mutationContext: headlessMutationContext(deps),
   });
   const envelope = makeEnvelope('retry-workflow', 'headless', 'workflow', { workflowId });
   const result = await deps.commandService.retryWorkflow(envelope);

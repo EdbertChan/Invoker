@@ -20,6 +20,8 @@ export type WorkflowMutationContext = {
   signal: AbortSignal;
   intentId: number;
   workflowId: string;
+  channel: string;
+  args: readonly unknown[];
 };
 
 function envMs(name: string, fallback: number): number {
@@ -219,6 +221,8 @@ export class PersistedWorkflowMutationCoordinator {
         signal: invalidation.abortController.signal,
         intentId: intent.id,
         workflowId,
+        channel: intent.channel,
+        args: intent.args,
       };
       const dispatchPromise = Promise.resolve(this.dispatch(intent.channel, intent.args, mutationContext));
       void dispatchPromise.catch(() => {});

@@ -3089,6 +3089,7 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.cancel-workflow',
+          mutationContext: activeMutationContext,
         });
         await finalizeMutationWithGlobalTopup({
           orchestrator,
@@ -3148,6 +3149,7 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.recreate-workflow',
+          mutationContext: activeMutationContext,
         });
         const started = sharedRecreateWorkflow(workflowId, { persistence, orchestrator });
         remoteFetchForPool.enabled = false;
@@ -3211,6 +3213,7 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.retry-workflow',
+          mutationContext: activeMutationContext,
         });
         const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
         const result = await commandService.retryWorkflow(envelope);
@@ -3248,6 +3251,7 @@ if (isHeadless) {
             preemptWorkflowExecution,
             logger,
             context: 'ipc.rebase-and-retry',
+            mutationContext: activeMutationContext,
           });
         }
         const started = await rebaseAndRetry(taskId, {
@@ -3286,6 +3290,7 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.recreate-with-rebase',
+          mutationContext: activeMutationContext,
         });
         const started = await recreateWithRebase(workflowId, {
           orchestrator,
