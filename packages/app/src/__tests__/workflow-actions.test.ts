@@ -2221,11 +2221,10 @@ describe('fixWithAgentAction lineage guard', () => {
   });
 
   it('skips revertConflictResolution when lineage changed and fix threw', async () => {
-    let getTaskCallCount = 0;
+    let fixCalled = false;
     const orchestrator = {
       getTask: vi.fn(() => {
-        getTaskCallCount++;
-        if (getTaskCallCount <= 2) {
+        if (!fixCalled) {
           return makeTask({
             status: 'failed',
             config: { workflowId: 'wf-1' },
@@ -2248,7 +2247,10 @@ describe('fixWithAgentAction lineage guard', () => {
       appendTaskOutput: vi.fn(),
     };
     const taskExecutor = {
-      fixWithAgent: vi.fn().mockRejectedValue(new Error('agent crashed')),
+      fixWithAgent: vi.fn().mockImplementation(async () => {
+        fixCalled = true;
+        throw new Error('agent crashed');
+      }),
       resolveConflict: vi.fn(),
     };
 
@@ -2290,6 +2292,54 @@ describe('fixWithAgentAction lineage guard', () => {
 
     // Normal path should proceed
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
+    expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
+  });
+
+  it('proceeds normally when beginConflictResolution bumps generation (real-orchestrator semantics)', async () => {
+    // Real `Orchestrator.beginConflictResolution` bumps `execution.generation`
+    // and replaces `selectedAttemptId`. The post-async lineage assertion must
+    // therefore compare against the *post-begin* baseline, not the entry
+    // snapshot — otherwise every happy-path fix-with-agent would erroneously
+    // throw `StaleLineageError`.
+    const state = { selectedAttemptId: 'att-1', generation: 5, status: 'failed' as string };
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: state.status,
+        config: { workflowId: 'wf-1' },
+        execution: {
+          error: 'boom',
+          selectedAttemptId: state.selectedAttemptId,
+          generation: state.generation,
+        },
+      })),
+      beginConflictResolution: vi.fn(() => {
+        state.selectedAttemptId = 'att-2';
+        state.generation = 6;
+        state.status = 'fixing_with_ai';
+        return { savedError: 'boom' };
+      }),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockResolvedValue(undefined),
+      resolveConflict: vi.fn(),
+    };
+
+    const result = await fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    });
+
+    expect(orchestrator.beginConflictResolution).toHaveBeenCalledWith('task-a');
+    expect(taskExecutor.fixWithAgent).toHaveBeenCalled();
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
     expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
   });
 });
@@ -2341,11 +2391,10 @@ describe('resolveConflictAction lineage guard', () => {
   });
 
   it('skips revertConflictResolution when lineage changed and resolution threw', async () => {
-    let getTaskCallCount = 0;
+    let resolveCalled = false;
     const orchestrator = {
       getTask: vi.fn(() => {
-        getTaskCallCount++;
-        if (getTaskCallCount <= 1) {
+        if (!resolveCalled) {
           return makeTask({
             status: 'fixing_with_ai',
             config: { workflowId: 'wf-1' },
@@ -2366,7 +2415,10 @@ describe('resolveConflictAction lineage guard', () => {
       appendTaskOutput: vi.fn(),
     };
     const taskExecutor = {
-      resolveConflict: vi.fn().mockRejectedValue(new Error('resolution failed')),
+      resolveConflict: vi.fn().mockImplementation(async () => {
+        resolveCalled = true;
+        throw new Error('resolution failed');
+      }),
     };
 
     await expect(resolveConflictAction('task-a', {
@@ -2376,6 +2428,50 @@ describe('resolveConflictAction lineage guard', () => {
     })).rejects.toThrow('resolution failed');
 
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+  });
+
+  it('proceeds normally when beginConflictResolution bumps generation (real-orchestrator semantics)', async () => {
+    // Mirror of the fixWithAgentAction regression: ensures the operational
+    // lineage is re-snapshotted after `beginConflictResolution` so the
+    // post-async assertion does not flag the bump itself as "stale".
+    const state = { selectedAttemptId: 'att-1', generation: 5, status: 'failed' as string };
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: state.status,
+        config: { workflowId: 'wf-1' },
+        execution: {
+          error: 'merge err',
+          selectedAttemptId: state.selectedAttemptId,
+          generation: state.generation,
+        },
+      })),
+      beginConflictResolution: vi.fn(() => {
+        state.selectedAttemptId = 'att-2';
+        state.generation = 6;
+        state.status = 'fixing_with_ai';
+        return { savedError: 'merge err' };
+      }),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      resolveConflict: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await resolveConflictAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    });
+
+    expect(orchestrator.beginConflictResolution).toHaveBeenCalledWith('task-a');
+    expect(taskExecutor.resolveConflict).toHaveBeenCalled();
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'merge err');
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(result).toEqual({ autoApproved: false, started: [] });
   });
 });
 
@@ -2435,12 +2531,11 @@ describe('autoFixOnFailure lineage guard', () => {
   });
 
   it('skips revertConflictResolution on failure when lineage changed', async () => {
-    let getTaskCallCount = 0;
+    let fixCalled = false;
     const orchestrator = {
       shouldAutoFix: vi.fn(() => true),
       getTask: vi.fn(() => {
-        getTaskCallCount++;
-        if (getTaskCallCount <= 2) {
+        if (!fixCalled) {
           return makeTask({
             status: 'failed',
             config: { workflowId: 'wf-1' },
@@ -2472,7 +2567,10 @@ describe('autoFixOnFailure lineage guard', () => {
       logEvent: vi.fn(),
     };
     const taskExecutor = {
-      fixWithAgent: vi.fn().mockRejectedValue(new Error('agent crashed')),
+      fixWithAgent: vi.fn().mockImplementation(async () => {
+        fixCalled = true;
+        throw new Error('agent crashed');
+      }),
       resolveConflict: vi.fn(),
       executeTasks: vi.fn().mockResolvedValue(undefined),
     };
@@ -2562,5 +2660,188 @@ describe('finalizeAppliedFix lineage guard', () => {
 
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-error');
     expect(result).toEqual({ autoApproved: false, started: [] });
+  });
+});
+
+describe('fix lineage guard entry and persistence checkpoints', () => {
+  it('resolveConflictAction: does not mutate orchestrator state when signal is already aborted at entry', async () => {
+    const ac = new AbortController();
+    ac.abort(new Error('superseded-before-entry'));
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: 'merge err', selectedAttemptId: 'att-1', generation: 5 },
+      })),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'merge err' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      resolveConflict: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(resolveConflictAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, undefined, ac.signal)).rejects.toThrow(StaleLineageError);
+
+    expect(orchestrator.beginConflictResolution).not.toHaveBeenCalled();
+    expect(taskExecutor.resolveConflict).not.toHaveBeenCalled();
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
+  });
+
+  it('fixWithAgentAction: does not mutate orchestrator state when signal is already aborted at entry', async () => {
+    const ac = new AbortController();
+    ac.abort(new Error('superseded-before-entry'));
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+      })),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockResolvedValue(undefined),
+      resolveConflict: vi.fn(),
+    };
+
+    await expect(fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, {
+      signal: ac.signal,
+    })).rejects.toThrow(StaleLineageError);
+
+    expect(orchestrator.beginConflictResolution).not.toHaveBeenCalled();
+    expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
+  });
+
+  it('fixWithAgentAction: does not append stale failure output when lineage drifted during async fix', async () => {
+    let fixCalled = false;
+    let getTaskCallCount = 0;
+    const orchestrator = {
+      getTask: vi.fn(() => {
+        getTaskCallCount++;
+        if (!fixCalled) {
+          return makeTask({
+            status: 'failed',
+            config: { workflowId: 'wf-1' },
+            execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+          });
+        }
+        return makeTask({
+          status: 'pending',
+          config: { workflowId: 'wf-1' },
+          execution: { selectedAttemptId: 'att-2', generation: 6 },
+        });
+      }),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockImplementation(async () => {
+        fixCalled = true;
+        throw new Error('agent crashed');
+      }),
+      resolveConflict: vi.fn(),
+    };
+
+    await expect(fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    })).rejects.toThrow('agent crashed');
+
+    expect(getTaskCallCount).toBeGreaterThan(0);
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+  });
+
+  it('resolveConflictAction: does not append stale failure output when lineage drifted during conflict resolution', async () => {
+    let resolveCalled = false;
+    const orchestrator = {
+      getTask: vi.fn(() => {
+        if (!resolveCalled) {
+          return makeTask({
+            status: 'failed',
+            config: { workflowId: 'wf-1' },
+            execution: { error: 'merge err', selectedAttemptId: 'att-1', generation: 5 },
+          });
+        }
+        return makeTask({
+          status: 'pending',
+          config: { workflowId: 'wf-1' },
+          execution: { selectedAttemptId: 'att-2', generation: 6 },
+        });
+      }),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'merge err' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      resolveConflict: vi.fn().mockImplementation(async () => {
+        resolveCalled = true;
+        throw new Error('resolution failed');
+      }),
+    };
+
+    await expect(resolveConflictAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    })).rejects.toThrow('resolution failed');
+
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+  });
+
+  it('finalizeAppliedFix: short-circuits when lineage drifts before awaiting-approval transition', async () => {
+    const ac = new AbortController();
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'pending',
+        config: { workflowId: 'wf-1' },
+        execution: { selectedAttemptId: 'att-2', generation: 6 },
+      })),
+      setFixAwaitingApproval: vi.fn(),
+    };
+    const lineageSnapshot = {
+      taskId: 'task-a',
+      selectedAttemptId: 'att-1',
+      generation: 5,
+    };
+
+    await expect(finalizeAppliedFix('task-a', 'saved-error', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      taskExecutor: {} as TaskRunner,
+    }, ac.signal, lineageSnapshot)).rejects.toThrow(StaleLineageError);
+
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
   });
 });
