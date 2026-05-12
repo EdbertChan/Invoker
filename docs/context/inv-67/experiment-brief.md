@@ -76,10 +76,23 @@ tests.
 | Parallel safety | Curated allowlist (`is_parallel_safe`) | Implicit (one job per package) |
 | Cost of adding a suite | Drop `.sh` into `scripts/test-suites/<tier>/` | New workflow file or matrix entry |
 
-**Verdict:** keep the status quo. The matrix approach would lose the
-deterministic local replay and the resume-from-checkpoint property that
-INV-67's reviewability requirement depends on. The matrix variant remains
-viable if/when CI elapsed time becomes the dominant cost.
+### Alternative verdicts (Supported / Rejected / Deferred)
+
+Each design considered for INV-67 is classified with an explicit verdict so the
+decision is reviewable without re-deriving the tradeoffs:
+
+| Design / approach | Verdict | Reason |
+|-------------------|---------|--------|
+| Status quo: `scripts/run-all-tests.sh` + `workspace-test.sh` tiering | **Supported** | Deterministic ordering (`LC_ALL=C sort`), checkpoint resume scoped to `.git/`, parallel safety gated by an explicit allowlist. Satisfies E1–E8 thresholds below. |
+| `pnpm -r --filter` + GHA matrix replacement | **Rejected** | Loses local replay and checkpoint resume; topology-order rather than locale-stable ordering; cost of adding a suite rises (new workflow/matrix entry). Reconsider only if CI elapsed time becomes the dominant cost. |
+| Move directly to implementation without evidence | **Rejected** | Violates the INV-67 reviewability requirement: no deterministic command can falsify the design and no threshold is recorded. |
+| Evaluate alternatives informally without deterministic checks | **Rejected** | Informal evaluation cannot produce a pass/fail exit code; reviewers cannot reproduce the verdict from a clean checkout. |
+| Migrate checkpoint state out of `.git/` into a repo-tracked path | **Deferred** | Worth revisiting if multi-host shared runners need to read the checkpoint, but not required for INV-67's local-replay scope. No experiment in this brief depends on it. |
+| Auto-discover parallel-safe suites instead of curated `is_parallel_safe` | **Deferred** | Currently no signal in `scripts/test-suites/<tier>/*.sh` to declare parallel safety; deferring until the suite metadata is formalized. The curated allowlist remains the safe default. |
+
+**Selected design verdict:** the status quo is **Supported** and adopted. The
+matrix variant is **Rejected** for INV-67 and re-evaluable later; the two
+Deferred items are tracked here so they are not silently lost.
 
 ## Deterministic commands and expected outputs
 
@@ -221,6 +234,18 @@ Threshold: zero `dangerous/` suite paths in stdout when dangerous flag is 0.
 
 A run is considered deterministic proof for INV-67 iff E1–E8 all return their
 PASS verdict on a clean checkout of this branch.
+
+### Verdict mapping to overall decision
+
+- All eight experiments PASS on their threshold → status quo design is
+  **Supported**. Adopt without further changes.
+- Any experiment FAILS on its threshold → status quo design is **Rejected** for
+  that property; re-open the alternative-design comparison above for the
+  failing dimension.
+- An experiment cannot be executed in this environment (e.g. dangerous tier
+  requires opt-in fixtures not present) → that experiment is **Deferred** and
+  must be re-run once the prerequisite is available before the overall verdict
+  is treated as final.
 
 ## How to reproduce end-to-end
 
