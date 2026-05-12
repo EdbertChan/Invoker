@@ -3,6 +3,16 @@
  *
  * Demoted from packages/app/e2e/context-menu.spec.ts.
  * Tests right-click, Escape close, click-outside close, and menu items.
+ *
+ * INV-155 transport-perimeter proof: docs/context/inv-155/experiment-brief.md
+ * §4.8–§4.10 pin this file's behavioural surface. The right-click menu's
+ * terminal actions land on the same `mock.api.<facadeMethod>` vocabulary
+ * the HTTP layer exposes (`recreateTask`, `recreateWithRebase`,
+ * `cancelWorkflow`), proving the IPC twin and the HTTP transport share
+ * the single `WorkflowMutationFacade` mutation vocabulary. The brief
+ * pins exactly 10 `it(…)` cases and ≥ 11 `setupAndRightClick` occurrences
+ * (1 helper definition + 10 callsites); adding or removing a menu case
+ * requires updating the brief in the same commit.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';

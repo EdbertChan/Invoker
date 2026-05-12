@@ -13,6 +13,20 @@
  * method and receive a structured result. The facade does NOT own
  * request parsing, error mapping, or response formatting — those
  * remain in the entrypoint layer.
+ *
+ * INV-155 transport-perimeter proof: docs/context/inv-155/experiment-brief.md
+ * §4.5–§4.7 pin this file's lifecycle shape: exactly four private helpers
+ * (`dispatchWithTopup`, `finalizeWithTopup`, `topupOnly`, `actionDeps`), at
+ * least 18 callsites through those helpers, at least 20 `shared<Action>(`
+ * delegations into `workflow-actions.ts`, and zero direct calls to
+ * `this.deps.orchestrator.{retryTask|recreateTask|recreateWorkflow|
+ * retryWorkflow|selectExperiments?|approveTask|editTask*|
+ * setTaskExternalGatePolicies}`. The orchestrator stays the sole
+ * coordinator (INV-91 invariant #1) even when reached through this
+ * facade — the cancel/delete/detach paths are intentionally allowed to
+ * call `orchestrator.<method>` directly because they have no `shared*`
+ * form (see brief §4.7). Adding a public mutation that inlines its own
+ * lifecycle sequencing is a brief violation.
  */
 
 import type { Logger } from '@invoker/contracts';

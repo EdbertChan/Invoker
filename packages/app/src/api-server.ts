@@ -10,6 +10,15 @@
  * write must route through `mutations.*`. Updating the endpoint set
  * requires updating the brief in the same commit.
  *
+ * INV-155 transport-perimeter proof: docs/context/inv-155/experiment-brief.md
+ * extends the INV-91 anchor across the full transport perimeter (HTTP + IPC
+ * + UI menu). §4.1 pins the 127.0.0.1 bind count at ≥ 3, §4.2 pins the
+ * `mutations.*` callsite count at ≥ 15 with zero direct-orchestrator
+ * mutators, §4.3 pins the endpoint marker count at exactly 28, and §4.4
+ * requires the inv-91 anchor and the `mutations: WorkflowMutationFacade`
+ * dependency declaration that this file already carries. Any change to
+ * the HTTP write surface must update both briefs in the same commit.
+ *
  * Binds to 127.0.0.1 only (no external access). Default port 4100,
  * configurable via INVOKER_API_PORT env var.
  *
