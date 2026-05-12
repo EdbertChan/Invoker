@@ -155,6 +155,17 @@ jobs:
       - name: Run suite group
         run: ${{ matrix.command }}
 
+  # INV-119: status quo three-shard split — Supported per
+  # docs/context/inv-119/experiment-brief.md. The three matrix rows
+  # partition scripts/e2e-dry-run/cases/case-*.sh by family prefix
+  # (case-1.*, case-2.*, case-4.*); the partition contract is enforced by
+  # experiments E2 (this matrix references exactly the three shard suites),
+  # E4 (partition is complete), and E5 (shards are pairwise disjoint).
+  # Rejected alternatives: collapsing to a single dry-run job (loses CI
+  # parallelism, hides new family prefixes) and one matrix entry per case
+  # (per-case Playwright container startup dominates runtime, raises
+  # enrollment cost). Auto-discovery of family prefixes is Deferred until a
+  # third family is introduced — see brief §"Alternative verdicts".
   dry-run:
     needs: build-artifacts
     runs-on: ubuntu-latest

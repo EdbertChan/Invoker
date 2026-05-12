@@ -11,6 +11,22 @@
 #   E7 — Invalid `INVOKER_TEST_ALL_JOBS` exits 2 with an explicit stderr message.
 #   E8 — Dangerous tier is opt-in (only `EXTENDED=1 && DANGEROUS=1` surfaces it).
 # The matrix-replacement alternative is Rejected; see brief §"Alternative verdicts".
+#
+# INV-119 (status quo three-shard CI dry-run split, Supported per
+# docs/context/inv-119/experiment-brief.md) additionally requires that this
+# enumeration surface the three dry-run shard wrappers in locale-stable
+# lexicographic order so a local `pnpm run test:all` is a superset of the CI
+# `dry-run` matrix signal. Properties this script must preserve for INV-119:
+#   E1 (INV-119) — `find … | LC_ALL=C sort` yields, in order,
+#       scripts/test-suites/required/20-e2e-dry-run.sh
+#       scripts/test-suites/required/21-e2e-dry-run-downstream.sh
+#       scripts/test-suites/required/22-e2e-dry-run-github.sh
+#   E7 (INV-119) — `pnpm run test:all` prints exactly three
+#       `==> Running scripts/test-suites/required/2[0-2]-e2e-dry-run…` lines
+#       under the required tier.
+# `is_parallel_safe` MUST list all three shard wrappers so they remain
+# eligible for the same parallelization rules; rejected alternatives (single
+# collapsed job, per-case matrix entries) are documented in the brief.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
