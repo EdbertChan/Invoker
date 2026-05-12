@@ -501,29 +501,48 @@ class IpcBus {
   }
   tryConnect() {
     const sock = createConnection({ path: this.socketPath }, () => {
+      sock.removeAllListeners('error');
       this.addPeer(sock);
       this.resolveReady();
     });
-    sock.on('error', () => { this.tryServe(); });
+    sock.once('error', () => { this.tryServe(); });
   }
   tryServe() {
     mkdirSync(dirname(this.socketPath), { recursive: true });
-    try { unlinkSync(this.socketPath); } catch (e) {}
     const srv = createServer((client) => { this.addPeer(client); });
     srv.on('error', (err) => {
-      if (err.code === 'EADDRINUSE') { this.tryConnectRetry(); }
+      if (err.code === 'EADDRINUSE') { this.recoverFromAddressInUse(); }
     });
+    this.listenOnServer(srv);
+  }
+  tryConnectRetry() {
+    const sock = createConnection({ path: this.socketPath }, () => {
+      sock.removeAllListeners('error');
+      this.addPeer(sock);
+      this.resolveReady();
+    });
+    sock.on('error', () => { this.resolveReady(); });
+  }
+  listenOnServer(srv) {
     srv.listen(this.socketPath, () => {
       this.server = srv;
       this.resolveReady();
     });
   }
-  tryConnectRetry() {
-    const sock = createConnection({ path: this.socketPath }, () => {
-      this.addPeer(sock);
-      this.resolveReady();
+  recoverFromAddressInUse() {
+    const probe = createConnection({ path: this.socketPath }, () => {
+      probe.destroy();
+      this.tryConnectRetry();
     });
-    sock.on('error', () => { this.resolveReady(); });
+    probe.once('error', (err) => {
+      probe.destroy();
+      if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT') {
+        try { unlinkSync(this.socketPath); } catch (e) {}
+        this.tryServe();
+        return;
+      }
+      this.tryConnectRetry();
+    });
   }
   addPeer(sock) {
     if (this.disconnected) {
@@ -651,7 +670,7 @@ ${minimalIpcBusJS}
 
     // Wait for subscriber to be ready before starting publisher
     try {
-      await waitFor(() => messages.a.some((m: any) => m.ready), 2000);
+      await waitFor(() => messages.a.some((m: any) => m.ready), 5000);
     } catch (e) {
       console.error('Process A stderr:', stderrA);
       throw e;
@@ -671,7 +690,7 @@ ${minimalIpcBusJS}
     // Wait for the sentinel message to be received
     await Promise.race([
       testPromise,
-      sleep(3000).then(() => {
+      sleep(5000).then(() => {
         console.error('Process A stderr:', stderrA);
         console.error('Process B stderr:', stderrB);
         throw new Error('Test timed out waiting for cross-process message');
@@ -684,7 +703,7 @@ ${minimalIpcBusJS}
 
     expect(messages.a.some((m: any) => m.received)).toBe(true);
     expect(messages.b.some((m: any) => m.error)).toBe(false);
-  }, 10000);
+  }, 15000);
 
   it('cross-process: B subscribes, A publishes (reversed)', async () => {
     const sock = tempSocketPath();
@@ -740,29 +759,48 @@ class IpcBus {
   }
   tryConnect() {
     const sock = createConnection({ path: this.socketPath }, () => {
+      sock.removeAllListeners('error');
       this.addPeer(sock);
       this.resolveReady();
     });
-    sock.on('error', () => { this.tryServe(); });
+    sock.once('error', () => { this.tryServe(); });
   }
   tryServe() {
     mkdirSync(dirname(this.socketPath), { recursive: true });
-    try { unlinkSync(this.socketPath); } catch (e) {}
     const srv = createServer((client) => { this.addPeer(client); });
     srv.on('error', (err) => {
-      if (err.code === 'EADDRINUSE') { this.tryConnectRetry(); }
+      if (err.code === 'EADDRINUSE') { this.recoverFromAddressInUse(); }
     });
+    this.listenOnServer(srv);
+  }
+  tryConnectRetry() {
+    const sock = createConnection({ path: this.socketPath }, () => {
+      sock.removeAllListeners('error');
+      this.addPeer(sock);
+      this.resolveReady();
+    });
+    sock.on('error', () => { this.resolveReady(); });
+  }
+  listenOnServer(srv) {
     srv.listen(this.socketPath, () => {
       this.server = srv;
       this.resolveReady();
     });
   }
-  tryConnectRetry() {
-    const sock = createConnection({ path: this.socketPath }, () => {
-      this.addPeer(sock);
-      this.resolveReady();
+  recoverFromAddressInUse() {
+    const probe = createConnection({ path: this.socketPath }, () => {
+      probe.destroy();
+      this.tryConnectRetry();
     });
-    sock.on('error', () => { this.resolveReady(); });
+    probe.once('error', (err) => {
+      probe.destroy();
+      if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT') {
+        try { unlinkSync(this.socketPath); } catch (e) {}
+        this.tryServe();
+        return;
+      }
+      this.tryConnectRetry();
+    });
   }
   addPeer(sock) {
     if (this.disconnected) {
@@ -890,7 +928,7 @@ ${minimalIpcBusJS}
 
     // Wait for subscriber to be ready before starting publisher
     try {
-      await waitFor(() => messages.b.some((m: any) => m.ready), 2000);
+      await waitFor(() => messages.b.some((m: any) => m.ready), 5000);
     } catch (e) {
       console.error('Process B stderr:', stderrB);
       throw e;
@@ -910,7 +948,7 @@ ${minimalIpcBusJS}
     // Wait for the sentinel message to be received
     await Promise.race([
       testPromise,
-      sleep(3000).then(() => {
+      sleep(5000).then(() => {
         console.error('Process A stderr:', stderrA);
         console.error('Process B stderr:', stderrB);
         throw new Error('Test timed out waiting for cross-process message (reversed)');
@@ -923,7 +961,7 @@ ${minimalIpcBusJS}
 
     expect(messages.b.some((m: any) => m.received)).toBe(true);
     expect(messages.a.some((m: any) => m.error)).toBe(false);
-  }, 10000);
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------

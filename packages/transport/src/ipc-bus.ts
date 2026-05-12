@@ -312,12 +312,13 @@ export class IpcBus implements MessageBus {
 
   private tryConnect(): void {
     const sock = createConnection({ path: this.socketPath }, () => {
+      sock.removeAllListeners('error');
       // Connected as client.
       this.addPeer(sock);
       this.resolveReady();
     });
 
-    sock.on('error', (err: NodeJS.ErrnoException) => {
+    sock.once('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT') {
         if (!this.allowServe) {
           this.resolveReady();
@@ -340,44 +341,65 @@ export class IpcBus implements MessageBus {
     // Ensure directory exists.
     mkdirSync(dirname(this.socketPath), { recursive: true });
 
-    // Clean stale socket file before binding.
-    try {
-      unlinkSync(this.socketPath);
-    } catch {
-      // File may not exist — fine.
-    }
-
     const srv = createServer((client) => {
       this.addPeer(client);
     });
 
     srv.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        // Another process won the race — fall back to client.
-        this.tryConnectRetry();
+        // Either another process won the race or a stale socket path exists.
+        this.recoverFromAddressInUse();
       }
       // Other server errors are silently ignored (no payload logging).
     });
 
+    this.listenOnServer(srv);
+  }
+
+  /** Retry connect after losing the serve race. */
+  private tryConnectRetry(): void {
+    const sock = createConnection({ path: this.socketPath }, () => {
+      sock.removeAllListeners('error');
+      this.addPeer(sock);
+      this.resolveReady();
+    });
+
+    sock.once('error', () => {
+      if (this.allowServe) {
+        this.scheduleServeRecovery();
+      }
+      // Nothing else we can do synchronously — resolve ready so callers don't hang forever.
+      this.resolveReady();
+    });
+  }
+
+  private listenOnServer(srv: Server): void {
     srv.listen(this.socketPath, () => {
       this.server = srv;
       this.resolveReady();
     });
   }
 
-  /** Retry connect after losing the serve race. */
-  private tryConnectRetry(): void {
-    const sock = createConnection({ path: this.socketPath }, () => {
-      this.addPeer(sock);
-      this.resolveReady();
+  private recoverFromAddressInUse(): void {
+    const probe = createConnection({ path: this.socketPath }, () => {
+      probe.destroy();
+      this.tryConnectRetry();
     });
 
-    sock.on('error', () => {
-      if (this.allowServe) {
-        this.scheduleServeRecovery();
+    probe.once('error', (err: NodeJS.ErrnoException) => {
+      probe.destroy();
+      if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT') {
+        try {
+          unlinkSync(this.socketPath);
+        } catch {
+          // Another process may have already cleaned up the stale socket.
+        }
+        if (!this.disconnected) {
+          this.tryServe();
+        }
+        return;
       }
-      // Nothing else we can do synchronously — resolve ready so callers don't hang forever.
-      this.resolveReady();
+      this.tryConnectRetry();
     });
   }
 
