@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# INV-67 tier-aware suite runner.
+#
+# Design verdict: Supported (status quo) per docs/context/inv-67/experiment-brief.md.
+# Properties this script must preserve (any change must keep these passing):
+#   E1 — `find ... | LC_ALL=C sort` enumeration is locale-stable.
+#   E3 — `pnpm run test:all` (mode=required, jobs=1, resume=0) reports `Failed: 0`.
+#   E4 — Extended mode strictly extends the required listing with optional/*.sh.
+#   E5 — `INVOKER_TEST_ALL_RESUME=1` skips prior passed/skipped-unavailable rows.
+#   E6 — `INVOKER_TEST_ALL_FORCE_RERUN=1` overrides E5 and re-runs the full set.
+#   E7 — Invalid `INVOKER_TEST_ALL_JOBS` exits 2 with an explicit stderr message.
+#   E8 — Dangerous tier is opt-in (only `EXTENDED=1 && DANGEROUS=1` surfaces it).
+# The matrix-replacement alternative is Rejected; see brief §"Alternative verdicts".
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
