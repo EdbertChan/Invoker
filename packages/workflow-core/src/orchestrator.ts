@@ -2019,10 +2019,10 @@ export class Orchestrator {
 
   restartTask(taskId: string): TaskState[] {
     this.logger.warn(
-      '[orchestrator] restartTask is deprecated. Routing to recreateTask. Use retryTask() for lineage-preserving reset or recreateTask() for fresh-lineage reset explicitly.',
+      '[orchestrator] restartTask is deprecated. Routing to retryTask. Use retryTask() for lineage-preserving reset or recreateTask() for fresh-lineage reset explicitly.',
       { taskId },
     );
-    return this.recreateTask(taskId);
+    return this.retryTask(taskId);
   }
 
   retryTask(taskId: string): TaskState[] {

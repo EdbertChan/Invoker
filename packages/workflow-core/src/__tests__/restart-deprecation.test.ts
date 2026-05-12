@@ -29,18 +29,18 @@ describe('restartTask deprecation shim', () => {
       (orch as unknown as { logger: { warn: typeof warnSpy } }).logger = {
         warn: warnSpy,
       } as never;
-      // The shim only calls `this.recreateTask`, so stubbing
+      // The shim only calls `this.retryTask`, so stubbing
       // that out and asserting the call is sufficient.
       recreateSpy = vi.spyOn(orch, 'recreateTask').mockImplementation(() => []);
       retrySpy = vi.spyOn(orch, 'retryTask').mockImplementation(() => []);
     });
 
-    it('delegates restartTask to recreateTask (NOT retryTask)', () => {
+    it('delegates restartTask to retryTask (NOT recreateTask)', () => {
       orch.restartTask('task-1');
 
-      expect(recreateSpy).toHaveBeenCalledTimes(1);
-      expect(recreateSpy).toHaveBeenCalledWith('task-1');
-      expect(retrySpy).not.toHaveBeenCalled();
+      expect(retrySpy).toHaveBeenCalledTimes(1);
+      expect(retrySpy).toHaveBeenCalledWith('task-1');
+      expect(recreateSpy).not.toHaveBeenCalled();
     });
 
     it('emits a deprecation warning on stderr', () => {
@@ -50,14 +50,14 @@ describe('restartTask deprecation shim', () => {
       const message = String(warnSpy.mock.calls[0][0]);
       expect(message).toContain('restartTask');
       expect(message).toContain('deprecated');
-      expect(message).toContain('Routing to recreateTask');
+      expect(message).toContain('Routing to retryTask');
       expect(message).toContain('retryTask');
       expect(message).toContain('recreateTask');
     });
 
-    it('returns whatever recreateTask returns (passthrough)', () => {
+    it('returns whatever retryTask returns (passthrough)', () => {
       const sentinel = [{ id: 'task-1' } as never];
-      recreateSpy.mockReturnValueOnce(sentinel);
+      retrySpy.mockReturnValueOnce(sentinel);
 
       const result = orch.restartTask('task-1');
 
@@ -90,13 +90,13 @@ describe('restartTask deprecation shim', () => {
       warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     });
 
-    it('delegates restartTask to orchestrator.recreateTask (NOT retryTask)', async () => {
+    it('delegates restartTask to orchestrator.retryTask (NOT recreateTask)', async () => {
       const result = await svc.restartTask(envelope({ taskId: 't-1' }));
 
       expect(result).toEqual({ ok: true, data: [] });
-      expect(orchestrator.recreateTask).toHaveBeenCalledTimes(1);
-      expect(orchestrator.recreateTask).toHaveBeenCalledWith('t-1');
-      expect(orchestrator.retryTask).not.toHaveBeenCalled();
+      expect(orchestrator.retryTask).toHaveBeenCalledTimes(1);
+      expect(orchestrator.retryTask).toHaveBeenCalledWith('t-1');
+      expect(orchestrator.recreateTask).not.toHaveBeenCalled();
     });
 
     it('emits a deprecation warning', async () => {
@@ -106,7 +106,7 @@ describe('restartTask deprecation shim', () => {
       const message = String(warnSpy.mock.calls[0][0]);
       expect(message).toContain('restartTask');
       expect(message).toContain('deprecated');
-      expect(message).toContain('Routing to recreateTask');
+      expect(message).toContain('Routing to retryTask');
     });
 
     it('exposes explicit retryTask + recreateTask methods', async () => {

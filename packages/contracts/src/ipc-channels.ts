@@ -263,12 +263,13 @@ export const IpcChannels = {
    * `restartTask` was the overloaded "retry-or-recreate" verb the
    * chart's "Naming inconsistency" section flagged. The channel
    * itself is preserved for UI compatibility but its handler in
-   * `main.ts` now routes through `commandService.retryTask` →
+   * `main.ts` routes through `commandService.retryTask` →
    * `Orchestrator.retryTask` (retry-class semantics: preserves
-   * branch/workspacePath lineage). Prefer the explicit channels —
-   * `invoker:retry-task` (when wired) for retry-class invalidation
-   * or `invoker:recreate-task` for recreate-class invalidation.
-   * Once UI is migrated this channel can be removed.
+   * branch/workspacePath lineage). `invoker:recreate-task` remains
+   * the explicit recreate-class channel. This is the INV-91 selected
+   * design: the registry defines the typed surface and surfaces
+   * delegate to orchestrator primitives instead of owning mutation
+   * semantics locally.
    */
   'invoker:restart-task': {} as {
     request: [taskId: string];

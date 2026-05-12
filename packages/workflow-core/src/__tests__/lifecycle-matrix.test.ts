@@ -197,13 +197,12 @@ describe('Step 17: canonical lifecycle matrix lock-in', () => {
       }
     });
 
-    it('still exposes the Step 13 deprecated restartTask shim that delegates to recreateTask', () => {
+    it('still exposes the Step 13 deprecated restartTask shim that delegates to retryTask', () => {
       // The shim's behavior is locked-in by `restart-deprecation.test.ts`;
       // here we just reassert the surface invariant so the matrix
-      // doc reads cleanly: restartTask exists, restartTask !== retryTask
-      // path, and restartTask collapses to recreateTask. See
-      // `docs/architecture/task-invalidation-chart.md` "Naming
-      // inconsistency" for the rationale.
+      // doc reads cleanly: restartTask exists only as a compatibility
+      // alias and collapses to retryTask. This matches the INV-91
+      // experiment's HTTP/IPC legacy task restart route.
       expect(typeof Orchestrator.prototype.restartTask).toBe('function');
 
       const orch = Object.create(Orchestrator.prototype) as Orchestrator;
@@ -215,9 +214,9 @@ describe('Step 17: canonical lifecycle matrix lock-in', () => {
       const retrySpy = vi.spyOn(orch, 'retryTask').mockReturnValue([]);
       try {
         orch.restartTask('t-x');
-        expect(recreateSpy).toHaveBeenCalledTimes(1);
-        expect(recreateSpy).toHaveBeenCalledWith('t-x');
-        expect(retrySpy).not.toHaveBeenCalled();
+        expect(retrySpy).toHaveBeenCalledTimes(1);
+        expect(retrySpy).toHaveBeenCalledWith('t-x');
+        expect(recreateSpy).not.toHaveBeenCalled();
       } finally {
         recreateSpy.mockRestore();
         retrySpy.mockRestore();
