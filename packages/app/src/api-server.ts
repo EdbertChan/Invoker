@@ -7,6 +7,12 @@
  * All write endpoints delegate to a WorkflowMutationFacade instance
  * which encapsulates the mutation → dispatch → topup lifecycle.
  *
+ * INV-130: this single-seam delegation contract is locked in by the
+ * architectural invariants block in `__tests__/api-server.test.ts`
+ * (EXP-2/EXP-3 from `docs/context/inv-130/experiment-brief.md`).
+ * No handler in this file may call `orchestrator.<mutator>(...)`
+ * directly; new write endpoints must dispatch via `deps.mutations`.
+ *
  * Read endpoints:
  *   GET  /api/health
  *   GET  /api/status

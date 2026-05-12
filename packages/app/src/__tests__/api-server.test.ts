@@ -9,6 +9,8 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
+import { resolve as pathResolve } from 'node:path';
 import { startApiServer, type ApiServer } from '../api-server.js';
 import { WorkflowMutationFacade } from '../workflow-mutation-facade.js';
 import { OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
@@ -933,5 +935,82 @@ describe('Unknown routes', () => {
     const res = await request(port, 'DELETE', '/api/health');
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Not found');
+  });
+});
+
+// ── INV-130 architectural invariants ────────────────────────
+//
+// These assertions mechanize EXP-2, EXP-3, and EXP-4 from
+// `docs/context/inv-130/experiment-brief.md` (the experiment that
+// selected facade-mediated dispatch over per-handler Orchestrator calls).
+// They guard the single-seam contract: HTTP write endpoints route
+// through `WorkflowMutationFacade`, and the Orchestrator's documented
+// `refreshFromDb → writeAndSync` lifecycle remains pervasively invoked.
+describe('INV-130 architectural invariants', () => {
+  const apiServerSrc = readFileSync(
+    pathResolve(__dirname, '..', 'api-server.ts'),
+    'utf8',
+  );
+  const orchestratorSrc = readFileSync(
+    pathResolve(
+      __dirname,
+      '..',
+      '..',
+      '..',
+      'workflow-core',
+      'src',
+      'orchestrator.ts',
+    ),
+    'utf8',
+  );
+
+  // EXP-3 enumerated mutator names. Adding a new orchestrator mutator
+  // that the facade owns should extend this list (and the brief).
+  const ORCHESTRATOR_MUTATORS = [
+    'approve',
+    'reject',
+    'retryTask',
+    'cancelTask',
+    'revertConflictResolution',
+    'editTaskCommand',
+    'editTaskPrompt',
+    'editTaskType',
+    'editTaskAgent',
+    'setTaskExternalGatePolicies',
+    'setFixAwaitingApproval',
+    'provideInput',
+    'beginConflictResolution',
+    'recreateTask',
+    'recreateWorkflow',
+    'recreateWorkflowFromFreshBase',
+    'forkWorkflow',
+    'retryWorkflow',
+    'cancelWorkflow',
+    'setWorkflowMergeMode',
+  ];
+
+  function countMatches(source: string, re: RegExp): number {
+    return source.match(re)?.length ?? 0;
+  }
+
+  it('EXP-2: api-server.ts dispatches ≥17 calls through mutations.<verb>(...)', () => {
+    const count = countMatches(apiServerSrc, /mutations\.[a-zA-Z]+\(/g);
+    expect(count).toBeGreaterThanOrEqual(17);
+  });
+
+  it('EXP-3: api-server.ts contains zero direct orchestrator.<mutator>() calls', () => {
+    const re = new RegExp(
+      `orchestrator\\.(${ORCHESTRATOR_MUTATORS.join('|')})\\(`,
+      'g',
+    );
+    const count = countMatches(apiServerSrc, re);
+    expect(count).toBe(0);
+  });
+
+  it('EXP-4: orchestrator.ts retains refreshFromDb/writeAndSync lifecycle calls', () => {
+    const refreshCount = countMatches(orchestratorSrc, /this\.refreshFromDb\(\)/g);
+    const writeSyncCount = countMatches(orchestratorSrc, /this\.writeAndSync\(/g);
+    expect(refreshCount).toBeGreaterThanOrEqual(20);
+    expect(writeSyncCount).toBeGreaterThanOrEqual(30);
   });
 });

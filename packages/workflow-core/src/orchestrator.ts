@@ -10,6 +10,13 @@
  *   2. validate / compute using read-only queries
  *   3. writeAndSync()   — persist changes to DB, update graph cache
  *   4. publish delta    — notify UI
+ *
+ * INV-130: this lifecycle is the contract `WorkflowMutationFacade` (the
+ * sole HTTP-plane caller) relies on. EXP-4 in
+ * `docs/context/inv-130/experiment-brief.md` asserts that
+ * `refreshFromDb()` and `writeAndSync()` remain pervasively invoked
+ * across the mutator surface; the architectural invariants block in
+ * `packages/app/src/__tests__/api-server.test.ts` mechanizes that floor.
  */
 
 import { appendFileSync, mkdirSync } from 'node:fs';
