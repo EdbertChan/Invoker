@@ -82,7 +82,8 @@ branch refs/heads/experiment/task2-ccdd3344
 `;
 
   it('matches worktree with same actionId but different hash suffix', () => {
-    // Looking for actionId "task1" — should match the branch experiment/task1-aabb1122
+    // Legacy compatibility only: canonical INV-114 branches are handled by
+    // findManagedWorktreeByContent so reuse remains content-addressed.
     const result = findManagedWorktreeByActionId(
       porcelain,
       'task1',
@@ -121,6 +122,19 @@ branch refs/heads/task1-aabb1122
     const result = findManagedWorktreeByActionId(
       porcelainNoExp,
       'task1',
+      ['/home/u/.invoker/wt/h'],
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it('does not match canonical lifecycle/content-hash branches by actionId alone', () => {
+    const canonical = `worktree /home/u/.invoker/wt/h/experiment-wf-1-task-g0.t0.aaaa11111-deadbeef
+HEAD b
+branch refs/heads/experiment/wf-1/task/g0.t0.aaaa11111-deadbeef
+`;
+    const result = findManagedWorktreeByActionId(
+      canonical,
+      'wf-1/task',
       ['/home/u/.invoker/wt/h'],
     );
     expect(result).toBeUndefined();

@@ -1902,8 +1902,8 @@ describe('TaskRunner', () => {
       await executor.executeTask(task);
 
       expect(capturedRequest).toBeDefined();
-      // Lifecycle tag embeds wfGen=3, taskGen=5, attemptShort sanitized from
-      // 'attempt-abc' (truncated to 12 chars, lowercased, kept dash chars).
+      // INV-114 selected design: lifecycle provenance remains separate from
+      // WorktreeExecutor's content hash while still making branch names unique.
       expect(capturedRequest.inputs.lifecycleTag).toBe('g3.t5.aattempt-abc');
     });
 

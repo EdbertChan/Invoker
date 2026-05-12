@@ -165,9 +165,13 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       upstreamCommits,
       baseHead,
     );
+    // INV-114 selected content-addressable reuse: TaskRunner-owned lifecycle
+    // provenance stays visible in the branch name, while contentHash remains
+    // the deterministic cache-equivalence key for unchanged task specs.
+    const lifecycleTag = request.inputs.lifecycleTag ?? '';
     const branch = buildExperimentBranchName(
       request.actionId,
-      request.inputs.lifecycleTag ?? '',
+      lifecycleTag,
       contentHash,
     );
     traceExecution(`[WorktreeExecutor] branch=${branch} contentHash=${contentHash}`);

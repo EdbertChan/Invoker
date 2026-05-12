@@ -74,8 +74,12 @@ export function findManagedWorktreeForBranch(
 }
 
 /**
- * First Invoker-managed worktree whose branch starts with `experiment/{actionId}-`
- * (same task, possibly different hash). Returns the worktree path and branch name.
+ * Legacy lookup for pre-INV-114 flat branches shaped as
+ * `experiment/{actionId}-{hash}`.
+ *
+ * Canonical branches (`experiment/<actionId>/<lifecycleTag>-<contentHash>`)
+ * must flow through `findManagedWorktreeByContent()` so reuse depends on the
+ * deterministic content hash rather than on action chronology.
  */
 export function findManagedWorktreeByActionId(
   porcelain: string,

@@ -43,7 +43,7 @@ Observed expected output:
 
 ```text
 Test Files  3 passed (3)
-Tests       270 passed (270)
+Tests       271 passed (271)
 ```
 
 Threshold:
@@ -91,6 +91,7 @@ Selected design passes the deterministic proof because the tests cover:
 - round-trip parsing of the selected branch shape;
 - rejection of legacy or malformed branch names;
 - managed lookup by content-equivalent worktree;
+- rejection of canonical branch reuse by action id alone;
 - collision detection across different action ids;
 - TaskRunner lifecycle-tag generation from workflow generation, task generation, and attempt id.
 
