@@ -26,6 +26,9 @@ function tempSocketPath(): string {
 }
 
 describe('IpcBus', () => {
+  const CROSS_PROCESS_BOOTSTRAP_TIMEOUT_MS = 5000;
+  const CROSS_PROCESS_DELIVERY_TIMEOUT_MS = 5000;
+
   const buses: IpcBus[] = [];
 
   function createBus(socketPath: string): IpcBus {
@@ -651,7 +654,10 @@ ${minimalIpcBusJS}
 
     // Wait for subscriber to be ready before starting publisher
     try {
-      await waitFor(() => messages.a.some((m: any) => m.ready), 2000);
+      await waitFor(
+        () => messages.a.some((m: any) => m.ready),
+        CROSS_PROCESS_BOOTSTRAP_TIMEOUT_MS,
+      );
     } catch (e) {
       console.error('Process A stderr:', stderrA);
       throw e;
@@ -671,7 +677,7 @@ ${minimalIpcBusJS}
     // Wait for the sentinel message to be received
     await Promise.race([
       testPromise,
-      sleep(3000).then(() => {
+      sleep(CROSS_PROCESS_DELIVERY_TIMEOUT_MS).then(() => {
         console.error('Process A stderr:', stderrA);
         console.error('Process B stderr:', stderrB);
         throw new Error('Test timed out waiting for cross-process message');
@@ -890,7 +896,10 @@ ${minimalIpcBusJS}
 
     // Wait for subscriber to be ready before starting publisher
     try {
-      await waitFor(() => messages.b.some((m: any) => m.ready), 2000);
+      await waitFor(
+        () => messages.b.some((m: any) => m.ready),
+        CROSS_PROCESS_BOOTSTRAP_TIMEOUT_MS,
+      );
     } catch (e) {
       console.error('Process B stderr:', stderrB);
       throw e;
@@ -910,7 +919,7 @@ ${minimalIpcBusJS}
     // Wait for the sentinel message to be received
     await Promise.race([
       testPromise,
-      sleep(3000).then(() => {
+      sleep(CROSS_PROCESS_DELIVERY_TIMEOUT_MS).then(() => {
         console.error('Process A stderr:', stderrA);
         console.error('Process B stderr:', stderrB);
         throw new Error('Test timed out waiting for cross-process message (reversed)');
