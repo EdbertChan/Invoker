@@ -1,0 +1,10 @@
+{
+  "threshold": 1500,
+  "files": {
+    "packages/app/src/headless.ts": 2759,
+    "packages/app/src/main.ts": 3756,
+    "packages/data-store/src/sqlite-adapter.ts": 2130,
+    "packages/execution-engine/src/task-runner.ts": 2090,
+    "packages/workflow-core/src/orchestrator.ts": 4677
+  }
+}
