@@ -1,12 +1,33 @@
 /**
  * Default shell command for provisioning a worktree after clone (local or remote).
  * Kept in one place so WorktreeExecutor, SshExecutor, and docs stay aligned.
+ * Honors .node-version before pnpm so managed worktrees do not inherit an
+ * incompatible ambient Node from the Invoker host process.
  */
 export const DEFAULT_WORKTREE_PROVISION_COMMAND =
   'if [ ! -f package.json ] && [ ! -f pnpm-workspace.yaml ]; then \
     echo "[provision] No package.json/pnpm-workspace.yaml found; skipping pnpm install"; \
     exit 0; \
   fi; \
+  invoker_prepend_node_version_bin() { \
+    if [ ! -f .node-version ]; then return 0; fi; \
+    INVOKER_NODE_VERSION="$(tr -d "[:space:]" < .node-version)"; \
+    if [ -z "$INVOKER_NODE_VERSION" ]; then return 0; fi; \
+    INVOKER_NODE_VERSION="${INVOKER_NODE_VERSION#v}"; \
+    INVOKER_NODE_MAJOR="${INVOKER_NODE_VERSION%%.*}"; \
+    INVOKER_NODE_BIN_DIRS="${INVOKER_NODE_VERSION_BIN_DIRS:-/opt/homebrew/opt/node@$INVOKER_NODE_MAJOR/bin:/usr/local/opt/node@$INVOKER_NODE_MAJOR/bin}"; \
+    INVOKER_OLD_IFS="$IFS"; IFS=:; \
+    for INVOKER_NODE_BIN in $INVOKER_NODE_BIN_DIRS; do \
+      IFS="$INVOKER_OLD_IFS"; \
+      if [ -x "$INVOKER_NODE_BIN/node" ]; then \
+        export PATH="$INVOKER_NODE_BIN:$PATH"; \
+        echo "[provision] using Node from .node-version: $($INVOKER_NODE_BIN/node --version)"; \
+        return 0; \
+      fi; \
+    done; \
+    IFS="$INVOKER_OLD_IFS"; \
+  }; \
+  invoker_prepend_node_version_bin; \
   if ! NODE_ENV=development pnpm install --frozen-lockfile; then \
     echo "[provision] frozen-lockfile install failed; refreshing lockfile and retrying"; \
     NODE_ENV=development pnpm install --lockfile-only; \
