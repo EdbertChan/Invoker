@@ -18,6 +18,12 @@
 #   1 = one or more checks failed
 #   2 = usage/argument error
 #
+# The {0,1,2} exit-code contract is load-bearing per the INV-63 experiment
+# brief at docs/context/inv-63/experiment-brief.md (EXP-5). The brief also
+# records the single-orchestrator design (EXP-1, EXP-2) against the rejected
+# multi-script alternative ALT-A. Any change that adds an out-of-band exit
+# code or removes a documented run_check call must reopen the brief.
+#
 # Output: JSON summary of all checks with pass/fail status
 set -euo pipefail
 

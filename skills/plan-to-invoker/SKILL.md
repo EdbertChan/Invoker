@@ -43,6 +43,26 @@ Grep-only checks are Phase 1a only; behavioral claims require executed Phase 1b 
 
 Use these as concrete skill steps. Every step should run a command and produce pass/fail output.
 
+### Design rationale (INV-63)
+
+The single-orchestrator design below is **load-bearing** per the experiment
+brief at [`docs/context/inv-63/experiment-brief.md`](../../docs/context/inv-63/experiment-brief.md).
+That brief records the **PROVEN** verdict for hypotheses H1, H2, H3 and the
+**REJECTED** verdict for the per-script alternative (ALT-A). The contract
+asserted by the brief — and enforced by `scripts/test-inv-63-brief-thresholds.sh` —
+is:
+
+- One orchestrator (`skill-doctor.sh`) fans out **every** advertised sub-check
+  (EXP-1, threshold ≥ 8 `run_check` invocations).
+- `SKILL.md` advertises that single surface in at least two places (EXP-2).
+- `.cursor/skills/plan-to-invoker` is a symlink to `../../skills/plan-to-invoker`,
+  so the cursor mirror is byte-identical structurally (EXP-3, EXP-4).
+- `skill-doctor.sh` exit codes are confined to `{0, 1, 2}` (EXP-5).
+- `scripts/*.sh` inventory keeps ≥ 10 scripts (EXP-6 control).
+
+Any edit that regresses one of these thresholds breaks the brief's PROVEN
+verdict and must either restore the threshold or reopen the brief.
+
 ### Primary validation surface
 
 **Run all plan validation checks in one command:**

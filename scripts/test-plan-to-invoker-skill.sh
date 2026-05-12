@@ -116,3 +116,14 @@ if [[ -f "$POLICY_TEST_SCRIPT" ]]; then
 else
   fail "Policy coverage test script not found: $POLICY_TEST_SCRIPT"
 fi
+
+echo ""
+echo "Running INV-63 experiment-brief threshold checks..."
+BRIEF_TEST_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/test-inv-63-brief-thresholds.sh"
+if [[ -f "$BRIEF_TEST_SCRIPT" ]]; then
+  if ! bash "$BRIEF_TEST_SCRIPT"; then
+    fail "INV-63 experiment-brief thresholds regressed"
+  fi
+else
+  fail "INV-63 brief-threshold test script not found: $BRIEF_TEST_SCRIPT"
+fi
