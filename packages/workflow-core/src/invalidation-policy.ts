@@ -1,3 +1,23 @@
+/**
+ * Invalidation policy — single source of truth for `MutationKey` →
+ * `{ invalidatesExecutionSpec, invalidateIfActive, action }` rows and
+ * the `applyInvalidation` dispatcher that fans them into orchestrator
+ * deps.
+ *
+ * Proof anchor: `docs/context/inv-90/experiment-brief.md`.
+ *  - §4.1 pins exactly 14 `MUTATION_POLICIES` rows (one per `MutationKey`).
+ *  - §4.2 pins exactly 24 union members across `InvalidationAction` (10) +
+ *    `MutationKey` (14), so the dispatcher's exhaustive `switch` and the
+ *    `Record<MutationKey, ...>` table cannot drift apart.
+ *  - §4.3 pins `applyInvalidation` as the exported funnel containing the
+ *    sole `await deps.cancelInFlight(scope, id)` callsite — cancel-first
+ *    ordering for every invalidating action is encoded here, not at
+ *    callers.
+ *
+ * Rejected alternative (per brief §3): per-method ad-hoc invalidation
+ * inlined in each `editTask*`. Do not regress toward duplicating
+ * `cancelInFlight` / scope guards into callers.
+ */
 
 import type { TaskState } from '@invoker/workflow-graph';
 export type InvalidationAction =
