@@ -1,6 +1,15 @@
 /**
  * Orchestrator behavioural test surface.
  *
+ * Proof anchor: `docs/context/inv-88/experiment-brief.md`.
+ *  - §4.9 pins the named describe blocks for DB-first persistence,
+ *    retry/recreate lineage, and blocked-task unblocking.
+ *  - The assertions below intentionally exercise the selected funnel
+ *    design: deltas carry continuity metadata, attempt replacements
+ *    preserve supersession edges, and downstream launches carry
+ *    upstream attempt IDs. The rejected alternative is per-method
+ *    inline persistence or lineage construction.
+ *
  * Proof anchor: `docs/context/inv-90/experiment-brief.md`.
  *  - §4.5 pins this file at exactly 328 passing tests — the cancel-first,
  *    gen-bump, lineage, scope-validation, and `applyInvalidation` routing
@@ -3940,9 +3949,18 @@ describe('Orchestrator', () => {
       });
       orchestrator.startExecution();
 
+      publishedDeltas = [];
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: 't1', status: 'completed', outputs: { exitCode: 0 } }),
       );
+
+      const after = orchestrator.getTask('t1')!;
+      const delta = publishedDeltas.findLast(
+        (d) => d.type === 'updated' && d.taskId === after.id && d.changes.status === 'completed',
+      );
+      expect(delta).toBeDefined();
+      expect(delta!.previousTaskStateVersion).toBe(delta!.taskStateVersion! - 1);
+      expect(delta!.taskStateVersion).toBe(after.taskStateVersion);
 
       for (const task of orchestrator.getAllTasks()) {
         const persisted = persistence.getTaskEntry(task.id);
@@ -4463,6 +4481,9 @@ describe('Orchestrator', () => {
 
       expect(orchestrator.getTask('B')!.status).toBe('running');
       expect(orchestrator.getTask('C')!.status).toBe('pending');
+      expect(persistence.loadAttempt(orchestrator.getTask('B')!.execution.selectedAttemptId!)?.upstreamAttemptIds).toContain(
+        orchestrator.getTask('A')!.execution.selectedAttemptId,
+      );
     });
 
     it('ignores responses when they arrive for a non-executable task', () => {
@@ -6224,6 +6245,7 @@ describe('Orchestrator', () => {
       expect(latestAttemptId).not.toBe(claimedAttemptId);
       expect(persistence.loadAttempt(claimedAttemptId!)?.status).toBe('superseded');
       expect(persistence.loadAttempt(latestAttemptId!)?.status).toBe('running');
+      expect(persistence.loadAttempt(latestAttemptId!)?.supersedesAttemptId).toBe(claimedAttemptId);
     });
 
     it('retryWorkflow selects a fresh persisted attempt for retried tasks', () => {

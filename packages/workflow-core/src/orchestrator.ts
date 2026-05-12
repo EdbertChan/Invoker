@@ -14,6 +14,14 @@
  * (`invalidation-policy.ts` §4.3). Rejected alternative (brief §3):
  * per-method ad-hoc invalidation inlined in each editor.
  *
+ * INV-88 invariant (orchestrator persistence and lineage contract).
+ * Proof anchor: docs/context/inv-88/experiment-brief.md. Supported
+ * design: preserve the private funnels below for DB-first writes,
+ * refresh-before-mutate consistency, generation bumps, attempt
+ * lineage, delta continuity, and external-dependency gating. Rejected
+ * alternative: inline DB writes, per-method generation math, or
+ * per-method attempt-lineage construction.
+ *
  * ALL writes go through the persistence layer (DB) first. The in-memory
  * graph (via TaskStateMachine) is a read-only cache that is refreshed
  * from the DB. This ensures the DB is always the single source of truth.
@@ -719,6 +727,10 @@ export class Orchestrator {
    * Refresh the in-memory graph from the database.
    * Called at the start of every public mutation to ensure
    * we see any external changes before proceeding.
+   *
+   * INV-88 §4.3: this is the refresh-before-mutate funnel. Do not
+   * replace public mutation entrypoint refreshes with per-method cache
+   * assumptions.
    */
   private refreshFromDb(): void {
     if (this.activeWorkflowIds.size === 0) return;
@@ -742,6 +754,9 @@ export class Orchestrator {
   /**
    * Write field changes to the DB, then update the in-memory cache
    * to match. Returns the updated task state.
+   *
+   * INV-88 §4.4: this is the only task-state write funnel. DB writes
+   * must happen before the TaskStateMachine cache is restored.
    */
   private writeAndSync(
     taskId: string,
@@ -1029,6 +1044,11 @@ export class Orchestrator {
     return task?.execution.generation ?? 0;
   }
 
+  /**
+   * INV-88 §4.5: generation bumps are centralized here so retry /
+   * recreate / conflict-resolution paths do not inline their own
+   * `generation + 1` arithmetic.
+   */
   private withBumpedExecutionGeneration(task: TaskState, changes: TaskStateChanges): TaskStateChanges {
     return {
       ...changes,
@@ -1150,6 +1170,8 @@ export class Orchestrator {
       .map(depId => this.stateGetTask(depId)?.execution.selectedAttemptId)
       .filter((id): id is string => !!id);
 
+    // INV-88 §4.7: every replacement attempt records both the selected
+    // upstream attempts and the supersession edge to the prior attempt.
     const freshAttempt = createAttempt(task.id, {
       status: 'pending',
       snapshotCommit: current?.commit,
@@ -4316,6 +4338,11 @@ export class Orchestrator {
     return tasks.find((t) => t.id === scopedId || t.id === normalizedTaskId);
   }
 
+  /**
+   * INV-88 §4.8: all external-dependency start/block decisions must
+   * route through this resolver so HTTP, IPC, and internal scheduler
+   * surfaces cannot diverge.
+   */
   private getExternalDependencyBlocker(task: TaskState): string | undefined {
     const deps = task.config.externalDependencies;
     if (!deps || deps.length === 0) return undefined;
