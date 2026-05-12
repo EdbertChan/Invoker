@@ -22,6 +22,7 @@ import {
   getTasks,
   findTaskByIdSuffix,
 } from './fixtures/electron-app.js';
+import type { Page } from '@playwright/test';
 
 const DEATH_LOG_PLAN = {
   name: 'E2E Death Log Plan',
@@ -50,6 +51,20 @@ const SILENT_FAIL_PLAN = {
     },
   ],
 };
+
+async function selectTaskAndWaitForPanel(page: Page, taskSuffix: string): Promise<void> {
+  const node = page.locator(`.react-flow__node[data-testid$="/${taskSuffix}"]`);
+  const commandDisplay = page.locator('[data-testid="command-display"]');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await node.click();
+    try {
+      await expect(commandDisplay).toBeVisible({ timeout: 3000 });
+      return;
+    } catch (err) {
+      if (attempt === 2) throw err;
+    }
+  }
+}
 
 test.describe('Task death logs', () => {
   test('failed task has death log in persisted output', async ({ page }) => {
@@ -84,7 +99,7 @@ test.describe('Task death logs', () => {
     await startPlan(page);
     await waitForTaskStatus(page, 'silent-fail', 'failed');
 
-    await page.locator('.react-flow__node[data-testid$="/silent-fail"]').click();
+    await selectTaskAndWaitForPanel(page, 'silent-fail');
 
     await expect(page.locator('text=Exit code: 1')).toBeVisible({ timeout: 3000 });
   });
@@ -122,7 +137,7 @@ test.describe('Task death logs', () => {
       },
     ]);
 
-    await page.locator('.react-flow__node[data-testid$="/silent-fail"]').click();
+    await selectTaskAndWaitForPanel(page, 'silent-fail');
 
     await expect(
       page.locator('text=Executor startup failed (worktree): git not found'),
