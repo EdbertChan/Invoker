@@ -1,5 +1,32 @@
 name: CI
 
+# INV-117: status quo explicit CI-matrix mapping — Supported per
+# docs/context/inv-117/experiment-brief.md. Every `bash
+# scripts/test-suites/<tier>/<file>.sh` reference below is part of a
+# bidirectional coverage contract with `scripts/run-all-tests.sh` (which
+# enumerates the same files under `find … | LC_ALL=C sort`). The contract
+# must satisfy all six experiments E1–E6 in the brief on a clean checkout:
+#   E1 — every CI-referenced suite path is `test -f`-valid
+#   E2 — required-tier suites ↔ CI references form equal sets
+#   E3 — dangerous-tier suites ↔ CI references form equal sets
+#   E4 — optional-tier orphans = {optional/32-e2e-chaos.sh,
+#                                  optional/33-e2e-chaos-overload.sh}
+#   E5 — `required/10-vitest-workspace.sh` reaches `scripts/workspace-test.sh`
+#        through `pnpm test` (root `package.json#test` script)
+#   E6 — `scripts/workspace-test.sh` keeps the `CONCURRENCY=1` CI-default
+#        branch and the `pnpm -r --workspace-concurrency="$CONCURRENCY" test`
+#        invocation verbatim
+# Adding a `required/*.sh` or `dangerous/*.sh` without a matching matrix
+# entry below regresses E2/E3. Adding an `optional/*.sh` without a matrix
+# entry regresses E4 unless the new orphan is also recorded as Deferred in
+# the brief. Renaming `scripts/workspace-test.sh` or
+# `required/10-vitest-workspace.sh` regresses E5/E6.
+# Rejected alternative: collapsing all suite invocations into a single
+# `pnpm run test:all` step — loses per-tier parallelism (Playwright
+# container, sshd setup, Docker host) and runner specialization. Deferred:
+# auto-derivation of this matrix from the `scripts/test-suites/<tier>/`
+# listing (requires per-suite runner/container/sshd metadata).
+
 on:
   push:
     branches: [master, main]

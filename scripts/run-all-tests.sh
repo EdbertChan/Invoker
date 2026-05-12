@@ -27,6 +27,31 @@
 # `is_parallel_safe` MUST list all three shard wrappers so they remain
 # eligible for the same parallelization rules; rejected alternatives (single
 # collapsed job, per-case matrix entries) are documented in the brief.
+#
+# INV-117 (status quo explicit CI-matrix mapping, Supported per
+# docs/context/inv-117/experiment-brief.md) additionally requires that the
+# `find scripts/test-suites/<tier> … | LC_ALL=C sort` enumeration here remain
+# the canonical local listing that the CI workflow's explicit matrix entries
+# in `.github/workflows/ci.yml` are checked against. Properties this script
+# must preserve for INV-117:
+#   E2 (INV-117) — every `scripts/test-suites/required/*.sh` enumerated
+#       below is also referenced by some `.github/workflows/ci.yml` matrix
+#       entry. Adding a new required suite without a matching CI matrix row
+#       breaks the bidirectional coverage contract.
+#   E3 (INV-117) — every `scripts/test-suites/dangerous/*.sh` enumerated
+#       below is referenced by the CI `docker` job (or another dangerous-tier
+#       job). Adding a dangerous suite without a CI matrix row likewise
+#       violates the contract.
+#   E4 (INV-117) — the optional-tier orphan set produced by `comm -23` of
+#       this script's enumeration vs the CI references must remain exactly
+#       {`optional/32-e2e-chaos.sh`, `optional/33-e2e-chaos-overload.sh`}.
+#       Any new optional suite must either be added to the CI matrix or
+#       documented explicitly in the brief as Deferred — silent orphans are
+#       Rejected.
+# Auto-derivation of CI matrix from this enumeration (Alt A) is Deferred
+# until a per-suite metadata schema exists; collapsing CI to a single
+# `pnpm run test:all` step (Alt B) is Rejected because it loses per-tier
+# parallelism and runner specialization.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
