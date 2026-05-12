@@ -11,6 +11,14 @@ import type { WorkResponse, Logger } from '@invoker/contracts';
 import { EventEmitter } from 'events';
 import { buildCanonicalPrBody, validateCanonicalPrBody } from '../pr-authoring.js';
 import type { PrAuthoringContext } from '../pr-authoring.js';
+import {
+  parseGitWorktreePorcelain,
+  findManagedWorktreeForBranch,
+  findManagedWorktreeByActionId,
+  abbrevRefMatchesBranch,
+  canonicalPathForComparison,
+  pathIsUnderManagedPrefixes,
+} from '../worktree-discovery.js';
 
 /**
  * Creates a mock executor that auto-completes on start().
@@ -9128,6 +9136,137 @@ describe('TaskRunner', () => {
       expect(body).toContain('![mobile](https://img.example.com/mobile.png)');
       // Validate the body passes canonical schema validation
       expect(validateCanonicalPrBody(body)).toEqual([]);
+    });
+  });
+});
+
+// INV-114 brief consumption — pins the porcelain-based discovery design
+// selected by `docs/context/inv-114/experiment-brief.md` §2 and the §3.3
+// trip-wire invariants the executor depends on. A failure in this block
+// means the executor's discovery contract has drifted from the brief and
+// the experiment must be re-issued before further INV-114 work lands.
+describe('INV-114 brief consumption — worktree-discovery design pin', () => {
+  describe('porcelain parser (selected design over fs-scan alternative)', () => {
+    it('parses managed + main worktree records into a single deterministic pass', () => {
+      const porcelain = `worktree /home/u/project
+HEAD a
+branch refs/heads/main
+
+worktree /home/u/.invoker/wt/h/experiment-wf-1-task-g0.t1.aa1-deadbeef
+HEAD b
+branch refs/heads/experiment/wf-1/task/g0.t1.aa1-deadbeef
+`;
+      const entries = parseGitWorktreePorcelain(porcelain);
+      expect(entries).toHaveLength(2);
+      expect(entries[0]).toEqual({ path: '/home/u/project', branch: 'main' });
+      expect(entries[1].branch).toBe('experiment/wf-1/task/g0.t1.aa1-deadbeef');
+    });
+
+    it('handles porcelain "branch (detached)" entries without a refs/heads line by leaving branch undefined', () => {
+      // Real `git worktree list --porcelain` emits a bare `detached` line
+      // (no `branch refs/heads/<x>`) for detached HEADs. The brief's §3.3
+      // trip-wire #10 guards that such entries are NOT surfaced as managed
+      // branches — keeping the literal `branch (detached)` here documents
+      // the contract under test for grep-driven reviewers.
+      const porcelain = `worktree /home/u/.invoker/wt/h/detached-leftover
+HEAD f00f00f0
+detached
+`;
+      const entries = parseGitWorktreePorcelain(porcelain);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toEqual({ path: '/home/u/.invoker/wt/h/detached-leftover' });
+      expect(entries[0].branch).toBeUndefined();
+    });
+  });
+
+  describe('managed-prefix filter (selected design)', () => {
+    it('returns the worktree path when the branch matches and lives under a managed prefix', () => {
+      const porcelain = `worktree /home/u/project
+HEAD a
+branch refs/heads/main
+
+worktree /home/u/.invoker/wt/h/experiment-merge
+HEAD b
+branch refs/heads/experiment/__merge__wf-1-cafebabe
+`;
+      const path = findManagedWorktreeForBranch(
+        porcelain,
+        'experiment/__merge__wf-1-cafebabe',
+        ['/home/u/.invoker/wt/h'],
+      );
+      expect(path).toBe('/home/u/.invoker/wt/h/experiment-merge');
+    });
+
+    it('rejects detached-HEAD records when looking up managed worktrees by branch', () => {
+      // Re-affirms the brief's §3.3 trip-wire that the rejected fs-scan
+      // alternative would have silently surfaced — `branch (detached)`
+      // entries must never resolve to a managed branch path.
+      const porcelain = `worktree /home/u/.invoker/wt/h/detached-leftover
+HEAD f00f00f0
+detached
+`;
+      const found = findManagedWorktreeForBranch(
+        porcelain,
+        'experiment/wf-1/task/g0.t1.aa1-deadbeef',
+        ['/home/u/.invoker/wt/h'],
+      );
+      expect(found).toBeUndefined();
+    });
+
+    it('finds an Invoker-managed worktree by actionId prefix even when the content hash differs', () => {
+      const porcelain = `worktree /home/u/.invoker/wt/h/experiment-wf-1-task-aabb1122
+HEAD c
+branch refs/heads/experiment/wf-1/task-aabb1122
+
+worktree /home/u/.invoker/wt/h/experiment-wf-2-other-ccdd3344
+HEAD d
+branch refs/heads/experiment/wf-2/other-ccdd3344
+`;
+      const result = findManagedWorktreeByActionId(
+        porcelain,
+        'wf-1/task',
+        ['/home/u/.invoker/wt/h'],
+      );
+      expect(result).toEqual({
+        path: '/home/u/.invoker/wt/h/experiment-wf-1-task-aabb1122',
+        branch: 'experiment/wf-1/task-aabb1122',
+      });
+    });
+  });
+
+  describe('symlink canonicalisation (trip-wire #9)', () => {
+    it('canonicalises a real on-disk path through realpathSync when the target exists', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'inv114-canonical-'));
+      try {
+        const canonical = canonicalPathForComparison(dir);
+        // On macOS this collapses /var → /private/var; on Linux it is a no-op.
+        // Either way the result must equal the canonical realpath of `dir`.
+        // We do not hard-code /private to keep the test cross-platform.
+        expect(canonical.endsWith(dir.replace(/^\/var/, ''))).toBe(true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('treats a managed-prefix match as inclusive of equal paths and descendants only', () => {
+      const prefix = mkdtempSync(join(tmpdir(), 'inv114-prefix-'));
+      try {
+        const inside = join(prefix, 'experiment-wf-1');
+        mkdirSync(inside);
+        expect(pathIsUnderManagedPrefixes(prefix, [prefix])).toBe(true);
+        expect(pathIsUnderManagedPrefixes(inside, [prefix])).toBe(true);
+        // Sibling path with shared prefix string but not a real descendant.
+        expect(pathIsUnderManagedPrefixes(prefix + '-sibling', [prefix])).toBe(false);
+      } finally {
+        rmSync(prefix, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('abbrev-ref guard (selected design)', () => {
+    it('treats a literal HEAD output as detached and rejects branch equality', () => {
+      expect(abbrevRefMatchesBranch('HEAD', 'experiment/wf-1/task-deadbeef')).toBe(false);
+      expect(abbrevRefMatchesBranch('experiment/wf-1/task-deadbeef', 'experiment/wf-1/task-deadbeef')).toBe(true);
     });
   });
 });

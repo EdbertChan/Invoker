@@ -79,6 +79,12 @@ interface WorktreeEntry extends BaseEntry {
  *
  * Each experiment gets its own worktree directory and branch, providing
  * filesystem-level isolation without the overhead of Docker containers.
+ *
+ * INV-114 design anchor: the worktree lifecycle here intentionally relies on
+ * the porcelain-driven discovery in `./worktree-discovery.ts` rather than a
+ * filesystem-scan + per-directory `git rev-parse` approach. See
+ * `docs/context/inv-114/experiment-brief.md` §2 for the verdict and §3.3
+ * trip-wires that guard the symlink-canonical and detached-HEAD invariants.
  */
 export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
   readonly type = 'worktree';

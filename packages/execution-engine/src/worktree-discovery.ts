@@ -1,6 +1,24 @@
 import { realpathSync } from 'node:fs';
 import { normalize, sep } from 'node:path';
 
+/*
+ * INV-114 selected design (see `docs/context/inv-114/experiment-brief.md` §2).
+ *
+ * This module implements the *porcelain parse + managed-prefix filter* path
+ * chosen by the experiment over a filesystem-scan + per-directory branch read
+ * alternative. The two invariants the brief's §3.3 trip-wires guard are:
+ *
+ *   - `realpathSync` canonicalisation through `canonicalPathForComparison`
+ *     so that macOS `/var` vs `/private/var` symlinks do not silently
+ *     mis-classify managed worktrees.
+ *   - Detached-HEAD entries (porcelain `branch (detached)` records) are
+ *     recorded with `branch` left undefined and skipped by every managed
+ *     lookup; they must never be returned as a managed branch.
+ *
+ * Touching either of those properties without re-running the brief and
+ * updating the verdicts will regress INV-114.
+ */
+
 export interface GitWorktreePorcelainEntry {
   path: string;
   /** Short branch name from `branch refs/heads/<name>` (omit detached). */

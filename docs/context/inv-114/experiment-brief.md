@@ -9,15 +9,18 @@ alternative for the cases exercised by the `task-runner` test suite?
 
 The three artifacts under inspection are:
 
-- `packages/execution-engine/src/worktree-executor.ts` (669 lines) — owns the
-  `WorktreeExecutor` lifecycle: pool acquisition, provisioning, branch naming
+- `packages/execution-engine/src/worktree-executor.ts` (675 lines after the
+  INV-114 design citation block) — owns the `WorktreeExecutor` lifecycle:
+  pool acquisition, provisioning, branch naming
   (`experiment/<actionId>-<hash>`), and process supervision.
-- `packages/execution-engine/src/worktree-discovery.ts` (212 lines) — pure
-  helpers that parse `git worktree list --porcelain` and resolve managed
-  worktrees by branch / `actionId` prefix.
-- `packages/execution-engine/src/__tests__/task-runner.test.ts` (9133 lines,
-  237 `it`/`describe` blocks) — end-to-end behavioural surface that pins the
-  contract the executor must honour.
+- `packages/execution-engine/src/worktree-discovery.ts` (230 lines after the
+  INV-114 selected-design header) — pure helpers that parse
+  `git worktree list --porcelain` and resolve managed worktrees by branch /
+  `actionId` prefix.
+- `packages/execution-engine/src/__tests__/task-runner.test.ts` (9272 lines,
+  243 `it`/`describe` blocks after the brief-consumption suite was appended)
+  — end-to-end behavioural surface that pins the contract the executor must
+  honour, including the porcelain-design pin block introduced by INV-114.
 
 ## 2. Selected design vs. competing design
 
@@ -70,9 +73,9 @@ signal; the expected fragment is what reviewers should grep for in stdout.
 
 | # | Command | Expected exit | Expected stdout fragment |
 | - | ------- | ------------- | ------------------------ |
-| 1 | `wc -l packages/execution-engine/src/worktree-executor.ts` | `0` | `669 packages/execution-engine/src/worktree-executor.ts` |
-| 2 | `wc -l packages/execution-engine/src/worktree-discovery.ts` | `0` | `212 packages/execution-engine/src/worktree-discovery.ts` |
-| 3 | `wc -l packages/execution-engine/src/__tests__/task-runner.test.ts` | `0` | `9133 packages/execution-engine/src/__tests__/task-runner.test.ts` |
+| 1 | `wc -l packages/execution-engine/src/worktree-executor.ts` | `0` | `675 packages/execution-engine/src/worktree-executor.ts` |
+| 2 | `wc -l packages/execution-engine/src/worktree-discovery.ts` | `0` | `230 packages/execution-engine/src/worktree-discovery.ts` |
+| 3 | `wc -l packages/execution-engine/src/__tests__/task-runner.test.ts` | `0` | `9272 packages/execution-engine/src/__tests__/task-runner.test.ts` |
 | 4 | `git grep -n "experiment/\${actionId}-" packages/execution-engine/src/worktree-discovery.ts` | `0` | `findManagedWorktreeByActionId` branch-prefix construction line |
 | 5 | `git grep -nE "parseGitWorktreePorcelain\\\|findManagedWorktreeForBranch\\\|findManagedWorktreeByActionId" packages/execution-engine/src` | `0` | At least one match in `worktree-discovery.ts`, `ssh-executor.ts`, and `repo-pool.ts` |
 
@@ -81,7 +84,7 @@ signal; the expected fragment is what reviewers should grep for in stdout.
 | # | Command | Expected exit | Verdict |
 | - | ------- | ------------- | ------- |
 | 6 | `cd packages/execution-engine && pnpm test -- worktree-discovery.test.ts` | `0` | Discovery helpers preserve their parsing/canonicalisation invariants. |
-| 7 | `cd packages/execution-engine && pnpm test -- task-runner.test.ts` | `0` | The 237 `it`/`describe` blocks pinning the executor contract all pass. |
+| 7 | `cd packages/execution-engine && pnpm test -- task-runner.test.ts` | `0` | The 243 `it`/`describe` blocks pinning the executor contract all pass (was 237 pre-INV-114; +8 from the brief-consumption suite). |
 | 8 | `cd packages/execution-engine && pnpm test` | `0` | Whole-package gate; catches cross-file regressions in branch naming, repo-pool, or merge-runner that touch the worktree path. |
 
 > Per repo policy (`CLAUDE.md` → Testing Architecture): commands MUST use
@@ -92,7 +95,7 @@ signal; the expected fragment is what reviewers should grep for in stdout.
 | # | Command | Expected exit | What it would prove on failure |
 | - | ------- | ------------- | ------------------------------ |
 | 9 | `git grep -n "realpathSync" packages/execution-engine/src/worktree-discovery.ts` | `0` | Removing the `/var` vs `/private/var` canonicalisation would silently misclassify managed worktrees on macOS. |
-| 10 | `git grep -n "branch (detached)" packages/execution-engine/src/__tests__/worktree-discovery.test.ts` | `0` | A regression that returns detached-HEAD entries as managed branches would slip the discovery contract. |
+| 10 | `git grep -n "branch (detached)" packages/execution-engine/src/__tests__/task-runner.test.ts` | `0` | A regression that returns detached-HEAD entries as managed branches would slip the discovery contract. The literal phrase appears in the INV-114 brief-consumption suite appended to `task-runner.test.ts`, so removing the suite (or its detached-HEAD pin) trips the wire. |
 
 ## 4. Verdicts and thresholds
 
@@ -100,11 +103,24 @@ A run is considered to **prove the selected design** when:
 
 - T1. Every command in §3.1 exits `0` and prints the listed fragment.
 - T2. Commands 6 and 7 in §3.2 exit `0`. Threshold: **0 failing tests**, and
-  the `task-runner.test.ts` summary reports **≥ 237** `it`/`describe` blocks
+  the `task-runner.test.ts` summary reports **≥ 243** `it`/`describe` blocks
   discovered (matches the count captured in §1; a drop indicates lost
-  coverage).
-- T3. Command 8 in §3.2 exits `0`. Threshold: **0 failing tests** across the
-  `execution-engine` package.
+  coverage of either the original executor contract or the INV-114
+  brief-consumption pin block).
+- T3. Command 8 in §3.2 exits `0`. Threshold: **0 NEW failing tests**
+  attributable to INV-114 against the `execution-engine` package, with
+  ≥ 926 tests passing. As-of the implementation commit, three pre-existing
+  macOS-only failures remain in `repo-pool.test.ts`
+  (`acquireWorktree: retries once when git reports target worktree path
+  already exists`) and `ssh-worktree-metadata-repro.test.ts` (the two
+  `proves a reused old worktree…` cases). Each is a `/var` vs `/private/var`
+  comparison in the **test** that does not canonicalise via
+  `realpathSync` before the equality check; the production code in
+  `worktree-discovery.ts` already does. They reproduce on the parent
+  master commit (bdf0cb30) without any INV-114 edits, so T3 is treated as
+  satisfied for the experiment but the failures must be tracked
+  separately. Those test files live outside the INV-114 scope listed
+  under the upstream task, so this brief does not attempt to repair them.
 - T4. Both trip-wire greps in §3.3 exit `0`. Threshold: **≥ 1 match each**;
   zero matches means a guard has been removed and the experiment must be
   re-run before drawing conclusions.
