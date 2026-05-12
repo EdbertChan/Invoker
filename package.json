@@ -40,6 +40,11 @@
   "engines": {
     "node": ">=22 <23"
   },
+  "invokerTestDesign": {
+    "brief": "docs/context/inv-67/experiment-brief.md",
+    "verdict": "Supported",
+    "notes": "test, test:high-resource, test:low-resource* satisfy E2 via scripts/workspace-test.sh. test:all, test:all:extended, test:all:destructive satisfy E1, E3-E8 via scripts/run-all-tests.sh. The pnpm -r matrix alternative is Rejected; see brief for thresholds and re-run guidance."
+  },
   "pnpm": {
     "onlyBuiltDependencies": [
       "electron"
