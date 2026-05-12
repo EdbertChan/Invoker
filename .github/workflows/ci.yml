@@ -448,7 +448,6 @@ jobs:
         run: ${{ matrix.command }}
 
   docker:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: build-artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 60
