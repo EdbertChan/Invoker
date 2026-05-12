@@ -10,6 +10,21 @@ FAIL_FAST="${INVOKER_TEST_ALL_FAIL_FAST:-0}"
 RESUME="${INVOKER_TEST_ALL_RESUME:-0}"
 FORCE_RERUN="${INVOKER_TEST_ALL_FORCE_RERUN:-0}"
 JOBS="${INVOKER_TEST_ALL_JOBS:-1}"
+EXPERIMENT_BRIEF_REL="docs/context/inv-67/experiment-brief.md"
+
+readonly EXPERIMENT_BRIEF_REL
+readonly REQUIRED_SUITE_MANIFEST=(
+  "required/05-delete-all-prod-db-guard.sh"
+  "required/07-invalid-config-json.sh"
+  "required/10-vitest-workspace.sh"
+  "required/15-owner-boundary-policy.sh"
+  "required/15-submit-workflow-chain.sh"
+  "required/20-e2e-dry-run.sh"
+  "required/21-e2e-dry-run-downstream.sh"
+  "required/22-e2e-dry-run-github.sh"
+  "required/23-fix-intent-repros.sh"
+  "required/50-verify-executor-routing.sh"
+)
 
 if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [ "$JOBS" -lt 1 ]; then
   echo "ERROR: INVOKER_TEST_ALL_JOBS must be a positive integer" >&2
@@ -53,6 +68,7 @@ load_state() {
     [ -n "${mode:-}" ] || continue
     [ -n "${suite:-}" ] || continue
     [ -n "${status:-}" ] || continue
+    suite="${suite#$ROOT/scripts/test-suites/}"
     STATE_MAP["$mode|$suite"]="$status"
   done < "$STATE_FILE"
 }
@@ -71,13 +87,13 @@ persist_state() {
 
 state_get() {
   local suite="$1"
-  printf '%s' "${STATE_MAP["$MODE_KEY|$suite"]:-}"
+  printf '%s' "${STATE_MAP["$MODE_KEY|$(suite_relpath "$suite")"]:-}"
 }
 
 state_set() {
   local suite="$1"
   local status="$2"
-  STATE_MAP["$MODE_KEY|$suite"]="$status"
+  STATE_MAP["$MODE_KEY|$(suite_relpath "$suite")"]="$status"
   persist_state
 }
 
@@ -263,6 +279,38 @@ collect_suites() {
   done
 }
 
+assert_required_manifest() {
+  local -a discovered=()
+  local suite relpath
+  local index=0
+
+  for suite in "${SUITES[@]}"; do
+    relpath="$(suite_relpath "$suite")"
+    case "$relpath" in
+      required/*)
+        discovered+=( "$relpath" )
+        ;;
+    esac
+  done
+
+  if [ "${#discovered[@]}" -ne "${#REQUIRED_SUITE_MANIFEST[@]}" ]; then
+    echo "ERROR: required suite count changed from INV-67 experiment threshold (${#REQUIRED_SUITE_MANIFEST[@]}) to ${#discovered[@]}" >&2
+    echo "Update ${EXPERIMENT_BRIEF_REL} or add a replacement experiment before changing the required proof surface." >&2
+    return 2
+  fi
+
+  while [ "$index" -lt "${#REQUIRED_SUITE_MANIFEST[@]}" ]; do
+    if [ "${discovered[$index]}" != "${REQUIRED_SUITE_MANIFEST[$index]}" ]; then
+      echo "ERROR: required suite manifest differs from INV-67 experiment threshold at position $((index + 1))" >&2
+      echo "Expected: ${REQUIRED_SUITE_MANIFEST[$index]}" >&2
+      echo "Actual:   ${discovered[$index]}" >&2
+      echo "Update ${EXPERIMENT_BRIEF_REL} or add a replacement experiment before changing the required proof surface." >&2
+      return 2
+    fi
+    index=$((index + 1))
+  done
+}
+
 should_skip_for_resume() {
   local suite="$1"
   local existing
@@ -312,8 +360,10 @@ print_summary() {
 
 load_state
 collect_suites
+assert_required_manifest
 
 echo "==> Running Invoker test suites (mode=$MODE_KEY, jobs=$JOBS, resume=$RESUME)"
+echo "==> Using INV-67 experiment thresholds from ${EXPERIMENT_BRIEF_REL}"
 
 overall_failed=0
 for suite in "${SUITES[@]}"; do
