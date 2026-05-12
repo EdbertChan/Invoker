@@ -56,6 +56,18 @@ export interface RuntimeServices {
   readonly terminalLauncher: TerminalLauncher;
 }
 
+/**
+ * Canonical facade surface selected by INV-74.
+ * Composition may route through different startup paths, but the runtime
+ * facade remains limited to these caller-provided ports.
+ */
+export const RUNTIME_SERVICE_PORT_KEYS = Object.freeze([
+  'workspaceProbe',
+  'containerProbe',
+  'sessionProbe',
+  'terminalLauncher',
+] as const);
+
 // ── Factory ────────────────────────────────────────────────
 
 /**
@@ -72,7 +84,10 @@ export function composeRuntimeServices(
     containerProbe: deps.containerProbe,
     sessionProbe: deps.sessionProbe,
     terminalLauncher: deps.terminalLauncher,
-  });
+  } satisfies Record<
+    typeof RUNTIME_SERVICE_PORT_KEYS[number],
+    RuntimeServices[typeof RUNTIME_SERVICE_PORT_KEYS[number]]
+  >);
 
   if (deps.enableDormantBridge === true && deps.dormantBridgeHook) {
     deps.dormantBridgeHook(services);

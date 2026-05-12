@@ -98,6 +98,10 @@ export interface HeadlessDeps {
   installBundledSkills?: (mode?: BundledSkillsInstallMode) => BundledSkillsStatus;
   /** Abort signal from the workflow mutation coordinator, if running inside a coordinated mutation. */
   signal?: AbortSignal;
+  /**
+   * Composed runtime facade selected by INV-74. The caller owns concrete
+   * adapter construction; headless commands consume the typed facade only.
+   */
   runtimeServices?: RuntimeServices;
 }
 

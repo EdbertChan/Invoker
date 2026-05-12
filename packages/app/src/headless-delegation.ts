@@ -15,6 +15,9 @@ type DelegateTrackingOptions = {
   timeoutMs?: number;
 };
 
+export const DEFAULT_DELEGATION_TIMEOUT_MS = 5_000;
+export const WORKFLOW_DELEGATION_TIMEOUT_MS = 60_000;
+
 // ---------------------------------------------------------------------------
 // DelegationOutcome — typed result union for delegation attempts
 // ---------------------------------------------------------------------------
@@ -50,7 +53,7 @@ export async function tryDelegateRun(
     'headless.run',
     { planPath: resolvePath(planPath), traceId },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs: timeoutMs ?? 5_000 },
+    { waitForApproval, noTrack, timeoutMs: timeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS },
   );
 }
 
@@ -66,7 +69,7 @@ export async function tryDelegateResume(
     'headless.resume',
     { workflowId, traceId },
     messageBus,
-    { waitForApproval, noTrack, timeoutMs: timeoutMs ?? 5_000 },
+    { waitForApproval, noTrack, timeoutMs: timeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS },
   );
 }
 
@@ -84,22 +87,22 @@ export function delegationTimeoutMs(
 ): number {
   const command = args[0] ?? '';
   if (!usesExtendedDelegationTimeout(command)) {
-    return 5_000;
+    return DEFAULT_DELEGATION_TIMEOUT_MS;
   }
 
   const resolvedTarget = resolveHeadlessTarget(args[1], targetLookup);
   if (resolvedTarget.kind === 'workflow') {
-    return 60_000;
+    return WORKFLOW_DELEGATION_TIMEOUT_MS;
   }
-  return 5_000;
+  return DEFAULT_DELEGATION_TIMEOUT_MS;
 }
 
 export async function resolveDelegationTimeoutMs(args: string[]): Promise<number> {
   const command = args[0] ?? '';
   if (!usesExtendedDelegationTimeout(command)) {
-    return 5_000;
+    return DEFAULT_DELEGATION_TIMEOUT_MS;
   }
-  return looksLikeWorkflowId(args[1]) ? 60_000 : 5_000;
+  return looksLikeWorkflowId(args[1]) ? WORKFLOW_DELEGATION_TIMEOUT_MS : DEFAULT_DELEGATION_TIMEOUT_MS;
 }
 
 export async function tryDelegateExec(
@@ -218,15 +221,16 @@ async function tryDelegate(
   let targetWorkflowId: string | undefined;
   const DELEGATION_TIMEOUT = Symbol('delegation-timeout');
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_DELEGATION_TIMEOUT_MS;
   const timeoutPromise = new Promise<typeof DELEGATION_TIMEOUT>((_, reject) => {
-    timeoutHandle = setTimeout(() => reject(DELEGATION_TIMEOUT), options.timeoutMs ?? 5_000);
+    timeoutHandle = setTimeout(() => reject(DELEGATION_TIMEOUT), timeoutMs);
     timeoutHandle.unref?.();
   });
 
   let raw: unknown;
   try {
     const startedAt = Date.now();
-    delegationLog(`${traceId} send channel=${channel} timeoutMs=${options.timeoutMs ?? 5_000}`);
+    delegationLog(`${traceId} send channel=${channel} timeoutMs=${timeoutMs}`);
     raw = await Promise.race([
       messageBus.request(channel, payload),
       timeoutPromise,
@@ -234,7 +238,7 @@ async function tryDelegate(
     delegationLog(`${traceId} response channel=${channel} elapsedMs=${Date.now() - startedAt}`);
   } catch (err) {
     if (err === DELEGATION_TIMEOUT) {
-      delegationLog(`${traceId} timeout channel=${channel} timeoutMs=${options.timeoutMs ?? 5_000}`);
+      delegationLog(`${traceId} timeout channel=${channel} timeoutMs=${timeoutMs}`);
       return { kind: 'timeout' };
     }
     if (err instanceof TransportError && err.code === TransportErrorCode.NO_HANDLER) {
