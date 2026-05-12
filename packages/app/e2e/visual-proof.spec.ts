@@ -275,7 +275,7 @@ test.describe('Visual proof capture', () => {
       .locator(`.react-flow__node[data-testid="${mergeGateTaskId}"], .react-flow__node[data-testid$="${mergeGateTaskId}"]`)
       .first();
     await expect(mergeGateNode).toBeVisible({ timeout: 15000 });
-    await expect(mergeGateNode.getByText('APPROVE')).toBeVisible();
+    await expect(mergeGateNode.getByText('APPROVE', { exact: true })).toBeVisible();
 
     // Inline chip button must be gone — approval lives in the TaskPanel now.
     await expect(mergeGateNode.locator('[data-testid="approve-merge-button"]')).toHaveCount(0);
