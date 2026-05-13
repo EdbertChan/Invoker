@@ -148,7 +148,7 @@ import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './work
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
 import { persistShutdownDiagnostic } from './shutdown-diagnostic.js';
-import { launchGuiMode, startAppWhenReady } from './bootstrap/app-bootstrap.js';
+import { launchGuiMode, startGuiAppBootstrap } from './bootstrap/app-bootstrap.js';
 import {
   createGuiMutationRegistrar,
   createWorkflowScopedGuiMutationRegistrar,
@@ -2456,94 +2456,82 @@ if (isHeadless) {
     }, 0);
   }
 
-  startAppWhenReady({
-    app,
-    onReady: async () => {
-    recordStartupMark('app.whenReady');
-    ownerMode = true;
-    try {
-      recordStartupMark('initServices.start');
-      await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      recordStartupMark('initServices.end', { ownerMode: true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!message.includes('[db-writer-lock]')) {
-        process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
-        app.quit();
-        return;
-      }
-      recordStartupMark('initServices.readOnly.start');
-      await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      ownerMode = false;
-      recordStartupMark('initServices.readOnly.end', { ownerMode: false });
-    }
+  async function initializeOwnerServices(): Promise<void> {
+    await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
+  }
 
-    if (ownerMode) {
-      rebuildTaskRunner();
-      workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
-        persistence,
-        workflowMutationOwnerId,
-        async (channel: string, args: unknown[], context) => {
-          const handler = workflowMutationDispatcher.get(channel);
-          if (!handler) {
-            throw new Error(`No workflow mutation dispatcher registered for ${channel}`);
-          }
-          activeMutationContext = context;
-          try {
-            return await handler(...args);
-          } finally {
-            activeMutationContext = undefined;
-          }
-        },
-        { maxConcurrentWorkflowDrains },
-      );
-    } else {
-      logger.info('Launched in follower mode; mutation execution is delegated to the current owner', {
-        module: 'init',
-      });
-    }
+  async function initializeFollowerServices(): Promise<void> {
+    await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
+  }
 
-    // ── IPC Delegation Handlers — peer → owner ────────────────
-    // Peer processes delegate write-heavy commands to the owner process via IpcBus.
-    if (ownerMode) {
-      registerOwnerIpcHandlers({
-        messageBus,
-        workflowMutationDispatcher,
-        workflowMutationCoordinator,
-        workflowMutationOwnerId,
-        mode: 'gui',
-        logger,
-        getUiPerfStats,
-        resetUiPerfStats,
-        getQueueStatus: () => orchestrator.getQueueStatus() as unknown as Record<string, unknown>,
-        executeHeadlessRun,
-        executeHeadlessResume,
-        executeHeadlessExec,
-        classifyHeadlessExecMutation,
-        runWorkflowMutation,
-        registerAdditionalDispatchers: () => {
-          workflowMutationDispatcher.set('api:approve-task', async (taskIdArg: unknown) => {
-            await performSharedApproveTask(String(taskIdArg), 'api');
-          });
-          workflowMutationDispatcher.set('api:reject-task', async (taskIdArg: unknown, reasonArg?: unknown) => {
-            const taskId = String(taskIdArg);
-            const reason = reasonArg === undefined ? undefined : String(reasonArg);
-            const envelope = makeEnvelope('reject', 'surface', 'task', { taskId, reason });
-            const result = await commandService.reject(envelope);
-            if (!result.ok) throw new Error(result.error.message);
-          });
-          workflowMutationDispatcher.set('surface:approve-task', async (taskIdArg: unknown) => {
-            await performSharedApproveTask(String(taskIdArg), 'surface');
-          });
-        },
-      });
-      logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
-      recordStartupMark('owner-ipc-ready');
-    }
+  function setOwnerMode(nextOwnerMode: boolean): void {
+    ownerMode = nextOwnerMode;
+  }
 
-    bootstrapInitialWorkflowState();
+  function onOwnerModeReady(): void {
+    rebuildTaskRunner();
+    workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
+      persistence,
+      workflowMutationOwnerId,
+      async (channel: string, args: unknown[], context) => {
+        const handler = workflowMutationDispatcher.get(channel);
+        if (!handler) {
+          throw new Error(`No workflow mutation dispatcher registered for ${channel}`);
+        }
+        activeMutationContext = context;
+        try {
+          return await handler(...args);
+        } finally {
+          activeMutationContext = undefined;
+        }
+      },
+      { maxConcurrentWorkflowDrains },
+    );
+  }
 
-    // Relaunch orphaned running tasks and start any pending-but-ready tasks.
+  function onFollowerModeReady(): void {
+    logger.info('Launched in follower mode; mutation execution is delegated to the current owner', {
+      module: 'init',
+    });
+  }
+
+  function registerOwnerIpc(): void {
+    registerOwnerIpcHandlers({
+      messageBus,
+      workflowMutationDispatcher,
+      workflowMutationCoordinator,
+      workflowMutationOwnerId,
+      mode: 'gui',
+      logger,
+      getUiPerfStats,
+      resetUiPerfStats,
+      getQueueStatus: () => orchestrator.getQueueStatus() as unknown as Record<string, unknown>,
+      executeHeadlessRun,
+      executeHeadlessResume,
+      executeHeadlessExec,
+      classifyHeadlessExecMutation,
+      runWorkflowMutation,
+      registerAdditionalDispatchers: () => {
+        workflowMutationDispatcher.set('api:approve-task', async (taskIdArg: unknown) => {
+          await performSharedApproveTask(String(taskIdArg), 'api');
+        });
+        workflowMutationDispatcher.set('api:reject-task', async (taskIdArg: unknown, reasonArg?: unknown) => {
+          const taskId = String(taskIdArg);
+          const reason = reasonArg === undefined ? undefined : String(reasonArg);
+          const envelope = makeEnvelope('reject', 'surface', 'task', { taskId, reason });
+          const result = await commandService.reject(envelope);
+          if (!result.ok) throw new Error(result.error.message);
+        });
+        workflowMutationDispatcher.set('surface:approve-task', async (taskIdArg: unknown) => {
+          await performSharedApproveTask(String(taskIdArg), 'surface');
+        });
+      },
+    });
+    logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
+    recordStartupMark('owner-ipc-ready');
+  }
+
+  function resumeStartupExecution(): void {
     if (!ownerMode) {
       logger.info('follower mode startup: auto-run and orphan relaunch disabled', { module: 'init' });
     } else if (invokerConfig.disableAutoRunOnStartup) {
@@ -2555,14 +2543,17 @@ if (isHeadless) {
       }
       requireTaskExecutor().resumeMergeGatePolling();
     }
+  }
 
+  function logStartupState(): void {
     const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
     logger.info(`Database: ${dbPath}`, { module: 'init' });
     logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
     logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
     logger.info('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig), module: 'startup' });
-    recordStartupMark('startup.ready-for-window');
+  }
 
+  function registerMessageBusSubscriptions(): void {
     // Forward deltas to renderer and keep snapshot cache in sync so
     // the db-poll doesn't re-emit deltas the messageBus already delivered.
     messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
@@ -2618,7 +2609,9 @@ if (isHeadless) {
         mainWindow.webContents.send('invoker:task-output', data);
       }
     });
+  }
 
+  function registerRendererIpc(): void {
     // Register IPC handlers
     ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
       event.returnValue = {
@@ -3590,9 +3583,9 @@ if (isHeadless) {
           'Task is still running or being fixed with AI. View output in the terminal panel below.',
       });
     });
+  }
 
-    seedUiSnapshotCache();
-    createWindow();
+  function onCreateWindowComplete(): void {
     recordStartupMark('createWindow.end');
 
     app.on('activate', () => {
@@ -3600,7 +3593,26 @@ if (isHeadless) {
         createWindow();
       }
     });
-    },
+  }
+
+  startGuiAppBootstrap({
+    app,
+    recordStartupMark,
+    initializeOwnerServices,
+    initializeFollowerServices,
+    setOwnerMode,
+    isOwnerMode: () => ownerMode,
+    onOwnerModeReady,
+    onFollowerModeReady,
+    registerOwnerIpc,
+    bootstrapInitialWorkflowState,
+    resumeStartupExecution,
+    logStartupState,
+    registerMessageBusSubscriptions,
+    registerRendererIpc,
+    seedUiSnapshotCache,
+    createWindow,
+    onCreateWindowComplete,
     onError: (err) => {
       process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
       app.quit();

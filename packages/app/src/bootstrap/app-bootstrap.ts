@@ -27,12 +27,6 @@ export interface GuiModeLaunchOptions {
   setupGuiMode: () => void;
 }
 
-export interface AppReadyOptions {
-  app: App;
-  onReady: () => Promise<void>;
-  onError: (error: unknown) => void;
-}
-
 export function launchGuiMode(options: GuiModeLaunchOptions): void {
   if (!options.isTest) {
     const gotTheLock = options.app.requestSingleInstanceLock();
@@ -42,10 +36,6 @@ export function launchGuiMode(options: GuiModeLaunchOptions): void {
     }
   }
   options.setupGuiMode();
-}
-
-export function startAppWhenReady(options: AppReadyOptions): void {
-  options.app.whenReady().then(options.onReady).catch(options.onError);
 }
 
 export function startGuiAppBootstrap(options: GuiAppBootstrapOptions): void {
