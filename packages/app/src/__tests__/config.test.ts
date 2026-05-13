@@ -140,10 +140,10 @@ describe('loadConfig', () => {
   it('reads local execution pool members', () => {
     writeFileSync(
       join(fakeHome, '.invoker', 'config.json'),
-      JSON.stringify({ executionPools: { localOnly: ['local'] } }),
+      JSON.stringify({ executionPools: { localOnly: { members: [{ type: 'worktree', id: 'local' }] } } }),
     );
     const config = loadConfig();
-    expect(config.executionPools?.localOnly).toEqual(['local']);
+    expect(config.executionPools?.localOnly).toEqual({ members: [{ type: 'worktree', id: 'local' }] });
   });
 
   it('reads SSH execution pool members backed by remoteTargets', () => {
@@ -158,11 +158,11 @@ describe('loadConfig', () => {
             maxConcurrentTasks: 2,
           },
         },
-        executionPools: { sshLight: ['remote-1'] },
+        executionPools: { sshLight: { members: [{ type: 'ssh', id: 'remote-1' }] } },
       }),
     );
     const config = loadConfig();
-    expect(config.executionPools?.sshLight).toEqual(['remote-1']);
+    expect(config.executionPools?.sshLight).toEqual({ members: [{ type: 'ssh', id: 'remote-1' }] });
     expect(config.remoteTargets?.['remote-1']?.maxConcurrentTasks).toBe(2);
   });
 
@@ -173,27 +173,37 @@ describe('loadConfig', () => {
         remoteTargets: {
           'remote-1': { host: '127.0.0.1', user: 'runner', sshKeyPath: '~/.ssh/id_ed25519' },
         },
-        executionPools: { mixed: ['local', 'remote-1'] },
+        executionPools: {
+          mixed: {
+            members: [
+              { type: 'worktree', id: 'local' },
+              { type: 'ssh', id: 'remote-1' },
+            ],
+          },
+        },
       }),
     );
     const config = loadConfig();
-    expect(config.executionPools?.mixed).toEqual(['local', 'remote-1']);
+    expect(config.executionPools?.mixed?.members).toEqual([
+      { type: 'worktree', id: 'local' },
+      { type: 'ssh', id: 'remote-1' },
+    ]);
   });
 
   it('rejects execution pool members missing from remoteTargets', () => {
     writeFileSync(
       join(fakeHome, '.invoker', 'config.json'),
-      JSON.stringify({ executionPools: { sshLight: ['missing-remote'] } }),
+      JSON.stringify({ executionPools: { sshLight: { members: [{ type: 'ssh', id: 'missing-remote' }] } } }),
     );
-    expect(() => loadConfig()).toThrow('executionPools.sshLight member "missing-remote" must be "local" or a key in remoteTargets');
+    expect(() => loadConfig()).toThrow('executionPools.sshLight SSH member "missing-remote" must be a key in remoteTargets');
   });
 
   it('rejects empty execution pools', () => {
     writeFileSync(
       join(fakeHome, '.invoker', 'config.json'),
-      JSON.stringify({ executionPools: { empty: [] } }),
+      JSON.stringify({ executionPools: { empty: { members: [] } } }),
     );
-    expect(() => loadConfig()).toThrow('executionPools.empty must not be empty');
+    expect(() => loadConfig()).toThrow('executionPools.empty.members must not be empty');
   });
 
 });

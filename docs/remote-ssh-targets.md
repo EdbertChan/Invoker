@@ -37,8 +37,18 @@ settings under `remoteTargets`.
     }
   },
   "executionPools": {
-    "ssh-light": ["staging-server", "staging-server-b"],
-    "mixed": ["local", "staging-server"]
+    "ssh-light": {
+      "members": [
+        { "type": "ssh", "id": "staging-server" },
+        { "type": "ssh", "id": "staging-server-b" }
+      ]
+    },
+    "mixed": {
+      "members": [
+        { "type": "worktree", "id": "local" },
+        { "type": "ssh", "id": "staging-server" }
+      ]
+    }
   }
 }
 ```

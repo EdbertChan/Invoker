@@ -649,7 +649,7 @@ async function headlessCosts(
       const ctx = buildAttributionContext({
         id: task.id,
         workflowId: wf.id,
-        executorType: task.config.executorType ?? 'worktree',
+        executorType: task.config.dockerImage ? 'docker' : (task.config.poolId ? 'pool' : 'worktree'),
         agentSessionId: task.execution.agentSessionId,
         lastAgentSessionId: task.execution.lastAgentSessionId,
         agentName: task.execution.agentName,
@@ -738,7 +738,7 @@ async function collectCostEvents(
       const ctx = buildAttributionContext({
         id: task.id,
         workflowId: wf.id,
-        executorType: task.config.executorType ?? 'worktree',
+        executorType: task.config.dockerImage ? 'docker' : (task.config.poolId ? 'pool' : 'worktree'),
         agentSessionId: task.execution.agentSessionId,
         lastAgentSessionId: task.execution.lastAgentSessionId,
         agentName: task.execution.agentName,
@@ -882,8 +882,8 @@ async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
     case 'prompt':
       await headlessEditPrompt(args[1], args.slice(2).join(' '), deps);
       break;
-    case 'executor':
-      await headlessEditExecutor(args[1], args[2], args[3], deps);
+    case 'pool':
+      await headlessEditPool(args[1], args[2], deps);
       break;
     case 'agent':
       await headlessEditAgent(args[1], args[2], deps);
@@ -1091,8 +1091,7 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       break;
     case 'edit-executor':
     case 'edit-type':
-      warnDeprecated(command, 'set executor');
-      await headlessSet(['executor', ...args.slice(1)], deps);
+      throw new Error(`${command} is no longer supported. Use "set pool <taskId> <poolId>" instead.`);
       break;
     case 'edit-agent':
       warnDeprecated('edit-agent', 'set agent');
@@ -1174,7 +1173,7 @@ ${BOLD}Configure:${RESET}
   install-skills [install|update|reinstall]          Install bundled Invoker skills into Codex
   set command <taskId> <cmd>                          Edit task command and re-run
   set prompt <taskId> <text>                          Edit task prompt and re-run
-  set executor <taskId> <type> [remoteTargetId]       Change executor type (worktree|docker|ssh)
+  set pool <taskId> <poolId>                          Change execution pool
   set agent <taskId> <agent>                          Change execution agent (claude|codex)
   set merge-mode <workflowId> <mode>                  manual | automatic | external_review
   set fix-prompt <taskId> <text>                      Update fix-session prompt and retry
@@ -1194,7 +1193,7 @@ ${BOLD}Lifecycle:${RESET}
 ${BOLD}Deprecated${RESET} (use new names above):
   list → query workflows       status → query tasks       task-status → query task
   queue → query queue           audit → query audit         session → query session
-  edit → set command            edit-executor → set executor
+  edit → set command
   edit-agent → set agent        set-merge-mode → set merge-mode
   delete-workflow → delete
   rebase-and-retry → rebase (task) or recreate-with-rebase (workflow)
@@ -2063,37 +2062,35 @@ async function headlessEditPrompt(taskId: string, newPrompt: string, deps: Headl
   autoFix.unsubscribe();
 }
 
-async function headlessEditExecutor(
+async function headlessEditPool(
   taskId: string,
-  executorType: string,
-  remoteTargetId: string | undefined,
+  poolId: string | undefined,
   deps: HeadlessDeps,
 ): Promise<void> {
-  if (!taskId || !executorType) {
+  if (!taskId || !poolId) {
     throw new Error(
-      'Missing arguments. Usage: --headless edit-executor <taskId> <executorType> [remoteTargetId]',
+      'Missing arguments. Usage: --headless set pool <taskId> <poolId>',
     );
   }
-  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'set executor');
+  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'set pool');
   if (!restored) return;
   taskId = restored.resolvedTaskId;
   const taskExecutor = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
 
-  const envelope = makeEnvelope('edit-task-type', 'headless', 'task', { taskId, executorType, remoteTargetId });
-  const result = await deps.commandService.editTaskType(envelope);
+  const envelope = makeEnvelope('edit-task-pool', 'headless', 'task', { taskId, poolId });
+  const result = await deps.commandService.editTaskPool(envelope);
   if (!result.ok) throw new Error(result.error.message);
   const runnable = result.data.filter((task) => task.status === 'running');
   if (runnable.length > 0) {
     await taskExecutor.executeTasks(runnable);
   }
   process.stdout.write(
-    `Edited task "${taskId}" executor → "${executorType}"` +
-    `${remoteTargetId ? ` (remoteTargetId=${remoteTargetId})` : ''}\n`,
+    `Edited task "${taskId}" pool → "${poolId}"\n`,
   );
 
   if (deps.noTrack) {
-    process.stdout.write('[headless] --no-track enabled: set executor accepted; exiting without tracking.\n');
+    process.stdout.write('[headless] --no-track enabled: set pool accepted; exiting without tracking.\n');
     autoFix.unsubscribe();
     return;
   }
@@ -2195,7 +2192,7 @@ export async function resolveAgentSession(
   if (driver.fetchRemoteSession && allTasks) {
     const sshTask = allTasks.find(
       t => t.execution.agentSessionId === sessionId
-        && t.config.executorType === 'ssh',
+        && Boolean(t.config.poolId),
     );
     if (sshTask) {
       const { loadConfig } = await import('./config.js');

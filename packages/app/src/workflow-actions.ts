@@ -537,13 +537,12 @@ export function editTaskPrompt(
   return deps.orchestrator.editTaskPrompt(taskId, newPrompt);
 }
 
-export function editTaskType(
+export function editTaskPool(
   taskId: string,
-  executorType: string,
+  poolId: string | undefined,
   deps: Pick<ActionDeps, 'orchestrator'>,
-  remoteTargetId?: string,
 ): TaskState[] {
-  return deps.orchestrator.editTaskType(taskId, executorType, remoteTargetId);
+  return deps.orchestrator.editTaskPool(taskId, poolId);
 }
 
 export function editTaskAgent(

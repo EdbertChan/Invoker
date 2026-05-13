@@ -21,7 +21,8 @@ export interface TaskReplacementDef {
   command?: string;
   prompt?: string;
   dependencies?: string[];
-  executorType?: string;
+  poolId?: string;
+  dockerImage?: string;
   executionAgent?: string;
 }
 
@@ -288,8 +289,8 @@ export const IpcChannels = {
     request: [taskId: string, newCommand: string];
     response: void;
   },
-  'invoker:edit-task-type': {} as {
-    request: [taskId: string, executorType: string, remoteTargetId?: string];
+  'invoker:edit-task-pool': {} as {
+    request: [taskId: string, poolId: string];
     response: void;
   },
   'invoker:edit-task-agent': {} as {
@@ -377,6 +378,10 @@ export const IpcChannels = {
     response: QueueStatus;
   },
   'invoker:get-remote-targets': {} as {
+    request: [];
+    response: string[];
+  },
+  'invoker:get-execution-pools': {} as {
     request: [];
     response: string[];
   },

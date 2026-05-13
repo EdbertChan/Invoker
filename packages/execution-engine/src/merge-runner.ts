@@ -485,7 +485,7 @@ export async function executeMergeNodeImpl(
         };
         host.callbacks.onComplete?.(task.id, manualResponse);
         setMergeGateReviewReady(host, task.id, {
-          config: { executorType: 'worktree', summary },
+          config: { summary },
           execution: { branch: featureBranch ?? undefined, workspacePath: gateWorkspacePath },
         });
         await startReviewReadyDependents(host);
@@ -558,7 +558,7 @@ export async function executeMergeNodeImpl(
             `task=${task.id} gateWorkspacePath=${gateWorkspacePath ?? 'NULL'}`,
         );
         setMergeGateReviewReady(host, task.id, {
-          config: { executorType: 'worktree', summary },
+          config: { summary },
           execution: {
             branch: featureBranch,
             workspacePath: gateWorkspacePath,
@@ -610,7 +610,7 @@ export async function executeMergeNodeImpl(
       };
       host.callbacks.onComplete?.(task.id, gateResponse);
       setMergeGateReviewReady(host, task.id, {
-        config: { executorType: 'worktree', summary },
+        config: { summary },
         execution: { branch: featureBranch ?? undefined, workspacePath: gateWorkspacePath },
       });
       await startReviewReadyDependents(host);
@@ -635,7 +635,7 @@ export async function executeMergeNodeImpl(
       `gateWorkspacePath=${gateWorkspacePath ?? 'NULL'} response=${response.status}`,
   );
   host.persistence.updateTask(task.id, {
-    config: { executorType: 'worktree', summary },
+    config: { summary },
     execution: {
       branch: featureBranch ?? undefined,
       workspacePath: gateWorkspacePath,
@@ -656,7 +656,7 @@ export async function executeMergeNodeImpl(
         `task=${task.id} gateWorkspacePath=${gateWorkspacePath ?? 'NULL'}`,
     );
     setMergeGateReviewReady(host, task.id, {
-      config: { executorType: 'worktree', summary },
+      config: { summary },
       execution: {
         branch: featureBranch ?? undefined,
         workspacePath: gateWorkspacePath,
@@ -831,7 +831,7 @@ export async function publishAfterFixImpl(
           `will persist workspacePath=${gateWorkspacePath ?? 'NULL'}`,
       );
       setMergeGateReviewReady(host, task.id, {
-        config: { executorType: 'worktree', summary },
+        config: { summary },
         execution: {
           workspacePath: gateWorkspacePath,
           fixedIntegrationSha: undefined,
@@ -1044,7 +1044,7 @@ export async function publishAfterFixImpl(
 
 
       setMergeGateReviewReady(host, task.id, {
-        config: { executorType: 'worktree', summary },
+        config: { summary },
         execution: {
           branch: featureBranch,
           workspacePath: gateWorkspacePath,
@@ -1085,7 +1085,7 @@ export async function publishAfterFixImpl(
     }
 
     setMergeGateReviewReady(host, task.id, {
-      config: { executorType: 'worktree', summary },
+      config: { summary },
       execution: {
         branch: featureBranch,
         workspacePath: gateWorkspacePath,

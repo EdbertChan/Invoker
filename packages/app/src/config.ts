@@ -9,6 +9,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
+export type ExecutionPoolMemberConfig =
+  | { type: 'ssh'; id: string; maxConcurrentTasks?: number }
+  | { type: 'worktree'; id: string; maxConcurrentTasks?: number };
+
+export interface ExecutionPoolConfig {
+  members: ExecutionPoolMemberConfig[];
+  selectionStrategy?: 'roundRobin' | 'leastLoaded';
+  maxConcurrentTasksPerMember?: number;
+}
+
 export interface InvokerConfig {
   defaultBranch?: string;
   /**
@@ -109,13 +119,11 @@ export interface InvokerConfig {
     maxConcurrentTasks?: number;
   }>;
   /**
-   * Named execution pools. Each member is either reserved local worktree member
-   * "local" or an SSH machine ID declared in remoteTargets.
+   * Named execution pools. Pools can mix SSH and local worktree members behind
+   * a single task-facing poolId.
    */
-  executionPools?: Record<string, string[]>;
+  executionPools?: Record<string, ExecutionPoolConfig>;
 }
-
-const LOCAL_POOL_MEMBER = 'local';
 
 function readJsonSafe(path: string): InvokerConfig {
   if (!existsSync(path)) {
@@ -147,24 +155,56 @@ function validateExecutionPools(config: InvokerConfig, path: string): void {
     throw new Error(`Invalid Invoker config at ${path}: "executionPools" must be an object`);
   }
   const remoteTargetIds = new Set(Object.keys(config.remoteTargets ?? {}));
-  for (const [poolId, members] of Object.entries(pools)) {
+  const seenMembers = new Map<string, string>();
+  for (const [poolId, pool] of Object.entries(pools)) {
+    if (typeof pool !== 'object' || pool === null || Array.isArray(pool)) {
+      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId} must be an object`);
+    }
+    const members = pool.members;
     if (!Array.isArray(members)) {
-      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId} must be an array`);
+      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId}.members must be an array`);
     }
     if (members.length === 0) {
-      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId} must not be empty`);
+      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId}.members must not be empty`);
+    }
+    if (
+      pool.selectionStrategy !== undefined &&
+      pool.selectionStrategy !== 'roundRobin' &&
+      pool.selectionStrategy !== 'leastLoaded'
+    ) {
+      throw new Error(
+        `Invalid Invoker config at ${path}: executionPools.${poolId}.selectionStrategy ` +
+        'must be "roundRobin" or "leastLoaded"',
+      );
     }
     for (const member of members) {
-      if (typeof member !== 'string' || member.trim() === '') {
-        throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId} members must be non-empty strings`);
-      }
-      if (member === LOCAL_POOL_MEMBER) continue;
-      if (!remoteTargetIds.has(member)) {
+      if (
+        typeof member !== 'object' ||
+        member === null ||
+        (member.type !== 'ssh' && member.type !== 'worktree') ||
+        typeof member.id !== 'string' ||
+        member.id.trim() === ''
+      ) {
         throw new Error(
-          `Invalid Invoker config at ${path}: executionPools.${poolId} member "${member}" ` +
-          `must be "${LOCAL_POOL_MEMBER}" or a key in remoteTargets`,
+          `Invalid Invoker config at ${path}: executionPools.${poolId}.members entries ` +
+          'must include { type: "ssh" | "worktree", id: string }',
         );
       }
+      if (member.type === 'ssh' && !remoteTargetIds.has(member.id)) {
+        throw new Error(
+          `Invalid Invoker config at ${path}: executionPools.${poolId} SSH member "${member.id}" ` +
+          'must be a key in remoteTargets',
+        );
+      }
+      const memberKey = `${member.type}:${member.id}`;
+      const owner = seenMembers.get(memberKey);
+      if (owner && owner !== poolId) {
+        throw new Error(
+          `Invalid Invoker config at ${path}: execution pool member "${memberKey}" ` +
+          `is shared by pools "${owner}" and "${poolId}"`,
+        );
+      }
+      seenMembers.set(memberKey, poolId);
     }
   }
 }

@@ -19,7 +19,7 @@
  *   electron dist/main.js --headless fix <taskId>
  *   electron dist/main.js --headless resolve-conflict <taskId>
  *   electron dist/main.js --headless edit <taskId> <newCommand>
- *   electron dist/main.js --headless edit-executor <taskId> <executorType>
+ *   electron dist/main.js --headless set pool <taskId> <poolId>
  *   electron dist/main.js --headless edit-agent <taskId> <claude|codex>
  *   electron dist/main.js --headless cancel <taskId>
  *   electron dist/main.js --headless set-merge-mode <workflowId> <mode>
@@ -1921,8 +1921,8 @@ if (isHeadless) {
         return { channel: 'headless.exec', request: { args: ['set', 'command', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-prompt':
         return { channel: 'headless.exec', request: { args: ['set', 'prompt', String(arg0), String(arg1)] } };
-      case 'invoker:edit-task-type':
-        return { channel: 'headless.exec', request: { args: ['set', 'executor', String(arg0), String(arg1)] } };
+      case 'invoker:edit-task-pool':
+        return { channel: 'headless.exec', request: { args: ['set', 'pool', String(arg0), String(arg1)] } };
       case 'invoker:edit-task-agent':
         return { channel: 'headless.exec', request: { args: ['set', 'agent', String(arg0), String(arg1)] } };
       case 'invoker:set-task-external-gate-policies': {
@@ -2395,7 +2395,7 @@ if (isHeadless) {
                   const { heartbeatStale, leaseExpired, executingStalled, staleReason } = evaluateExecutingStall({
                     now,
                     phase: task.execution.phase,
-                    executorType: task.config.executorType,
+                    executorType: task.config.dockerImage ? 'docker' : (task.config.poolId ? 'ssh' : 'worktree'),
                     executingStartedAt,
                     leaseExpiresAt,
                     executorHeartbeatAt: previousHeartbeat,
@@ -3544,24 +3544,23 @@ if (isHeadless) {
       }
     });
 
-    registerGuiMutationHandler('invoker:edit-task-type', async (taskIdArg: unknown, executorTypeArg: unknown, remoteTargetIdArg?: unknown) => {
+    registerGuiMutationHandler('invoker:edit-task-pool', async (taskIdArg: unknown, poolIdArg: unknown) => {
       const taskId = String(taskIdArg);
-      const executorType = String(executorTypeArg);
-      const remoteTargetId = remoteTargetIdArg === undefined ? undefined : String(remoteTargetIdArg);
-      logger.info(`edit-task-type: "${taskId}" → "${executorType}" remoteTargetId=${remoteTargetId ?? 'none'}`, { module: 'ipc' });
+      const poolId = poolIdArg === undefined ? undefined : String(poolIdArg);
+      logger.info(`edit-task-pool: "${taskId}" → "${poolId ?? 'default'}"`, { module: 'ipc' });
       try {
-        const envelope = makeEnvelope('edit-task-type', 'ui', 'task', { taskId, executorType, remoteTargetId });
-        const result = await commandService.editTaskType(envelope);
+        const envelope = makeEnvelope('edit-task-pool', 'ui', 'task', { taskId, poolId });
+        const result = await commandService.editTaskPool(envelope);
         if (!result.ok) throw new Error(result.error.message);
         await dispatchStartedTasksWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
           logger,
-          context: 'ipc.edit-task-type',
+          context: 'ipc.edit-task-pool',
           started: result.data,
         });
       } catch (err) {
-        logger.error(`edit-task-type failed: ${err}`, { module: 'ipc' });
+        logger.error(`edit-task-pool failed: ${err}`, { module: 'ipc' });
         throw err;
       }
     });
@@ -3613,6 +3612,10 @@ if (isHeadless) {
 
     ipcMain.handle('invoker:get-remote-targets', () => {
       return Object.keys(loadConfig().remoteTargets ?? {});
+    });
+
+    ipcMain.handle('invoker:get-execution-pools', () => {
+      return Object.keys(loadConfig().executionPools ?? {});
     });
 
     ipcMain.handle('invoker:get-execution-agents', () => {

@@ -30,8 +30,8 @@ export type MutationKey =
   | 'command'
   | 'prompt'
   | 'executionAgent'
-  | 'executorType'
-  | 'remoteTargetId'
+  | 'poolId'
+  | 'dockerImage'
   | 'selectedExperiment'
   | 'selectedExperimentSet'
   | 'mergeMode'
@@ -46,8 +46,8 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   command:               { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   prompt:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   executionAgent:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
-  executorType:          { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
-  remoteTargetId:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
+  poolId:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
+  dockerImage:           { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   selectedExperiment:    { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   selectedExperimentSet: { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   mergeMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },

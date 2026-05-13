@@ -192,25 +192,13 @@ export function applyGraphMutationImpl(host: GraphMutationHost, mutation: GraphM
       experimentPrompt: nodeDef.experimentPrompt,
       prompt: nodeDef.prompt,
       command: nodeDef.command,
+      poolId: nodeDef.poolId,
+      dockerImage: nodeDef.dockerImage,
       isReconciliation: nodeDef.isReconciliation,
       requiresManualApproval: nodeDef.requiresManualApproval,
       isMergeNode: nodeDef.isMergeNode,
     } as const;
-    let nodeConfig: TaskConfig;
-    switch (nodeDef.executorType) {
-      case 'merge':
-        nodeConfig = { ...nodeBase, executorType: 'merge' };
-        break;
-      case 'docker':
-        nodeConfig = { ...nodeBase, executorType: 'docker' };
-        break;
-      case 'ssh':
-        nodeConfig = { ...nodeBase, executorType: 'ssh' };
-        break;
-      default:
-        nodeConfig = { ...nodeBase, executorType: nodeDef.executorType };
-        break;
-    }
+    const nodeConfig: TaskConfig = { ...nodeBase };
     const task = createTaskState(nodeDef.id, nodeDef.description, nodeDef.dependencies, nodeConfig);
     host.createAndSync(task);
     const delta: TaskDelta = { type: 'created', task };

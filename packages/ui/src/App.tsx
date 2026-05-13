@@ -64,7 +64,7 @@ export function App() {
   const [onFinish, setOnFinish] = useState<'none' | 'merge' | 'pull_request'>('merge');
   const [viewMode, setViewMode] = useState<'dag' | 'history' | 'timeline' | 'queue'>('dag');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; taskId: string } | null>(null);
-  const [remoteTargets, setRemoteTargets] = useState<string[]>([]);
+  const [executionPools, setExecutionPools] = useState<string[]>([]);
   const [executionAgents, setExecutionAgents] = useState<string[]>([]);
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
   const [systemDiagnostics, setSystemDiagnostics] = useState<SystemDiagnostics | null>(null);
@@ -90,7 +90,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    window.invoker?.getRemoteTargets?.().then(setRemoteTargets).catch(() => {});
+    window.invoker?.getExecutionPools?.().then(setExecutionPools).catch(() => {});
     window.invoker?.getExecutionAgents?.().then(setExecutionAgents).catch(() => {});
     refreshSystemDiagnostics();
   }, [refreshSystemDiagnostics]);
@@ -300,7 +300,7 @@ export function App() {
   const handleFix = useCallback(async (taskId: string, agentName: string) => {
     setContextMenu(null);
     const task = tasks.get(taskId);
-    if (task?.config.executorType === 'docker') {
+    if (task?.config.dockerImage) {
       const proceed = window.confirm(
         'Note: AI CLI tools have known freeze issues inside Docker containers. ' +
         'The automated fix will run in non-interactive pipe mode which is unaffected.\n\n' +
@@ -501,14 +501,14 @@ export function App() {
     [invoker],
   );
 
-  // ── Edit task executor type ───────────────────────────────
-  const handleEditType = useCallback(
-    async (taskId: string, executorType: string, remoteTargetId?: string) => {
+  // ── Edit task execution pool ──────────────────────────────
+  const handleEditPool = useCallback(
+    async (taskId: string, poolId: string) => {
       if (!invoker) return;
       try {
-        await invoker.editTaskType(taskId, executorType, remoteTargetId);
+        await invoker.editTaskPool(taskId, poolId);
       } catch (err) {
-        console.error('Failed to edit task type:', err);
+        console.error('Failed to edit task pool:', err);
       }
     },
     [invoker],
@@ -669,7 +669,7 @@ export function App() {
               baseBranch={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.baseBranch : undefined}
               workflowRepoUrl={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.repoUrl : undefined}
               mergeMode={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.mergeMode : undefined}
-              remoteTargets={remoteTargets}
+              executionPools={executionPools}
               executionAgents={executionAgents}
               onProvideInput={openInputModal}
               onApprove={openApprovalModal}
@@ -679,7 +679,7 @@ export function App() {
               onSelectExperiment={openExperimentModal}
               onEditCommand={handleEditCommand}
               onEditPrompt={handleEditPrompt}
-              onEditType={handleEditType}
+              onEditPool={handleEditPool}
               onEditAgent={handleEditAgent}
               onSetExternalGatePolicies={handleSetExternalGatePolicies}
               onSetMergeBranch={invoker?.setMergeBranch}

@@ -44,8 +44,18 @@
   },
 
   "executionPools": {
-    "ssh-light": ["staging-server", "build-server-b"],
-    "mixed": ["local", "staging-server"]
+    "ssh-light": {
+      "members": [
+        { "type": "ssh", "id": "staging-server" },
+        { "type": "ssh", "id": "build-server-b" }
+      ]
+    },
+    "mixed": {
+      "members": [
+        { "type": "worktree", "id": "local" },
+        { "type": "ssh", "id": "staging-server" }
+      ]
+    }
   },
 
   "autoFixRetries": 3,
@@ -60,7 +70,7 @@
     "routing": [
       "Tasks without poolId run locally",
       "Tasks with poolId use executionPools",
-      "Pool member local runs locally; other members reference remoteTargets keys"
+      "Pool members with type=worktree run locally; type=ssh members reference remoteTargets keys"
     ]
   }
 }

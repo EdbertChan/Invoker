@@ -20,8 +20,7 @@ import { ResponseHandler } from './response-handler.js';
 import type { ParsedResponse } from './response-handler.js';
 import { TaskScheduler } from './scheduler.js';
 import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, ExternalDependency, TaskStatus } from '@invoker/workflow-graph';
-import type { ExecutorType } from '@invoker/workflow-graph';
-import { createTaskState, createAttempt, normalizeExecutorType } from '@invoker/workflow-graph';
+import { createTaskState, createAttempt } from '@invoker/workflow-graph';
 import type { Logger, WorkResponse } from '@invoker/contracts';
 
 const MERGE_TRACE_LOG = resolve(homedir(), '.invoker', 'merge-trace.log');
@@ -189,7 +188,7 @@ export interface OrchestratorPersistence {
   ): void;
   /**
    * Load a workflow by ID. Used by:
-   *   - SSH validation in `editTaskType` (`repoUrl`),
+   *   - pool-selection validation (`repoUrl`),
    *   - same-mode no-op detection in `editTaskMergeMode` (`mergeMode`).
    * The interface lists only the fields the orchestrator actually reads;
    * concrete adapters (e.g. `SQLiteAdapter.loadWorkflow`) return more.
@@ -342,7 +341,8 @@ export interface GraphMutationNodeDef {
   experimentPrompt?: string;
   prompt?: string;
   command?: string;
-  executorType?: ExecutorType;
+  poolId?: string;
+  dockerImage?: string;
   isReconciliation?: boolean;
   requiresManualApproval?: boolean;
   isMergeNode?: boolean;
@@ -362,7 +362,8 @@ export interface TaskReplacementDef {
   command?: string;
   prompt?: string;
   dependencies?: string[];
-  executorType?: ExecutorType;
+  poolId?: string;
+  dockerImage?: string;
   executionAgent?: string;
 }
 
@@ -554,8 +555,6 @@ export class Orchestrator {
       ...existing,
       ...(changes.status !== undefined ? { status: changes.status } : {}),
       ...(changes.dependencies !== undefined ? { dependencies: changes.dependencies } : {}),
-      // Type assertion: spread widens the discriminated union but the runtime
-      // value preserves the correct executorType discriminant from existing.config.
       config: { ...existing.config, ...changes.config } as TaskConfig,
       execution: { ...existing.execution, ...changes.execution },
       taskStateVersion: existing.taskStateVersion + 1,
@@ -1070,7 +1069,7 @@ export class Orchestrator {
         externalDependencies,
         poolId: taskDef.poolId,
       } as const;
-      const taskConfig: TaskConfig = { ...baseConfig, executorType: 'worktree' as const };
+      const taskConfig: TaskConfig = { ...baseConfig };
       const task = createTaskState(
         scopedId,
         taskDef.description,
@@ -1108,7 +1107,7 @@ export class Orchestrator {
       mergeNodeId,
       descriptionForMergeNode(plan),
       leafIds,
-      { workflowId, isMergeNode: true, executorType: 'merge' },
+      { workflowId, isMergeNode: true },
     );
 
     // ── Pass 2: all validation passed — persist everything ──
@@ -1590,7 +1589,7 @@ export class Orchestrator {
    *
    * Sequence (mirrors `applyInvalidation`'s contract for the
    * synchronous orchestrator-internal seam — see `invalidation-policy.ts`
-   * and the Step 5/6 `editTaskType` precedent):
+   * and the pool-selection mutation precedent):
    *   1. **Cancel-first (Hard Invariant).** Compute the transitive
    *      downstream subgraph of the reconciliation task and cancel any
    *      member that is actively executing (`running` or
@@ -2405,53 +2404,28 @@ export class Orchestrator {
     return this.recreateTask(taskId);
   }
 
-    editTaskType(taskId: string, executorType: string, remoteTargetId?: string): TaskState[] {
+    editTaskPool(taskId: string, poolId: string | undefined): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
-    if (task.config.isMergeNode) throw new Error(`Cannot change executor type of merge node ${taskId}`);
-
-    const effectiveType = normalizeExecutorType(executorType) ?? executorType;
-
-    // SSH requires repoUrl on the workflow to clone onto the remote host
-    if (effectiveType === 'ssh' && task.config.workflowId && this.persistence.loadWorkflow) {
-      const wf = this.persistence.loadWorkflow(task.config.workflowId);
-      if (!wf?.repoUrl) {
-        throw new Error(
-          `Cannot switch task "${taskId}" to SSH: workflow has no repoUrl. ` +
-          `Add repoUrl to the plan YAML.`,
-        );
-      }
-    }
-
-    const oldExecutorType = task.config.executorType;
-    const oldRemoteTargetId =
-      oldExecutorType === 'ssh' ? (task.config as { remoteTargetId?: string }).remoteTargetId : undefined;
-    const newRemoteTargetId = effectiveType === 'ssh' ? remoteTargetId : undefined;
-    const hostKey = (et: string | undefined, rid: string | undefined): string =>
-      et === 'ssh' ? `ssh:${rid ?? ''}` : 'local';
-    const hostChanged =
-      hostKey(oldExecutorType, oldRemoteTargetId) !==
-      hostKey(effectiveType, newRemoteTargetId);
+    if (task.config.isMergeNode) throw new Error(`Cannot change execution pool of merge node ${taskId}`);
 
     if (task.status === 'running' || task.status === 'fixing_with_ai') {
       this.cancelTask(taskId);
     }
 
-    const configPatch: Record<string, unknown> = { executorType: effectiveType };
-    if (effectiveType === 'ssh') {
-      configPatch.remoteTargetId = remoteTargetId;
-    } else {
-      configPatch.remoteTargetId = undefined;
+    const normalizedPoolId = poolId?.trim() || undefined;
+    if (task.config.poolId === normalizedPoolId) {
+      return [];
     }
-    const typeChanges: TaskStateChanges = { config: configPatch };
-    const typeBefore = this.stateGetTask(taskId)!;
-    const typeUpdated = this.writeAndSync(taskId, typeChanges);
-    const typeDelta: TaskDelta = this.buildUpdateDelta(typeBefore, typeUpdated, typeChanges);
-    this.persistence.logEvent?.(taskId, 'task.updated', typeChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, typeDelta);
+    const poolChanges: TaskStateChanges = { config: { poolId: normalizedPoolId } };
+    const poolBefore = this.stateGetTask(taskId)!;
+    const poolUpdated = this.writeAndSync(taskId, poolChanges);
+    const poolDelta: TaskDelta = this.buildUpdateDelta(poolBefore, poolUpdated, poolChanges);
+    this.persistence.logEvent?.(taskId, 'task.updated', poolChanges);
+    this.messageBus.publish(TASK_DELTA_CHANNEL, poolDelta);
 
-    return hostChanged ? this.recreateTask(taskId) : this.retryTask(taskId);
+    return this.recreateTask(taskId);
   }
 
     editTaskAgent(taskId: string, agentName: string): TaskState[] {
@@ -2557,7 +2531,7 @@ export class Orchestrator {
    * built from upstream leaf results); only the merge execution
    * policy changed. That distinction is what makes merge-mode the
    * single retry-class route alongside the other retry-class rows
-   * (`executorType`, `selectedExperiment`, `selectedExperimentSet`)
+   * (`poolId`, `selectedExperiment`, `selectedExperimentSet`)
    * in the chart's Decision Table.
    */
   editTaskMergeMode(
@@ -2693,8 +2667,8 @@ export class Orchestrator {
    * NOTE: `restartTask` is intentionally used here (not
    * `recreateTask`) because Step 10 is retry-class — fix
    * prompt/context changes do NOT change the task's execution-defining
-   * spec (`command` / `prompt` / `executionAgent` / `executorType` /
-   * `remoteTargetId`); they only redirect the AI fix attempt that
+   * spec (`command` / `prompt` / `executionAgent` / `poolId` /
+   * `dockerImage`); they only redirect the AI fix attempt that
    * runs against an already-failed task lineage.
    */
   editTaskFixContext(
@@ -2949,7 +2923,7 @@ export class Orchestrator {
       newMergeId,
       mergeDescription,
       leafIds,
-      { workflowId: newWfId, isMergeNode: true, executorType: 'merge' },
+      { workflowId: newWfId, isMergeNode: true },
     );
     this.createAndSync(newMerge);
     this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newMerge });
@@ -3068,32 +3042,14 @@ export class Orchestrator {
       const deps = hasInternalDeps
         ? rt.dependencies!.map((d) => scopeLocal(d))
         : [...task.dependencies];
-      const rtExecutorType = normalizeExecutorType(rt.executorType) ?? task.config.executorType ?? 'worktree';
-      const rtBase = {
+      const rtConfig: TaskConfig = {
         workflowId: wfId,
         command: rt.command,
         prompt: rt.prompt,
         executionAgent: rt.executionAgent ?? task.config.executionAgent,
-      } as const;
-      // Replacement tasks inherit executor config from the parent task.
-      // The switch narrows the config so TS accepts the correct variant.
-      let rtConfig: TaskConfig;
-      switch (rtExecutorType) {
-        case 'docker':
-          rtConfig = {
-            ...rtBase, executorType: 'docker',
-            dockerImage: task.config.executorType === 'docker' ? task.config.dockerImage : undefined,
-          };
-          break;
-        case 'ssh':
-          rtConfig = {
-            ...rtBase, executorType: 'ssh',
-          };
-          break;
-        default:
-          rtConfig = { ...rtBase, executorType: 'worktree' as const };
-          break;
-      }
+        poolId: rt.poolId ?? task.config.poolId,
+        dockerImage: rt.dockerImage ?? task.config.dockerImage,
+      };
       const newTask = createTaskState(scopedId, rt.description, deps, rtConfig);
       this.createAndSync(newTask);
       this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newTask });
@@ -3844,7 +3800,8 @@ export class Orchestrator {
       experimentPrompt: v.prompt,
       prompt: v.prompt,
       command: v.command,
-      executorType: parentTask?.config.executorType,
+      poolId: parentTask?.config.poolId,
+      dockerImage: parentTask?.config.dockerImage,
     }));
 
     const reconciliationId = `${taskId}-reconciliation`;

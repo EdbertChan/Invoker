@@ -61,28 +61,14 @@ export interface BaseTaskConfig {
   readonly fixContext?: string;
 }
 
-export interface WorktreeTaskConfig extends BaseTaskConfig {
-  readonly executorType?: 'worktree';
-  readonly dockerImage?: never;
-}
-
-export interface DockerTaskConfig extends BaseTaskConfig {
-  readonly executorType: 'docker';
+export interface TaskConfig extends BaseTaskConfig {
+  /**
+   * Docker image requested for this task. Presence selects Docker execution.
+   * Tasks without a docker image run through an execution pool when poolId is set,
+   * otherwise through the default local worktree runner.
+   */
   readonly dockerImage?: string;
 }
-
-export interface SshTaskConfig extends BaseTaskConfig {
-  readonly executorType: 'ssh';
-  readonly dockerImage?: never;
-}
-
-/** Internal-only config for merge gate nodes. */
-export interface MergeTaskConfig extends BaseTaskConfig {
-  readonly executorType: 'merge';
-  readonly dockerImage?: never;
-}
-
-export type TaskConfig = WorktreeTaskConfig | DockerTaskConfig | SshTaskConfig | MergeTaskConfig;
 
 export interface ExternalDependency {
   readonly workflowId: string;

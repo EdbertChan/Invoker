@@ -26,7 +26,7 @@
  *   POST   /api/tasks/:id/input        body: { text }
  *   POST   /api/tasks/:id/edit         body: { command }
  *   POST   /api/tasks/:id/edit-prompt  body: { prompt }
- *   POST   /api/tasks/:id/edit-type    body: { executorType, remoteTargetId? }
+ *   POST   /api/tasks/:id/edit-pool    body: { poolId }
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
  *   POST   /api/workflows/:id/detach  body: { upstreamWorkflowId }
@@ -499,19 +499,19 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         return;
       }
 
-      // POST /api/tasks/:id/edit-type
-      const editTypeMatch = path.match(/^\/api\/tasks\/([^/]+)\/edit-type$/);
-      if (method === 'POST' && editTypeMatch) {
-        const taskId = decodeURIComponent(editTypeMatch[1]);
+      // POST /api/tasks/:id/edit-pool
+      const editPoolMatch = path.match(/^\/api\/tasks\/([^/]+)\/edit-pool$/);
+      if (method === 'POST' && editPoolMatch) {
+        const taskId = decodeURIComponent(editPoolMatch[1]);
         try {
           const body = await readBody(req);
-          const { executorType, remoteTargetId } = JSON.parse(body);
-          if (!executorType) {
-            json(res, 400, { error: 'Missing "executorType" in request body' });
+          const { poolId } = JSON.parse(body);
+          if (!poolId) {
+            json(res, 400, { error: 'Missing "poolId" in request body' });
             return;
           }
-          const result = await mutations.editTaskType(taskId, executorType, remoteTargetId);
-          json(res, 200, { ok: true, taskId, action: 'type_edited', tasksStarted: result.runnable.length });
+          const result = await mutations.editTaskPool(taskId, poolId);
+          json(res, 200, { ok: true, taskId, action: 'pool_edited', tasksStarted: result.runnable.length });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }

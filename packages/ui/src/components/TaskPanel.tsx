@@ -64,7 +64,7 @@ interface TaskPanelProps {
   allTasks?: Map<string, TaskState>;
   baseBranch?: string;
   workflowRepoUrl?: string;
-  remoteTargets?: string[];
+  executionPools?: string[];
   executionAgents?: string[];
   onProvideInput: (task: TaskState) => void;
   onApprove: (task: TaskState) => void;
@@ -72,7 +72,7 @@ interface TaskPanelProps {
   onSelectExperiment: (task: TaskState) => void;
   onEditCommand?: (taskId: string, newCommand: string) => void;
   onEditPrompt?: (taskId: string, newPrompt: string) => void;
-  onEditType?: (taskId: string, executorType: string, remoteTargetId?: string) => void;
+  onEditPool?: (taskId: string, poolId: string) => void;
   onEditAgent?: (taskId: string, agentName: string) => void;
   onSetExternalGatePolicies?: (taskId: string, updates: ExternalGatePolicyUpdate[]) => Promise<void>;
   onSetMergeBranch?: (workflowId: string, baseBranch: string) => Promise<void>;
@@ -87,16 +87,11 @@ function formatDate(date?: Date | string): string {
 }
 
 /**
- * Display value when task.config.executorType is unset: matches orchestrator
- * loadPlan default worktree. SSH tasks encode the remote target ID as
- * "ssh:<targetId>" for the compound select. Merge nodes hide the selector.
+ * Display value for pool selection. Empty means the task uses the default
+ * worktree scheduling path; merge nodes hide the selector.
  */
-function effectiveExecutorSelectValue(task: TaskState): string {
-  if (task.config.executorType === 'ssh' && task.config.remoteTargetId) {
-    return `ssh:${task.config.remoteTargetId}`;
-  }
-  if (task.config.executorType) return task.config.executorType;
-  return 'worktree';
+function effectivePoolSelectValue(task: TaskState): string {
+  return task.config.poolId ?? '';
 }
 
 /**
@@ -185,7 +180,7 @@ export function TaskPanel({
   allTasks,
   baseBranch,
   workflowRepoUrl,
-  remoteTargets,
+  executionPools,
   executionAgents,
   onProvideInput,
   onApprove,
@@ -193,7 +188,7 @@ export function TaskPanel({
   onSelectExperiment,
   onEditCommand,
   onEditPrompt,
-  onEditType,
+  onEditPool,
   onEditAgent,
   onSetExternalGatePolicies,
   onSetMergeBranch,
@@ -267,7 +262,7 @@ export function TaskPanel({
   const phaseLabel = task.status === 'running'
     ? getRunningPhaseLabel(task.execution.phase)
     : null;
-  const executorSelectValue = effectiveExecutorSelectValue(task);
+  const poolSelectValue = effectivePoolSelectValue(task);
 
   const mergeGateDisplayTitle = mergeGatePanelHeading(task, mergeMode);
   const isFixApproval = Boolean(task.execution.pendingFixError);
@@ -421,7 +416,7 @@ export function TaskPanel({
 
       {/* Advanced section (collapsed by default) */}
       {(
-        (onEditType && !task.config.isMergeNode) ||
+        (onEditPool && !task.config.isMergeNode) ||
         (task.config.prompt && onEditAgent) ||
         (task.config.isMergeNode && onSetMergeMode && task.config.workflowId)
       ) && (
@@ -437,29 +432,24 @@ export function TaskPanel({
 
           {showAdvanced && (
             <div className="mt-3 space-y-3">
-              {/* Executor type selector (for non-merge tasks) */}
-              {onEditType && !task.config.isMergeNode && (
+              {/* Execution pool selector (for non-merge tasks) */}
+              {onEditPool && !task.config.isMergeNode && (
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-400">Run on</span>
                   <select
-                    value={executorSelectValue}
+                    value={poolSelectValue}
                     onChange={(e) => {
                       const val = e.target.value;
-                      if (val.startsWith('ssh:')) {
-                        onEditType(task.id, 'ssh', val.slice(4));
-                      } else {
-                        onEditType(task.id, val);
-                      }
+                      onEditPool(task.id, val);
                     }}
                     disabled={task.status === 'running'}
                     className="bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                    data-testid="executor-type-select"
+                    data-testid="pool-select"
                   >
-                    <option value="worktree">Worktree</option>
-                    <option value="docker">Docker</option>
-                    {remoteTargets?.map((targetId) => (
-                      <option key={targetId} value={`ssh:${targetId}`}>
-                        SSH: {targetId}
+                    <option value="">Default worktree</option>
+                    {executionPools?.map((poolId) => (
+                      <option key={poolId} value={poolId}>
+                        Pool: {poolId}
                       </option>
                     ))}
                   </select>
