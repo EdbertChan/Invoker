@@ -106,6 +106,9 @@ invoker_e2e_ssh_write_config() {
 
   cat > "$config_file" <<EOJSON
 {
+  "executionPools": {
+    "localhost-e2e": ["localhost-e2e"]
+  },
   "remoteTargets": {
     "localhost-e2e": {
       "host": "localhost",
