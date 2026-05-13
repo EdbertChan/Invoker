@@ -43,8 +43,8 @@ export interface BaseTaskConfig {
   readonly executionAgent?: string;
   /** Cross-workflow prerequisites for this task. */
   readonly externalDependencies?: readonly ExternalDependency[];
-  /** Remote target identifier for executor routing. Primarily used by SSH executors but can be set on any task via routing rules. */
-  readonly remoteTargetId?: string;
+  /** Execution pool identifier used to route this task. Omit to run in the default local worktree. */
+  readonly poolId?: string;
   /**
    * Fix-session prompt override carried on the failed task across the
    * `failed` → `fixing_with_ai` → `failed` cycle (Step 10 of the

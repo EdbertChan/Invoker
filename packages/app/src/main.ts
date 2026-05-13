@@ -421,7 +421,6 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     taskRepository,
     maxConcurrency: effectiveMaxConcurrency,
     defaultAutoFixRetries: invokerConfig.autoFixRetries,
-    executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
     deferRunningUntilLaunch: true,
   });
   commandService = new CommandService(orchestrator);
@@ -2828,7 +2827,6 @@ if (isHeadless) {
         taskRepository: new SqliteTaskRepository(persistence),
         maxConcurrency: effectiveMaxConcurrency,
         defaultAutoFixRetries: invokerConfig.autoFixRetries,
-        executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
         deferRunningUntilLaunch: true,
       });
       commandService = new CommandService(orchestrator);

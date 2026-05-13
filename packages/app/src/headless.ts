@@ -2199,10 +2199,7 @@ export async function resolveAgentSession(
     if (sshTask) {
       const { loadConfig } = await import('./config.js');
       const targets = loadConfig().remoteTargets ?? {};
-      const targetId = sshTask.config.remoteTargetId;
-      const target = targetId
-        ? targets[targetId]
-        : Object.values(targets)[0];
+      const target = Object.values(targets)[0];
       if (target) {
         const remoteRaw = await driver.fetchRemoteSession(sessionId, target);
         if (remoteRaw) {
