@@ -33,7 +33,6 @@ import { startApiServer } from './api-server.js';
 import { WorkflowMutationFacade } from './workflow-mutation-facade.js';
 import {
   approveTask,
-  deleteAllWorkflows as sharedDeleteAllWorkflows,
   fixWithAgentAction,
   rebaseAndRetry,
   recreateWithRebase,
@@ -52,6 +51,9 @@ import { trackWorkflow } from './headless-watch.js';
 import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './workflow-preemption.js';
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import type { RuntimeServices } from '@invoker/runtime-service';
+import { handleHeadlessRunResumeCommand } from './headless-run-resume-handlers.js';
+import { handleHeadlessQueryListCommand } from './headless-query-list-handlers.js';
+import { handleHeadlessApproveDeleteCommand } from './headless-approve-delete-handlers.js';
 
 export { bumpGenerationAndRecreate } from './workflow-actions.js';
 export {
@@ -297,13 +299,6 @@ export function wireHeadlessApproveHook(deps: HeadlessDeps, te: TaskRunner): voi
 function warnDeprecated(oldCmd: string, newCmd: string): void {
   process.stderr.write(
     `${YELLOW}[deprecated]${RESET} "${oldCmd}" is deprecated. Use "${newCmd}" instead.\n`,
-  );
-}
-
-function assertDeleteAllEnabled(): void {
-  if (process.env.INVOKER_ALLOW_DELETE_ALL === '1') return;
-  throw new Error(
-    'delete-all is disabled by default. Set INVOKER_ALLOW_DELETE_ALL=1 to enable it explicitly.',
   );
 }
 
@@ -934,14 +929,37 @@ async function headlessInstallSkills(
 export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<void> {
   const command = args[0];
 
+  if (await handleHeadlessQueryListCommand(args, deps, {
+    query: headlessQuery,
+    warnDeprecated,
+  })) {
+    return;
+  }
+
+  if (await handleHeadlessRunResumeCommand(args, deps, {
+    run: headlessRun,
+    resume: headlessResume,
+  })) {
+    return;
+  }
+
+  if (await handleHeadlessApproveDeleteCommand(args, deps, {
+    approve: headlessApprove,
+    reject: headlessReject,
+    input: headlessInput,
+    select: headlessSelect,
+    cancel: headlessCancel,
+    cancelWorkflow: headlessCancelWorkflow,
+    deleteWorkflow: headlessDeleteWorkflow,
+  })) {
+    return;
+  }
+
   switch (command) {
     case 'owner-serve':
       await headlessOwnerServe(deps);
       break;
     // ── New grouped commands ──
-    case 'query':
-      await headlessQuery(args.slice(1), deps);
-      break;
     case 'set':
       await headlessSet(args.slice(1), deps);
       break;
@@ -959,12 +977,6 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       break;
 
     // ── Execute (unchanged) ──
-    case 'run':
-      await headlessRun(args[1], deps, deps.waitForApproval, deps.noTrack);
-      break;
-    case 'resume':
-      await headlessResume(args[1], deps, deps.waitForApproval, deps.noTrack);
-      break;
     case 'retry':
       await headlessRetryWorkflow(args[1], deps);
       break;
@@ -1007,46 +1019,6 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       await headlessResolveConflict(args[1], deps, args[2]);
       break;
 
-    // ── Respond (unchanged) ──
-    case 'approve':
-      await headlessApprove(args[1], deps);
-      break;
-    case 'reject':
-      await headlessReject(args[1], deps, args.slice(2).join(' ') || undefined);
-      break;
-    case 'input':
-      await headlessInput(args[1], args.slice(2).join(' '), deps);
-      break;
-    case 'select':
-      await headlessSelect(args[1], args[2], deps);
-      break;
-
-    // ── Lifecycle (unchanged) ──
-    case 'cancel':
-      await headlessCancel(args[1], deps);
-      break;
-    case 'cancel-workflow':
-      await headlessCancelWorkflow(args[1], deps);
-      break;
-    case 'delete':
-    case 'delete-workflow':
-      await headlessDeleteWorkflow(args[1], deps);
-      break;
-    case 'delete-all':
-      assertDeleteAllEnabled();
-      {
-        const { snapshotPath } = await sharedDeleteAllWorkflows({
-          logger: deps.logger,
-          orchestrator: deps.orchestrator,
-        });
-        if (snapshotPath) {
-          process.stderr.write(`[headless] delete-all snapshot: ${snapshotPath}\n`);
-        } else {
-          process.stderr.write('[headless] delete-all snapshot skipped: DB file does not exist yet\n');
-        }
-      }
-      process.stdout.write('All workflows deleted.\n');
-      break;
     case 'open-terminal':
       await headlessOpenTerminal(args[1], deps);
       break;
@@ -1055,32 +1027,6 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       break;
     case 'query-select':
       await headlessQuerySelect(args[1], deps);
-      break;
-
-    // ── Deprecated aliases → query ──
-    case 'list':
-      warnDeprecated('list', 'query workflows');
-      await headlessQuery(['workflows', ...args.slice(1)], deps);
-      break;
-    case 'status':
-      warnDeprecated('status', 'query tasks');
-      await headlessQuery(['tasks', ...args.slice(1)], deps);
-      break;
-    case 'task-status':
-      warnDeprecated('task-status', 'query task');
-      await headlessQuery(['task', ...args.slice(1)], deps);
-      break;
-    case 'queue':
-      warnDeprecated('queue', 'query queue');
-      await headlessQuery(['queue', ...args.slice(1)], deps);
-      break;
-    case 'audit':
-      warnDeprecated('audit', 'query audit');
-      await headlessQuery(['audit', ...args.slice(1)], deps);
-      break;
-    case 'session':
-      warnDeprecated('session', 'query session');
-      await headlessQuery(['session', ...args.slice(1)], deps);
       break;
 
     // ── Deprecated aliases → set ──
