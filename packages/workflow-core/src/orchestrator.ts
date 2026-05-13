@@ -51,6 +51,18 @@ export class OrchestratorError extends Error {
   }
 }
 
+export interface ExecutionLineageGuard {
+  selectedAttemptId?: string;
+  generation: number;
+}
+
+export class StaleTaskLineageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StaleTaskLineageError';
+  }
+}
+
 function isActiveForInvalidation(status: TaskStatus): boolean {
   return (
     status === 'running' ||
@@ -1016,6 +1028,23 @@ export class Orchestrator {
     return task?.execution.generation ?? 0;
   }
 
+  private assertExecutionLineageCurrent(
+    task: TaskState,
+    guard: ExecutionLineageGuard | undefined,
+    context: string,
+  ): void {
+    if (!guard) return;
+    const currentAttemptId = task.execution.selectedAttemptId;
+    const currentGeneration = this.getExecutionGeneration(task);
+    if (currentAttemptId !== guard.selectedAttemptId || currentGeneration !== guard.generation) {
+      throw new StaleTaskLineageError(
+        `${context} skipped for stale task lineage ${task.id} `
+        + `(attempt ${guard.selectedAttemptId ?? 'none'} -> ${currentAttemptId ?? 'none'}, `
+        + `gen ${guard.generation} -> ${currentGeneration})`,
+      );
+    }
+  }
+
   private withBumpedExecutionGeneration(task: TaskState, changes: TaskStateChanges): TaskStateChanges {
     return {
       ...changes,
@@ -1610,10 +1639,11 @@ export class Orchestrator {
     this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', additionalChanges);
   }
 
-  setFixAwaitingApproval(taskId: string, originalError: string): void {
+  setFixAwaitingApproval(taskId: string, originalError: string, guard?: ExecutionLineageGuard): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    this.assertExecutionLineageCurrent(task, guard, 'setFixAwaitingApproval');
     const tid = task.id;
     if (task.status !== 'running' && task.status !== 'fixing_with_ai') {
       throw new Error(`Task ${tid} is not running or fixing with AI (status: ${task.status})`);
@@ -2498,10 +2528,11 @@ export class Orchestrator {
    * Clears terminal failure fields on the row so SQLite does not show stale error/exit/completed.
    * Returns the saved error string so the caller can revert on failure.
    */
-  beginConflictResolution(taskId: string): { savedError: string } {
+  beginConflictResolution(taskId: string, guard?: ExecutionLineageGuard): { savedError: string } {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    this.assertExecutionLineageCurrent(task, guard, 'beginConflictResolution');
     if (task.status !== 'failed') throw new Error(`Task ${taskId} is not failed (status: ${task.status})`);
 
     const savedError = task.execution.error ?? '';
@@ -2547,12 +2578,18 @@ export class Orchestrator {
    * Revert a conflict resolution attempt: restore the task to failed
    * with its original error and re-parsed mergeConflict field.
    */
-  revertConflictResolution(taskId: string, savedError: string, fixError?: string): void {
+  revertConflictResolution(
+    taskId: string,
+    savedError: string,
+    fixError?: string,
+    guard?: ExecutionLineageGuard,
+  ): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) {
       throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     }
+    this.assertExecutionLineageCurrent(task, guard, 'revertConflictResolution');
     const id = task.id;
 
     const normalizedSavedError = stripFixFailureWrapper(savedError);
