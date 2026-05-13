@@ -25,7 +25,6 @@
       "user": "deploy",
       "sshKeyPath": "/home/user/.ssh/id_staging",
       "port": 22,
-      "maxConcurrentTasks": 1,
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
       "provisionCommand": "pnpm install --frozen-lockfile",
@@ -37,7 +36,6 @@
       "user": "deploy",
       "sshKeyPath": "/home/user/.ssh/id_build_b",
       "port": 22,
-      "maxConcurrentTasks": 1,
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
       "provisionCommand": "pnpm install --frozen-lockfile",
@@ -47,26 +45,18 @@
 
   "executionPools": {
     "ssh-light": {
-      "comment": "Pool routes tasks across mixed SSH/local members with shared queue/drain semantics",
       "members": [
         { "type": "ssh", "id": "staging-server" },
-        { "type": "ssh", "id": "build-server-b" },
-        { "type": "worktree", "id": "local-fallback", "maxConcurrentTasks": 2 }
-      ],
-      "selectionStrategy": "roundRobin",
-      "maxConcurrentTasksPerMember": 1
+        { "type": "ssh", "id": "build-server-b" }
+      ]
+    },
+    "mixed": {
+      "members": [
+        { "type": "worktree", "id": "local" },
+        { "type": "ssh", "id": "staging-server" }
+      ]
     }
   },
-
-  "executorRoutingRules": [
-    {
-      "comment": "Route pnpm commands to ssh-light pool",
-      "regex": "\\bpnpm(?:\\s|$)",
-      "executorType": "ssh",
-      "poolId": "ssh-light",
-      "strategy": "route"
-    }
-  ],
 
   "autoFixRetries": 3,
   "autoApproveAIFixes": true,
@@ -77,10 +67,10 @@
       "~/.invoker/config.json - Default user-level settings",
       "INVOKER_REPO_CONFIG_PATH=/path/to/config.json - Explicit override for repo/test-specific config"
     ],
-    "executor_types": [
-      "worktree - Git worktree isolation (default)",
-      "docker - Docker container execution",
-      "ssh - Remote SSH execution"
+    "routing": [
+      "Tasks without poolId run locally",
+      "Tasks with poolId use executionPools",
+      "Pool members with type=worktree run locally; type=ssh members reference remoteTargets keys"
     ]
   }
 }

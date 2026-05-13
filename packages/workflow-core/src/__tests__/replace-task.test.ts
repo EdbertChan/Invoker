@@ -422,11 +422,11 @@ describe('replaceTask', () => {
     expect(result.errors).toEqual([]);
   });
 
-  it('replacement inherits executorType from broken task when not specified', () => {
+  it('replacement inherits poolId from broken task when not specified', () => {
     orchestrator.loadPlan({
       name: 'test',
       tasks: [
-        { id: 'X', description: 'X', command: 'echo X', executorType: 'worktree' },
+        { id: 'X', description: 'X', command: 'echo X', poolId: 'local-pool' },
       ],
     });
     orchestrator.startExecution();
@@ -436,24 +436,24 @@ describe('replaceTask', () => {
       { id: 'fix', description: 'Fix', command: 'echo fix' },
     ]);
 
-    expect(orchestrator.getTask('fix')!.config.executorType).toBe('worktree');
+    expect(orchestrator.getTask('fix')!.config.poolId).toBe('local-pool');
   });
 
-  it('replacement can override executorType', () => {
+  it('replacement can override poolId', () => {
     orchestrator.loadPlan({
       name: 'test',
       tasks: [
-        { id: 'X', description: 'X', command: 'echo X', executorType: 'worktree' },
+        { id: 'X', description: 'X', command: 'echo X', poolId: 'local-pool' },
       ],
     });
     orchestrator.startExecution();
     failTask(orchestrator, 'X');
 
     orchestrator.replaceTask('X', [
-      { id: 'fix', description: 'Fix', command: 'echo fix', executorType: 'docker' },
+      { id: 'fix', description: 'Fix', command: 'echo fix', poolId: 'docker-pool' },
     ]);
 
-    expect(orchestrator.getTask('fix')!.config.executorType).toBe('docker');
+    expect(orchestrator.getTask('fix')!.config.poolId).toBe('docker-pool');
   });
 
   // ── Step 11 (task-invalidation roadmap): topology-fork policy ──

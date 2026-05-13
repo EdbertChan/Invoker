@@ -11,7 +11,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import type { Orchestrator } from '@invoker/workflow-core';
+import type { Orchestrator, TaskState } from '@invoker/workflow-core';
 import { OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import { cleanElectronEnv } from './process-utils.js';
@@ -49,6 +49,7 @@ export interface ConflictResolverHost {
   removeMergeWorktree(dir: string): Promise<void>;
   spawnAgentFix(prompt: string, cwd: string, agentName?: string): Promise<{ stdout: string; sessionId: string }>;
   getRemoteTargetConfig?(targetId: string): RemoteTargetConfig | undefined;
+  getRemoteTargetForTask?(task: TaskState): { id: string; target: RemoteTargetConfig } | undefined;
 }
 
 const DEFAULT_MAX_INLINE_PROMPT_BYTES = 64 * 1024;
@@ -205,23 +206,20 @@ export async function resolveConflictImpl(
     );
   }
 
-  // SSH tasks: run conflict resolution on the remote host
-  if (task.config.executorType === 'ssh' && task.config.remoteTargetId && !existsSync(rawCwd)) {
+  // Pooled SSH tasks use remote workspace paths, so they do not exist on the host.
+  const remoteTarget = host.getRemoteTargetForTask?.(task);
+  if (remoteTarget && !existsSync(rawCwd)) {
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'resolve-conflict-remote-path',
-      remoteTargetId: task.config.remoteTargetId,
+      remoteTargetId: remoteTarget.id,
       workspacePath: rawCwd,
     });
-    const target = host.getRemoteTargetConfig?.(task.config.remoteTargetId);
-    if (!target) {
-      throw new Error(`No remote target config for "${task.config.remoteTargetId}" — cannot resolve conflict on remote`);
-    }
-    await resolveConflictRemote(host, task, taskBranch, conflictInfo, rawCwd, target, agentName);
+    await resolveConflictRemote(host, task, taskBranch, conflictInfo, rawCwd, remoteTarget.target, agentName);
     return;
   }
 
   // For local tasks (worktree, docker), require workspace path exists on disk
-  if (task.config.executorType !== 'ssh' && !existsSync(rawCwd)) {
+  if (!existsSync(rawCwd)) {
     throw new Error(
       `resolveConflict: task "${taskId}" workspace does not exist on disk: ${rawCwd}. ` +
       `Refusing to run git operations without a valid workspace. ` +
@@ -457,19 +455,16 @@ export async function fixWithAgentImpl(
   const prompt = buildFixPrompt(taskForPrompt, taskOutput);
   const workspacePath = task.execution.workspacePath;
 
-  // SSH tasks: run agent on the remote host
-  if (task.config.executorType === 'ssh' && task.config.remoteTargetId && workspacePath && !existsSync(workspacePath)) {
+  // Pooled SSH tasks use remote workspace paths, so they do not exist on the host.
+  const remoteTarget = host.getRemoteTargetForTask?.(task);
+  if (remoteTarget && workspacePath && !existsSync(workspacePath)) {
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'fix-with-agent-remote-path',
-      remoteTargetId: task.config.remoteTargetId,
+      remoteTargetId: remoteTarget.id,
       workspacePath,
     });
-    const target = host.getRemoteTargetConfig?.(task.config.remoteTargetId);
-    if (!target) {
-      throw new Error(`No remote target config for "${task.config.remoteTargetId}" — cannot fix on remote`);
-    }
     const resolvedWorkspacePath =
-      (await resolveRemoteBranchOwnerPath(task.execution.branch, workspacePath, target)) ?? workspacePath;
+      (await resolveRemoteBranchOwnerPath(task.execution.branch, workspacePath, remoteTarget.target)) ?? workspacePath;
     if (resolvedWorkspacePath !== workspacePath) {
       host.persistence.updateTask(taskId, {
         execution: {
@@ -486,7 +481,7 @@ export async function fixWithAgentImpl(
     const { stdout: output, sessionId } = await spawnRemoteAgentFixImpl(
       prompt,
       resolvedWorkspacePath,
-      target,
+      remoteTarget.target,
       agentName,
       host.agentRegistry,
     );

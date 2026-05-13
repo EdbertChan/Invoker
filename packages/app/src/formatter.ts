@@ -277,7 +277,8 @@ export function serializeTask(task: TaskState): Record<string, unknown> {
   if (task.config.workflowId != null) config.workflowId = task.config.workflowId;
   if (task.config.command != null) config.command = task.config.command;
   if (task.config.prompt != null) config.prompt = task.config.prompt;
-  if (task.config.executorType != null) config.executorType = task.config.executorType;
+  if (task.config.poolId != null) config.poolId = task.config.poolId;
+  if (task.config.dockerImage != null) config.dockerImage = task.config.dockerImage;
   if (task.config.isMergeNode != null) config.isMergeNode = task.config.isMergeNode;
   if (task.config.executionAgent != null) config.executionAgent = task.config.executionAgent;
   if (task.config.featureBranch != null) config.featureBranch = task.config.featureBranch;

@@ -137,66 +137,73 @@ describe('loadConfig', () => {
     expect(config.imageStorage).toEqual(imageStorage);
   });
 
-  it('reads executorRoutingRules route strategy from user config', () => {
-    const executorRoutingRules = [{
-      regex: '\\bpnpm(?:\\s|$)',
-      executorType: 'ssh',
-      poolId: 'ssh-light',
-      strategy: 'route',
-    }];
+  it('reads local execution pool members', () => {
     writeFileSync(
       join(fakeHome, '.invoker', 'config.json'),
-      JSON.stringify({ executorRoutingRules }),
+      JSON.stringify({ executionPools: { localOnly: { members: [{ type: 'worktree', id: 'local' }] } } }),
     );
     const config = loadConfig();
-    expect(config.executorRoutingRules).toEqual(executorRoutingRules);
+    expect(config.executionPools?.localOnly).toEqual({ members: [{ type: 'worktree', id: 'local' }] });
   });
 
-  it('reads remote target maxConcurrentTasks from user config', () => {
+  it('reads SSH execution pool members backed by remoteTargets', () => {
     writeFileSync(
       join(fakeHome, '.invoker', 'config.json'),
       JSON.stringify({
         remoteTargets: {
-          ci1: {
-            host: '10.0.0.1',
-            user: 'invoker',
-            sshKeyPath: '/tmp/key',
+          'remote-1': {
+            host: '127.0.0.1',
+            user: 'runner',
+            sshKeyPath: '~/.ssh/id_ed25519',
             maxConcurrentTasks: 2,
           },
         },
+        executionPools: { sshLight: { members: [{ type: 'ssh', id: 'remote-1' }] } },
       }),
     );
     const config = loadConfig();
-    expect(config.remoteTargets?.ci1?.maxConcurrentTasks).toBe(2);
+    expect(config.executionPools?.sshLight).toEqual({ members: [{ type: 'ssh', id: 'remote-1' }] });
+    expect(config.remoteTargets?.['remote-1']?.maxConcurrentTasks).toBe(2);
   });
 
-  it('reads executionPools from user config', () => {
+  it('reads mixed local and SSH execution pool members', () => {
     writeFileSync(
       join(fakeHome, '.invoker', 'config.json'),
       JSON.stringify({
+        remoteTargets: {
+          'remote-1': { host: '127.0.0.1', user: 'runner', sshKeyPath: '~/.ssh/id_ed25519' },
+        },
         executionPools: {
-          'ssh-light': {
+          mixed: {
             members: [
+              { type: 'worktree', id: 'local' },
               { type: 'ssh', id: 'remote-1' },
-              { type: 'ssh', id: 'remote-2' },
-              { type: 'worktree', id: 'local-fallback', maxConcurrentTasks: 2 },
             ],
-            selectionStrategy: 'roundRobin',
-            maxConcurrentTasksPerMember: 1,
           },
         },
       }),
     );
     const config = loadConfig();
-    expect(config.executionPools?.['ssh-light']).toEqual({
-      members: [
-        { type: 'ssh', id: 'remote-1' },
-        { type: 'ssh', id: 'remote-2' },
-        { type: 'worktree', id: 'local-fallback', maxConcurrentTasks: 2 },
-      ],
-      selectionStrategy: 'roundRobin',
-      maxConcurrentTasksPerMember: 1,
-    });
+    expect(config.executionPools?.mixed?.members).toEqual([
+      { type: 'worktree', id: 'local' },
+      { type: 'ssh', id: 'remote-1' },
+    ]);
+  });
+
+  it('rejects execution pool members missing from remoteTargets', () => {
+    writeFileSync(
+      join(fakeHome, '.invoker', 'config.json'),
+      JSON.stringify({ executionPools: { sshLight: { members: [{ type: 'ssh', id: 'missing-remote' }] } } }),
+    );
+    expect(() => loadConfig()).toThrow('executionPools.sshLight SSH member "missing-remote" must be a key in remoteTargets');
+  });
+
+  it('rejects empty execution pools', () => {
+    writeFileSync(
+      join(fakeHome, '.invoker', 'config.json'),
+      JSON.stringify({ executionPools: { empty: { members: [] } } }),
+    );
+    expect(() => loadConfig()).toThrow('executionPools.empty.members must not be empty');
   });
 
 });

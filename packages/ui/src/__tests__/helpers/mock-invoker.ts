@@ -75,7 +75,7 @@ export function createMockInvoker(
     selectExperiment: vi.fn(async () => {}),
     restartTask: vi.fn(async () => {}),
     editTaskCommand: vi.fn(async () => {}),
-    editTaskType: vi.fn(async () => {}),
+    editTaskPool: vi.fn(async () => {}),
     editTaskAgent: vi.fn(async () => {}),
     setTaskExternalGatePolicies: vi.fn(async () => {}),
     getRemoteTargets: vi.fn(async () => []),

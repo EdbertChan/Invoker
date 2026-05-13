@@ -32,7 +32,7 @@ function stubOrchestrator(overrides: Partial<Orchestrator> = {}): Orchestrator {
     recreateTask: vi.fn().mockReturnValue([]),
     selectExperiment: vi.fn().mockReturnValue([]),
     editTaskCommand: vi.fn().mockReturnValue([]),
-    editTaskType: vi.fn().mockReturnValue([]),
+    editTaskPool: vi.fn().mockReturnValue([]),
     editTaskAgent: vi.fn().mockReturnValue([]),
     setTaskExternalGatePolicies: vi.fn().mockReturnValue([]),
     replaceTask: vi.fn().mockReturnValue([]),
@@ -204,27 +204,27 @@ describe('CommandService', () => {
     });
   });
 
-  // ── editTaskType ─────────────────────────────────────────
+  // ── editTaskPool ─────────────────────────────────────────
 
-  describe('editTaskType', () => {
-    it('delegates to orchestrator.editTaskType', async () => {
-      const result = await service.editTaskType(makeEnvelope({ taskId: 't-1', executorType: 'docker' }));
+  describe('editTaskPool', () => {
+    it('delegates to orchestrator.editTaskPool', async () => {
+      const result = await service.editTaskPool(makeEnvelope({ taskId: 't-1', poolId: 'ssh-light' }));
       expect(result).toEqual({ ok: true, data: [] });
-      expect(orchestrator.editTaskType).toHaveBeenCalledWith('t-1', 'docker', undefined);
+      expect(orchestrator.editTaskPool).toHaveBeenCalledWith('t-1', 'ssh-light');
     });
 
-    it('passes remoteTargetId when provided', async () => {
-      const result = await service.editTaskType(makeEnvelope({ taskId: 't-1', executorType: 'ssh', remoteTargetId: 'host-1' }));
+    it('passes undefined poolId for default worktree routing', async () => {
+      const result = await service.editTaskPool(makeEnvelope({ taskId: 't-1' }));
       expect(result).toEqual({ ok: true, data: [] });
-      expect(orchestrator.editTaskType).toHaveBeenCalledWith('t-1', 'ssh', 'host-1');
+      expect(orchestrator.editTaskPool).toHaveBeenCalledWith('t-1', undefined);
     });
 
     it('returns error on exception', async () => {
-      (orchestrator.editTaskType as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      (orchestrator.editTaskPool as ReturnType<typeof vi.fn>).mockImplementation(() => {
         throw new Error('Cannot edit merge node');
       });
-      const result = await service.editTaskType(makeEnvelope({ taskId: 't-1', executorType: 'bad' }));
-      expect(result).toEqual({ ok: false, error: { code: 'EDIT_TASK_TYPE_FAILED', message: 'Cannot edit merge node' } });
+      const result = await service.editTaskPool(makeEnvelope({ taskId: 't-1', poolId: 'bad' }));
+      expect(result).toEqual({ ok: false, error: { code: 'EDIT_TASK_POOL_FAILED', message: 'Cannot edit merge node' } });
     });
   });
 

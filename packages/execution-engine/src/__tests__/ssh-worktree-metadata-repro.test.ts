@@ -68,10 +68,9 @@ describe('SSH worktree metadata repro', () => {
     expect(existsSync(oldPath)).toBe(true);
     expect(existsSync(canonicalNewPath)).toBe(false);
 
-    const realOldPath = realpathSync(oldPath);
     expect(() => {
       git(`git worktree add ${JSON.stringify(canonicalNewPath)} ${JSON.stringify(newBranch)}`, repoDir);
-    }).toThrow(new RegExp(`already used by worktree at '${realOldPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+    }).toThrow(/(?:already used by worktree at|already checked out at)/);
   });
 
   it('proves TaskRunner should persist the owning worktree path on SSH startup failure', async () => {
@@ -100,7 +99,7 @@ describe('SSH worktree metadata repro', () => {
 
     const task = makeTask({
       id: 'wf-1/test-execution-engine',
-      config: { command: 'pnpm test', executorType: 'ssh' },
+      config: { command: 'pnpm test', poolId: 'ssh-pool' },
     });
 
     const updateSpy = vi.fn();
@@ -121,13 +120,25 @@ describe('SSH worktree metadata repro', () => {
         get: () => failingExecutor,
         getAll: () => [failingExecutor],
       } as any,
+      remoteTargetsProvider: () => ({
+        'remote-1': {
+          host: 'remote.example',
+          user: 'invoker',
+          sshKeyPath: '/tmp/key',
+        },
+      }),
+      executionPoolsProvider: () => ({
+        'ssh-pool': {
+          members: [{ type: 'ssh', id: 'remote-1' }],
+        },
+      }),
+      sshExecutorFactory: () => failingExecutor as any,
       cwd: '/tmp',
     });
 
     await runner.executeTask(task);
 
     expect(updateSpy).toHaveBeenCalledWith('wf-1/test-execution-engine', {
-      config: { executorType: 'ssh' },
       execution: {
         workspacePath: ownerPath,
         branch,

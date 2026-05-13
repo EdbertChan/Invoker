@@ -58,9 +58,7 @@ export interface RawPlanTask {
   experimentVariants?: RawExperimentVariant[];
   requiresManualApproval?: boolean;
   featureBranch?: string;
-  executorType?: string;
   dockerImage?: string;
-  remoteTargetId?: string;
   poolId?: string;
   executionAgent?: string;
 }
@@ -76,7 +74,6 @@ export interface RawPlan {
   reviewProvider?: string;
   repoUrl?: string;
   intermediateRepoUrl?: string;
-  executorType?: string;
   externalDependencies?: Array<{
     workflowId?: string;
     taskId?: string;
@@ -278,7 +275,9 @@ export function parsePlan(yamlContent: string): PlanDefinition {
     raw.intermediateRepoUrl = raw.intermediateRepoUrl.trim();
   }
 
-  const defaultExecutorType = raw.executorType;
+  if (hasOwn(raw as object, 'executorType')) {
+    throw new PlanParseError('Plan uses unsupported field "executorType". Use "poolId" on tasks instead.');
+  }
   const topLevelExternalDependencies = parseExternalDependencies('Plan', raw.externalDependencies);
 
   const tasks = raw.tasks.map((task, index) => {
@@ -325,21 +324,14 @@ export function parsePlan(yamlContent: string): PlanDefinition {
       command: v.command,
     }));
 
-    const resolvedExecutorType = task.executorType ?? defaultExecutorType;
-
-    if (resolvedExecutorType === 'docker' && !task.dockerImage) {
+    if (hasOwn(task as object, 'executorType')) {
       throw new PlanParseError(
-        `Task "${task.id}" has executorType "docker" but is missing required field "dockerImage"`,
+        `Task "${task.id}" uses unsupported field "executorType". Use "poolId" instead.`,
       );
     }
-    if (task.remoteTargetId !== undefined) {
+    if (hasOwn(task as object, 'remoteTargetId')) {
       throw new PlanParseError(
-        `Task "${task.id}" uses unsupported field "remoteTargetId". Use "poolId" instead.`,
-      );
-    }
-    if (resolvedExecutorType === 'ssh' && !task.poolId) {
-      throw new PlanParseError(
-        `Task "${task.id}" has executorType "ssh" but is missing required field "poolId"`,
+        `Task "${task.id}" uses unsupported field "remoteTargetId". Configure an execution pool and use "poolId" instead.`,
       );
     }
 
@@ -354,7 +346,6 @@ export function parsePlan(yamlContent: string): PlanDefinition {
       experimentVariants,
       requiresManualApproval: task.requiresManualApproval,
       featureBranch: task.featureBranch,
-      executorType: resolvedExecutorType,
       dockerImage: task.dockerImage,
       poolId: task.poolId,
       executionAgent: task.executionAgent?.trim() || undefined,

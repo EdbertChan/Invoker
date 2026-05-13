@@ -23,7 +23,7 @@ import {
   provideInput,
   editTaskCommand,
   editTaskPrompt,
-  editTaskType,
+  editTaskPool,
   selectExperiment,
   setWorkflowMergeMode,
   fixWithAgentAction,
@@ -1445,25 +1445,25 @@ describe('editTaskPrompt', () => {
   });
 });
 
-describe('editTaskType', () => {
-  it('calls orchestrator.editTaskType and returns result', () => {
+describe('editTaskPool', () => {
+  it('calls orchestrator.editTaskPool and returns result', () => {
     const tasks = [makeRunningTask()];
-    const orchestrator = { editTaskType: vi.fn(() => tasks) };
+    const orchestrator = { editTaskPool: vi.fn(() => tasks) };
 
-    const result = editTaskType('task-a', 'docker', {
+    const result = editTaskPool('task-a', 'ssh-light', {
       orchestrator: orchestrator as unknown as Orchestrator,
     });
 
-    expect(orchestrator.editTaskType).toHaveBeenCalledWith('task-a', 'docker', undefined);
+    expect(orchestrator.editTaskPool).toHaveBeenCalledWith('task-a', 'ssh-light');
     expect(result).toBe(tasks);
   });
 
-  it('passes remoteTargetId when provided', () => {
-    const orchestrator = { editTaskType: vi.fn(() => []) };
+  it('passes undefined when clearing the pool', () => {
+    const orchestrator = { editTaskPool: vi.fn(() => []) };
 
-    editTaskType('task-a', 'ssh', { orchestrator: orchestrator as unknown as Orchestrator }, 'remote-1');
+    editTaskPool('task-a', undefined, { orchestrator: orchestrator as unknown as Orchestrator });
 
-    expect(orchestrator.editTaskType).toHaveBeenCalledWith('task-a', 'ssh', 'remote-1');
+    expect(orchestrator.editTaskPool).toHaveBeenCalledWith('task-a', undefined);
   });
 });
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# End-to-end validation: executor routing via INVOKER_REPO_CONFIG_PATH.
+# End-to-end validation: pool routing via INVOKER_REPO_CONFIG_PATH.
 #
 # Submits plans/verify-executor-routing-headless.yaml with a fixture config
-# (plans/verify-executor-routing.invoker.json) that contains executorRoutingRules
-# and a dummy remoteTargets entry.  Uses a temp INVOKER_DB_DIR so the user's DB
-# is never touched.  Never calls delete-all.
+# (plans/verify-executor-routing.invoker.json) that contains an execution pool
+# and a dummy remoteTargets entry. Uses a temp INVOKER_DB_DIR so the user's DB is
+# never touched. Never calls delete-all.
 #
 # INVOKER_REPO_CONFIG_PATH overrides the .invoker.json path inside loadConfig,
 # allowing fixture configs to be injected without clobbering the checked-in file.
@@ -53,20 +53,20 @@ dest.write_text(nl.join(out) + (nl if text.endswith('\n') else ''), encoding='ut
 echo "==> submit-plan (headless run) $PLAN_SRC (repoUrl -> file:// checkout)"
 ./submit-plan.sh "$PLAN_TMP"
 
-# Assert executor_type in SQLite if sqlite3 is available and the column exists
+# Assert pool_id in SQLite if sqlite3 is available and the column exists
 # (schema may evolve). Task IDs are workflow-scoped.
 DB="$TMPDB/invoker.db"
 if [[ -f "$DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
   COLS=$(sqlite3 "$DB" "PRAGMA table_info(tasks);" | cut -d'|' -f2)
-  if echo "$COLS" | grep -q '^executor_type$'; then
-    FT=$(sqlite3 "$DB" "SELECT executor_type FROM tasks WHERE id LIKE '%/verify-routing-command' LIMIT 1;")
-    if [[ "$FT" != "worktree" ]]; then
-      echo "FAIL: expected executor_type=worktree for validated routing task, got '$FT'" >&2
+  if echo "$COLS" | grep -q '^pool_id$'; then
+    FT=$(sqlite3 "$DB" "SELECT pool_id FROM tasks WHERE id LIKE '%/verify-routing-command' LIMIT 1;")
+    if [[ "$FT" != "dummy-pool" ]]; then
+      echo "FAIL: expected pool_id=dummy-pool for validated routing task, got '$FT'" >&2
       exit 1
     fi
-    echo "PASS: executor_type=$FT (routing validation succeeded)"
+    echo "PASS: pool_id=$FT (routing validation succeeded)"
 
   else
-    echo "INFO: executor_type column not present; skipping SQLite assertion"
+    echo "INFO: pool_id column not present; skipping SQLite assertion"
   fi
 fi

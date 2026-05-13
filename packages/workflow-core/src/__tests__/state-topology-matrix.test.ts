@@ -327,7 +327,7 @@ describe('State × Topology Matrix', () => {
       // Hydrate workspace lineage on the root so the preservation half
       // of the assertion is meaningful (the in-memory persistence mock
       // does not write branch/workspacePath itself for completed work).
-      // `editTaskType()` calls `refreshFromDb()` internally, which
+      // `editTaskPool()` calls `refreshFromDb()` internally, which
       // re-loads from the persistence mock — no manual sync needed.
       // Tasks in the matrix tests are persisted under their fully-qualified
       // `<workflowId>/<bareId>` key (e.g. `wf-test-N/A`), even though
@@ -353,7 +353,7 @@ describe('State × Topology Matrix', () => {
         D: orchestrator.getTask('D')!.execution.generation ?? 0,
       };
 
-      orchestrator.editTaskType('A', 'worktree');
+      orchestrator.editTaskPool('A', 'worktree-pool');
 
       const genAfter = {
         A: orchestrator.getTask('A')!.execution.generation ?? 0,
@@ -369,7 +369,7 @@ describe('State × Topology Matrix', () => {
       expect(genAfter.D).toBe(genBefore.D + 1);
 
       const rootAfter = orchestrator.getTask('A')!;
-      expect(rootAfter.config.executorType).toBe('worktree');
+      expect(rootAfter.config.poolId).toBe('worktree-pool');
       expect(rootAfter.execution.branch).toBe('experiment/preserved-branch');
       expect(rootAfter.execution.workspacePath).toBe('/tmp/preserved-workspace');
     });

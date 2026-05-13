@@ -33,6 +33,7 @@ const RESET = '\x1b[0m';
 const repoRoot = resolveRepoRoot(__dirname);
 
 function delegationClientLog(message: string): void {
+  if (process.env.VITEST && process.env.INVOKER_HEADLESS_CLIENT_DEBUG !== '1') return;
   process.stderr.write(`[headless-client] ${message}\n`);
 }
 

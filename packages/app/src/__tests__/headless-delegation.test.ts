@@ -1,5 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { runHeadless } from '../headless.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createHeadlessExecutor, runHeadless } from '../headless.js';
 import type { HeadlessDeps } from '../headless.js';
 import { Orchestrator, CommandService } from '@invoker/workflow-core';
 import { SQLiteAdapter } from '@invoker/data-store';
@@ -14,8 +17,10 @@ import { TaskRunner } from '@invoker/execution-engine';
 
 describe('headless delegation enforcement', () => {
   let mockDeps: HeadlessDeps;
+  let previousConfigPath: string | undefined;
 
   beforeEach(() => {
+    previousConfigPath = process.env.INVOKER_REPO_CONFIG_PATH;
     const noopLogger = {
       debug: vi.fn(),
       info: vi.fn(),
@@ -39,6 +44,46 @@ describe('headless delegation enforcement', () => {
       initServices: vi.fn(async () => {}),
       wireSlackBot: vi.fn(async () => ({})),
     };
+  });
+
+  afterEach(() => {
+    if (previousConfigPath === undefined) {
+      delete process.env.INVOKER_REPO_CONFIG_PATH;
+    } else {
+      process.env.INVOKER_REPO_CONFIG_PATH = previousConfigPath;
+    }
+  });
+
+  it('wires execution pools from repo config into the headless task runner', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'invoker-headless-pools-'));
+    const configPath = join(dir, 'config.json');
+    try {
+      writeFileSync(configPath, JSON.stringify({
+        remoteTargets: {
+          'remote-1': {
+            host: 'localhost',
+            user: 'runner',
+            sshKeyPath: '/tmp/key',
+          },
+        },
+        executionPools: {
+          'ssh-pool': {
+            members: [{ type: 'ssh', id: 'remote-1' }],
+          },
+        },
+      }));
+      process.env.INVOKER_REPO_CONFIG_PATH = configPath;
+
+      const executor = createHeadlessExecutor(mockDeps);
+
+      expect((executor as any).getExecutionPools()).toEqual({
+        'ssh-pool': {
+          members: [{ type: 'ssh', id: 'remote-1' }],
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   describe('read-only command execution', () => {
@@ -492,7 +537,7 @@ describe('headless delegation enforcement', () => {
           execution: {},
         } as any;
         mockDeps.commandService.editTaskCommand = vi.fn(async () => ({ ok: true as const, data: [runnableTask] }));
-        mockDeps.commandService.editTaskType = vi.fn(async () => ({ ok: true as const, data: [runnableTask] }));
+        mockDeps.commandService.editTaskPool = vi.fn(async () => ({ ok: true as const, data: [runnableTask] }));
         mockDeps.commandService.editTaskAgent = vi.fn(async () => ({ ok: true as const, data: [runnableTask] }));
         mockDeps.commandService.setTaskExternalGatePolicies = vi.fn(async () => ({ ok: true as const, data: [runnableTask] }));
         const executeTasksSpy = vi
@@ -503,7 +548,7 @@ describe('headless delegation enforcement', () => {
 
         await runHeadless(['set', 'command', 'wf-1/task-1', 'echo ok'], mockDeps);
         taskStatus = 'running';
-        await runHeadless(['set', 'executor', 'wf-1/task-1', 'shell'], mockDeps);
+        await runHeadless(['set', 'pool', 'wf-1/task-1', 'worktree-pool'], mockDeps);
         taskStatus = 'running';
         await runHeadless(['set', 'agent', 'wf-1/task-1', 'codex'], mockDeps);
         taskStatus = 'running';
@@ -511,7 +556,7 @@ describe('headless delegation enforcement', () => {
 
         expect(executeTasksSpy).toHaveBeenCalledTimes(4);
         expect(mockDeps.commandService.editTaskCommand).toHaveBeenCalled();
-        expect(mockDeps.commandService.editTaskType).toHaveBeenCalled();
+        expect(mockDeps.commandService.editTaskPool).toHaveBeenCalled();
         expect(mockDeps.commandService.editTaskAgent).toHaveBeenCalled();
         expect(mockDeps.commandService.setTaskExternalGatePolicies).toHaveBeenCalled();
 

@@ -9,6 +9,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
+export type ExecutionPoolMemberConfig =
+  | { type: 'ssh'; id: string; maxConcurrentTasks?: number }
+  | { type: 'worktree'; id: string; maxConcurrentTasks?: number };
+
+export interface ExecutionPoolConfig {
+  members: ExecutionPoolMemberConfig[];
+  selectionStrategy?: 'roundRobin' | 'leastLoaded';
+  maxConcurrentTasksPerMember?: number;
+}
+
 export interface InvokerConfig {
   defaultBranch?: string;
   /**
@@ -105,72 +115,14 @@ export interface InvokerConfig {
      * Used for SSH executing-stall liveness checks. Default: 30.
      */
     remoteHeartbeatIntervalSeconds?: number;
-    /**
-     * Max concurrent tasks allowed on this target when used inside an execution pool.
-     * Default for pooled SSH members: 1.
-     */
+    /** Maximum tasks that may run concurrently on this SSH machine. Default: 1. */
     maxConcurrentTasks?: number;
   }>;
   /**
-   * Named execution pools used by routing rules.
-   * Pools provide shared queue + drain semantics with per-member capacity limits.
+   * Named execution pools. Pools can mix SSH and local worktree members behind
+   * a single task-facing poolId.
    */
-  executionPools?: Record<string, {
-    /** Pool members can mix substrates under one shared queue. */
-    members: Array<
-      | { type: 'ssh'; id: string; maxConcurrentTasks?: number }
-      | { type: 'worktree'; id: string; maxConcurrentTasks?: number }
-    >;
-    /** Member selection strategy for available capacity. Default: roundRobin */
-    selectionStrategy?: 'roundRobin' | 'leastLoaded';
-    /** Fallback per-member cap when member-specific capacity is not set. */
-    maxConcurrentTasksPerMember?: number;
-  }>;
-  /**
-   * Deprecated compatibility alias for routing rules with `strategy: "route"`.
-   * Prefer `executorRoutingRules` for all command-routing policies.
-   */
-  heavyweightCommandRouting?: {
-    /** Set false to disable heavyweight auto-routing without deleting the config block. */
-    enabled?: boolean;
-    /** Destination executor type. Default: "ssh". */
-    executorType?: string;
-    /** Destination execution pool ID. */
-    poolId: string;
-    /** Optional command matchers; defaults to matching any `pnpm` invocation. */
-    matchers?: Array<{
-      pattern?: string;
-      regex?: string;
-    }>;
-  };
-  /**
-   * Pattern-based command routing rules.
-   *
-   * Rule strategies:
-   * - `enforce` (default): require matching tasks to already declare the same executor/destination.
-   * - `route`: auto-apply executor/destination when omitted; reject explicit conflicts.
-   *
-   * First matching rule wins per strategy bucket:
-   * - first matching `route` rule is applied
-   * - then first matching `enforce` rule validates the effective routing
-   *
-   * If both `pattern` and `regex` are present, a rule matches if either matches.
-   * Tasks with commands matching a rule MUST explicitly declare the required executorType
-   * and poolId in the plan YAML, or plan loading will fail with a validation error.
-   * Only applies to tasks that have a command (not prompt-only tasks).
-   */
-  executorRoutingRules?: Array<{
-    /** Substring to match against the task command. */
-    pattern?: string;
-    /** Regular expression matched against the task command; compiled with new RegExp(regex). */
-    regex?: string;
-    /** Required executor type for matching commands (e.g. "ssh", "docker", "worktree"). */
-    executorType: string;
-    /** Required execution pool ID for matching commands. */
-    poolId: string;
-    /** Routing strategy. Defaults to "enforce". */
-    strategy?: 'enforce' | 'route';
-  }>;
+  executionPools?: Record<string, ExecutionPoolConfig>;
 }
 
 function readJsonSafe(path: string): InvokerConfig {
@@ -191,7 +143,70 @@ function readJsonSafe(path: string): InvokerConfig {
     throw new Error(`Invalid Invoker config at ${path}: expected a JSON object`);
   }
 
-  return parsed as InvokerConfig;
+  const config = parsed as InvokerConfig;
+  validateExecutionPools(config, path);
+  return config;
+}
+
+function validateExecutionPools(config: InvokerConfig, path: string): void {
+  const pools = config.executionPools;
+  if (pools === undefined) return;
+  if (typeof pools !== 'object' || pools === null || Array.isArray(pools)) {
+    throw new Error(`Invalid Invoker config at ${path}: "executionPools" must be an object`);
+  }
+  const remoteTargetIds = new Set(Object.keys(config.remoteTargets ?? {}));
+  const seenMembers = new Map<string, string>();
+  for (const [poolId, pool] of Object.entries(pools)) {
+    if (typeof pool !== 'object' || pool === null || Array.isArray(pool)) {
+      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId} must be an object`);
+    }
+    const members = pool.members;
+    if (!Array.isArray(members)) {
+      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId}.members must be an array`);
+    }
+    if (members.length === 0) {
+      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId}.members must not be empty`);
+    }
+    if (
+      pool.selectionStrategy !== undefined &&
+      pool.selectionStrategy !== 'roundRobin' &&
+      pool.selectionStrategy !== 'leastLoaded'
+    ) {
+      throw new Error(
+        `Invalid Invoker config at ${path}: executionPools.${poolId}.selectionStrategy ` +
+        'must be "roundRobin" or "leastLoaded"',
+      );
+    }
+    for (const member of members) {
+      if (
+        typeof member !== 'object' ||
+        member === null ||
+        (member.type !== 'ssh' && member.type !== 'worktree') ||
+        typeof member.id !== 'string' ||
+        member.id.trim() === ''
+      ) {
+        throw new Error(
+          `Invalid Invoker config at ${path}: executionPools.${poolId}.members entries ` +
+          'must include { type: "ssh" | "worktree", id: string }',
+        );
+      }
+      if (member.type === 'ssh' && !remoteTargetIds.has(member.id)) {
+        throw new Error(
+          `Invalid Invoker config at ${path}: executionPools.${poolId} SSH member "${member.id}" ` +
+          'must be a key in remoteTargets',
+        );
+      }
+      const memberKey = `${member.type}:${member.id}`;
+      const owner = seenMembers.get(memberKey);
+      if (owner && owner !== poolId) {
+        throw new Error(
+          `Invalid Invoker config at ${path}: execution pool member "${memberKey}" ` +
+          `is shared by pools "${owner}" and "${poolId}"`,
+        );
+      }
+      seenMembers.set(memberKey, poolId);
+    }
+  }
 }
 
 export function loadConfig(): InvokerConfig {

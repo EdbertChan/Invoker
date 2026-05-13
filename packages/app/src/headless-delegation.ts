@@ -31,6 +31,7 @@ export function isDelegated(outcome: DelegationOutcome): outcome is DelegationOu
 }
 
 function delegationLog(message: string): void {
+  if (process.env.VITEST && process.env.INVOKER_HEADLESS_CLIENT_DEBUG !== '1') return;
   process.stderr.write(`[delegation] ${message}\n`);
 }
 

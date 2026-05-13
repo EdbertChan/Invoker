@@ -515,22 +515,21 @@ describe('Flow 4: edit/fork mutations', () => {
     expect(h.getAllTasks().find((t) => t.id.endsWith('/C-v2'))).toBeUndefined();
   });
 
-  it('editTaskType does NOT fork subtree', () => {
+  it('editTaskPool does NOT fork subtree', () => {
     h.loadAndStart(LINEAR_PLAN);
     h.completeTask('A');
     h.completeTask('B');
 
-    // Edit A's type
-    h.orchestrator.editTaskType('A', 'worktree');
+    h.orchestrator.editTaskPool('A', 'worktree-pool');
 
     // A restarted
     const a = h.getTask('A')!;
-    expect(a.config.executorType).toBe('worktree');
+    expect(a.config.poolId).toBe('worktree-pool');
     expect(a.status === 'pending' || a.status === 'running').toBe(true);
 
     // B should still be the original (not forked), no B-v2 created
     expect(h.getAllTasks().find((t) => t.id.endsWith('/B-v2'))).toBeUndefined();
-    // B is invalidated since editTaskType restarts in-place and resets downstream
+    // B is invalidated since editTaskPool restarts in-place and resets downstream
     expect(h.getTask('B')!.status).toBe('pending');
   });
 

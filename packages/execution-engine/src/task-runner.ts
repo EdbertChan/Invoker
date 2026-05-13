@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 
 import { scopePlanTaskId } from '@invoker/workflow-core';
-import type { Orchestrator, TaskState, ExperimentVariant, ExecutorType } from '@invoker/workflow-core';
+import type { Orchestrator, TaskState, ExperimentVariant } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { WorkRequest, WorkResponse, ActionType, Logger } from '@invoker/contracts';
 import type { Executor, ExecutorHandle } from './executor.js';
@@ -27,7 +27,7 @@ import { DockerExecutor } from './docker-executor.js';
 import { WorktreeExecutor } from './worktree-executor.js';
 import { isInvokerManagedPoolBranch } from './plan-base-remote.js';
 import { formatLifecycleTag, extractAttemptSuffix } from './branch-utils.js';
-import { SshExecutor } from './ssh-executor.js';
+import { SshExecutor, type SshExecutorConfig } from './ssh-executor.js';
 import {
   executeMergeNodeImpl,
   approveMergeImpl,
@@ -108,11 +108,16 @@ interface PoolState {
   poolId: string;
   strategy: SelectionStrategy;
   members: string[];
+  memberIds: Map<string, string>;
   memberTypes: Map<string, 'ssh' | 'worktree'>;
   capacities: Map<string, number>;
   active: Map<string, number>;
   rrCursor: number;
   waiters: Array<(assignment: PoolAssignment) => void>;
+}
+
+function poolMemberKey(member: Pick<ExecutionPoolMemberConfig, 'type' | 'id'>): string {
+  return `${member.type}:${member.id}`;
 }
 
 function nextLeaseExpiry(from: Date): Date {
@@ -166,7 +171,6 @@ export interface TaskRunnerConfig {
    * Called at task-execution time so config file changes take effect on retry.
    */
   remoteTargetsProvider?: () => Record<string, RemoteTargetConfig>;
-  /** Provider that returns execution pools keyed by pool ID. */
   executionPoolsProvider?: () => Record<string, ExecutionPoolConfig>;
   /** Docker execution environment configuration from .invoker.json. */
   dockerConfig?: {
@@ -175,13 +179,15 @@ export interface TaskRunnerConfig {
   };
   /** Shared execution agents (Claude, Codex). Passed into lazily constructed executors. */
   executionAgentRegistry?: AgentRegistry;
+  /** Factory override for constructing target-specific SSH executors. */
+  sshExecutorFactory?: (config: SshExecutorConfig) => Executor;
   logger?: Logger;
 }
 
 // ── TaskRunner ──────────────────────────────────────────
 
 export class TaskRunner {
-  private static readonly BRANCH_REMOTE_NAME = 'invoker-branches';
+  private static readonly INTERMEDIATE_REMOTE_NAME = 'intermediate';
   /** @internal */ orchestrator: Orchestrator;
   /** @internal */ persistence: SQLiteAdapter;
   private executorRegistry: ExecutorRegistry;
@@ -196,9 +202,10 @@ export class TaskRunner {
   private getExecutionPools: () => Record<string, ExecutionPoolConfig>;
   private dockerConfig: { imageName?: string; secretsFile?: string };
   private executionAgentRegistry?: AgentRegistry;
+  private sshExecutorFactory: (config: SshExecutorConfig) => Executor;
   private logger: Logger;
-  /** Cache for SSH executors, keyed by remoteTargetId. One instance per target for correct git locking. */
-  private sshExecutorCache = new Map<string, SshExecutor>();
+  /** Cache for SSH executors, keyed by SSH member id + config fingerprint. */
+  private sshExecutorCache = new Map<string, Executor>();
 
   /** In-flight executions keyed by attemptId (with taskId retained for external kill resolution). */
   private activeExecutions = new Map<string, ActiveExecutionEntry>();
@@ -269,6 +276,7 @@ export class TaskRunner {
     this.getExecutionPools = config.executionPoolsProvider ?? (() => ({}));
     this.dockerConfig = config.dockerConfig ?? {};
     this.executionAgentRegistry = config.executionAgentRegistry;
+    this.sshExecutorFactory = config.sshExecutorFactory ?? ((sshConfig) => new SshExecutor(sshConfig));
     this.logger = config.logger ?? NOOP_LOGGER;
   }
 
@@ -323,197 +331,6 @@ export class TaskRunner {
     return undefined;
   }
 
-  private validatePoolMemberUniqueness(pools: Record<string, ExecutionPoolConfig>): void {
-    const seen = new Map<string, string>();
-    for (const [poolId, pool] of Object.entries(pools)) {
-      for (const member of pool.members ?? []) {
-        const key = `${member.type}:${member.id}`;
-        const owner = seen.get(key);
-        if (owner && owner !== poolId) {
-          throw new Error(
-            `Execution pool member "${key}" is shared by pools "${owner}" and "${poolId}". ` +
-            'Members may only belong to one pool.',
-          );
-        }
-        seen.set(key, poolId);
-      }
-    }
-  }
-
-  private buildPoolState(poolId: string, pool: ExecutionPoolConfig): PoolState {
-    const capacities = new Map<string, number>();
-    const active = new Map<string, number>();
-    const memberTypes = new Map<string, 'ssh' | 'worktree'>();
-    const remoteTargets = this.getRemoteTargets();
-    const fallbackCap = pool.maxConcurrentTasksPerMember && pool.maxConcurrentTasksPerMember > 0
-      ? Math.floor(pool.maxConcurrentTasksPerMember)
-      : 1;
-
-    for (const member of pool.members) {
-      const memberId = member.id;
-      let cap = fallbackCap;
-      if (member.type === 'ssh') {
-        const target = remoteTargets[memberId];
-        if (!target) {
-          throw new Error(
-            `Execution pool "${poolId}" references unknown remote target "${memberId}". ` +
-            `Available: [${Object.keys(remoteTargets).join(', ')}]`,
-          );
-        }
-        cap = member.maxConcurrentTasks && member.maxConcurrentTasks > 0
-          ? Math.floor(member.maxConcurrentTasks)
-          : (target.maxConcurrentTasks && target.maxConcurrentTasks > 0
-            ? Math.floor(target.maxConcurrentTasks)
-            : fallbackCap);
-      } else if (member.maxConcurrentTasks && member.maxConcurrentTasks > 0) {
-        cap = Math.floor(member.maxConcurrentTasks);
-      }
-      memberTypes.set(memberId, member.type);
-      capacities.set(memberId, cap);
-      active.set(memberId, 0);
-    }
-
-    return {
-      poolId,
-      strategy: pool.selectionStrategy ?? 'roundRobin',
-      members: pool.members.map((m) => m.id),
-      memberTypes,
-      capacities,
-      active,
-      rrCursor: 0,
-      waiters: [],
-    };
-  }
-
-  private getOrBuildPoolState(poolId: string): PoolState {
-    const pools = this.getExecutionPools();
-    this.validatePoolMemberUniqueness(pools);
-    const pool = pools[poolId];
-    if (!pool) {
-      throw new Error(
-        `Task requested poolId="${poolId}" but no matching execution pool exists. ` +
-        `Available: [${Object.keys(pools).join(', ')}]`,
-      );
-    }
-    if (!Array.isArray(pool.members) || pool.members.length === 0) {
-      throw new Error(`Execution pool "${poolId}" must define a non-empty members array.`);
-    }
-    for (const member of pool.members) {
-      if (!member?.id || (member.type !== 'ssh' && member.type !== 'worktree')) {
-        throw new Error(
-          `Execution pool "${poolId}" has invalid member. ` +
-          'Each member must include { type: "ssh" | "worktree", id: string }.',
-        );
-      }
-    }
-    const existing = this.poolStates.get(poolId);
-    if (existing) {
-      return existing;
-    }
-    const built = this.buildPoolState(poolId, pool);
-    this.poolStates.set(poolId, built);
-    return built;
-  }
-
-  private pickAvailableMember(state: PoolState): string | undefined {
-    const candidates = state.members.filter((memberId) => {
-      const active = state.active.get(memberId) ?? 0;
-      const cap = state.capacities.get(memberId) ?? 0;
-      return active < cap;
-    });
-    if (candidates.length === 0) return undefined;
-
-    if (state.strategy === 'leastLoaded') {
-      let chosen = candidates[0]!;
-      let chosenRatio = (state.active.get(chosen) ?? 0) / Math.max(state.capacities.get(chosen) ?? 1, 1);
-      for (const memberId of candidates.slice(1)) {
-        const ratio = (state.active.get(memberId) ?? 0) / Math.max(state.capacities.get(memberId) ?? 1, 1);
-        if (ratio < chosenRatio) {
-          chosen = memberId;
-          chosenRatio = ratio;
-        }
-      }
-      return chosen;
-    }
-
-    const total = state.members.length;
-    for (let offset = 0; offset < total; offset += 1) {
-      const idx = (state.rrCursor + offset) % total;
-      const memberId = state.members[idx]!;
-      if (candidates.includes(memberId)) {
-        state.rrCursor = (idx + 1) % total;
-        return memberId;
-      }
-    }
-    return candidates[0];
-  }
-
-  private acquirePoolSlot(task: TaskState): Promise<PoolAssignment | undefined> {
-    const poolId = task.config.poolId?.trim();
-    if (!poolId) {
-      if (task.config.executorType === 'ssh') {
-        throw new Error(
-          `Task ${task.id} has executorType=ssh but no poolId. ` +
-          'Assign SSH tasks to an execution pool.',
-        );
-      }
-      return Promise.resolve(undefined);
-    }
-    const state = this.getOrBuildPoolState(poolId);
-    const selected = this.pickAvailableMember(state);
-    if (selected) {
-      state.active.set(selected, (state.active.get(selected) ?? 0) + 1);
-      return Promise.resolve({ poolId, memberId: selected, type: state.memberTypes.get(selected) ?? 'worktree' });
-    }
-    return new Promise<PoolAssignment>((resolve) => {
-      state.waiters.push(resolve);
-    });
-  }
-
-  private drainPoolQueue(state: PoolState): void {
-    while (state.waiters.length > 0) {
-      const selected = this.pickAvailableMember(state);
-      if (!selected) return;
-      const waiter = state.waiters.shift();
-      if (!waiter) return;
-      state.active.set(selected, (state.active.get(selected) ?? 0) + 1);
-      waiter({ poolId: state.poolId, memberId: selected, type: state.memberTypes.get(selected) ?? 'worktree' });
-    }
-  }
-
-  private releasePoolSlot(assignment: PoolAssignment | undefined): void {
-    if (!assignment) return;
-    const state = this.poolStates.get(assignment.poolId);
-    if (!state) return;
-    const current = state.active.get(assignment.memberId) ?? 0;
-    state.active.set(assignment.memberId, Math.max(0, current - 1));
-    this.drainPoolQueue(state);
-  }
-
-  private applyPoolAssignment(task: TaskState, assignment: PoolAssignment | undefined): TaskState {
-    if (!assignment) return task;
-    if (assignment.type === 'ssh') {
-      return {
-        ...task,
-        config: {
-          ...task.config,
-          executorType: 'ssh',
-          remoteTargetId: assignment.memberId,
-          poolId: assignment.poolId,
-        },
-      } as TaskState;
-    }
-    return {
-      ...task,
-      config: {
-        ...task.config,
-        executorType: 'worktree',
-        remoteTargetId: undefined,
-        poolId: assignment.poolId,
-      },
-    } as TaskState;
-  }
-
   /**
    * Execute multiple tasks concurrently.
    */
@@ -559,6 +376,175 @@ export class TaskRunner {
     return false;
   }
 
+  private validatePoolMemberUniqueness(pools: Record<string, ExecutionPoolConfig>): void {
+    const seen = new Map<string, string>();
+    for (const [poolId, pool] of Object.entries(pools)) {
+      for (const member of pool.members ?? []) {
+        const key = `${member.type}:${member.id}`;
+        const owner = seen.get(key);
+        if (owner && owner !== poolId) {
+          throw new Error(
+            `Execution pool member "${key}" is shared by pools "${owner}" and "${poolId}". ` +
+            'Members may only belong to one pool.',
+          );
+        }
+        seen.set(key, poolId);
+      }
+    }
+  }
+
+  private buildPoolState(poolId: string, pool: ExecutionPoolConfig): PoolState {
+    const capacities = new Map<string, number>();
+    const active = new Map<string, number>();
+    const memberIds = new Map<string, string>();
+    const memberTypes = new Map<string, 'ssh' | 'worktree'>();
+    const remoteTargets = this.getRemoteTargets();
+    const fallbackCap = pool.maxConcurrentTasksPerMember && pool.maxConcurrentTasksPerMember > 0
+      ? Math.floor(pool.maxConcurrentTasksPerMember)
+      : 1;
+
+    for (const member of pool.members) {
+      let cap = fallbackCap;
+      if (member.type === 'ssh') {
+        const target = remoteTargets[member.id];
+        if (!target) {
+          throw new Error(
+            `Execution pool "${poolId}" references unknown remote target "${member.id}". ` +
+            `Available: [${Object.keys(remoteTargets).join(', ')}]`,
+          );
+        }
+        cap = member.maxConcurrentTasks && member.maxConcurrentTasks > 0
+          ? Math.floor(member.maxConcurrentTasks)
+          : (target.maxConcurrentTasks && target.maxConcurrentTasks > 0
+            ? Math.floor(target.maxConcurrentTasks)
+            : fallbackCap);
+      } else if (member.maxConcurrentTasks && member.maxConcurrentTasks > 0) {
+        cap = Math.floor(member.maxConcurrentTasks);
+      }
+      const key = poolMemberKey(member);
+      memberIds.set(key, member.id);
+      memberTypes.set(key, member.type);
+      capacities.set(key, cap);
+      active.set(key, 0);
+    }
+
+    return {
+      poolId,
+      strategy: pool.selectionStrategy ?? 'roundRobin',
+      members: pool.members.map(poolMemberKey),
+      memberIds,
+      memberTypes,
+      capacities,
+      active,
+      rrCursor: 0,
+      waiters: [],
+    };
+  }
+
+  private getOrBuildPoolState(poolId: string): PoolState {
+    const pools = this.getExecutionPools();
+    this.validatePoolMemberUniqueness(pools);
+    const pool = pools[poolId];
+    if (!pool) {
+      throw new Error(
+        `Task requested poolId="${poolId}" but no matching execution pool exists. ` +
+        `Available: [${Object.keys(pools).join(', ')}]`,
+      );
+    }
+    if (!Array.isArray(pool.members) || pool.members.length === 0) {
+      throw new Error(`Execution pool "${poolId}" must define a non-empty members array.`);
+    }
+    for (const member of pool.members) {
+      if (!member?.id || (member.type !== 'ssh' && member.type !== 'worktree')) {
+        throw new Error(
+          `Execution pool "${poolId}" has invalid member. ` +
+          'Each member must include { type: "ssh" | "worktree", id: string }.',
+        );
+      }
+    }
+    const existing = this.poolStates.get(poolId);
+    if (existing) return existing;
+    const built = this.buildPoolState(poolId, pool);
+    this.poolStates.set(poolId, built);
+    return built;
+  }
+
+  private pickAvailableMember(state: PoolState): string | undefined {
+    const candidates = state.members.filter((memberId) => {
+      const active = state.active.get(memberId) ?? 0;
+      const cap = state.capacities.get(memberId) ?? 0;
+      return active < cap;
+    });
+    if (candidates.length === 0) return undefined;
+
+    if (state.strategy === 'leastLoaded') {
+      let chosen = candidates[0]!;
+      let chosenRatio = (state.active.get(chosen) ?? 0) / Math.max(state.capacities.get(chosen) ?? 1, 1);
+      for (const memberId of candidates.slice(1)) {
+        const ratio = (state.active.get(memberId) ?? 0) / Math.max(state.capacities.get(memberId) ?? 1, 1);
+        if (ratio < chosenRatio) {
+          chosen = memberId;
+          chosenRatio = ratio;
+        }
+      }
+      return chosen;
+    }
+
+    const total = state.members.length;
+    for (let offset = 0; offset < total; offset += 1) {
+      const idx = (state.rrCursor + offset) % total;
+      const memberId = state.members[idx]!;
+      if (candidates.includes(memberId)) {
+        state.rrCursor = (idx + 1) % total;
+        return memberId;
+      }
+    }
+    return candidates[0];
+  }
+
+  private acquirePoolSlot(task: TaskState): Promise<PoolAssignment | undefined> {
+    const poolId = task.config.poolId?.trim();
+    if (!poolId) return Promise.resolve(undefined);
+    const state = this.getOrBuildPoolState(poolId);
+    const selected = this.pickAvailableMember(state);
+    if (selected) {
+      state.active.set(selected, (state.active.get(selected) ?? 0) + 1);
+      return Promise.resolve({
+        poolId,
+        memberId: state.memberIds.get(selected) ?? selected,
+        type: state.memberTypes.get(selected) ?? 'worktree',
+      });
+    }
+    return new Promise<PoolAssignment>((resolve) => {
+      state.waiters.push(resolve);
+    });
+  }
+
+  private drainPoolQueue(state: PoolState): void {
+    while (state.waiters.length > 0) {
+      const selected = this.pickAvailableMember(state);
+      if (!selected) return;
+      const waiter = state.waiters.shift();
+      if (!waiter) return;
+      state.active.set(selected, (state.active.get(selected) ?? 0) + 1);
+      waiter({
+        poolId: state.poolId,
+        memberId: state.memberIds.get(selected) ?? selected,
+        type: state.memberTypes.get(selected) ?? 'worktree',
+      });
+    }
+  }
+
+  private releasePoolSlot(assignment: PoolAssignment | undefined): void {
+    if (!assignment) return;
+    const state = this.poolStates.get(assignment.poolId);
+    if (!state) return;
+    const key = poolMemberKey({ type: assignment.type, id: assignment.memberId });
+    const current = state.active.get(key) ?? 0;
+    state.active.set(key, Math.max(0, current - 1));
+    this.drainPoolQueue(state);
+  }
+
   async executeTask(task: TaskState): Promise<void> {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
@@ -575,8 +561,7 @@ export class TaskRunner {
     let poolAssignment: PoolAssignment | undefined;
     try {
       poolAssignment = await this.acquirePoolSlot(task);
-      const taskWithPoolAssignment = this.applyPoolAssignment(task, poolAssignment);
-      await this.executeTaskInner(taskWithPoolAssignment, attemptId);
+      await this.executeTaskInner(task, attemptId, poolAssignment);
     } catch (err) {
       // Resource limit: defer the task instead of failing it
       const cause = err instanceof Error ? err.cause : undefined;
@@ -639,7 +624,7 @@ export class TaskRunner {
     }
   }
 
-  private async executeTaskInner(task: TaskState, attemptId: string): Promise<void> {
+  private async executeTaskInner(task: TaskState, attemptId: string, poolAssignment?: PoolAssignment): Promise<void> {
     // Pivot tasks with experimentVariants: synthesize a spawn_experiments
     // response instead of running through the executor.
     if (task.config.pivot && task.config.experimentVariants && task.config.experimentVariants.length > 0) {
@@ -718,7 +703,7 @@ export class TaskRunner {
     });
     const baseBranch = workflow?.baseBranch ?? this.defaultBranch;
     const repoUrl = workflow?.repoUrl;
-    const branchRepoUrl = workflow?.intermediateRepoUrl?.trim() || undefined;
+    const intermediateRepoUrl = workflow?.intermediateRepoUrl;
 
     // Persist the experiment branch as soon as the executor knows it — well
     // before `git worktree add` could leak a worktree without a recorded branch
@@ -760,7 +745,7 @@ export class TaskRunner {
         prompt: task.config.prompt,
         executionAgent: task.config.executionAgent?.trim() || DEFAULT_EXECUTION_AGENT,
         repoUrl,
-        branchRepoUrl,
+        branchRepoUrl: intermediateRepoUrl?.trim() || undefined,
         featureBranch: task.config.featureBranch,
         upstreamContext: upstreamContext.length > 0 ? upstreamContext : undefined,
         alternatives: alternatives.length > 0 ? alternatives : undefined,
@@ -779,7 +764,7 @@ export class TaskRunner {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} WorkRequest built actionType=${request.actionType} repoUrl=${request.inputs.repoUrl ?? '(none)'} upstreamBranches=${JSON.stringify(request.inputs.upstreamBranches ?? [])}`,
     );
-    const executor = this.selectExecutor(task);
+    const executor = this.selectExecutor(task, poolAssignment);
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} selectExecutor → type=${executor.type} calling executor.start()`,
     );
@@ -832,7 +817,6 @@ export class TaskRunner {
         }
         if (meta.containerId) execution.containerId = meta.containerId;
         this.persistence.updateTask(task.id, {
-          config: { executorType: executor.type as ExecutorType },
           execution: execution as any,
         });
       }
@@ -873,7 +857,6 @@ export class TaskRunner {
       }
 
       const changes = {
-        config: { executorType: executor.type as ExecutorType },
         execution: {
           workspacePath: handle.workspacePath,
           branch: handle.branch ?? undefined,  // Explicit undefined when branch is not applicable (e.g., BYO mode)
@@ -1015,64 +998,32 @@ export class TaskRunner {
 
   /**
    * Select the executor to use for a given task.
-   * Uses task.executorType to look up in the registry; falls back to default.
-   * Merge gate tasks use the default (worktree) executor when selected explicitly.
+   * Pool member type or dockerImage select the runner; default is local worktree.
    */
-  selectExecutor(task: TaskState): Executor {
-    const effectiveType = task.config.executorType;
-
-    if (effectiveType) {
-      const registered = this.executorRegistry.get(effectiveType);
-      if (registered) {
-        traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} effectiveType=${effectiveType} → ${registered.type}`);
-        return registered;
-      }
-
-      // Per-task Docker instance (each task gets its own container + execGitSimple routing)
-      if (effectiveType === 'docker') {
+  selectExecutor(task: TaskState, poolAssignment?: PoolAssignment): Executor {
+    if (task.config.dockerImage) {
         const docker = new DockerExecutor({
           imageName: task.config.dockerImage || this.dockerConfig.imageName,
           secretsFile: this.dockerConfig.secretsFile,
           agentRegistry: this.executionAgentRegistry,
         });
         this.executorRegistry.register(`docker:${task.id}`, docker);
-        traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} effectiveType=docker → docker (per-task)`);
+        traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} dockerImage=${task.config.dockerImage} → docker (per-task)`);
         return docker;
-      }
+    }
 
-      // Lazy registration for Worktree
-      if (effectiveType === 'worktree') {
-        const invokerHome = resolve(homedir(), '.invoker');
-        const worktree = new WorktreeExecutor({
-          worktreeBaseDir: resolve(invokerHome, 'worktrees'),
-          cacheDir: resolve(invokerHome, 'repos'),
-          maxWorktrees: this.maxWorktreesPerRepo,
-          agentRegistry: this.executionAgentRegistry,
-        });
-        this.executorRegistry.register('worktree', worktree);
-        traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} effectiveType=worktree → worktree (lazy registered)`);
-        return worktree;
-      }
-
-      // Lazy registration for SSH — resolve remoteTargetId from config and cache by targetId.
+    if (poolAssignment?.type === 'ssh') {
+      // Lazy registration for SSH — resolve the target from pool member ID and cache by SSH machine ID.
       // The cache is config-aware: if the underlying remote target config changes (e.g. via
       // remoteTargetsProvider returning new values), we replace the cached executor so the
       // new config takes effect immediately.
-      if (effectiveType === 'ssh') {
-        const targetId = task.config.remoteTargetId;
-        if (!targetId) {
-          throw new Error(
-            `Task ${task.id} resolved to executorType=ssh but no pool member target was assigned. ` +
-            `poolId=${task.config.poolId ?? '(unset)'}`,
-          );
-        }
-
+        const targetId = poolAssignment.memberId;
         // Always re-read targets so dynamic provider updates are picked up.
         const remoteTargets = this.getRemoteTargets();
         const target = remoteTargets[targetId];
         if (!target) {
           throw new Error(
-            `Task ${task.id} references remoteTargetId="${targetId}" but no matching ` +
+            `Task ${task.id} resolved SSH machine "${targetId}" but no matching ` +
             `entry exists in remoteTargets config. Available: [${Object.keys(remoteTargets).join(', ')}]`,
           );
         }
@@ -1087,7 +1038,6 @@ export class TaskRunner {
           remoteInvokerHome: target.remoteInvokerHome,
           provisionCommand: target.provisionCommand,
           remoteHeartbeatIntervalSeconds: target.remoteHeartbeatIntervalSeconds,
-          maxConcurrentTasks: target.maxConcurrentTasks,
         });
         const cacheKey = `${targetId}|${configFingerprint}`;
 
@@ -1105,7 +1055,7 @@ export class TaskRunner {
           }
         }
 
-        const ssh = new SshExecutor({
+        const ssh = this.sshExecutorFactory({
           host: target.host,
           user: target.user,
           sshKeyPath: target.sshKeyPath,
@@ -1118,9 +1068,8 @@ export class TaskRunner {
         });
 
         this.sshExecutorCache.set(cacheKey, ssh);
-        traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} effectiveType=ssh remoteTarget=${targetId} → ssh (new, cached)`);
+        traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} pool=${poolAssignment.poolId} sshMember=${targetId} → ssh (new, cached)`);
         return ssh;
-      }
     }
 
     if (task.config.isMergeNode) {
@@ -1129,9 +1078,21 @@ export class TaskRunner {
       return mergeGateExecutor;
     }
 
-    const defaultExecutor = this.executorRegistry.getDefault();
-    traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} effectiveType=${effectiveType ?? 'none'} → ${defaultExecutor.type} (default)`);
-    return defaultExecutor;
+    const registered = this.executorRegistry.get('worktree');
+    if (registered) {
+      traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} → ${registered.type}`);
+      return registered;
+    }
+    const invokerHome = resolve(homedir(), '.invoker');
+    const worktree = new WorktreeExecutor({
+      worktreeBaseDir: resolve(invokerHome, 'worktrees'),
+      cacheDir: resolve(invokerHome, 'repos'),
+      maxWorktrees: this.maxWorktreesPerRepo,
+      agentRegistry: this.executionAgentRegistry,
+    });
+    this.executorRegistry.register('worktree', worktree);
+    traceExecution(`[trace] TaskRunner.selectExecutor: task=${task.id} → worktree (lazy registered)`);
+    return worktree;
   }
 
   /**
@@ -1197,7 +1158,11 @@ export class TaskRunner {
       },
     };
 
-    const executor = this.selectExecutor(task);
+    const remoteTarget = this.getRemoteTargetForTask(task);
+    const executor = this.selectExecutor(
+      task,
+      remoteTarget ? { poolId: task.config.poolId!, memberId: remoteTarget.id, type: 'ssh' } : undefined,
+    );
     let result: { commitHash?: string; error?: string };
     if (executor instanceof SshExecutor) {
       result = await executor.publishApprovedFix(workspacePath, request, branch);
@@ -1682,7 +1647,7 @@ export class TaskRunner {
         ? this.persistence.loadWorkflow(reconWorkflowId)
         : undefined;
     const reconRepoUrl = reconWorkflow?.repoUrl;
-    const reconBranchRepoUrl = reconWorkflow?.intermediateRepoUrl?.trim() || undefined;
+    const reconIntermediateRepoUrl = reconWorkflow?.intermediateRepoUrl;
 
     const worktreeDir = await this.createMergeWorktree(baseBranch, 'recon-' + reconTaskId, reconRepoUrl);
 
@@ -1700,12 +1665,12 @@ export class TaskRunner {
           throw new Error(`Experiment ${expId} has no branch`);
         }
         const b = expTask.execution.branch;
-        await ensureLocalBranchForMerge(this, worktreeDir, b, reconRepoUrl, reconBranchRepoUrl);
+        await ensureLocalBranchForMerge(this, worktreeDir, b, reconRepoUrl, reconIntermediateRepoUrl);
         const expMergeMsg = `Merge ${b} — ${expTask.description}`;
         await this.execGitIn(['merge', '--no-ff', '-m', expMergeMsg, b], worktreeDir);
       }
 
-      await this.pushBranchFromMergeWorktree(worktreeDir, branchName, reconBranchRepoUrl);
+      await this.pushBranchFromMergeWorktree(worktreeDir, branchName, reconIntermediateRepoUrl);
 
       const commit = await this.execGitIn(['rev-parse', 'HEAD'], worktreeDir);
       return { branch: branchName, commit };
@@ -2049,6 +2014,16 @@ export class TaskRunner {
     return this.getRemoteTargets()[targetId];
   }
 
+  getRemoteTargetForTask(task: TaskState): { id: string; target: RemoteTargetConfig } | undefined {
+    const poolId = task.config.poolId?.trim();
+    if (!poolId) return undefined;
+    const pool = this.getExecutionPools()[poolId];
+    const member = pool?.members.find((candidate) => candidate.type === 'ssh');
+    if (!member) return undefined;
+    const target = this.getRemoteTargets()[member.id];
+    return target ? { id: member.id, target } : undefined;
+  }
+
   /**
    * Destroy all cached SSH executors and clear the cache.
    * Useful for testing or when remote target configs change.
@@ -2065,7 +2040,7 @@ export class TaskRunner {
    * Destroy and deregister a per-task Docker executor if one was created for this task.
    */
   private async cleanupPerTaskDockerExecutor(task: TaskState): Promise<void> {
-    if (task.config.executorType !== 'docker') return;
+    if (!task.config.dockerImage) return;
     const dockerKey = `docker:${task.id}`;
     const dockerExec = this.executorRegistry.get(dockerKey);
     if (!dockerExec) return;
@@ -2246,7 +2221,7 @@ export class TaskRunner {
 
     const rebaseWorkflow = this.persistence.loadWorkflow?.(workflowId);
     const rebaseRepoUrl = rebaseWorkflow?.repoUrl;
-    const rebaseBranchRepoUrl = rebaseWorkflow?.intermediateRepoUrl?.trim() || undefined;
+    const rebaseIntermediateRepoUrl = rebaseWorkflow?.intermediateRepoUrl;
     const worktreeDir = await this.createMergeWorktree(baseBranch, 'rebase-' + workflowId, rebaseRepoUrl);
 
     const rebasedBranches: string[] = [];
@@ -2257,7 +2232,7 @@ export class TaskRunner {
         try {
           await this.execGitIn(['checkout', branch], worktreeDir);
           await this.execGitIn(['rebase', baseBranch], worktreeDir);
-          await this.pushBranchFromMergeWorktree(worktreeDir, branch, rebaseBranchRepoUrl);
+          await this.pushBranchFromMergeWorktree(worktreeDir, branch, rebaseIntermediateRepoUrl);
           rebasedBranches.push(branch);
           this.logger.info(`[rebase] Successfully rebased ${branch} onto ${baseBranch}`);
         } catch (err) {
@@ -2281,23 +2256,23 @@ export class TaskRunner {
   private async pushBranchFromMergeWorktree(
     worktreeDir: string,
     branch: string,
-    branchRepoUrl?: string,
+    intermediateRepoUrl?: string,
   ): Promise<void> {
-    const trimmedBranchRepoUrl = branchRepoUrl?.trim();
-    if (trimmedBranchRepoUrl) {
+    const trimmedIntermediateUrl = intermediateRepoUrl?.trim();
+    if (trimmedIntermediateUrl) {
       try {
         await this.execGitIn(
-          ['remote', 'set-url', TaskRunner.BRANCH_REMOTE_NAME, trimmedBranchRepoUrl],
+          ['remote', 'set-url', TaskRunner.INTERMEDIATE_REMOTE_NAME, trimmedIntermediateUrl],
           worktreeDir,
         );
       } catch {
         await this.execGitIn(
-          ['remote', 'add', TaskRunner.BRANCH_REMOTE_NAME, trimmedBranchRepoUrl],
+          ['remote', 'add', TaskRunner.INTERMEDIATE_REMOTE_NAME, trimmedIntermediateUrl],
           worktreeDir,
         );
       }
       await this.execGitIn(
-        ['push', '--force', TaskRunner.BRANCH_REMOTE_NAME, `${branch}:refs/heads/${branch}`],
+        ['push', '--force', TaskRunner.INTERMEDIATE_REMOTE_NAME, `${branch}:refs/heads/${branch}`],
         worktreeDir,
       );
       return;

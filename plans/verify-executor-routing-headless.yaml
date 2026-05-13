@@ -1,7 +1,7 @@
 # Run: bash scripts/verify-executor-routing.sh
 #
-# Asserts executor routing validation: a command task whose executorType and
-# poolId conform to an executorRoutingRules pattern validates successfully.
+# Asserts pool routing validation: a command task whose poolId conforms to the
+# configured execution pool validates successfully.
 # The routing fixture config is injected via INVOKER_REPO_CONFIG_PATH so the
 # checked-in .invoker.json is never clobbered.
 # repoUrl below is overwritten by the script with file://<this checkout> for a local clone.
@@ -13,8 +13,7 @@ baseBranch: master
 
 tasks:
   - id: verify-routing-command
-    description: "Command task validates executorType and poolId routing"
+    description: "Command task validates poolId routing"
     command: echo verify-routing-ok
-    executorType: worktree
     poolId: dummy-pool
     dependencies: []

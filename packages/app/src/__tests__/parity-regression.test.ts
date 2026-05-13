@@ -105,7 +105,7 @@ function makeFacadeDeps(overrides: Partial<WorkflowMutationFacadeDeps> = {}): Wo
       })),
       editTaskCommand: vi.fn(() => [makeTask()]),
       editTaskPrompt: vi.fn(() => [makeTask()]),
-      editTaskType: vi.fn(() => [makeTask()]),
+      editTaskPool: vi.fn(() => [makeTask()]),
       editTaskAgent: vi.fn(() => [makeTask()]),
       setTaskExternalGatePolicies: vi.fn(() => []),
       selectExperiment: vi.fn(() => [makeTask()]),
@@ -159,7 +159,7 @@ describe('Parity: facade dispatch+topup lifecycle', () => {
     { name: 'recreateTask', invoke: (f) => f.recreateTask('task-1'), orchestratorMethod: 'recreateTask' },
     { name: 'editTaskCommand', invoke: (f) => f.editTaskCommand('task-1', 'echo ok'), orchestratorMethod: 'editTaskCommand' },
     { name: 'editTaskPrompt', invoke: (f) => f.editTaskPrompt('task-1', 'do it'), orchestratorMethod: 'editTaskPrompt' },
-    { name: 'editTaskType', invoke: (f) => f.editTaskType('task-1', 'docker'), orchestratorMethod: 'editTaskType' },
+    { name: 'editTaskPool', invoke: (f) => f.editTaskPool('task-1', 'ssh-light'), orchestratorMethod: 'editTaskPool' },
     { name: 'editTaskAgent', invoke: (f) => f.editTaskAgent('task-1', 'codex'), orchestratorMethod: 'editTaskAgent' },
     { name: 'selectExperiment', invoke: (f) => f.selectExperiment('task-1', 'exp-1'), orchestratorMethod: 'selectExperiment' },
     { name: 'retryWorkflow', invoke: (f) => f.retryWorkflow('wf-1'), orchestratorMethod: 'retryWorkflow' },
@@ -305,7 +305,7 @@ describe('Parity: API endpoints wire to facade methods', () => {
         recreateTask: vi.fn(() => [makeTask()]),
         editTaskCommand: vi.fn(() => [makeTask()]),
         editTaskPrompt: vi.fn(() => [makeTask()]),
-        editTaskType: vi.fn(() => [makeTask()]),
+        editTaskPool: vi.fn(() => [makeTask()]),
         editTaskAgent: vi.fn(() => [makeTask()]),
         setTaskExternalGatePolicies: vi.fn(() => [makeTask()]),
         cancelTask: vi.fn(() => ({ cancelled: ['task-1'], runningCancelled: ['task-1'] })),
@@ -390,7 +390,7 @@ describe('Parity: API endpoints wire to facade methods', () => {
     mocks.orchestrator.retryTask.mockReturnValue([makeTask()]);
     mocks.orchestrator.editTaskCommand.mockReturnValue([makeTask()]);
     mocks.orchestrator.editTaskPrompt.mockReturnValue([makeTask()]);
-    mocks.orchestrator.editTaskType.mockReturnValue([makeTask()]);
+    mocks.orchestrator.editTaskPool.mockReturnValue([makeTask()]);
     mocks.orchestrator.editTaskAgent.mockReturnValue([makeTask()]);
     mocks.orchestrator.setTaskExternalGatePolicies.mockReturnValue([makeTask()]);
     mocks.orchestrator.approve.mockResolvedValue([]);
@@ -429,7 +429,7 @@ describe('Parity: API endpoints wire to facade methods', () => {
     { name: 'POST /api/tasks/:id/restart', method: 'POST', path: '/api/tasks/task-1/restart', orchestratorMethod: 'retryTask', expectTopup: true },
     { name: 'POST /api/tasks/:id/edit', method: 'POST', path: '/api/tasks/task-1/edit', body: { command: 'echo ok' }, orchestratorMethod: 'editTaskCommand', expectTopup: true },
     { name: 'POST /api/tasks/:id/edit-prompt', method: 'POST', path: '/api/tasks/task-1/edit-prompt', body: { prompt: 'do it' }, orchestratorMethod: 'editTaskPrompt', expectTopup: true },
-    { name: 'POST /api/tasks/:id/edit-type', method: 'POST', path: '/api/tasks/task-1/edit-type', body: { executorType: 'docker' }, orchestratorMethod: 'editTaskType', expectTopup: true },
+    { name: 'POST /api/tasks/:id/edit-pool', method: 'POST', path: '/api/tasks/task-1/edit-pool', body: { poolId: 'ssh-light' }, orchestratorMethod: 'editTaskPool', expectTopup: true },
     { name: 'POST /api/tasks/:id/edit-agent', method: 'POST', path: '/api/tasks/task-1/edit-agent', body: { agent: 'codex' }, orchestratorMethod: 'editTaskAgent', expectTopup: true },
     { name: 'POST /api/tasks/:id/cancel', method: 'POST', path: '/api/tasks/task-1/cancel', orchestratorMethod: 'cancelTask', expectTopup: true },
     { name: 'POST /api/workflows/:id/cancel', method: 'POST', path: '/api/workflows/wf-1/cancel', orchestratorMethod: 'cancelWorkflow', expectTopup: true },
@@ -504,7 +504,7 @@ describe('Parity: CommandService routes to correct orchestrator primitives', () 
       detachWorkflow: vi.fn(),
       editTaskCommand: vi.fn(() => [makeTask()]),
       editTaskPrompt: vi.fn(() => [makeTask()]),
-      editTaskType: vi.fn(() => [makeTask()]),
+      editTaskPool: vi.fn(() => [makeTask()]),
       editTaskAgent: vi.fn(() => [makeTask()]),
       editTaskMergeMode: vi.fn(() => [makeTask()]),
       editTaskFixContext: vi.fn(() => [makeTask()]),
@@ -543,7 +543,7 @@ describe('Parity: CommandService routes to correct orchestrator primitives', () 
     { name: 'detachWorkflow', invoke: (cs) => cs.detachWorkflow(envelope({ workflowId: 'wf-1', upstreamWorkflowId: 'wf-0' })), orchestratorMethod: 'detachWorkflow' },
     { name: 'editTaskCommand', invoke: (cs) => cs.editTaskCommand(envelope({ taskId: 'task-1', newCommand: 'echo ok' })), orchestratorMethod: 'editTaskCommand' },
     { name: 'editTaskPrompt', invoke: (cs) => cs.editTaskPrompt(envelope({ taskId: 'task-1', newPrompt: 'do it' })), orchestratorMethod: 'editTaskPrompt' },
-    { name: 'editTaskType', invoke: (cs) => cs.editTaskType(envelope({ taskId: 'task-1', executorType: 'docker' })), orchestratorMethod: 'editTaskType' },
+    { name: 'editTaskPool', invoke: (cs) => cs.editTaskPool(envelope({ taskId: 'task-1', poolId: 'ssh-light' })), orchestratorMethod: 'editTaskPool' },
     { name: 'editTaskAgent', invoke: (cs) => cs.editTaskAgent(envelope({ taskId: 'task-1', agentName: 'codex' })), orchestratorMethod: 'editTaskAgent' },
     { name: 'editTaskMergeMode', invoke: (cs) => cs.editTaskMergeMode(envelope({ taskId: 'task-1', mergeMode: 'automatic' as const })), orchestratorMethod: 'editTaskMergeMode' },
     { name: 'selectExperiment', invoke: (cs) => cs.selectExperiment(envelope({ taskId: 'task-1', experimentId: 'exp-1' })), orchestratorMethod: 'selectExperiment' },
@@ -662,7 +662,7 @@ describe('Parity: cross-surface mutation isolation', () => {
     expect(deps.orchestrator.editTaskCommand).toHaveBeenCalled();
     expect(deps.orchestrator.editTaskPrompt).not.toHaveBeenCalled();
     expect(deps.orchestrator.editTaskAgent).not.toHaveBeenCalled();
-    expect(deps.orchestrator.editTaskType).not.toHaveBeenCalled();
+    expect(deps.orchestrator.editTaskPool).not.toHaveBeenCalled();
   });
 
   it('editTaskPrompt does not trigger editTaskCommand or editTaskAgent', async () => {

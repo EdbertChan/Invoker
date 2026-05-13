@@ -31,8 +31,10 @@ function parseYamlTasks(yaml: string): TaskReplacementDef[] {
       current.command = line.slice('command:'.length).trim();
     } else if (current && line.startsWith('prompt:')) {
       current.prompt = line.slice('prompt:'.length).trim();
-    } else if (current && line.startsWith('executorType:')) {
-      current.executorType = line.slice('executorType:'.length).trim();
+    } else if (current && line.startsWith('poolId:')) {
+      current.poolId = line.slice('poolId:'.length).trim();
+    } else if (current && line.startsWith('dockerImage:')) {
+      current.dockerImage = line.slice('dockerImage:'.length).trim();
     } else if (current && line.startsWith('dependencies:')) {
       const depsStr = line.slice('dependencies:'.length).trim();
       if (depsStr.startsWith('[') && depsStr.endsWith(']')) {

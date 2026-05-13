@@ -29,29 +29,23 @@ function makeDeps(overrides: Partial<MockedDeps> = {}): MockedDeps {
   } as MockedDeps;
 }
 
-describe('executor-type-mutation invalidation contract', () => {
-  it('MUTATION_POLICIES.executorType is RETRY-class (not recreate) and invalidates active attempts', () => {
-    expect(MUTATION_POLICIES.executorType.action).toBe('retryTask');
-    expect(MUTATION_POLICIES.executorType.invalidatesExecutionSpec).toBe(true);
-    expect(MUTATION_POLICIES.executorType.invalidateIfActive).toBe(true);
+describe('pool-id-mutation invalidation contract', () => {
+  it('MUTATION_POLICIES.poolId is RETRY-class (not recreate) and invalidates active attempts', () => {
+    expect(MUTATION_POLICIES.poolId.action).toBe('retryTask');
+    expect(MUTATION_POLICIES.poolId.invalidatesExecutionSpec).toBe(true);
+    expect(MUTATION_POLICIES.poolId.invalidateIfActive).toBe(true);
 
-    // Defensive: make sure executor-type didn't accidentally land in the
-    // same recreate-class bucket as command/prompt/executionAgent. The
-    // chart preserves workspace lineage for substrate-only changes, so
-    // the action MUST be `retryTask`, not `recreateTask`.
-    expect(MUTATION_POLICIES.executorType.action).not.toBe('recreateTask');
+    expect(MUTATION_POLICIES.poolId.action).not.toBe('recreateTask');
   });
 
   it('routes through applyInvalidation with cancelInFlight invoked BEFORE retryTask dep', async () => {
     const deps = makeDeps();
-    const policy = MUTATION_POLICIES.executorType;
+    const policy = MUTATION_POLICIES.poolId;
 
     await applyInvalidation('task', policy.action, 'task-a', deps);
 
     expect(deps.cancelInFlight).toHaveBeenCalledWith('task', 'task-a');
     expect(deps.retryTask).toHaveBeenCalledWith('task-a');
-    // Recreate-class deps MUST NOT be on the path — that would discard
-    // branch/workspacePath the chart says is still authoritative.
     expect(deps.recreateTask).not.toHaveBeenCalled();
     expect(deps.retryWorkflow).not.toHaveBeenCalled();
     expect(deps.recreateWorkflow).not.toHaveBeenCalled();
@@ -69,14 +63,14 @@ describe('executor-type-mutation invalidation contract', () => {
     });
 
     await expect(
-      applyInvalidation('task', MUTATION_POLICIES.executorType.action, 'task-a', deps),
+      applyInvalidation('task', MUTATION_POLICIES.poolId.action, 'task-a', deps),
     ).rejects.toBe(cancelError);
     expect(deps.retryTask).not.toHaveBeenCalled();
   });
 
-  it('idempotence: two consecutive executor-type edits trigger two cancel-first cycles, ordering preserved', async () => {
+  it('idempotence: two consecutive pool edits trigger two cancel-first cycles, ordering preserved', async () => {
     const deps = makeDeps();
-    const policy = MUTATION_POLICIES.executorType;
+    const policy = MUTATION_POLICIES.poolId;
 
     await applyInvalidation('task', policy.action, 'task-a', deps);
     await applyInvalidation('task', policy.action, 'task-a', deps);
@@ -102,68 +96,22 @@ describe('executor-type-mutation invalidation contract', () => {
   it('rejects task-scoped wiring with workflow-only actions (defensive scope/action mismatch)', async () => {
     const deps = makeDeps();
     await expect(
-      applyInvalidation('workflow', MUTATION_POLICIES.executorType.action, 'task-a', deps),
+      applyInvalidation('workflow', MUTATION_POLICIES.poolId.action, 'task-a', deps),
     ).rejects.toThrow(/requires scope 'task'/);
     expect(deps.cancelInFlight).not.toHaveBeenCalled();
     expect(deps.retryTask).not.toHaveBeenCalled();
   });
 });
 
-describe('remote-target-mutation invalidation contract', () => {
-  it('MUTATION_POLICIES.remoteTargetId is RECREATE-class (not retry) and invalidates active attempts', () => {
-    expect(MUTATION_POLICIES.remoteTargetId.action).toBe('recreateTask');
-    expect(MUTATION_POLICIES.remoteTargetId.invalidatesExecutionSpec).toBe(true);
-    expect(MUTATION_POLICIES.remoteTargetId.invalidateIfActive).toBe(true);
-
-    expect(MUTATION_POLICIES.remoteTargetId.action).not.toBe('retryTask');
-    expect(MUTATION_POLICIES.remoteTargetId.action).not.toBe(
-      MUTATION_POLICIES.executorType.action,
-    );
-  });
-
-  it('routes through applyInvalidation with cancelInFlight invoked BEFORE recreateTask dep', async () => {
-    const deps = makeDeps();
-    const policy = MUTATION_POLICIES.remoteTargetId;
-
-    await applyInvalidation('task', policy.action, 'task-a', deps);
-
-    expect(deps.cancelInFlight).toHaveBeenCalledWith('task', 'task-a');
-    expect(deps.recreateTask).toHaveBeenCalledWith('task-a');
-    // Retry-class deps MUST NOT be on the path — that would preserve
-    // workspace lineage the chart says is no longer authoritative
-    // after a remote host change.
-    expect(deps.retryTask).not.toHaveBeenCalled();
-    expect(deps.retryWorkflow).not.toHaveBeenCalled();
-    expect(deps.recreateWorkflow).not.toHaveBeenCalled();
-    expect(deps.cancelInFlight.mock.invocationCallOrder[0]).toBeLessThan(
-      deps.recreateTask.mock.invocationCallOrder[0],
-    );
-  });
-
-  it('aborts the recreate when cancelInFlight rejects (stale work must not survive a failed cancel)', async () => {
-    const cancelError = new Error('cancel failed');
-    const deps = makeDeps({
-      cancelInFlight: vi.fn(async () => {
-        throw cancelError;
-      }),
-    });
-
-    await expect(
-      applyInvalidation('task', MUTATION_POLICIES.remoteTargetId.action, 'task-a', deps),
-    ).rejects.toBe(cancelError);
-    expect(deps.recreateTask).not.toHaveBeenCalled();
-  });
-});
-
 function stubOrchestrator(overrides: Partial<Orchestrator> = {}): Orchestrator {
   return {
     getTask: vi.fn().mockReturnValue({ config: { workflowId: 'wf-1' } }),
-    editTaskType: vi.fn().mockReturnValue([] as TaskState[]),
+    editTaskPool: vi.fn().mockReturnValue([] as TaskState[]),
     ...overrides,
   } as unknown as Orchestrator;
 }
 
-describe('CommandService.editTaskType (headless integration seam)', () => {
+describe('CommandService.editTaskPool (headless integration)', () => {
   let orchestrator: Orchestrator;
   let service: CommandService;
 
@@ -172,62 +120,58 @@ describe('CommandService.editTaskType (headless integration seam)', () => {
     service = new CommandService(orchestrator);
   });
 
-  it('delegates an executor-type-edit envelope to orchestrator.editTaskType with the expected payload', async () => {
-    const envelope: CommandEnvelope<{ taskId: string; executorType: string; remoteTargetId?: string }> = {
-      commandId: 'cmd-type-1',
+  it('delegates a pool-edit envelope to orchestrator.editTaskPool with the expected payload', async () => {
+    const envelope: CommandEnvelope<{ taskId: string; poolId?: string }> = {
+      commandId: 'cmd-pool-1',
       source: 'headless',
       scope: 'task',
       idempotencyKey: 'idem-1',
-      payload: { taskId: 'wf-1/t1', executorType: 'worktree' },
+      payload: { taskId: 'wf-1/t1', poolId: 'ssh-light' },
     };
 
-    const result = await service.editTaskType(envelope);
+    const result = await service.editTaskPool(envelope);
 
     expect(result).toEqual({ ok: true, data: [] });
-    expect(orchestrator.editTaskType).toHaveBeenCalledWith('wf-1/t1', 'worktree', undefined);
-    expect(orchestrator.editTaskType).toHaveBeenCalledTimes(1);
+    expect(orchestrator.editTaskPool).toHaveBeenCalledWith('wf-1/t1', 'ssh-light');
+    expect(orchestrator.editTaskPool).toHaveBeenCalledTimes(1);
   });
 
-  it('forwards remoteTargetId for the SSH substrate', async () => {
-    const envelope: CommandEnvelope<{ taskId: string; executorType: string; remoteTargetId?: string }> = {
-      commandId: 'cmd-type-ssh',
+  it('allows clearing the pool assignment', async () => {
+    const envelope: CommandEnvelope<{ taskId: string; poolId?: string }> = {
+      commandId: 'cmd-pool-clear',
       source: 'headless',
       scope: 'task',
-      idempotencyKey: 'idem-ssh',
-      payload: { taskId: 'wf-1/t1', executorType: 'ssh', remoteTargetId: 'remote_digital_ocean' },
+      idempotencyKey: 'idem-clear',
+      payload: { taskId: 'wf-1/t1' },
     };
 
-    const result = await service.editTaskType(envelope);
+    const result = await service.editTaskPool(envelope);
 
     expect(result).toEqual({ ok: true, data: [] });
-    expect(orchestrator.editTaskType).toHaveBeenCalledWith(
-      'wf-1/t1',
-      'ssh',
-      'remote_digital_ocean',
-    );
+    expect(orchestrator.editTaskPool).toHaveBeenCalledWith('wf-1/t1', undefined);
   });
 
   it('wraps orchestrator errors in CommandResult instead of throwing', async () => {
     orchestrator = stubOrchestrator({
-      editTaskType: vi.fn().mockImplementation(() => {
+      editTaskPool: vi.fn().mockImplementation(() => {
         throw new Error('boom');
       }),
     });
     service = new CommandService(orchestrator);
 
-    const envelope: CommandEnvelope<{ taskId: string; executorType: string; remoteTargetId?: string }> = {
-      commandId: 'cmd-type-err',
+    const envelope: CommandEnvelope<{ taskId: string; poolId?: string }> = {
+      commandId: 'cmd-pool-err',
       source: 'headless',
       scope: 'task',
       idempotencyKey: 'idem-err',
-      payload: { taskId: 'wf-1/t1', executorType: 'doomed' },
+      payload: { taskId: 'wf-1/t1', poolId: 'bad' },
     };
 
-    const result = await service.editTaskType(envelope);
+    const result = await service.editTaskPool(envelope);
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.code).toBe('EDIT_TASK_TYPE_FAILED');
+      expect(result.error.code).toBe('EDIT_TASK_POOL_FAILED');
       expect(result.error.message).toContain('boom');
     }
   });

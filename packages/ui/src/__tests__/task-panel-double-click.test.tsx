@@ -619,13 +619,13 @@ describe('TaskPanel double-click editing', () => {
     });
   });
 
-  describe('Executor dropdown for merge nodes', () => {
-    it('does not render executor dropdown when task is a merge node', () => {
+  describe('Pool dropdown for merge nodes', () => {
+    it('does not render pool dropdown when task is a merge node', () => {
       const task = {
         ...makeTask({ command: 'echo test', status: 'pending' }),
         config: { command: 'echo test', isMergeNode: true },
       } as TaskState;
-      const mockOnEditType = vi.fn();
+      const mockOnEditPool = vi.fn();
       render(
         <TaskPanel
           task={task}
@@ -634,19 +634,19 @@ describe('TaskPanel double-click editing', () => {
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={mockOnEditType}
+          onEditPool={mockOnEditPool}
         />,
       );
 
-      expect(screen.queryByTestId('executor-type-select')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('pool-select')).not.toBeInTheDocument();
     });
 
-    it('renders executor dropdown for non-merge nodes when onEditType is provided', () => {
+    it('renders pool dropdown for non-merge nodes when onEditPool is provided', () => {
       const task = makeTask({
         command: 'echo test',
         status: 'pending',
       });
-      const mockOnEditType = vi.fn();
+      const mockOnEditPool = vi.fn();
       render(
         <TaskPanel
           task={task}
@@ -655,14 +655,14 @@ describe('TaskPanel double-click editing', () => {
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={mockOnEditType}
+          onEditPool={mockOnEditPool}
         />,
       );
 
-      expect(screen.getByTestId('executor-type-select')).toBeInTheDocument();
+      expect(screen.getByTestId('pool-select')).toBeInTheDocument();
     });
 
-    it('defaults executor select to worktree for prompt-only task when executorType unset (orchestrator default)', () => {
+    it('defaults pool select to default worktree for prompt-only task when poolId unset', () => {
       const task = makeTask({
         prompt: 'Write a test',
         status: 'pending',
@@ -675,14 +675,14 @@ describe('TaskPanel double-click editing', () => {
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={vi.fn()}
+          onEditPool={vi.fn()}
         />,
       );
 
-      expect(screen.getByTestId('executor-type-select')).toHaveValue('worktree');
+      expect(screen.getByTestId('pool-select')).toHaveValue('');
     });
 
-    it('defaults executor select to worktree for command task when executorType unset (orchestrator default)', () => {
+    it('defaults pool select to default worktree for command task when poolId unset', () => {
       const task = makeTask({
         command: 'echo test',
         status: 'pending',
@@ -695,119 +695,125 @@ describe('TaskPanel double-click editing', () => {
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={vi.fn()}
+          onEditPool={vi.fn()}
         />,
       );
 
-      expect(screen.getByTestId('executor-type-select')).toHaveValue('worktree');
+      expect(screen.getByTestId('pool-select')).toHaveValue('');
     });
 
-    it('renders SSH remote target options when remoteTargets are provided', () => {
+    it('renders pool options when executionPools are provided', () => {
       const task = makeTask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
-          remoteTargets={['do-droplet', 'aws-instance']}
+          executionPools={['ssh-light', 'gpu-pool']}
           onProvideInput={mockOnProvideInput}
           onApprove={mockOnApprove}
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={vi.fn()}
+          onEditPool={vi.fn()}
         />,
       );
 
-      const select = screen.getByTestId('executor-type-select');
+      const select = screen.getByTestId('pool-select');
       const options = select.querySelectorAll('option');
-      expect(options).toHaveLength(4);
-      expect(options[2]).toHaveValue('ssh:do-droplet');
-      expect(options[2]).toHaveTextContent('SSH: do-droplet');
-      expect(options[3]).toHaveValue('ssh:aws-instance');
-      expect(options[3]).toHaveTextContent('SSH: aws-instance');
+      expect(options).toHaveLength(3);
+      expect(options[0]).toHaveValue('');
+      expect(options[0]).toHaveTextContent('Default worktree');
+      expect(options[1]).toHaveValue('ssh-light');
+      expect(options[1]).toHaveTextContent('Pool: ssh-light');
+      expect(options[2]).toHaveValue('gpu-pool');
+      expect(options[2]).toHaveTextContent('Pool: gpu-pool');
     });
 
-    it('does not render SSH options when remoteTargets is empty', () => {
+    it('only renders the default worktree option when executionPools is empty', () => {
       const task = makeTask({ command: 'echo test', status: 'pending' });
       render(
         <TaskPanel
           task={task}
-          remoteTargets={[]}
+          executionPools={[]}
           onProvideInput={mockOnProvideInput}
           onApprove={mockOnApprove}
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={vi.fn()}
+          onEditPool={vi.fn()}
         />,
       );
 
-      const select = screen.getByTestId('executor-type-select');
+      const select = screen.getByTestId('pool-select');
       const options = select.querySelectorAll('option');
-      expect(options).toHaveLength(2);
+      expect(options).toHaveLength(1);
     });
 
-    it('selects SSH target when task has executorType=ssh and remoteTargetId', () => {
+    it('selects pool when task has poolId', () => {
       const task = makeTask({
         command: 'echo test',
         status: 'pending',
-        config: { command: 'echo test', executorType: 'ssh', remoteTargetId: 'do-droplet' } as TaskState['config'],
+        config: { command: 'echo test', poolId: 'ssh-light' } as TaskState['config'],
       });
       render(
         <TaskPanel
           task={task}
-          remoteTargets={['do-droplet']}
+          executionPools={['ssh-light']}
           onProvideInput={mockOnProvideInput}
           onApprove={mockOnApprove}
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={vi.fn()}
+          onEditPool={vi.fn()}
         />,
       );
 
-      expect(screen.getByTestId('executor-type-select')).toHaveValue('ssh:do-droplet');
+      expect(screen.getByTestId('pool-select')).toHaveValue('ssh-light');
     });
 
-    it('calls onEditType with ssh and remoteTargetId when SSH option selected', () => {
+    it('calls onEditPool with poolId when pool option selected', () => {
       const task = makeTask({ command: 'echo test', status: 'pending' });
-      const mockOnEditType = vi.fn();
+      const mockOnEditPool = vi.fn();
       render(
         <TaskPanel
           task={task}
-          remoteTargets={['do-droplet']}
+          executionPools={['ssh-light']}
           onProvideInput={mockOnProvideInput}
           onApprove={mockOnApprove}
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={mockOnEditType}
+          onEditPool={mockOnEditPool}
         />,
       );
 
-      const select = screen.getByTestId('executor-type-select');
-      fireEvent.change(select, { target: { value: 'ssh:do-droplet' } });
-      expect(mockOnEditType).toHaveBeenCalledWith('test-task-1', 'ssh', 'do-droplet');
+      const select = screen.getByTestId('pool-select');
+      fireEvent.change(select, { target: { value: 'ssh-light' } });
+      expect(mockOnEditPool).toHaveBeenCalledWith('test-task-1', 'ssh-light');
     });
 
-    it('calls onEditType without remoteTargetId when non-SSH option selected', () => {
-      const task = makeTask({ command: 'echo test', status: 'pending' });
-      const mockOnEditType = vi.fn();
+    it('calls onEditPool with empty poolId when default worktree option selected', () => {
+      const task = makeTask({
+        command: 'echo test',
+        status: 'pending',
+        config: { command: 'echo test', poolId: 'ssh-light' } as TaskState['config'],
+      });
+      const mockOnEditPool = vi.fn();
       render(
         <TaskPanel
           task={task}
-          remoteTargets={['do-droplet']}
+          executionPools={['ssh-light']}
           onProvideInput={mockOnProvideInput}
           onApprove={mockOnApprove}
           onReject={mockOnReject}
           onSelectExperiment={mockOnSelectExperiment}
           onEditCommand={mockOnEditCommand}
-          onEditType={mockOnEditType}
+          onEditPool={mockOnEditPool}
         />,
       );
 
-      const select = screen.getByTestId('executor-type-select');
-      fireEvent.change(select, { target: { value: 'docker' } });
-      expect(mockOnEditType).toHaveBeenCalledWith('test-task-1', 'docker');
+      const select = screen.getByTestId('pool-select');
+      fireEvent.change(select, { target: { value: '' } });
+      expect(mockOnEditPool).toHaveBeenCalledWith('test-task-1', '');
     });
   });
 

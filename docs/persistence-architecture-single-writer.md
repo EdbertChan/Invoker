@@ -41,7 +41,7 @@ This table lists every mutating command path and how the owner-boundary contract
 | `invoker:resolve-conflict` | main.ts:1182 | N/A (owner) | `resolveConflictAction()` → persistence + orchestrator | |
 | `invoker:fix-with-agent` | main.ts:1196 | N/A (owner) | `orchestrator.beginConflictResolution()` → persistence | |
 | `invoker:edit-task-command` | main.ts:1213 | N/A (owner) | `orchestrator.editTaskCommand()` → persistence | |
-| `invoker:edit-task-type` | main.ts:1225 | N/A (owner) | `orchestrator.editTaskType()` → persistence | |
+| `invoker:edit-task-pool` | main.ts:1225 | N/A (owner) | `orchestrator.editTaskPool()` → persistence | |
 | `invoker:edit-task-agent` | main.ts:1237 | N/A (owner) | `sharedEditTaskAgent()` → orchestrator → persistence | |
 | `invoker:replace-task` | main.ts:1257 | N/A (owner) | `orchestrator.replaceTask()` → persistence | |
 | `invoker:delete-workflow` | main.ts:867 | N/A (owner) | `orchestrator.deleteWorkflow()` → persistence | |
@@ -64,7 +64,7 @@ This table lists every mutating command path and how the owner-boundary contract
 | `delete` | headless.ts:1005 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
 | `delete-all` | headless.ts:434 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
 | `set command` | headless.ts:829 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
-| `set executor` | headless.ts:841 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
+| `set pool` | headless.ts:841 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
 | `set agent` | headless.ts:853 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
 | `set merge-mode` | headless.ts:1011 | **Yes** (line 365) | `tryDelegateExec()` OR standalone writable | |
 | **Headless Read-Only Commands** (never delegate, always read-only) |
@@ -83,7 +83,7 @@ This table lists every mutating command path and how the owner-boundary contract
 | `cancelWorkflow()` | workflow-actions.ts:103 | N/A | Called by owner → orchestrator → persistence | |
 | `rebaseAndRetry()` | workflow-actions.ts:117 | N/A | Called by owner → `bumpGenerationAndRecreate()` → persistence | |
 | `editTaskCommand()` | workflow-actions.ts:136 | N/A | Called by owner → orchestrator → persistence | |
-| `editTaskType()` | workflow-actions.ts:144 | N/A | Called by owner → orchestrator → persistence | |
+| `editTaskPool()` | workflow-actions.ts:144 | N/A | Called by owner → orchestrator → persistence | |
 | `editTaskAgent()` | workflow-actions.ts:153 | N/A | Called by owner → orchestrator → persistence | |
 | `selectExperiment()` | workflow-actions.ts:161 | N/A | Called by owner → orchestrator → persistence | |
 | `setWorkflowMergeMode()` | workflow-actions.ts:189 | N/A | Called by owner → persistence.updateWorkflow | |

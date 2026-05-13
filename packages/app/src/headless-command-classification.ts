@@ -109,7 +109,7 @@ export function isHeadlessMutatingCommand(args: string[]): boolean {
 
   if (command === 'set') {
     const sub = args[1];
-    return ['command', 'executor', 'agent', 'merge-mode', 'gate-policy'].includes(sub ?? '');
+    return ['command', 'pool', 'agent', 'merge-mode', 'gate-policy'].includes(sub ?? '');
   }
 
   if (['list', 'status', 'task-status', 'queue', 'audit', 'session', 'query-select', 'watch'].includes(command)) {
@@ -128,6 +128,6 @@ export function isHeadlessMutatingCommand(args: string[]): boolean {
     'approve', 'reject', 'input', 'select',
     'cancel', 'cancel-workflow',
     'delete', 'delete-workflow', 'delete-all',
-    'edit', 'edit-executor', 'edit-type', 'edit-agent', 'set-merge-mode',
+    'edit', 'edit-agent', 'set-merge-mode',
   ].includes(command);
 }

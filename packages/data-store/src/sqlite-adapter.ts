@@ -381,6 +381,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
         started_at TEXT,
         completed_at TEXT,
         execution_generation INTEGER DEFAULT 0,
+        pool_id TEXT,
         docker_image TEXT,
 
         FOREIGN KEY (workflow_id) REFERENCES workflows(id)
@@ -586,6 +587,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       'ALTER TABLE attempts ADD COLUMN claimed_at TEXT',
       'ALTER TABLE attempts ADD COLUMN lease_expires_at TEXT',
       'ALTER TABLE tasks ADD COLUMN task_state_version INTEGER NOT NULL DEFAULT 1',
+      'ALTER TABLE tasks ADD COLUMN pool_id TEXT',
     ];
     for (const sql of migrations) {
       try {
@@ -755,6 +757,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
         is_fixing_with_ai,
         execution_generation,
         remote_target_id,
+        pool_id,
         docker_image,
         execution_agent,
         agent_name,
@@ -774,6 +777,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
         ?, ?, ?, ?,
         ?, ?,
         ?, ?, ?, ?,
+        ?,
         ?,
         ?,
         ?,
@@ -807,7 +811,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       null, cfg.featureBranch ?? null,
       cfg.isMergeNode ? 1 : 0,
       0, null,
-      cfg.executorType ?? null,
+      null,
       exec.agentSessionId ?? null,
       exec.workspacePath ?? null,
       exec.containerId ?? null,
@@ -830,7 +834,8 @@ export class SQLiteAdapter implements PersistenceAdapter {
       exec.reviewProviderId ?? null,
       exec.isFixingWithAI ? 1 : 0,
       exec.generation ?? 0,
-      cfg.remoteTargetId ?? null,
+      null,
+      cfg.poolId ?? null,
       cfg.dockerImage ?? null,
       cfg.executionAgent ?? null,
       exec.agentName ?? null,
@@ -864,8 +869,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
         testPlan: 'test_plan',
         reproCommand: 'repro_command',
         featureBranch: 'feature_branch',
-        executorType: 'executor_type',
-        remoteTargetId: 'remote_target_id',
+        poolId: 'pool_id',
         dockerImage: 'docker_image',
         executionAgent: 'execution_agent',
       };
@@ -1697,8 +1701,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
         isReconciliation: row.is_reconciliation === 1 ? true : undefined,
         requiresManualApproval: row.requires_manual_approval === 1 ? true : undefined,
         featureBranch: row.feature_branch ?? undefined,
-        executorType: normalizeExecutorType(row.executor_type ?? undefined),
-        remoteTargetId: row.remote_target_id ?? undefined,
+        poolId: row.pool_id ?? undefined,
         dockerImage: row.docker_image ?? undefined,
         isMergeNode: row.is_merge_node === 1 ? true : undefined,
         summary: row.summary ?? undefined,

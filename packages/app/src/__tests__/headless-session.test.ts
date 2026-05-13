@@ -11,6 +11,11 @@ vi.mock('../config.js', () => ({
     remoteTargets: {
       remote_do_1: { host: '1.2.3.4', user: 'invoker', sshKeyPath: '/tmp/key' },
     },
+    executionPools: {
+      ssh_light: {
+        members: [{ type: 'ssh' as const, id: 'remote_do_1' }],
+      },
+    },
   }),
 }));
 
@@ -21,7 +26,7 @@ function makeSshTask(overrides: Partial<TaskState['config']> = {}): TaskState {
     status: 'completed',
     dependencies: [],
     config: {
-      executorType: 'ssh',
+      poolId: 'ssh_light',
       ...overrides,
     },
     execution: {
@@ -66,7 +71,7 @@ describe('resolveAgentSession', () => {
     expect(mockDriver.loadSession).toHaveBeenCalledWith('sess-abc');
   });
 
-  it('falls back to first remote target when SSH task has no remoteTargetId', async () => {
+  it('uses the SSH member from the task pool', async () => {
     const mockDriver = {
       processOutput: vi.fn(),
       loadSession: vi.fn(() => null), // not found locally
@@ -78,8 +83,7 @@ describe('resolveAgentSession', () => {
       getSessionDriver: () => mockDriver,
     } as unknown as AgentRegistry;
 
-    // SSH task without remoteTargetId
-    const task = makeSshTask({ remoteTargetId: undefined });
+    const task = makeSshTask();
     const result = await resolveAgentSession('sess-abc', 'codex', registry, [task]);
 
     expect(mockDriver.fetchRemoteSession).toHaveBeenCalledWith(
@@ -96,40 +100,41 @@ describe('resolveAgentSession', () => {
     });
   });
 
-  it('uses explicit remoteTargetId when present', async () => {
+  it('returns an error when the task pool has no SSH target', async () => {
     const mockDriver = {
       processOutput: vi.fn(),
       loadSession: vi.fn(() => null),
-      parseSession: vi.fn(() => [{ role: 'assistant', content: 'targeted' }]),
-      inspectSession: vi.fn(() => ({ state: 'finished' })),
-      fetchRemoteSession: vi.fn(async () => '{"messages":[]}'),
+      parseSession: vi.fn(),
+      inspectSession: vi.fn(),
+      fetchRemoteSession: vi.fn(),
     };
     const registry = {
       getSessionDriver: () => mockDriver,
     } as unknown as AgentRegistry;
 
-    const task = makeSshTask({ remoteTargetId: 'remote_do_1' });
+    const task = makeSshTask({ poolId: 'missing_pool' });
     const result = await resolveAgentSession('sess-abc', 'codex', registry, [task]);
 
-    expect(mockDriver.fetchRemoteSession).toHaveBeenCalledWith(
-      'sess-abc',
-      { host: '1.2.3.4', user: 'invoker', sshKeyPath: '/tmp/key' },
-    );
+    expect(mockDriver.fetchRemoteSession).not.toHaveBeenCalled();
     expect(result).toEqual({
       agentName: 'codex',
       sessionId: 'sess-abc',
-      state: 'finished',
-      reason: undefined,
-      messages: [{ role: 'assistant', content: 'targeted' }],
-      source: 'remote',
+      state: 'error',
+      messages: [],
+      reason: 'Session file not found',
     });
   });
 
-  it('returns null when SSH task has no remoteTargetId and no targets configured', async () => {
+  it('returns error when the task pool points at no configured target', async () => {
     // Override mock for this test
     const configModule = await import('../config.js');
     const loadConfigSpy = vi.spyOn(configModule, 'loadConfig').mockReturnValue({
       remoteTargets: {},
+      executionPools: {
+        ssh_light: {
+          members: [{ type: 'ssh', id: 'remote_do_1' }],
+        },
+      },
     } as any);
 
     const mockDriver = {
@@ -143,10 +148,9 @@ describe('resolveAgentSession', () => {
       getSessionDriver: () => mockDriver,
     } as unknown as AgentRegistry;
 
-    const task = makeSshTask({ remoteTargetId: undefined });
+    const task = makeSshTask();
     const result = await resolveAgentSession('sess-abc', 'codex', registry, [task]);
 
-    // fetchRemoteSession should NOT be called because there's no target
     expect(mockDriver.fetchRemoteSession).not.toHaveBeenCalled();
     expect(result).toEqual({
       agentName: 'codex',

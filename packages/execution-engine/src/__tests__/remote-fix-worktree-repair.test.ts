@@ -48,12 +48,15 @@ describe('fixWithAgentImpl remote worktree repair', () => {
       createMergeWorktree: async () => '/tmp/wt',
       removeMergeWorktree: async () => {},
       spawnAgentFix: async () => ({ stdout: '', sessionId: '' }),
-      getRemoteTargetConfig: () => ({
-        host: 'remote.example',
-        user: 'invoker',
-        sshKeyPath: '/tmp/key',
-        remoteInvokerHome: '/home/invoker/.invoker',
-        managedWorkspaces: true,
+      getRemoteTargetForTask: () => ({
+        id: 'remote-1',
+        target: {
+          host: 'remote.example',
+          user: 'invoker',
+          sshKeyPath: '/tmp/key',
+          remoteInvokerHome: '/home/invoker/.invoker',
+          managedWorkspaces: true,
+        },
       }),
       agentRegistry: registerBuiltinAgents(),
     };
@@ -73,11 +76,7 @@ describe('fixWithAgentImpl remote worktree repair', () => {
         workspacePath: stalePath,
         branch,
       },
-      config: {
-        command: 'pnpm test',
-        executorType: 'ssh' as const,
-        remoteTargetId: 'remote-1',
-      },
+      config: { command: 'pnpm test', poolId: 'ssh-pool' },
     };
 
     const { host, updateTask, appendTaskOutput } = makeHost(task);

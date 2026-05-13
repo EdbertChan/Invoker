@@ -957,12 +957,11 @@ describe('TaskRunner', () => {
       const task = makeTask({
         id: 'failing-start',
         status: 'running',
-        config: { command: 'echo hi', executorType: 'ssh' as any },
+        config: { command: 'echo hi' },
       });
       await executor.executeTask(task);
 
       expect(updateTask).toHaveBeenCalledWith('failing-start', {
-        config: { executorType: 'ssh' },
         execution: {
           workspacePath: '~/.invoker/worktrees/repo/task-1',
           branch: 'experiment/task-1-abc12345',
@@ -1019,7 +1018,7 @@ describe('TaskRunner', () => {
       const task = makeTask({
         id: 'stale-1',
         status: 'running',
-        config: { command: 'echo hi', executorType: 'ssh' as any },
+        config: { command: 'echo hi' },
         execution: { selectedAttemptId: 'attempt-1', generation: 0 },
       });
       await runner.executeTask(task);
@@ -1072,7 +1071,7 @@ describe('TaskRunner', () => {
       const task = makeTask({
         id: 'stale-gen',
         status: 'running',
-        config: { command: 'echo hi', executorType: 'ssh' as any },
+        config: { command: 'echo hi' },
         execution: { generation: 1 },
       });
       await runner.executeTask(task);
@@ -1124,14 +1123,13 @@ describe('TaskRunner', () => {
       const task = makeTask({
         id: 'current-1',
         status: 'running',
-        config: { command: 'echo hi', executorType: 'ssh' as any },
+        config: { command: 'echo hi' },
         execution: { selectedAttemptId: 'attempt-1', generation: 0 },
       });
       await runner.executeTask(task);
 
       // Metadata SHOULD be persisted when lineage is current
       expect(updateTask).toHaveBeenCalledWith('current-1', {
-        config: { executorType: 'ssh' },
         execution: {
           workspacePath: '/tmp/current-worktree',
           branch: 'experiment/current-branch',
@@ -1183,7 +1181,7 @@ describe('TaskRunner', () => {
       const task = makeTask({
         id: 'inner-stale',
         status: 'running',
-        config: { command: 'echo hi', executorType: 'ssh' as any },
+        config: { command: 'echo hi' },
         execution: { selectedAttemptId: 'attempt-old', generation: 0 },
       });
       await runner.executeTask(task);
@@ -2409,7 +2407,6 @@ describe('TaskRunner', () => {
 
       // Default mergeMode is 'manual', so setTaskAwaitingApproval is called with metadata
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({ branch: 'plan/feature', workspacePath: '/tmp/mock-wt' }),
       }));
     });
@@ -2649,7 +2646,6 @@ describe('TaskRunner', () => {
 
       // Should call setTaskAwaitingApproval with metadata instead of handleWorkerResponse
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({ branch: 'plan/feature', workspacePath: '/tmp/mock-wt' }),
       }));
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
@@ -2835,7 +2831,6 @@ describe('TaskRunner', () => {
 
       // Should set task awaiting approval with PR metadata (not handleWorkerResponse)
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({
           branch: 'plan/feature',
           reviewUrl: 'https://github.com/owner/repo/pull/42',
@@ -3006,7 +3001,6 @@ console.log(JSON.stringify(out));
 
       // No featureBranch set → gateWorkspacePath is undefined
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({ workspacePath: undefined }),
       }));
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
@@ -3130,7 +3124,6 @@ console.log(JSON.stringify(out));
 
       // Should pass PR metadata through setTaskAwaitingApproval
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({
           branch: 'plan/feature',
           reviewUrl: 'https://github.com/owner/repo/pull/55',
@@ -3315,7 +3308,6 @@ console.log(JSON.stringify(out));
 
       // No featureBranch set → gateWorkspacePath is undefined
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({ workspacePath: undefined }),
       }));
     });
@@ -6258,8 +6250,7 @@ console.log(JSON.stringify(out));
         id: 'ssh-fix-task',
         description: 'Apply approved fix over ssh',
         config: {
-          executorType: 'ssh',
-          remoteTargetId: 'remote-1',
+          poolId: 'ssh-pool',
           command: 'bash -lc false',
         },
         execution: {
@@ -6288,6 +6279,9 @@ console.log(JSON.stringify(out));
             user: 'invoker',
             sshKeyPath: '/tmp/test-key',
           },
+        }),
+        executionPoolsProvider: () => ({
+          'ssh-pool': { members: [{ type: 'ssh', id: 'remote-1' }] },
         }),
       });
 
@@ -7427,14 +7421,14 @@ console.log(JSON.stringify(out));
 
       const task = makeTask({
         id: 'ssh-task',
-        config: { executorType: 'ssh', remoteTargetId: 'do-droplet' },
+        config: { poolId: 'ssh-pool' },
       });
 
-      const executor1 = executor.selectExecutor(task);
+      const executor1 = executor.selectExecutor(task, { poolId: 'ssh-pool', memberId: 'do-droplet', type: 'ssh' });
       expect(executor1.type).toBe('ssh');
       expect((executor1 as any).sshKeyPath).toBe('/old/key');
 
-      const executor2 = executor.selectExecutor(task);
+      const executor2 = executor.selectExecutor(task, { poolId: 'ssh-pool', memberId: 'do-droplet', type: 'ssh' });
       expect((executor2 as any).sshKeyPath).toBe('/new/key');
 
       expect(provider).toHaveBeenCalledTimes(2);
@@ -7452,10 +7446,10 @@ console.log(JSON.stringify(out));
 
       const task = makeTask({
         id: 'ssh-task',
-        config: { executorType: 'ssh', remoteTargetId: 'missing-target' },
+        config: { poolId: 'ssh-pool' },
       });
 
-      expect(() => executor.selectExecutor(task)).toThrow('no matching');
+      expect(() => executor.selectExecutor(task, { poolId: 'ssh-pool', memberId: 'missing-target', type: 'ssh' })).toThrow('no matching');
     });
   });
 
@@ -7656,7 +7650,6 @@ console.log(JSON.stringify(out));
       await executor.publishAfterFix(mergeTask);
 
       expect(orchestrator.setTaskAwaitingApproval).toHaveBeenCalledWith('__merge__wf-pub', expect.objectContaining({
-        config: expect.objectContaining({ executorType: 'worktree' }),
         execution: expect.objectContaining({ workspacePath: '/tmp/gate-clone' }),
       }));
 
@@ -7760,7 +7753,7 @@ console.log(JSON.stringify(out));
   });
 
   describe('SSH Executor Caching', () => {
-    it('caches SSH executors by remoteTargetId and reuses them', () => {
+    it('caches SSH executors by selected pool member and reuses them', () => {
       const remoteTargets = {
         'remote-a': {
           host: 'dev.example.com',
@@ -7786,24 +7779,24 @@ console.log(JSON.stringify(out));
 
       const task1 = makeTask({
         id: 'task-1',
-        config: { executorType: 'ssh', remoteTargetId: 'remote-a' },
+        config: { poolId: 'ssh-pool' },
       });
       const task2 = makeTask({
         id: 'task-2',
-        config: { executorType: 'ssh', remoteTargetId: 'remote-a' },
+        config: { poolId: 'ssh-pool' },
       });
       const task3 = makeTask({
         id: 'task-3',
-        config: { executorType: 'ssh', remoteTargetId: 'remote-b' },
+        config: { poolId: 'ssh-pool' },
       });
 
-      const executor1 = executor.selectExecutor(task1);
-      const executor2 = executor.selectExecutor(task2);
-      const executor3 = executor.selectExecutor(task3);
+      const executor1 = executor.selectExecutor(task1, { poolId: 'ssh-pool', memberId: 'remote-a', type: 'ssh' });
+      const executor2 = executor.selectExecutor(task2, { poolId: 'ssh-pool', memberId: 'remote-a', type: 'ssh' });
+      const executor3 = executor.selectExecutor(task3, { poolId: 'ssh-pool', memberId: 'remote-b', type: 'ssh' });
 
-      // task1 and task2 share the same remoteTargetId → same executor instance
+      // task1 and task2 share the same selected pool member -> same executor instance
       expect(executor1).toBe(executor2);
-      // task3 has a different remoteTargetId → different executor instance
+      // task3 has a different selected pool member -> different executor instance
       expect(executor1).not.toBe(executor3);
       expect(executor2).not.toBe(executor3);
     });
@@ -7823,11 +7816,11 @@ console.log(JSON.stringify(out));
 
       const task1 = makeTask({
         id: 'task-1',
-        config: { executorType: 'worktree' },
+        config: {},
       });
       const task2 = makeTask({
         id: 'task-2',
-        config: { executorType: 'worktree' },
+        config: {},
       });
 
       const executor1 = executor.selectExecutor(task1);
@@ -7859,22 +7852,22 @@ console.log(JSON.stringify(out));
 
       const task1 = makeTask({
         id: 'task-1',
-        config: { executorType: 'ssh', remoteTargetId: 'remote-a' },
+        config: { poolId: 'ssh-pool' },
       });
       const task2 = makeTask({
         id: 'task-2',
-        config: { executorType: 'ssh', remoteTargetId: 'remote-a' },
+        config: { poolId: 'ssh-pool' },
       });
 
-      const executor1 = executor.selectExecutor(task1);
+      const executor1 = executor.selectExecutor(task1, { poolId: 'ssh-pool', memberId: 'remote-a', type: 'ssh' });
       await executor.clearSshExecutorCache();
-      const executor2 = executor.selectExecutor(task2);
+      const executor2 = executor.selectExecutor(task2, { poolId: 'ssh-pool', memberId: 'remote-a', type: 'ssh' });
 
       // After clearing cache, a new executor instance should be created
       expect(executor1).not.toBe(executor2);
     });
 
-    it('throws when SSH task has no remoteTargetId', () => {
+    it('throws when SSH pool selection has no member id', () => {
       const executor = new TaskRunner({
         orchestrator: { getTask: () => null, getAllTasks: () => [] } as any,
         persistence: {} as any,
@@ -7885,13 +7878,12 @@ console.log(JSON.stringify(out));
 
       const task = makeTask({
         id: 'task-missing-target',
-        config: { executorType: 'ssh' },
       });
 
-      expect(() => executor.selectExecutor(task)).toThrow('resolved to executorType=ssh but no pool member target was assigned');
+      expect(() => executor.selectExecutor(task, { poolId: 'ssh-pool', memberId: '', type: 'ssh' })).toThrow('no matching');
     });
 
-    it('throws when remoteTargetId does not exist in config', () => {
+    it('throws when selected SSH pool member does not exist in config', () => {
       const remoteTargets = {
         'remote-a': {
           host: 'dev.example.com',
@@ -7910,10 +7902,10 @@ console.log(JSON.stringify(out));
 
       const task = makeTask({
         id: 'task-unknown-target',
-        config: { executorType: 'ssh', remoteTargetId: 'remote-unknown' },
+        config: { poolId: 'ssh-pool' },
       });
 
-      expect(() => executor.selectExecutor(task)).toThrow('no matching entry exists in remoteTargets config');
+      expect(() => executor.selectExecutor(task, { poolId: 'ssh-pool', memberId: 'remote-unknown', type: 'ssh' })).toThrow('no matching entry exists in remoteTargets config');
     });
   });
 
@@ -7942,7 +7934,7 @@ console.log(JSON.stringify(out));
 
       const task = makeTask({
         id: 'task-1',
-        config: { executorType: 'ssh', poolId: 'ssh-light' },
+        config: { poolId: 'ssh-light' },
       });
       const first = await (runner as any).acquirePoolSlot(task);
       expect(first).toEqual({ poolId: 'ssh-light', memberId: 'remote-a', type: 'ssh' });
@@ -7981,12 +7973,53 @@ console.log(JSON.stringify(out));
 
       const task = makeTask({
         id: 'task-rr',
-        config: { executorType: 'ssh', poolId: 'ssh-light' },
+        config: { poolId: 'ssh-light' },
       });
       const first = await (runner as any).acquirePoolSlot(task);
       const second = await (runner as any).acquirePoolSlot(task);
       expect(first.memberId).toBe('remote-a');
       expect(second.memberId).toBe('remote-b');
+    });
+
+    it('schedules mixed members with the same id independently', async () => {
+      const runner = new TaskRunner({
+        orchestrator: { getTask: () => null, getAllTasks: () => [] } as any,
+        persistence: {} as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+        cwd: '/tmp',
+        remoteTargetsProvider: () => ({
+          local: { host: 'localhost', user: 'root', sshKeyPath: '/tmp/id', maxConcurrentTasks: 1 },
+        }),
+        executionPoolsProvider: () => ({
+          'mixed-pool': {
+            members: [
+              { type: 'worktree', id: 'local' },
+              { type: 'ssh', id: 'local' },
+            ],
+            selectionStrategy: 'roundRobin',
+          },
+        }),
+      });
+
+      const task = makeTask({
+        id: 'task-mixed',
+        config: { poolId: 'mixed-pool' },
+      });
+      const first = await (runner as any).acquirePoolSlot(task);
+      const second = await (runner as any).acquirePoolSlot(task);
+
+      expect(first).toEqual({ poolId: 'mixed-pool', memberId: 'local', type: 'worktree' });
+      expect(second).toEqual({ poolId: 'mixed-pool', memberId: 'local', type: 'ssh' });
+
+      const thirdPromise = (runner as any).acquirePoolSlot(task);
+      let thirdResolved = false;
+      thirdPromise.then(() => { thirdResolved = true; });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(thirdResolved).toBe(false);
+
+      (runner as any).releasePoolSlot(first);
+      const third = await thirdPromise;
+      expect(third).toEqual({ poolId: 'mixed-pool', memberId: 'local', type: 'worktree' });
     });
 
     it('rejects shared members across different pools', async () => {
@@ -8096,7 +8129,6 @@ console.log(JSON.stringify(out));
         status: 'pending',
         config: {
           command: 'echo test',
-          executorType: 'ssh',
           poolId: 'ssh-pool',
         },
       });
@@ -8124,13 +8156,13 @@ console.log(JSON.stringify(out));
         executionPoolsProvider: () => ({
           'ssh-pool': { members: [{ type: 'ssh', id: 'remote-1' }] },
         }),
+        sshExecutorFactory: () => managedSshExecutor as any,
       });
 
       await executor.executeTask(task);
 
       // Check that metadata was persisted immediately after start
       expect(updateSpy).toHaveBeenCalledWith('ssh-task-1', {
-        config: { executorType: 'ssh' },
         execution: {
           workspacePath: '~/.invoker/worktrees/abc123/experiment-ssh-task-1-def456',
           branch: 'experiment/ssh-task-1-def456',
@@ -8163,7 +8195,7 @@ console.log(JSON.stringify(out));
       const task = makeTask({
         id: 'task-failed',
         status: 'pending',
-        config: { command: 'echo test', executorType: 'ssh', poolId: 'ssh-pool' },
+        config: { command: 'echo test', poolId: 'ssh-pool' },
       });
 
       const updateSpy = vi.fn();
@@ -8190,13 +8222,13 @@ console.log(JSON.stringify(out));
         executionPoolsProvider: () => ({
           'ssh-pool': { members: [{ type: 'ssh', id: 'remote-1' }] },
         }),
+        sshExecutorFactory: () => failingExecutor as any,
       });
 
       await executor.executeTask(task);
 
       // Check that metadata was persisted despite error
       expect(updateSpy).toHaveBeenCalledWith('task-failed', {
-        config: { executorType: 'ssh' },
         execution: {
           workspacePath: '~/.invoker/worktrees/abc123/task-failed-xyz',
           branch: 'experiment/task-failed-xyz',
@@ -8307,7 +8339,7 @@ console.log(JSON.stringify(out));
       const task = makeTask({
         id: 'byo-task-1',
         status: 'pending',
-        config: { command: 'pwd', executorType: 'ssh', poolId: 'ssh-pool' },
+        config: { command: 'pwd', poolId: 'ssh-pool' },
       });
 
       const updateSpy = vi.fn();
@@ -8333,13 +8365,13 @@ console.log(JSON.stringify(out));
         executionPoolsProvider: () => ({
           'ssh-pool': { members: [{ type: 'ssh', id: 'remote-1' }] },
         }),
+        sshExecutorFactory: () => byoExecutor as any,
       });
 
       await executor.executeTask(task);
 
       // Check that metadata was persisted with workspacePath and branch=undefined
       expect(updateSpy).toHaveBeenCalledWith('byo-task-1', {
-        config: { executorType: 'ssh' },
         execution: {
           workspacePath: '/remote/user-provided/workspace',
           branch: undefined,
@@ -9469,9 +9501,8 @@ console.log(JSON.stringify(out));
         status: 'running',
         config: {
           workflowId: 'wf-1',
-          executorType: 'ssh',
           command: 'echo hi',
-          remoteTargetId: 'remote-1',
+          poolId: 'ssh-pool',
         },
         execution: { generation: 0, selectedAttemptId: 'attempt-ssh-1' },
       });
@@ -9518,6 +9549,13 @@ console.log(JSON.stringify(out));
         } as any,
         cwd: '/tmp',
         callbacks: { onHeartbeat: vi.fn() },
+        remoteTargetsProvider: () => ({
+          'remote-1': { host: 'ssh', user: 'u', sshKeyPath: 'k' },
+        }),
+        executionPoolsProvider: () => ({
+          'ssh-pool': { members: [{ type: 'ssh', id: 'remote-1' }] },
+        }),
+        sshExecutorFactory: () => sshExecutor,
       });
 
       const pending = runner.executeTask(runningTask);

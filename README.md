@@ -92,9 +92,9 @@ Minimal example:
 
 More examples: [docs/invoker-config-example.json](docs/invoker-config-example.json), [docs/remote-ssh-targets.md](docs/remote-ssh-targets.md), [docs/docker-executor.md](docs/docker-executor.md).
 
-### Multiple SSH Executors
+### Multiple SSH Pool Members
 
-Define multiple entries under `remoteTargets`, then select them per task with `executorType: ssh` and `remoteTargetId`.
+Define multiple entries under `remoteTargets`, group them in `executionPools`, then select the pool per task with `poolId`.
 
 ```yaml
 name: multi-remote-example
@@ -104,17 +104,15 @@ tasks:
   - id: test-a
     description: Run checks on remote target A
     command: pnpm test
-    executorType: ssh
-    remoteTargetId: staging-a
+    poolId: ci-remotes
 
   - id: test-b
     description: Run checks on remote target B
     command: pnpm test
-    executorType: ssh
-    remoteTargetId: staging-b
+    poolId: ci-remotes
 ```
 
-Use this when you want Invoker to spread work across machines you already manage. The SSH executor does not provision the hosts for you; it connects to the target you name and runs there.
+Use this when you want Invoker to spread work across machines you already manage. The pool scheduler picks an available member; tasks no longer name an individual SSH target.
 
 ## Quick start
 

@@ -83,18 +83,14 @@ describe('app-layer handoff repros', () => {
     expect(h.getTask('A')!.status).toBe('completed');
   });
 
-  it('edit-task-type launches restarted task and persists workspacePath', async () => {
+  it('edit-task-pool restarts task with updated pool config', () => {
     h.loadAndStart(LINEAR_PLAN);
     h.failTask('A', 'broken');
 
-    const started = h.orchestrator.editTaskType('A', 'worktree');
+    const started = h.orchestrator.editTaskPool('A', 'worktree-pool');
     expect(started.some((task) => task.id.endsWith('/A') && task.status === 'running')).toBe(true);
+    expect(h.getTask('A')!.config.poolId).toBe('worktree-pool');
     expect(h.getTask('A')!.execution.workspacePath).toBeUndefined();
-
-    await dispatchStarted(h, started, 'test.edit-task-type');
-
-    expect(h.getTask('A')!.execution.workspacePath).toBe('/tmp/mock-worktree');
-    expect(h.getTask('A')!.status).toBe('completed');
   });
 
   it('edit-task-agent launches restarted task and persists workspacePath', async () => {

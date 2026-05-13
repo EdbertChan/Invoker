@@ -33,8 +33,7 @@ describe('MUTATION_POLICIES', () => {
     expect(MUTATION_POLICIES.command.action).toBe('recreateTask');
     expect(MUTATION_POLICIES.prompt.action).toBe('recreateTask');
     expect(MUTATION_POLICIES.executionAgent.action).toBe('recreateTask');
-    expect(MUTATION_POLICIES.executorType.action).toBe('retryTask');
-    expect(MUTATION_POLICIES.remoteTargetId.action).toBe('recreateTask');
+    expect(MUTATION_POLICIES.poolId.action).toBe('retryTask');
     expect(MUTATION_POLICIES.selectedExperiment.action).toBe('recreateTask');
     expect(MUTATION_POLICIES.selectedExperimentSet.action).toBe('recreateTask');
     expect(MUTATION_POLICIES.mergeMode.action).toBe('retryTask');

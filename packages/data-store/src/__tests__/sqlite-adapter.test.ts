@@ -317,28 +317,30 @@ describe('SQLiteAdapter', () => {
     });
   });
 
-  describe('docker executor config', () => {
-    it('round-trips task-level dockerImage on save and update', () => {
+  describe('task routing config', () => {
+    it('round-trips task-level dockerImage and poolId on save and update', () => {
       adapter.saveWorkflow(testWorkflow);
       adapter.saveTask('wf-1', makeTask('t1', {
         config: {
-          executorType: 'docker',
           dockerImage: 'node:20',
+          poolId: 'build-pool',
         },
       }));
 
       let [loaded] = adapter.loadTasks('wf-1');
-      expect(loaded.config.executorType).toBe('docker');
       expect(loaded.config.dockerImage).toBe('node:20');
+      expect(loaded.config.poolId).toBe('build-pool');
 
       adapter.updateTask('t1', {
         config: {
           dockerImage: 'invoker-agent:latest',
+          poolId: 'deploy-pool',
         },
       });
 
       [loaded] = adapter.loadTasks('wf-1');
       expect(loaded.config.dockerImage).toBe('invoker-agent:latest');
+      expect(loaded.config.poolId).toBe('deploy-pool');
     });
   });
 

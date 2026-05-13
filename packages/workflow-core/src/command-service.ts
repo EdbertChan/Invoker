@@ -207,15 +207,14 @@ export class CommandService {
     );
   }
 
-    async editTaskType(
-    envelope: CommandEnvelope<{ taskId: string; executorType: string; remoteTargetId?: string }>,
+    async editTaskPool(
+    envelope: CommandEnvelope<{ taskId: string; poolId?: string }>,
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
-      'EDIT_TASK_TYPE_FAILED',
-      () => this.orchestrator.editTaskType(
+      'EDIT_TASK_POOL_FAILED',
+      () => this.orchestrator.editTaskPool(
         envelope.payload.taskId,
-        envelope.payload.executorType,
-        envelope.payload.remoteTargetId,
+        envelope.payload.poolId,
       ),
       this.workflowIdForTask(envelope.payload.taskId),
     );
@@ -237,7 +236,7 @@ export class CommandService {
    * (chart Decision Table row "Change merge mode";
    * `MUTATION_POLICIES.mergeMode` → `retryTask` / task scope, scoped
    * to the merge node). Mirrors the Step 5/7/8 retry-class seams
-   * (`editTaskType` / `selectExperiment` / `selectExperiments`) rather
+   * (`editTaskPool` / `selectExperiment` / `selectExperiments`) rather
    * than the recreate-class `editTaskCommand` / `editTaskPrompt` /
    * `editTaskAgent` seams: a merge-mode flip changes the merge
    * execution policy but preserves the merge node's branch /
@@ -279,7 +278,7 @@ export class CommandService {
    * (chart Decision Table row "Change fix prompt or fix context while
    * `fixing_with_ai`"; `MUTATION_POLICIES.fixContext` → `retryTask` /
    * task scope, scoped to the failed/fixing task). Mirrors the Step
-   * 5/7/8/9 retry-class seams (`editTaskType` / `selectExperiment` /
+   * 5/7/8/9 retry-class seams (`editTaskPool` / `selectExperiment` /
    * `selectExperiments` / `editTaskMergeMode`) rather than the
    * recreate-class `editTaskCommand` / `editTaskPrompt` /
    * `editTaskAgent` seams: a fix prompt/context edit redirects the

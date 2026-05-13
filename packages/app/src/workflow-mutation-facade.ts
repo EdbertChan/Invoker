@@ -34,7 +34,7 @@ import {
   forkWorkflow as sharedForkWorkflow,
   editTaskCommand as sharedEditTaskCommand,
   editTaskPrompt as sharedEditTaskPrompt,
-  editTaskType as sharedEditTaskType,
+  editTaskPool as sharedEditTaskPool,
   editTaskAgent as sharedEditTaskAgent,
   setTaskExternalGatePolicies as sharedSetTaskExternalGatePolicies,
   setWorkflowMergeMode as sharedSetWorkflowMergeMode,
@@ -177,18 +177,16 @@ export class WorkflowMutationFacade {
     return this.finalizeWithTopup(started, 'facade.edit-task-prompt');
   }
 
-  async editTaskType(
+  async editTaskPool(
     taskId: string,
-    executorType: string,
-    remoteTargetId?: string,
+    poolId: string | undefined,
   ): Promise<MutationResult> {
-    const started = sharedEditTaskType(
+    const started = sharedEditTaskPool(
       taskId,
-      executorType,
+      poolId,
       { orchestrator: this.deps.orchestrator },
-      remoteTargetId,
     );
-    return this.finalizeWithTopup(started, 'facade.edit-task-type');
+    return this.finalizeWithTopup(started, 'facade.edit-task-pool');
   }
 
   async editTaskAgent(taskId: string, agentName: string): Promise<MutationResult> {

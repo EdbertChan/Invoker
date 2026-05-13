@@ -97,7 +97,7 @@ function createMocks() {
       retryTask: vi.fn(() => [makeTask()]),
       editTaskCommand: vi.fn(() => [makeTask()]),
       editTaskPrompt: vi.fn(() => [makeTask()]),
-      editTaskType: vi.fn(() => [makeTask()]),
+      editTaskPool: vi.fn(() => [makeTask()]),
       editTaskAgent: vi.fn(() => [makeTask()]),
       setTaskExternalGatePolicies: vi.fn(() => [makeTask()]),
       cancelTask: vi.fn(() => ({ cancelled: ['task-1'], runningCancelled: ['task-1'] })),
@@ -200,7 +200,7 @@ beforeEach(() => {
   mocks.orchestrator.beginConflictResolution.mockReturnValue({ savedError: 'saved-error' });
   mocks.orchestrator.editTaskCommand.mockReturnValue([makeTask()]);
   mocks.orchestrator.editTaskPrompt.mockReturnValue([makeTask()]);
-  mocks.orchestrator.editTaskType.mockReturnValue([makeTask()]);
+  mocks.orchestrator.editTaskPool.mockReturnValue([makeTask()]);
   mocks.orchestrator.setTaskExternalGatePolicies.mockReturnValue([makeTask()]);
   mocks.orchestrator.cancelTask.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
   mocks.orchestrator.cancelWorkflow.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
@@ -619,39 +619,27 @@ describe('POST /api/tasks/:id/edit-prompt', () => {
   });
 });
 
-describe('POST /api/tasks/:id/edit-type', () => {
-  it('edits task type', async () => {
-    const res = await request(port, 'POST', '/api/tasks/task-1/edit-type', { executorType: 'docker' });
+describe('POST /api/tasks/:id/edit-pool', () => {
+  it('edits task pool', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/edit-pool', { poolId: 'ssh-light' });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.action).toBe('type_edited');
-    expect(mocks.orchestrator.editTaskType).toHaveBeenCalledWith('task-1', 'docker', undefined);
+    expect(res.body.action).toBe('pool_edited');
+    expect(mocks.orchestrator.editTaskPool).toHaveBeenCalledWith('task-1', 'ssh-light');
   });
 
-  it('passes remoteTargetId when provided', async () => {
-    const res = await request(port, 'POST', '/api/tasks/task-1/edit-type', {
-      executorType: 'ssh',
-      remoteTargetId: 'remote-1',
-    });
-    expect(res.status).toBe(200);
-    expect(mocks.orchestrator.editTaskType).toHaveBeenCalledWith('task-1', 'ssh', 'remote-1');
-  });
-
-  it('returns 400 when executorType is missing', async () => {
-    const res = await request(port, 'POST', '/api/tasks/task-1/edit-type', {});
+  it('returns 400 when poolId is missing', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/edit-pool', {});
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('Missing "executorType"');
+    expect(res.body.error).toContain('Missing "poolId"');
   });
 
-  it('forwards a remoteTargetId-only change (host change)', async () => {
-    const res = await request(port, 'POST', '/api/tasks/task-1/edit-type', {
-      executorType: 'ssh',
-      remoteTargetId: 'remote-b',
-    });
+  it('dispatches runnable work after a pool change', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/edit-pool', { poolId: 'worktree-pool' });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.action).toBe('type_edited');
-    expect(mocks.orchestrator.editTaskType).toHaveBeenCalledWith('task-1', 'ssh', 'remote-b');
+    expect(res.body.action).toBe('pool_edited');
+    expect(mocks.orchestrator.editTaskPool).toHaveBeenCalledWith('task-1', 'worktree-pool');
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
   });
 });

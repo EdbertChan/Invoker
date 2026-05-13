@@ -406,15 +406,12 @@ describe('remote agent dispatch via registry', () => {
       status: 'failed' as const,
       description: 'Test task',
       dependencies: [],
-      execution: {
-        error: conflictError,
-        branch: 'invoker/task-remote-codex',
-        workspacePath: '~/worktrees/task-remote-codex',
-      },
-      config: {
-        executorType: 'ssh' as const,
-        remoteTargetId: 'remote_do_1',
-      },
+        execution: {
+          error: conflictError,
+          branch: 'invoker/task-remote-codex',
+          workspacePath: '~/worktrees/task-remote-codex',
+        },
+      config: { poolId: 'ssh-pool' },
     };
 
     // We need the remote path to be non-existent locally for SSH dispatch
@@ -431,10 +428,13 @@ describe('remote agent dispatch via registry', () => {
       createMergeWorktree: async () => '/tmp/wt',
       removeMergeWorktree: async () => {},
       spawnAgentFix: async () => ({ stdout: '', sessionId: '' }),
-      getRemoteTargetConfig: () => ({
-        host: '1.2.3.4',
-        user: 'invoker',
-        sshKeyPath: '/tmp/key',
+      getRemoteTargetForTask: () => ({
+        id: 'remote_do_1',
+        target: {
+          host: '1.2.3.4',
+          user: 'invoker',
+          sshKeyPath: '/tmp/key',
+        },
       }),
     };
 
@@ -572,18 +572,18 @@ describe('conflict-resolver fail-fast workspace invariant', () => {
           branch: 'invoker/task-ssh',
           workspacePath: '~/worktrees/remote',  // Remote path
         },
-        config: {
-          executorType: 'ssh' as const,
-          remoteTargetId: 'remote-1',
-        },
+        config: { poolId: 'ssh-pool' },
       };
 
       const host: ConflictResolverHost = {
         ...makeHost(task),
-        getRemoteTargetConfig: () => ({
-          host: 'remote.example',
-          user: 'user',
-          sshKeyPath: '/key',
+        getRemoteTargetForTask: () => ({
+          id: 'remote-1',
+          target: {
+            host: 'remote.example',
+            user: 'user',
+            sshKeyPath: '/key',
+          },
         }),
       };
 
@@ -639,19 +639,18 @@ describe('conflict-resolver fail-fast workspace invariant', () => {
           error: 'Test failed',
           workspacePath: '~/worktrees/remote',  // Remote path
         },
-        config: {
-          command: 'npm test',
-          executorType: 'ssh' as const,
-          remoteTargetId: 'remote-1',
-        },
+        config: { command: 'npm test', poolId: 'ssh-pool' },
       };
 
       const host: ConflictResolverHost = {
         ...makeHost(task),
-        getRemoteTargetConfig: () => ({
-          host: 'remote.example',
-          user: 'user',
-          sshKeyPath: '/key',
+        getRemoteTargetForTask: () => ({
+          id: 'remote-1',
+          target: {
+            host: 'remote.example',
+            user: 'user',
+            sshKeyPath: '/key',
+          },
         }),
         agentRegistry: registerBuiltinAgents(),
       };
