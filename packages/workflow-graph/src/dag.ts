@@ -16,45 +16,46 @@ import type { TaskState } from './types.js';
 export function topologicalSort(tasks: TaskState[]): TaskState[] {
   if (tasks.length === 0) return [];
 
-  const taskMap = new Map<string, TaskState>();
-  const inDegree = new Map<string, number>();
-  const adjacency = new Map<string, string[]>();
+  const idToIndex = new Map<string, number>();
+  const inDegree = new Array<number>(tasks.length).fill(0);
+  const adjacency = Array.from({ length: tasks.length }, (): number[] => []);
 
-  for (const task of tasks) {
-    taskMap.set(task.id, task);
-    inDegree.set(task.id, 0);
-    adjacency.set(task.id, []);
+  for (let index = 0; index < tasks.length; index++) {
+    idToIndex.set(tasks[index]!.id, index);
   }
 
   // Build edges: for each dependency, add an edge from dep -> task
-  for (const task of tasks) {
+  for (let taskIndex = 0; taskIndex < tasks.length; taskIndex++) {
+    const task = tasks[taskIndex]!;
     for (const dep of task.dependencies) {
-      if (taskMap.has(dep)) {
-        adjacency.get(dep)!.push(task.id);
-        inDegree.set(task.id, inDegree.get(task.id)! + 1);
+      const depIndex = idToIndex.get(dep);
+      if (depIndex !== undefined) {
+        adjacency[depIndex]!.push(taskIndex);
+        inDegree[taskIndex] = (inDegree[taskIndex] ?? 0) + 1;
       }
     }
   }
 
   // Seed queue with zero in-degree nodes
-  const queue: string[] = [];
-  for (const [id, degree] of inDegree) {
-    if (degree === 0) {
-      queue.push(id);
+  const queue: number[] = [];
+  for (let index = 0; index < inDegree.length; index++) {
+    if (inDegree[index] === 0) {
+      queue.push(index);
     }
   }
 
   const sorted: TaskState[] = [];
 
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    sorted.push(taskMap.get(id)!);
+  let queueIndex = 0;
+  while (queueIndex < queue.length) {
+    const taskIndex = queue[queueIndex++]!;
+    sorted.push(tasks[taskIndex]!);
 
-    for (const neighbor of adjacency.get(id)!) {
-      const newDegree = inDegree.get(neighbor)! - 1;
-      inDegree.set(neighbor, newDegree);
+    for (const neighborIndex of adjacency[taskIndex]!) {
+      const newDegree = (inDegree[neighborIndex] ?? 0) - 1;
+      inDegree[neighborIndex] = newDegree;
       if (newDegree === 0) {
-        queue.push(neighbor);
+        queue.push(neighborIndex);
       }
     }
   }
@@ -106,8 +107,9 @@ export function getTransitiveDependents(
     }
   }
 
-  while (queue.length > 0) {
-    const current = queue.shift()!;
+  let queueIndex = 0;
+  while (queueIndex < queue.length) {
+    const current = queue[queueIndex++]!;
     const neighbors = reverseDeps.get(current) ?? [];
     for (const neighbor of neighbors) {
       if (!visited.has(neighbor)) {
@@ -144,46 +146,49 @@ export function validateDAG(tasks: TaskState[]): { valid: boolean; errors: strin
   }
 
   // Check for cycles using Kahn's algorithm
-  const inDegree = new Map<string, number>();
-  const adjacency = new Map<string, string[]>();
+  const idToIndex = new Map<string, number>();
+  const inDegree = new Array<number>(tasks.length).fill(0);
+  const adjacency = Array.from({ length: tasks.length }, (): number[] => []);
 
-  for (const task of tasks) {
-    inDegree.set(task.id, 0);
-    adjacency.set(task.id, []);
+  for (let index = 0; index < tasks.length; index++) {
+    idToIndex.set(tasks[index]!.id, index);
   }
 
-  for (const task of tasks) {
+  for (let taskIndex = 0; taskIndex < tasks.length; taskIndex++) {
+    const task = tasks[taskIndex]!;
     for (const dep of task.dependencies) {
-      if (knownIds.has(dep)) {
-        adjacency.get(dep)!.push(task.id);
-        inDegree.set(task.id, inDegree.get(task.id)! + 1);
+      const depIndex = idToIndex.get(dep);
+      if (depIndex !== undefined) {
+        adjacency[depIndex]!.push(taskIndex);
+        inDegree[taskIndex] = (inDegree[taskIndex] ?? 0) + 1;
       }
     }
   }
 
-  const queue: string[] = [];
-  for (const [id, degree] of inDegree) {
-    if (degree === 0) {
-      queue.push(id);
+  const queue: number[] = [];
+  for (let index = 0; index < inDegree.length; index++) {
+    if (inDegree[index] === 0) {
+      queue.push(index);
     }
   }
 
   let processed = 0;
-  while (queue.length > 0) {
-    const id = queue.shift()!;
+  let queueIndex = 0;
+  while (queueIndex < queue.length) {
+    const taskIndex = queue[queueIndex++]!;
     processed++;
-    for (const neighbor of adjacency.get(id)!) {
-      const newDegree = inDegree.get(neighbor)! - 1;
-      inDegree.set(neighbor, newDegree);
+    for (const neighborIndex of adjacency[taskIndex]!) {
+      const newDegree = (inDegree[neighborIndex] ?? 0) - 1;
+      inDegree[neighborIndex] = newDegree;
       if (newDegree === 0) {
-        queue.push(neighbor);
+        queue.push(neighborIndex);
       }
     }
   }
 
   if (processed < tasks.length) {
     const cycleNodes = tasks
-      .filter((t) => inDegree.get(t.id)! > 0)
+      .filter((_, index) => inDegree[index]! > 0)
       .map((t) => t.id);
     errors.push(
       `Cycle detected involving task(s): ${cycleNodes.join(', ')}.`,
