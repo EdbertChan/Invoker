@@ -1925,6 +1925,18 @@ describe('SQLiteAdapter', () => {
 
       db.close();
     });
+
+    it('falls back to durable task_output rows when no spool chunks exist', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t-task-output-tail'));
+
+      adapter.appendTaskOutput('t-task-output-tail', 'line before failure\n');
+      adapter.appendTaskOutput('t-task-output-tail', 'concrete stderr: startup failed\n');
+
+      const tail = adapter.getOutputTail('t-task-output-tail');
+      expect(tail.map(c => c.data).join('')).toContain('line before failure');
+      expect(tail.map(c => c.data).join('')).toContain('concrete stderr: startup failed');
+    });
   });
 
   describe('output spool: durability and persistence', () => {

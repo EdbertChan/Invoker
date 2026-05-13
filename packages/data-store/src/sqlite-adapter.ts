@@ -1467,9 +1467,32 @@ export class SQLiteAdapter implements PersistenceAdapter {
     // Populate cache
     if (chunks.length > 0) {
       this.outputTailCache.set(taskId, chunks);
+      return chunks;
     }
 
-    return chunks;
+    // Older/headless paths persisted durable output without writing to the
+    // replay spool. Fall back to task_output so shutdown diagnostics can still
+    // capture the concrete recent failure context.
+    const outputRows = this.queryAll(
+      `SELECT data FROM task_output
+       WHERE task_id = ?
+       ORDER BY id DESC
+       LIMIT ?`,
+      [taskId, this.outputTailLimit],
+    ) as Array<{ data: string }>;
+
+    let offset = 0;
+    const fallbackChunks = outputRows.reverse().map(r => {
+      const chunk = { offset, data: r.data };
+      offset += Buffer.byteLength(r.data, 'utf8');
+      return chunk;
+    });
+
+    if (fallbackChunks.length > 0) {
+      this.outputTailCache.set(taskId, fallbackChunks);
+    }
+
+    return fallbackChunks;
   }
 
   // ── Attempts ────────────────────────────────────────────

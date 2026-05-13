@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { TaskState } from '@invoker/workflow-core';
 import {
   persistShutdownDiagnostic,
+  persistStartupDiagnostic,
   SHUTDOWN_DIAGNOSTIC_TAIL_CHARS,
   type ShutdownDiagnosticDb,
 } from '../shutdown-diagnostic.js';
@@ -162,5 +163,71 @@ describe('persistShutdownDiagnostic', () => {
 
     const output = db.appended[0];
     expect(output).toContain('status=fixing_with_ai');
+  });
+
+  it('also appends shutdown diagnostics to output spool when supported', () => {
+    const task = makeTask();
+    const db = {
+      ...makeDb(['prior failure\n']),
+      appendOutputChunk: vi.fn(),
+    };
+
+    persistShutdownDiagnostic(task, db);
+
+    expect(db.appendOutputChunk).toHaveBeenCalledWith('task-1', expect.stringContaining('[Shutdown Diagnostic]'));
+  });
+});
+
+describe('persistStartupDiagnostic', () => {
+  it('appends concrete startup failure details with recent output tail', () => {
+    const db = makeDb(['executor stderr line\n']);
+
+    persistStartupDiagnostic('task-1', db, {
+      executorType: 'worktree',
+      message: 'Executor startup failed (worktree): git worktree add failed',
+    });
+
+    expect(db.appended).toHaveLength(1);
+    const output = db.appended[0];
+    expect(output).toContain('[Startup Diagnostic]');
+    expect(output).toContain('executor=worktree');
+    expect(output).toContain('git worktree add failed');
+    expect(output).toContain('executor stderr line');
+    expect(output).toContain('--- end startup diagnostic ---');
+  });
+
+  it('flushes pending output before capturing startup tail', () => {
+    const flushOrder: string[] = [];
+    const db = makeDb(['flushed startup stderr\n']);
+    const origAppend = db.appendTaskOutput.bind(db);
+    db.appendTaskOutput = (taskId: string, data: string) => {
+      flushOrder.push('append');
+      origAppend(taskId, data);
+    };
+
+    persistStartupDiagnostic('task-1', db, {
+      executorType: 'ssh',
+      message: 'connection refused',
+      flushPendingOutput: (taskId) => {
+        flushOrder.push(`flush:${taskId}`);
+      },
+    });
+
+    expect(flushOrder[0]).toBe('flush:task-1');
+    expect(flushOrder[1]).toBe('append');
+  });
+
+  it('also appends startup diagnostics to output spool when supported', () => {
+    const db = {
+      ...makeDb(),
+      appendOutputChunk: vi.fn(),
+    };
+
+    persistStartupDiagnostic('task-1', db, {
+      executorType: 'docker',
+      message: 'container failed to start',
+    });
+
+    expect(db.appendOutputChunk).toHaveBeenCalledWith('task-1', expect.stringContaining('[Startup Diagnostic]'));
   });
 });
