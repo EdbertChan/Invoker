@@ -2397,6 +2397,7 @@ if (isHeadless) {
                     task.execution.phase === 'executing'
                     && executingStartedAt !== undefined
                     && executingAgeMs >= executingStallTimeoutMs
+                    && !taskHandles.has(task.id)
                     && (leaseExpired || heartbeatStale);
 
                   if (executingStalled) {

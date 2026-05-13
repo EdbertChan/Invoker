@@ -1125,6 +1125,7 @@ describe('WorktreeExecutor', () => {
           worktreeBaseDir: '/fake/worktrees',
           claudeCommand: '/bin/echo',
         });
+        (claudeExecutor as any).heartbeatIntervalMs = 20;
         mockPool(claudeExecutor);
         const { taskProcess } = setupSpawnMock();
 
@@ -1135,14 +1136,20 @@ describe('WorktreeExecutor', () => {
         const handle = await claudeExecutor.start(request);
 
         let completed = false;
+        let heartbeatCount = 0;
+        claudeExecutor.onHeartbeat(handle, () => {
+          heartbeatCount += 1;
+        });
         claudeExecutor.onComplete(handle, () => {
           completed = true;
         });
 
+        (taskProcess as any).exitCode = 0;
         taskProcess.emit('close', 0, null);
 
         await new Promise((resolve) => setTimeout(resolve, 400));
         expect(completed).toBe(false);
+        expect(heartbeatCount).toBeGreaterThan(0);
       } finally {
         pushSpy.mockRestore();
       }
