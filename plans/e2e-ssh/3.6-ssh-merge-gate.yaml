@@ -17,4 +17,4 @@ tasks:
     command: echo ssh-b-ok
     dependencies: []
     executorType: ssh
-    remoteTargetId: localhost-e2e
+    poolId: localhost-e2e-pool

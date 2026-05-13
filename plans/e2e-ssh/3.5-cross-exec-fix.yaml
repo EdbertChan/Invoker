@@ -16,7 +16,7 @@ tasks:
     command: exit 1
     dependencies: []
     executorType: ssh
-    remoteTargetId: localhost-e2e
+    poolId: localhost-e2e-pool
 
   - id: e2e-g335-taskC
     description: "E2E 3.5 — worktree depends on A and B"

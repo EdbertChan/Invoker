@@ -18,4 +18,4 @@ tasks:
     command: cat e2e-cross-marker.txt && grep -q "marker-from-worktree-A" e2e-cross-marker.txt
     dependencies: [e2e-g331-taskA]
     executorType: ssh
-    remoteTargetId: localhost-e2e
+    poolId: localhost-e2e-pool

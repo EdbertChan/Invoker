@@ -420,7 +420,7 @@ function validateRoutingDestinationAvailability(
   poolId: string | undefined,
   availablePoolIds: Set<string>,
 ): void {
-  if (availablePoolIds.size > 0 && !availablePoolIds.has(poolId)) {
+  if (availablePoolIds.size > 0 && (!poolId || !availablePoolIds.has(poolId))) {
     throw new Error(
       `Task "${taskId}" with command "${command}" matched ${sourceLabel}, ` +
       `but config poolId="${poolId}" is not defined in executionPools.`,

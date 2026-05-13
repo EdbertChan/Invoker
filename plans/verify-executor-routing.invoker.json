@@ -5,9 +5,19 @@
     {
       "pattern": "verify-routing-ok",
       "executorType": "worktree",
-      "remoteTargetId": "dummy-target"
+      "poolId": "dummy-pool"
     }
   ],
+  "executionPools": {
+    "dummy-pool": {
+      "members": [
+        {
+          "type": "worktree",
+          "id": "local"
+        }
+      ]
+    }
+  },
   "remoteTargets": {
     "dummy-target": {
       "host": "localhost",
