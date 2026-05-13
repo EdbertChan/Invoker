@@ -29,6 +29,8 @@ export interface BaseEntry {
   evictedChunkCount: number;
   /** Stored completion response for replay when listeners register after completion. */
   completionResponse?: WorkResponse;
+  /** Deferred cleanup for completed entries kept around for late completion subscribers. */
+  completionCleanupTimer?: ReturnType<typeof setTimeout>;
   /** Heartbeat timer handle for orphan detection. */
   heartbeatTimer?: ReturnType<typeof setInterval>;
   /** Timestamp when the heartbeat was started, for max duration enforcement. */
@@ -169,13 +171,21 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       cb(response);
     }
     // Reconciliation tasks keep their entry alive so the orchestrator can
-    // re-emit on input. All other terminal completions release the entry,
-    // but defer the delete so late subscribers that register onComplete
-    // synchronously after start() returns can still replay completionResponse.
+    // re-emit on input. All other terminal completions release the entry.
+    //
+    // Some executor paths complete before start() returns a handle (for example
+    // no-command worktree tasks and setup-time merge conflicts). Keep those
+    // completed entries briefly so TaskRunner can still register onComplete
+    // and replay the response. A setImmediate cleanup is too aggressive here:
+    // awaited finalization inside start() can yield long enough for that
+    // immediate to run before the caller subscribes, leaving the task running
+    // forever with only "Process exited" in its output.
     if (response.status !== 'needs_input') {
-      setImmediate(() => {
+      const delayMs = entry.completeListeners.size > 0 ? 0 : 60_000;
+      entry.completionCleanupTimer = setTimeout(() => {
         this.entries.delete(executionId);
-      });
+      }, delayMs);
+      entry.completionCleanupTimer.unref?.();
     }
   }
 
@@ -263,7 +273,18 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     if (!entry) return () => {};
     // Replay if already completed
     if (entry.completionResponse) {
+      if (entry.completionCleanupTimer) {
+        clearTimeout(entry.completionCleanupTimer);
+        entry.completionCleanupTimer = undefined;
+      }
       cb(entry.completionResponse);
+      if (entry.completionResponse.status !== 'needs_input') {
+        entry.completionCleanupTimer = setTimeout(() => {
+          this.entries.delete(handle.executionId);
+        }, 0);
+        entry.completionCleanupTimer.unref?.();
+      }
+      return () => {};
     }
     entry.completeListeners.add(cb);
     return () => { entry.completeListeners.delete(cb); };

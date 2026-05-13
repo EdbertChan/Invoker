@@ -1607,6 +1607,30 @@ describe('WorktreeExecutor', () => {
     });
   });
 
+  it('replays immediate no-command completion to subscribers registered after start returns', async () => {
+    setupSpawnMock();
+    const request = makeRequest({
+      inputs: {
+        repoUrl: 'git@github.com:test/repo.git',
+        command: undefined,
+        prompt: undefined,
+      } as any,
+    });
+
+    const handle = await executor.start(request);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const responses: WorkResponse[] = [];
+    executor.onComplete(handle, (response) => { responses.push(response); });
+
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({
+      actionId: 'action-1',
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+  });
+
   describe('orphan entry GC and diagnostics', () => {
     let executor: WorktreeExecutor;
 
