@@ -29,6 +29,8 @@ export interface BaseEntry {
   evictedChunkCount: number;
   /** Stored completion response for replay when listeners register after completion. */
   completionResponse?: WorkResponse;
+  /** True while the child has exited and executor finalization is still running. */
+  completionInProgress?: boolean;
   /** Heartbeat timer handle for orphan detection. */
   heartbeatTimer?: ReturnType<typeof setInterval>;
   /** Timestamp when the heartbeat was started, for max duration enforcement. */
@@ -153,6 +155,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       clearInterval(entry.heartbeatTimer);
       entry.heartbeatTimer = undefined;
     }
+    entry.completionInProgress = false;
     entry.completed = true;
     entry.completionResponse = response;
     for (const cb of entry.completeListeners) {
@@ -183,6 +186,11 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       if (entry.completed) {
         clearInterval(entry.heartbeatTimer);
         entry.heartbeatTimer = undefined;
+        return;
+      }
+
+      if (entry.completionInProgress) {
+        this.emitHeartbeat(executionId);
         return;
       }
 
@@ -872,7 +880,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     },
   ): Promise<void> {
     const entry = this.entries.get(executionId);
-    if (entry) entry.completed = true;
+    if (entry) entry.completionInProgress = true;
     const bufferedOutput = entry?.outputBuffer.join('') ?? '';
     const semanticFailure = this.detectSemanticFailure(request, bufferedOutput, exitCode);
     const effectiveExitCode = (exitCode === 0 && semanticFailure)

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execSync } from 'node:child_process';
+import { execSync, type ChildProcess } from 'node:child_process';
 import { BaseExecutor, type BaseEntry, MergeConflictError, type SetupBranchOptions } from '../base-executor.js';
 import type { WorkRequest, WorkRequestInputs, WorkResponse } from '@invoker/contracts';
 import type { ExecutorHandle, TerminalSpec } from '../executor.js';
@@ -21,6 +21,15 @@ function makeRequest(actionId: string, inputs: Partial<WorkRequestInputs> = {}):
 // Concrete implementation for testing
 class TestExecutor extends BaseExecutor<BaseEntry> {
   readonly type = 'test';
+
+  constructor(
+    heartbeatIntervalMs?: number,
+    maxDurationMs?: number,
+    maxBufferChunks?: number,
+    maxBufferBytes?: number,
+  ) {
+    super(heartbeatIntervalMs, maxDurationMs, maxBufferChunks, maxBufferBytes);
+  }
 
   async start(_request: WorkRequest): Promise<ExecutorHandle> {
     throw new Error('Not implemented');
@@ -75,6 +84,10 @@ class TestExecutor extends BaseExecutor<BaseEntry> {
 
   testScheduleReconciliationResponse(executionId: string) {
     return this.scheduleReconciliationResponse(executionId);
+  }
+
+  testStartHeartbeat(executionId: string, child: ChildProcess): void {
+    this.startHeartbeat(executionId, child);
   }
 
   registerTestEntry(executionId: string, request: WorkRequest) {
@@ -2097,6 +2110,42 @@ describe('BaseExecutor.handleProcessExit push semantics', () => {
     expect(response?.status).toBe('failed');
     expect(response?.outputs.exitCode).toBe(1);
     expect(response?.outputs.error).toBe('push denied');
+  });
+
+  it('keeps heartbeating while post-exit finalization is still running', async () => {
+    const heartbeatExecutor = new TestExecutor(5, 0);
+    const req = makeRequest('task-finalizing', { description: 'slow finalization' });
+    const entry = heartbeatExecutor.registerTestEntry('e-finalizing', req);
+    let heartbeatCount = 0;
+    let response: WorkResponse | undefined;
+    entry.heartbeatListeners.add(() => { heartbeatCount += 1; });
+    entry.completeListeners.add((r) => { response = r; });
+
+    let releaseRecordTaskResult!: () => void;
+    vi.spyOn(BaseExecutor.prototype as any, 'recordTaskResult').mockImplementation(
+      () => new Promise<null>((resolve) => {
+        releaseRecordTaskResult = () => resolve(null);
+      }),
+    );
+
+    const child = {
+      exitCode: 0,
+      killed: false,
+      kill: vi.fn(),
+    } as unknown as ChildProcess;
+    heartbeatExecutor.testStartHeartbeat('e-finalizing', child);
+
+    const done = heartbeatExecutor.testHandleProcessExit('e-finalizing', req, cloneDir, 0);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(response).toBeUndefined();
+    expect(heartbeatCount).toBeGreaterThan(0);
+
+    releaseRecordTaskResult();
+    await done;
+
+    expect(response?.status).toBe('completed');
+    expect(response?.outputs.exitCode).toBe(0);
   });
 
   it('marks codex ai_task as failed when semantic sandbox denial appears in output despite exit 0', async () => {
