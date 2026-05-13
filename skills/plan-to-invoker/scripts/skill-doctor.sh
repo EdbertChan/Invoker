@@ -38,7 +38,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      sed -n '2,19p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     --skip-assumptions)

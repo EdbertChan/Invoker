@@ -45,6 +45,8 @@ Use these as concrete skill steps. Every step should run a command and produce p
 
 ### Primary validation surface
 
+INV-63 implementation consumes `docs/context/inv-63/experiment-brief.md`: use `skill-doctor.sh` as the selected proof boundary. Schema-only `validate-plan.sh` is a debugging sub-check, not an acceptable architecture proof on its own, because it misses zero-context prompt requirements, delegation metadata, cross-layer dependency direction, experiment handoff cleanup, policy coverage projection, task atomicity, and parse-result compatibility.
+
 **Run all plan validation checks in one command:**
 
 ```bash
@@ -52,7 +54,7 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 ```
 
 **Exit codes:** 0 = all checks pass, 1 = one or more failures, 2 = usage error
-**Output:** JSON summary with per-check pass/fail status
+**Output:** JSON summary with `planFile`, `allPassed`, `firstFailedStep`, and `checks[]` entries containing per-check `stepId` and `status`
 
 **Optional flags:**
 - `--skip-assumptions` — skip assumption extraction and verify plan generation
