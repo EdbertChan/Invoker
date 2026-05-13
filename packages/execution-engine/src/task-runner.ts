@@ -131,7 +131,9 @@ export interface TaskRunnerConfig {
     remoteInvokerHome?: string;
     provisionCommand?: string;
     remoteHeartbeatIntervalSeconds?: number;
+    maxConcurrentTasks?: number;
   }>;
+  executionPoolsProvider?: () => Record<string, string[]>;
   /** Docker execution environment configuration from .invoker.json. */
   dockerConfig?: {
     imageName?: string;
@@ -156,7 +158,8 @@ export class TaskRunner {
   /** @internal */ mergeGateProvider?: MergeGateProvider;
   /** @internal */ reviewProviderRegistry?: ReviewProviderRegistry;
   private activePrPollers = new Map<string, ReturnType<typeof setInterval>>();
-  private getRemoteTargets: () => Record<string, { host: string; user: string; sshKeyPath: string; port?: number; managedWorkspaces?: boolean; remoteInvokerHome?: string; provisionCommand?: string; remoteHeartbeatIntervalSeconds?: number }>;
+  private getRemoteTargets: () => Record<string, { host: string; user: string; sshKeyPath: string; port?: number; managedWorkspaces?: boolean; remoteInvokerHome?: string; provisionCommand?: string; remoteHeartbeatIntervalSeconds?: number; maxConcurrentTasks?: number }>;
+  private getExecutionPools: () => Record<string, string[]>;
   private dockerConfig: { imageName?: string; secretsFile?: string };
   private executionAgentRegistry?: AgentRegistry;
   private logger: Logger;
@@ -228,6 +231,7 @@ export class TaskRunner {
     this.mergeGateProvider = config.mergeGateProvider;
     this.reviewProviderRegistry = config.reviewProviderRegistry;
     this.getRemoteTargets = config.remoteTargetsProvider ?? (() => ({}));
+    this.getExecutionPools = config.executionPoolsProvider ?? (() => ({}));
     this.dockerConfig = config.dockerConfig ?? {};
     this.executionAgentRegistry = config.executionAgentRegistry;
     this.logger = config.logger ?? NOOP_LOGGER;
@@ -779,6 +783,44 @@ export class TaskRunner {
       && task.execution.workspacePath === undefined;
   }
 
+  private resolveTaskForExecution(task: TaskState): TaskState {
+    const poolId = task.config.poolId?.trim();
+    if (!poolId) return task;
+
+    const pools = this.getExecutionPools();
+    const members = pools[poolId];
+    if (!members || members.length === 0) {
+      throw new Error(`Task ${task.id} references poolId="${poolId}" but no matching non-empty execution pool is configured`);
+    }
+
+    const member = members[0];
+    const { dockerImage: _dockerImage, ...baseConfig } = task.config;
+    if (member === 'local') {
+      return {
+        ...task,
+        config: {
+          ...baseConfig,
+          executorType: 'worktree',
+        },
+      };
+    }
+
+    return {
+      ...task,
+      config: {
+        ...baseConfig,
+        executorType: 'ssh',
+      },
+    };
+  }
+
+  private resolveSshTargetId(task: TaskState): string | undefined {
+    const poolId = task.config.poolId?.trim();
+    if (!poolId) return undefined;
+    const members = this.getExecutionPools()[poolId] ?? [];
+    return members.find((member) => member !== 'local');
+  }
+
   /**
    * Select the executor to use for a given task.
    * Uses task.executorType to look up in the registry; falls back to default.
@@ -820,14 +862,14 @@ export class TaskRunner {
         return worktree;
       }
 
-      // Lazy registration for SSH — resolve remoteTargetId from config and cache by targetId.
+      // Lazy registration for SSH — resolve the target from poolId and cache by SSH machine ID.
       // The cache is config-aware: if the underlying remote target config changes (e.g. via
       // remoteTargetsProvider returning new values), we replace the cached executor so the
       // new config takes effect immediately.
       if (effectiveType === 'ssh') {
-        const targetId = (task.config as { remoteTargetId?: string }).remoteTargetId;
+        const targetId = this.resolveSshTargetId(task);
         if (!targetId) {
-          throw new Error(`Task ${task.id} has executorType=ssh but no remoteTargetId`);
+          throw new Error(`Task ${task.id} resolved to SSH but poolId did not select an SSH machine`);
         }
 
         // Always re-read targets so dynamic provider updates are picked up.
@@ -835,7 +877,7 @@ export class TaskRunner {
         const target = remoteTargets[targetId];
         if (!target) {
           throw new Error(
-            `Task ${task.id} references remoteTargetId="${targetId}" but no matching ` +
+            `Task ${task.id} resolved SSH machine "${targetId}" but no matching ` +
             `entry exists in remoteTargets config. Available: [${Object.keys(remoteTargets).join(', ')}]`,
           );
         }
@@ -959,7 +1001,8 @@ export class TaskRunner {
       },
     };
 
-    const executor = this.selectExecutor(task);
+    const executionTask = this.resolveTaskForExecution(task);
+    const executor = this.selectExecutor(executionTask);
     let result: { commitHash?: string; error?: string };
     if (executor instanceof SshExecutor) {
       result = await executor.publishApprovedFix(workspacePath, request, branch);
