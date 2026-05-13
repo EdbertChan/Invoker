@@ -18,7 +18,7 @@ tasks:
     command: echo "content-from-ssh" > e2e-file-b.txt
     dependencies: []
     executorType: ssh
-    remoteTargetId: localhost-e2e
+    poolId: localhost-e2e-pool
 
   - id: e2e-g332-taskC
     description: "E2E 3.2 — worktree verifies both files exist"
