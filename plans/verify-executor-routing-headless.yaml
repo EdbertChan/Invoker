@@ -16,5 +16,5 @@ tasks:
     description: "Command task validates executorType and poolId routing"
     command: echo verify-routing-ok
     executorType: worktree
-    poolId: dummy-target
+    poolId: dummy-pool
     dependencies: []

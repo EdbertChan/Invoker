@@ -19,7 +19,7 @@ tasks:
     command: grep -q "from-worktree-A" e2e-chain-a.txt && echo "from-ssh-B" > e2e-chain-b.txt
     dependencies: [e2e-g333-taskA]
     executorType: ssh
-    remoteTargetId: localhost-e2e
+    poolId: localhost-e2e-pool
 
   - id: e2e-g333-taskC
     description: "E2E 3.3 — worktree reads both files from chain"
