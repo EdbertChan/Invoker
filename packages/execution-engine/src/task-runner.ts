@@ -57,6 +57,7 @@ import {
 const PRE_START_HEARTBEAT_INTERVAL_MS = 30_000;
 const ATTEMPT_LEASE_MS = 20 * 60 * 1000;
 const DEFAULT_EXECUTOR_START_TIMEOUT_MS = 10 * 60 * 1000;
+const LAUNCH_DIAGNOSTICS_ENABLED = process.env.INVOKER_LAUNCH_DIAGNOSTICS === '1';
 
 type StartupFailureMetadata = {
   workspacePath?: string;
@@ -169,6 +170,11 @@ export class TaskRunner {
 
   /** Serializes async onComplete handlers so orchestrator mutations never overlap. */
   private completionChain: Promise<void> = Promise.resolve();
+
+  private logLaunchDiag(taskId: string, message: string): void {
+    if (!LAUNCH_DIAGNOSTICS_ENABLED) return;
+    this.logger.info(`[launch-diag] task="${taskId}" ${message}`, { module: 'exec' });
+  }
 
   /** Config default branch (e.g. master) for workflows without baseBranch. */
   getDefaultBranchHint(): string | undefined {
@@ -342,6 +348,7 @@ export class TaskRunner {
       return;
     }
     this.launchingAttemptIds.add(attemptId);
+    this.logLaunchDiag(task.id, `executeTask begin attemptId=${attemptId}`);
     try {
       await this.executeTaskInner(task, attemptId);
     } catch (err) {
@@ -402,6 +409,7 @@ export class TaskRunner {
       }
     } finally {
       this.launchingAttemptIds.delete(attemptId);
+      this.logLaunchDiag(task.id, `executeTask end attemptId=${attemptId}`);
     }
   }
 
@@ -440,9 +448,29 @@ export class TaskRunner {
     );
 
     // Gather upstream context from completed dependencies
+    const upstreamStartMs = Date.now();
+    this.logLaunchDiag(task.id, 'stage=buildUpstreamContext start');
     const upstreamContext = await this.buildUpstreamContext(task);
+    this.logLaunchDiag(
+      task.id,
+      `stage=buildUpstreamContext done elapsedMs=${Date.now() - upstreamStartMs}`,
+    );
+
+    const branchCollectionStartMs = Date.now();
+    this.logLaunchDiag(task.id, 'stage=collectUpstreamBranches start');
     const upstreamBranches = this.collectUpstreamBranches(task);
+    this.logLaunchDiag(
+      task.id,
+      `stage=collectUpstreamBranches done elapsedMs=${Date.now() - branchCollectionStartMs}`,
+    );
+
+    const alternativesStartMs = Date.now();
+    this.logLaunchDiag(task.id, 'stage=buildAlternatives start');
     const alternatives = this.buildAlternatives(task);
+    this.logLaunchDiag(
+      task.id,
+      `stage=buildAlternatives done elapsedMs=${Date.now() - alternativesStartMs}`,
+    );
 
     // Guard: every completed dependency (local or external) must have branch metadata.
     // Without it the downstream worktree would run against bare base branch,
@@ -545,12 +573,19 @@ export class TaskRunner {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} WorkRequest built actionType=${request.actionType} repoUrl=${request.inputs.repoUrl ?? '(none)'} upstreamBranches=${JSON.stringify(request.inputs.upstreamBranches ?? [])}`,
     );
+    const selectExecutorStartMs = Date.now();
+    this.logLaunchDiag(task.id, 'stage=selectExecutor start');
     const executor = this.selectExecutor(task);
+    this.logLaunchDiag(
+      task.id,
+      `stage=selectExecutor done elapsedMs=${Date.now() - selectExecutorStartMs} executor=${executor.type}`,
+    );
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} selectExecutor → type=${executor.type} calling executor.start()`,
     );
     traceExecution(`[trace] TaskRunner: task=${task.id} calling executor.start() type=${executor.type}`);
     this.callbacks.onLaunchStart?.(task.id, executor);
+    this.logLaunchDiag(task.id, `stage=onLaunchStart emitted executor=${executor.type}`);
     const startT0 = Date.now();
     const startTimeoutMs = getExecutorStartTimeoutMs();
     const preStartHeartbeatTimer = setInterval(() => {
@@ -564,6 +599,7 @@ export class TaskRunner {
     let preStartTimeout: ReturnType<typeof setTimeout> | undefined;
     let handle: ExecutorHandle;
     try {
+      this.logLaunchDiag(task.id, `stage=executor.start await begin timeoutMs=${startTimeoutMs}`);
       handle = await Promise.race<ExecutorHandle>([
         executor.start(request),
         new Promise<ExecutorHandle>((_resolve, reject) => {
@@ -572,7 +608,12 @@ export class TaskRunner {
           }, startTimeoutMs);
         }),
       ]);
+      this.logLaunchDiag(task.id, `stage=executor.start await done elapsedMs=${Date.now() - startT0}`);
     } catch (err) {
+      this.logLaunchDiag(
+        task.id,
+        `stage=executor.start await error elapsedMs=${Date.now() - startT0} error=${err instanceof Error ? err.message : String(err)}`,
+      );
       const meta = err as StartupFailureMetadata;
       const startupErrorMessage = `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}\n`;
       this.callbacks.onOutput?.(task.id, startupErrorMessage);
