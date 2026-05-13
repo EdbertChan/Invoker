@@ -20,6 +20,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { WorktreeExecutor, computeContentHash } from '../worktree-executor.js';
 import { BaseExecutor } from '../base-executor.js';
+import { DEFAULT_WORKTREE_PROVISION_COMMAND } from '../default-worktree-provision-command.js';
 
 const mockedSpawn = vi.mocked(spawn);
 
@@ -308,6 +309,27 @@ describe('WorktreeExecutor', () => {
     const pnpmIdx = mockedSpawn.mock.calls.indexOf(pnpmCall!);
     const taskIdx = mockedSpawn.mock.calls.indexOf(taskCall!);
     expect(pnpmIdx).toBeLessThan(taskIdx);
+
+    taskProcess.emit('close', 0, null);
+  });
+
+  it('provisioning honors .node-version before pnpm install', async () => {
+    const { taskProcess } = setupSpawnMock();
+
+    const request = makeRequest();
+    await executor.start(request);
+
+    const pnpmCall = mockedSpawn.mock.calls.find(
+      ([cmd, args]) => cmd === '/bin/bash' && (args as string[])?.[1]?.includes('pnpm install'),
+    );
+    expect(pnpmCall).toBeDefined();
+
+    const provisionScript = (pnpmCall![1] as string[])[1];
+    expect(provisionScript).toContain(DEFAULT_WORKTREE_PROVISION_COMMAND);
+    expect(provisionScript).toContain('.node-version');
+    expect(provisionScript).toContain('$HOME/.nvm/versions/node/v$invoker_node_major.*/bin');
+    expect(provisionScript).toContain('/opt/homebrew/opt/node@$invoker_node_major/bin');
+    expect(provisionScript.indexOf('.node-version')).toBeLessThan(provisionScript.indexOf('pnpm install --frozen-lockfile'));
 
     taskProcess.emit('close', 0, null);
   });

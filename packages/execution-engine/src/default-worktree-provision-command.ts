@@ -7,6 +7,30 @@ export const DEFAULT_WORKTREE_PROVISION_COMMAND =
     echo "[provision] No package.json/pnpm-workspace.yaml found; skipping pnpm install"; \
     exit 0; \
   fi; \
+  invoker_node_version=""; \
+  if [ -f .node-version ]; then \
+    invoker_node_version="$(tr -d "[:space:]" < .node-version)"; \
+  fi; \
+  if [ -n "$invoker_node_version" ]; then \
+    invoker_node_major="${invoker_node_version#v}"; \
+    invoker_node_major="${invoker_node_major%%.*}"; \
+    for invoker_node_bin in \
+      "$HOME/.local/share/mise/installs/node/$invoker_node_version/bin" \
+      "$HOME/.local/share/mise/installs/node/v$invoker_node_version/bin" \
+      "$HOME/.nvm/versions/node/v$invoker_node_version/bin" \
+      "$HOME/.asdf/installs/nodejs/$invoker_node_version/bin" \
+      $HOME/.local/share/mise/installs/node/$invoker_node_major.*/bin \
+      $HOME/.nvm/versions/node/v$invoker_node_major.*/bin \
+      $HOME/.asdf/installs/nodejs/$invoker_node_major.*/bin \
+      "/opt/homebrew/opt/node@$invoker_node_major/bin" \
+      "/usr/local/opt/node@$invoker_node_major/bin"; do \
+      if [ -x "$invoker_node_bin/node" ]; then \
+        export PATH="$invoker_node_bin:$PATH"; \
+        echo "[provision] using Node from .node-version: $($invoker_node_bin/node --version)"; \
+        break; \
+      fi; \
+    done; \
+  fi; \
   if ! NODE_ENV=development pnpm install --frozen-lockfile; then \
     echo "[provision] frozen-lockfile install failed; refreshing lockfile and retrying"; \
     NODE_ENV=development pnpm install --lockfile-only; \
