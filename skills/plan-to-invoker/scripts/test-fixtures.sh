@@ -531,6 +531,119 @@ EOF
   fi
 }
 
+test_lint_requires_cleanup_to_depend_on_verify_when_present() {
+  local temp_plan
+  temp_plan=$(mktemp)
+  trap "rm -f $temp_plan" RETURN
+
+  cat > "$temp_plan" <<'EOF'
+name: "Invalid cleanup ordering for experiment artifact"
+description: "Cleanup task skips targeted verification dependency"
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+tasks:
+  - id: experiment-inv-123
+    description: |
+      Goal:
+      - Record deterministic experiment results.
+      Motivation:
+      - Keep design tradeoffs explicit before implementation.
+      Alternative considerations:
+      - Option A (chosen): persist a brief artifact.
+      - Option B: rely on chat-only notes.
+      Implementation details:
+      - Create docs/context/inv-123/experiment-brief.md and commit it.
+      Layer: app_regression
+      Feature state: active
+    prompt: |
+      Goal:
+      - Write docs/context/inv-123/experiment-brief.md with Supported, Rejected, and Deferred outcomes.
+      Motivation:
+      - Preserve deterministic experiment evidence for downstream tasks.
+      Alternative considerations:
+      - Option A (chosen): commit the artifact for handoff.
+      - Option B: skip the committed artifact.
+      Implementation details:
+      - Create the artifact and commit it in this task.
+      Acceptance criteria:
+      - The artifact exists and is committed.
+    dependencies: []
+  - id: implement-inv-123
+    description: |
+      Goal:
+      - Consume experiment conclusions during implementation.
+      Motivation:
+      - Keep implementation aligned with deterministic experiment outcomes.
+      Alternative considerations:
+      - Option A (chosen): consume docs/context/inv-123/experiment-brief.md directly.
+      - Option B: ignore the artifact.
+      Implementation details:
+      - Read docs/context/inv-123/experiment-brief.md and implement against its conclusions.
+      Layer: application
+      Feature state: active
+    prompt: |
+      Goal:
+      - Implement the selected approach using docs/context/inv-123/experiment-brief.md.
+      Motivation:
+      - Ensure implementation reflects the recorded experiment decision.
+      Alternative considerations:
+      - Option A (chosen): follow the artifact.
+      - Option B: improvise during implementation.
+      Implementation details:
+      - Consume the artifact conclusions explicitly in the code change.
+      Acceptance criteria:
+      - Implementation reflects the chosen experiment path.
+    dependencies: [experiment-inv-123]
+  - id: verify-inv-123
+    description: |
+      Goal:
+      - Run targeted verification for the implementation slice.
+      Motivation:
+      - Catch scoped regressions before final cleanup and full regression.
+      Alternative considerations:
+      - Option A (chosen): targeted deterministic verification.
+      - Option B: rely only on final regression.
+      Implementation details:
+      - Execute focused checks while docs/context/inv-123/experiment-brief.md still exists.
+      Layer: app_regression
+      Feature state: active
+    command: "pnpm --dir packages/foo test"
+    dependencies: [implement-inv-123]
+  - id: cleanup-experiment-artifacts-inv-123
+    description: |
+      Goal:
+      - Remove persisted experiment artifact after implementation handoff.
+      Motivation:
+      - Preserve clean history while keeping handoff deterministic.
+      Alternative considerations:
+      - Option A (chosen): delete the artifact before final regression.
+      - Option B: keep experiment artifacts indefinitely.
+      Implementation details:
+      - Delete docs/context/inv-123/experiment-brief.md and commit cleanup after implementation handoff.
+      Layer: docs
+      Feature state: active
+    command: 'rm -f docs/context/inv-123/experiment-brief.md && git add docs/context/inv-123/experiment-brief.md && git commit -m "cleanup(inv-123/experiment-brief): remove artifact after handoff"'
+    dependencies: [experiment-inv-123, implement-inv-123]
+EOF
+
+  local output
+  set +e
+  output=$(bash "$LINT_SCRIPT" "$temp_plan" 2>&1)
+  local exit_code=$?
+  set -e
+
+  if [[ $exit_code -eq 0 ]]; then
+    echo "Expected lint to reject cleanup task missing verify dependency" >&2
+    return 1
+  fi
+
+  if ! grep -q 'must depend on "verify-inv-123" when targeted verification exists' <<<"$output"; then
+    echo "Expected missing verify dependency error, got: $output" >&2
+    return 1
+  fi
+}
+
 test_lint_requires_design_sections_for_prompt_tasks() {
   local temp_plan
   temp_plan=$(mktemp)
@@ -918,6 +1031,7 @@ run_test "Edge: stacked_basebranch_default" test_stacked_basebranch_master
 run_test "Lint: valid final pnpm run test:all gate" test_lint_valid_final_test_all
 run_test "Lint: reject non-test:all final gate" test_lint_rejects_non_test_all_final_gate
 run_test "Lint: reject final gate missing dependencies" test_lint_rejects_final_gate_missing_dependencies
+run_test "Lint: reject cleanup missing verify dependency" test_lint_requires_cleanup_to_depend_on_verify_when_present
 run_test "Lint: reject missing design sections for prompt tasks" test_lint_requires_design_sections_for_prompt_tasks
 run_test "Lint: accept prompt tasks with design sections" test_lint_accepts_design_sections_for_prompt_tasks
 run_test "Lint: reject missing design sections for command tasks" test_lint_requires_design_sections_for_command_tasks
