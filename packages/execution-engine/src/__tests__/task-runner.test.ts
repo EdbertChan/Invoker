@@ -1149,6 +1149,9 @@ describe('TaskRunner', () => {
     it('suppresses both inner metadata and outer response when lineage is stale throughout', async () => {
       const handleWorkerResponse = vi.fn();
       const updateTask = vi.fn();
+      const appendTaskOutput = vi.fn();
+      const onOutput = vi.fn();
+      const onLaunchFailed = vi.fn();
       const orchestrator = {
         getTask: () => makeTask({
           id: 'inner-stale',
@@ -1175,9 +1178,10 @@ describe('TaskRunner', () => {
 
       const runner = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { updateTask } as any,
+        persistence: { updateTask, appendTaskOutput } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        callbacks: { onOutput, onLaunchFailed },
       });
 
       const task = makeTask({
@@ -1196,6 +1200,9 @@ describe('TaskRunner', () => {
         }),
       );
       expect(handleWorkerResponse).not.toHaveBeenCalled();
+      expect(appendTaskOutput).not.toHaveBeenCalled();
+      expect(onOutput).not.toHaveBeenCalled();
+      expect(onLaunchFailed).not.toHaveBeenCalled();
     });
   });
 

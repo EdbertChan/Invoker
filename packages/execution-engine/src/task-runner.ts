@@ -574,11 +574,14 @@ export class TaskRunner {
     } catch (err) {
       const meta = err as StartupFailureMetadata;
       const startupErrorMessage = `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}\n`;
-      this.callbacks.onOutput?.(task.id, startupErrorMessage);
-      try {
-        this.persistence.appendTaskOutput(task.id, startupErrorMessage);
-      } catch {
-        // Preserve the original startup failure if output persistence also fails.
+      const launchStillCurrent = !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0);
+      if (launchStillCurrent) {
+        this.callbacks.onOutput?.(task.id, startupErrorMessage);
+        try {
+          this.persistence.appendTaskOutput(task.id, startupErrorMessage);
+        } catch {
+          // Preserve the original startup failure if output persistence also fails.
+        }
       }
       // Only persist startup-failure metadata when the launch is still
       // current.  If the task has moved to a newer attempt or generation
@@ -586,7 +589,7 @@ export class TaskRunner {
       // would corrupt the live attempt's state.
       if (
         (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-        && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
+        && launchStillCurrent
       ) {
         const execution: Record<string, string> = {};
         if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
@@ -605,7 +608,9 @@ export class TaskRunner {
         `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}`,
         { cause: err },
       );
-      this.callbacks.onLaunchFailed?.(task.id, wrapped, executor);
+      if (launchStillCurrent) {
+        this.callbacks.onLaunchFailed?.(task.id, wrapped, executor);
+      }
       throw wrapped;
     } finally {
       clearInterval(preStartHeartbeatTimer);
