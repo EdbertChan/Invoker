@@ -7933,6 +7933,20 @@ describe('Orchestrator', () => {
       expect(savedError).toBe(mergeConflictError);
     });
 
+    it('beginConflictResolution rejects stale expected lineage without changing task state', () => {
+      const before = orchestrator.getTask('t2')!;
+      expect(() => orchestrator.beginConflictResolution('t2', {
+        taskId: 't2',
+        selectedAttemptId: 'stale-attempt',
+        generation: before.execution.generation ?? 0,
+      })).toThrow('lineage changed');
+
+      const task = orchestrator.getTask('t2')!;
+      expect(task.status).toBe('failed');
+      expect(task.execution.selectedAttemptId).toBe(before.execution.selectedAttemptId);
+      expect(task.execution.generation).toBe(before.execution.generation);
+    });
+
     it('revertConflictResolution restores failed state with mergeConflict', () => {
       const { savedError } = orchestrator.beginConflictResolution('t2');
       const fixAttemptId = orchestrator.getTask('t2')!.execution.selectedAttemptId;
@@ -7958,6 +7972,24 @@ describe('Orchestrator', () => {
           d.changes.status === 'failed',
       );
       expect(failedDeltas).toHaveLength(1);
+    });
+
+    it('revertConflictResolution rejects stale expected lineage without cleanup writes', () => {
+      const { savedError } = orchestrator.beginConflictResolution('t2');
+      const before = orchestrator.getTask('t2')!;
+      publishedDeltas = [];
+
+      expect(() => orchestrator.revertConflictResolution('t2', savedError, 'late failure', {
+        taskId: 't2',
+        selectedAttemptId: 'newer-attempt',
+        generation: before.execution.generation ?? 0,
+      })).toThrow('lineage changed');
+
+      const task = orchestrator.getTask('t2')!;
+      expect(task.status).toBe('fixing_with_ai');
+      expect(task.execution.selectedAttemptId).toBe(before.execution.selectedAttemptId);
+      expect(task.execution.error).toBeUndefined();
+      expect(publishedDeltas).toHaveLength(0);
     });
 
     it('revertConflictResolution uses agent-agnostic fix failure prefix', () => {
@@ -8049,6 +8081,24 @@ describe('Orchestrator', () => {
       expect(task.execution.pendingFixError).toBe('test failed: expected 1 to be 2');
       expect(task.execution.isFixingWithAI).toBeFalsy();
       expect(persistence.loadAttempt(fixAttemptId!)?.status).toBe('needs_input');
+    });
+
+    it('setFixAwaitingApproval rejects stale expected lineage without changing approval state', () => {
+      orchestrator.beginConflictResolution('f2');
+      const before = orchestrator.getTask('f2')!;
+      publishedDeltas = [];
+
+      expect(() => orchestrator.setFixAwaitingApproval('f2', 'test failed: expected 1 to be 2', {
+        taskId: 'f2',
+        selectedAttemptId: 'newer-attempt',
+        generation: before.execution.generation ?? 0,
+      })).toThrow('lineage changed');
+
+      const task = orchestrator.getTask('f2')!;
+      expect(task.status).toBe('fixing_with_ai');
+      expect(task.execution.pendingFixError).toBeUndefined();
+      expect(task.execution.selectedAttemptId).toBe(before.execution.selectedAttemptId);
+      expect(publishedDeltas).toHaveLength(0);
     });
 
     it('setFixAwaitingApproval delta includes agentSessionId from DB', () => {
