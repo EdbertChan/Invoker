@@ -4,8 +4,7 @@ import { createAttempt } from '@invoker/workflow-graph';
 import type { TaskScheduler } from '../scheduler.js';
 import type { TaskStateMachine } from '../state-machine.js';
 import type { TaskRepository } from '../task-repository.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { TASK_DELTA_CHANNEL } from './event-domain.js';
 
 export interface OrchestratorSchedulerHost {
   stateMachine: TaskStateMachine;

@@ -3,8 +3,7 @@ import type { Attempt, TaskDelta, TaskState, TaskStateChanges } from '@invoker/w
 import { OrchestratorError, OrchestratorErrorCode } from '../orchestrator.js';
 import type { OrchestratorPersistence } from '../orchestrator.js';
 import type { TaskRepository } from '../task-repository.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { TASK_DELTA_CHANNEL } from './event-domain.js';
 const FIX_FAILURE_PREFIX_RE = /^\[Fix with (?:Claude|Agent) failed\] [^\n]*\n\n/;
 
 function stripFixFailureWrapper(errorText: string): string {
