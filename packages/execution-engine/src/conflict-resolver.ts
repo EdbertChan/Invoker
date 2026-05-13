@@ -206,15 +206,16 @@ export async function resolveConflictImpl(
   }
 
   // SSH tasks: run conflict resolution on the remote host
-  if (task.config.executorType === 'ssh' && task.config.remoteTargetId && !existsSync(rawCwd)) {
+  const remoteTargetId = (task.config as { remoteTargetId?: string }).remoteTargetId;
+  if (task.config.executorType === 'ssh' && remoteTargetId && !existsSync(rawCwd)) {
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'resolve-conflict-remote-path',
-      remoteTargetId: task.config.remoteTargetId,
+      remoteTargetId,
       workspacePath: rawCwd,
     });
-    const target = host.getRemoteTargetConfig?.(task.config.remoteTargetId);
+    const target = host.getRemoteTargetConfig?.(remoteTargetId);
     if (!target) {
-      throw new Error(`No remote target config for "${task.config.remoteTargetId}" — cannot resolve conflict on remote`);
+      throw new Error(`No remote target config for "${remoteTargetId}" — cannot resolve conflict on remote`);
     }
     await resolveConflictRemote(host, task, taskBranch, conflictInfo, rawCwd, target, agentName);
     return;
@@ -458,15 +459,16 @@ export async function fixWithAgentImpl(
   const workspacePath = task.execution.workspacePath;
 
   // SSH tasks: run agent on the remote host
-  if (task.config.executorType === 'ssh' && task.config.remoteTargetId && workspacePath && !existsSync(workspacePath)) {
+  const remoteTargetId = (task.config as { remoteTargetId?: string }).remoteTargetId;
+  if (task.config.executorType === 'ssh' && remoteTargetId && workspacePath && !existsSync(workspacePath)) {
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'fix-with-agent-remote-path',
-      remoteTargetId: task.config.remoteTargetId,
+      remoteTargetId,
       workspacePath,
     });
-    const target = host.getRemoteTargetConfig?.(task.config.remoteTargetId);
+    const target = host.getRemoteTargetConfig?.(remoteTargetId);
     if (!target) {
-      throw new Error(`No remote target config for "${task.config.remoteTargetId}" — cannot fix on remote`);
+      throw new Error(`No remote target config for "${remoteTargetId}" — cannot fix on remote`);
     }
     const resolvedWorkspacePath =
       (await resolveRemoteBranchOwnerPath(task.execution.branch, workspacePath, target)) ?? workspacePath;

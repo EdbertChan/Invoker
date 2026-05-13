@@ -825,7 +825,7 @@ export class TaskRunner {
       // remoteTargetsProvider returning new values), we replace the cached executor so the
       // new config takes effect immediately.
       if (effectiveType === 'ssh') {
-        const targetId = task.config.remoteTargetId;
+        const targetId = (task.config as { remoteTargetId?: string }).remoteTargetId;
         if (!targetId) {
           throw new Error(`Task ${task.id} has executorType=ssh but no remoteTargetId`);
         }
