@@ -585,7 +585,6 @@ echo ${payloadB64} | base64 -d | bash -se
       void (async () => {
         const exitCode = code ?? (signal ? 1 : 0);
         const e = this.entries.get(executionId);
-        if (e) e.completed = true;
 
         let status: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed';
         let mappedError: string | undefined;
@@ -662,7 +661,31 @@ echo ${payloadB64} | base64 -d | bash -se
           },
         };
         this.emitComplete(executionId, response);
-      })();
+      })().catch((err) => {
+        const e = this.entries.get(executionId);
+        if (!e || e.completionResponse) return;
+        const exitCode = code ?? (signal ? 1 : 0);
+        const reason = err instanceof Error ? err.stack ?? err.message : String(err);
+        this.emitOutput(
+          executionId,
+          `[SshExecutor] Finalization failed after remote process exited: ${reason}\n`,
+        );
+        this.emitComplete(executionId, {
+          requestId: request.requestId,
+          actionId: request.actionId,
+          executionGeneration: request.executionGeneration,
+          status: 'failed',
+          outputs: {
+            exitCode: exitCode === 0 ? 1 : exitCode,
+            error: `Invoker finalization failed after remote process exited: ${reason}`,
+            agentSessionId: entry.agentSessionId,
+            ...(finalizeRemote?.branch ? { branch: finalizeRemote.branch } : {}),
+          },
+        });
+      }).finally(() => {
+        const e = this.entries.get(executionId);
+        if (e) e.process = null;
+      });
     });
 
     this.startHeartbeat(executionId, child);

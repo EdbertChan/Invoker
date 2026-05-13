@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { SshExecutor } from '../ssh-executor.js';
-import type { WorkRequest } from '@invoker/contracts';
+import type { WorkRequest, WorkResponse } from '@invoker/contracts';
 import type { PersistedTaskMeta } from '../executor.js';
 import { createSshRemoteScriptError } from '../ssh-git-exec.js';
 import { computeRepoUrlHash } from '../git-utils.js';
@@ -847,6 +847,61 @@ describe('SshExecutor entry lifecycle', () => {
     expect((ssh as any).entries.size).toBe(0);
 
     await expect(ssh.destroyAll()).resolves.toBeUndefined();
+  });
+
+  it('emits a terminal failure when SSH close finalization throws after process exit', async () => {
+    const driver = {
+      extractSessionId: vi.fn(() => 'real-session-id'),
+      processOutput: vi.fn(() => {
+        throw new Error('session persistence failed');
+      }),
+      loadSession: vi.fn(),
+      parseSession: vi.fn(),
+    };
+    const agent = {
+      name: 'codex',
+      buildCommand: vi.fn(() => ({
+        cmd: 'codex',
+        args: ['exec', 'test prompt'],
+        sessionId: 'local-session-id',
+      })),
+    };
+    const sshWithAgent = new SshExecutor({
+      host: 'localhost',
+      user: 'testuser',
+      sshKeyPath: '/dev/null',
+      managedWorkspaces: false,
+      agentRegistry: {
+        getOrThrow: vi.fn(() => agent),
+        getSessionDriver: vi.fn(() => driver),
+      } as any,
+    });
+
+    const request = makeRequest({
+      actionType: 'ai_task',
+      inputs: {
+        prompt: 'test prompt',
+        description: 'test',
+        workspacePath: '/remote/worktree',
+        executionAgent: 'codex',
+      },
+    });
+
+    const handle = await sshWithAgent.start(request);
+    const completion = new Promise<WorkResponse>((resolve) => {
+      sshWithAgent.onComplete(handle, resolve);
+    });
+
+    const proc = spawnedProcesses[spawnedProcesses.length - 1];
+    (proc.stdout as any).emit('data', Buffer.from('{"type":"thread.started","thread_id":"real-session-id"}\n'));
+    proc.emit('close', 0, null);
+
+    const response = await completion;
+    expect(response.status).toBe('failed');
+    expect(response.outputs.exitCode).toBe(1);
+    expect(response.outputs.agentSessionId).toBe('real-session-id');
+    expect(response.outputs.error).toContain('Invoker finalization failed after remote process exited');
+    expect(response.outputs.error).toContain('session persistence failed');
   });
 
   it('preserves stdout on execRemoteCapture error (Bug #4)', async () => {
