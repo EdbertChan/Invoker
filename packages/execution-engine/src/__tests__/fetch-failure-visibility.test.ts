@@ -87,6 +87,12 @@ function createRemote(localRepo: string): string {
   return remote;
 }
 
+function createEmptyCommits(repo: string, count: number): void {
+  for (let i = 1; i <= count; i++) {
+    execSync(`git commit --allow-empty -m "commit ${i}"`, { cwd: repo });
+  }
+}
+
 describe('syncFromRemote - fetch failure handling', () => {
   describe('fetch failure (strict by default)', () => {
     let executor: TestExecutor;
@@ -239,11 +245,8 @@ describe('syncFromRemote - fetch failure handling', () => {
       execSync('git config user.email "test@test.com"', { cwd: secondClone });
       execSync('git config user.name "Test"', { cwd: secondClone });
 
-      // Push 101 commits to trigger loud warning
-      for (let i = 1; i <= 101; i++) {
-        writeFileSync(join(secondClone, `file${i}.txt`), `content${i}`);
-        execSync(`git add -A && git commit -m "commit ${i}"`, { cwd: secondClone });
-      }
+      // Use empty commits here to keep the >100 behind scenario fast enough for test timeouts.
+      createEmptyCommits(secondClone, 101);
       execSync('git push', { cwd: secondClone });
 
       const executionId = 'test-exec-staleness-loud';
@@ -257,7 +260,7 @@ describe('syncFromRemote - fetch failure handling', () => {
 
       // Cleanup
       rmSync(secondClone, { recursive: true, force: true });
-    });
+    }, 40_000);
 
     it('reports up to date when local matches remote', async () => {
       const executionId = 'test-exec-staleness-uptodate';

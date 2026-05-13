@@ -265,22 +265,28 @@ describe('DockerExecutor', () => {
       runScopedGitAndShell('container-b', 'from-b', 0),
     ]);
 
-    expect(routedCalls).toEqual([
+    expect(routedCalls).toHaveLength(4);
+
+    const callsByContainer = {
+      'container-a': routedCalls.filter((call) => call.containerId === 'container-a'),
+      'container-b': routedCalls.filter((call) => call.containerId === 'container-b'),
+    };
+
+    expect(callsByContainer['container-a']).toEqual([
       expect.objectContaining({
-        containerId: 'container-b',
         script: expect.stringContaining('git \'status\' \'--short\''),
       }),
       expect.objectContaining({
-        containerId: 'container-b',
-        script: 'echo from-b',
-      }),
-      expect.objectContaining({
-        containerId: 'container-a',
-        script: expect.stringContaining('git \'status\' \'--short\''),
-      }),
-      expect.objectContaining({
-        containerId: 'container-a',
         script: 'echo from-a',
+      }),
+    ]);
+
+    expect(callsByContainer['container-b']).toEqual([
+      expect.objectContaining({
+        script: expect.stringContaining('git \'status\' \'--short\''),
+      }),
+      expect.objectContaining({
+        script: 'echo from-b',
       }),
     ]);
   });

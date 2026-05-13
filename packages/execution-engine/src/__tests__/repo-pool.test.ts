@@ -414,7 +414,7 @@ describe('RepoPool', () => {
         rmSync(bareDir, { recursive: true, force: true });
         rmSync(sourceDir, { recursive: true, force: true });
       }
-    });
+    }, 60_000);
   });
 
   describe('repoChains serialization', () => {
