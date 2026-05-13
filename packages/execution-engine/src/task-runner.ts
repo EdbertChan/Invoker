@@ -342,7 +342,7 @@ export class TaskRunner {
     }
     this.launchingAttemptIds.add(attemptId);
     try {
-      await this.executeTaskInner(task, attemptId);
+      await this.executeTaskInner(task, attemptId, startGeneration);
     } catch (err) {
       // Resource limit: defer the task instead of failing it
       const cause = err instanceof Error ? err.cause : undefined;
@@ -404,7 +404,7 @@ export class TaskRunner {
     }
   }
 
-  private async executeTaskInner(task: TaskState, attemptId: string): Promise<void> {
+  private async executeTaskInner(task: TaskState, attemptId: string, startGeneration: number): Promise<void> {
     // Pivot tasks with experimentVariants: synthesize a spawn_experiments
     // response instead of running through the executor.
     if (task.config.pivot && task.config.experimentVariants && task.config.experimentVariants.length > 0) {
@@ -490,7 +490,6 @@ export class TaskRunner {
     // on the attempt row. Reconciliation paths can then observe the branch
     // even if the executor crashes mid-startup.
     let branchPersistedEarly = false;
-    const startGeneration = task.execution.generation ?? 0;
     const onBranchResolved = (branch: string): void => {
       if (!branch || branchPersistedEarly) return;
       // Skip if the task has moved to a newer attempt/generation.
@@ -580,13 +579,14 @@ export class TaskRunner {
       } catch {
         // Preserve the original startup failure if output persistence also fails.
       }
+      const launchIsStale = this.isLaunchStale(task.id, attemptId, startGeneration);
       // Only persist startup-failure metadata when the launch is still
       // current.  If the task has moved to a newer attempt or generation
       // (e.g. via recreate-task), writing old workspace/branch metadata
       // would corrupt the live attempt's state.
       if (
         (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-        && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
+        && !launchIsStale
       ) {
         const execution: Record<string, string> = {};
         if (meta.workspacePath) execution.workspacePath = meta.workspacePath;

@@ -71,7 +71,7 @@ describe('SSH worktree metadata repro', () => {
     const realOldPath = realpathSync(oldPath);
     expect(() => {
       git(`git worktree add ${JSON.stringify(canonicalNewPath)} ${JSON.stringify(newBranch)}`, repoDir);
-    }).toThrow(new RegExp(`already used by worktree at '${realOldPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+    }).toThrow(new RegExp(`already (?:used by worktree|checked out) at '${realOldPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
   });
 
   it('proves TaskRunner should persist the owning worktree path on SSH startup failure', async () => {
@@ -144,5 +144,80 @@ describe('SSH worktree metadata repro', () => {
         error: expect.stringContaining('Executor startup failed (ssh)'),
       }),
     }));
+  });
+
+  it('does not attach stale SSH startup-failure metadata after selected attempt advances', async () => {
+    const ownerPath = '/home/invoker/.invoker/worktrees/049de5b865cc/experiment-wf-1-test-execution-engine-old';
+    const branch = 'experiment/wf-1/test-execution-engine-old';
+
+    const failingExecutor = {
+      type: 'ssh',
+      start: vi.fn().mockRejectedValue(Object.assign(
+        new Error(
+          'SSH remote script failed (exit=128)\n' +
+            `STDERR:\nfatal: '${branch}' is already checked out at '${ownerPath}'\n`,
+        ),
+        {
+          workspacePath: ownerPath,
+          branch,
+        },
+      )),
+      onComplete: vi.fn(),
+      onOutput: vi.fn(),
+      onHeartbeat: vi.fn(),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const launchedTask = makeTask({
+      id: 'wf-1/test-execution-engine',
+      config: { command: 'pnpm test', executorType: 'ssh' },
+      execution: { selectedAttemptId: 'attempt-1', generation: 0 },
+    });
+    const currentTask = makeTask({
+      id: 'wf-1/test-execution-engine',
+      config: { command: 'pnpm test', executorType: 'ssh' },
+      execution: { selectedAttemptId: 'attempt-2', generation: 0 },
+    });
+
+    const updateSpy = vi.fn();
+    const appendOutputSpy = vi.fn();
+    const handleResponseSpy = vi.fn();
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => currentTask,
+        getAllTasks: () => [currentTask],
+        handleWorkerResponse: handleResponseSpy,
+      } as any,
+      persistence: {
+        updateTask: updateSpy,
+        appendTaskOutput: appendOutputSpy,
+      } as any,
+      executorRegistry: {
+        getDefault: () => failingExecutor,
+        get: () => failingExecutor,
+        getAll: () => [failingExecutor],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    await runner.executeTask(launchedTask);
+
+    expect(updateSpy).not.toHaveBeenCalledWith('wf-1/test-execution-engine', expect.objectContaining({
+      execution: expect.objectContaining({
+        workspacePath: ownerPath,
+      }),
+    }));
+    expect(updateSpy).not.toHaveBeenCalledWith('wf-1/test-execution-engine', expect.objectContaining({
+      execution: expect.objectContaining({
+        branch,
+      }),
+    }));
+    expect(handleResponseSpy).not.toHaveBeenCalled();
+    expect(appendOutputSpy).toHaveBeenCalledWith(
+      'wf-1/test-execution-engine',
+      expect.stringContaining(`already checked out at '${ownerPath}'`),
+    );
   });
 });
