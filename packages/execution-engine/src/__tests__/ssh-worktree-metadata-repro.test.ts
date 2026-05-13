@@ -181,6 +181,7 @@ describe('SSH worktree metadata repro', () => {
     });
 
     const updateSpy = vi.fn();
+    const updateAttemptSpy = vi.fn();
     const appendOutputSpy = vi.fn();
     const handleResponseSpy = vi.fn();
 
@@ -192,6 +193,8 @@ describe('SSH worktree metadata repro', () => {
       } as any,
       persistence: {
         updateTask: updateSpy,
+        updateAttempt: updateAttemptSpy,
+        loadAttempt: () => ({ id: 'attempt-1', nodeId: 'wf-1/test-execution-engine', status: 'running' }),
         appendTaskOutput: appendOutputSpy,
       } as any,
       executorRegistry: {
@@ -215,6 +218,12 @@ describe('SSH worktree metadata repro', () => {
       }),
     }));
     expect(handleResponseSpy).not.toHaveBeenCalled();
+    expect(updateAttemptSpy).toHaveBeenCalledWith('attempt-1', expect.objectContaining({
+      status: 'failed',
+      exitCode: 1,
+      completedAt: expect.any(Date),
+      error: expect.stringContaining(`already checked out at '${ownerPath}'`),
+    }));
     expect(appendOutputSpy).toHaveBeenCalledWith(
       'wf-1/test-execution-engine',
       expect.stringContaining(`already checked out at '${ownerPath}'`),

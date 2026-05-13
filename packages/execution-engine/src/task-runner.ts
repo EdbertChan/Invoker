@@ -328,6 +328,31 @@ export class TaskRunner {
     return false;
   }
 
+  private persistStaleStartupFailureAttempt(attemptId: string, err: unknown): void {
+    const updateAttempt = this.persistence.updateAttempt?.bind(this.persistence);
+    if (!updateAttempt) return;
+
+    try {
+      const attempt = this.persistence.loadAttempt?.(attemptId);
+      if (attempt && ['completed', 'failed', 'superseded'].includes(attempt.status)) return;
+
+      const failedAt = new Date();
+      updateAttempt(attemptId, {
+        status: 'failed',
+        completedAt: failedAt,
+        exitCode: 1,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+        lastHeartbeatAt: failedAt,
+        leaseExpiresAt: failedAt,
+      } as any);
+    } catch (persistErr) {
+      this.logger.warn(
+        `[TaskRunner] failed to persist stale startup-failure attempt=${attemptId}`,
+        { err: persistErr },
+      );
+    }
+  }
+
   async executeTask(task: TaskState): Promise<void> {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
@@ -360,6 +385,7 @@ export class TaskRunner {
         this.logger.warn(
           `[TaskRunner] suppressing stale startup-failure metadata/response for task=${task.id} attemptId=${attemptId}`,
         );
+        this.persistStaleStartupFailureAttempt(attemptId, err);
         await this.cleanupPerTaskDockerExecutor(task);
         return;
       }

@@ -984,6 +984,7 @@ describe('TaskRunner', () => {
     it('suppresses metadata write and failed response when selectedAttemptId has advanced', async () => {
       const handleWorkerResponse = vi.fn();
       const updateTask = vi.fn();
+      const updateAttempt = vi.fn();
       // Orchestrator returns a task whose selectedAttemptId has moved forward
       const orchestrator = {
         getTask: () => makeTask({
@@ -1010,7 +1011,11 @@ describe('TaskRunner', () => {
 
       const runner = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { updateTask } as any,
+        persistence: {
+          updateTask,
+          updateAttempt,
+          loadAttempt: () => ({ id: 'attempt-1', nodeId: 'stale-1', status: 'running' }),
+        } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
       });
@@ -1033,6 +1038,69 @@ describe('TaskRunner', () => {
       );
       // Failed WorkResponse must NOT be emitted
       expect(handleWorkerResponse).not.toHaveBeenCalled();
+      // The stale attempt is closed on the attempt-scoped path so it cannot
+      // linger as running without a live executor handle.
+      expect(updateAttempt).toHaveBeenCalledWith('attempt-1', expect.objectContaining({
+        status: 'failed',
+        exitCode: 1,
+        completedAt: expect.any(Date),
+        error: expect.stringContaining('Executor startup failed (ssh)'),
+      }));
+    });
+
+    it('does not reopen a stale startup failure attempt that was already superseded', async () => {
+      const handleWorkerResponse = vi.fn();
+      const updateTask = vi.fn();
+      const updateAttempt = vi.fn();
+      const orchestrator = {
+        getTask: () => makeTask({
+          id: 'already-superseded',
+          status: 'running',
+          execution: { selectedAttemptId: 'attempt-new', generation: 0 },
+        }),
+        handleWorkerResponse,
+      };
+      const startupErr: any = new Error('SSH startup failed after recreate');
+      startupErr.workspacePath = '/tmp/superseded-worktree';
+      startupErr.branch = 'experiment/superseded-branch';
+      const throwingExecutor = {
+        type: 'ssh',
+        start: async () => { throw startupErr; },
+        onOutput: () => () => {},
+        onComplete: () => () => {},
+      };
+      const registry = {
+        getDefault: () => throwingExecutor,
+        get: () => throwingExecutor,
+        getAll: () => [throwingExecutor],
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: {
+          updateTask,
+          updateAttempt,
+          loadAttempt: () => ({ id: 'attempt-old', nodeId: 'already-superseded', status: 'superseded' }),
+        } as any,
+        executorRegistry: registry as any,
+        cwd: '/tmp',
+      });
+
+      await runner.executeTask(makeTask({
+        id: 'already-superseded',
+        status: 'running',
+        config: { command: 'echo hi', executorType: 'ssh' as any },
+        execution: { selectedAttemptId: 'attempt-old', generation: 0 },
+      }));
+
+      expect(updateTask).not.toHaveBeenCalledWith(
+        'already-superseded',
+        expect.objectContaining({
+          execution: expect.objectContaining({ workspacePath: '/tmp/superseded-worktree' }),
+        }),
+      );
+      expect(handleWorkerResponse).not.toHaveBeenCalled();
+      expect(updateAttempt).not.toHaveBeenCalled();
     });
 
     it('suppresses metadata write and failed response when generation has advanced', async () => {
