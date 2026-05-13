@@ -11,12 +11,10 @@
 
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import yaml from 'js-yaml';
-import type { TaskState, TaskReplacementDef, ExternalGatePolicyUpdate } from './types.js';
+import type { TaskState, TaskReplacementDef, ExternalGatePolicyUpdate, WorkflowStatus } from './types.js';
 import { useTasks } from './hooks/useTasks.js';
 import { useInvoker } from './hooks/useInvoker.js';
 import { TaskDAG } from './components/TaskDAG.js';
-import { TaskPanel } from './components/TaskPanel.js';
-import { StatusBar } from './components/StatusBar.js';
 import { TopBar } from './components/TopBar.js';
 import { HistoryView } from './components/HistoryView.js';
 import { TimelineView } from './components/TimelineView.js';
@@ -27,6 +25,10 @@ import { ContextMenu } from './components/ContextMenu.js';
 import { QueueView } from './components/QueueView.js';
 import { ReplaceTaskModal } from './components/ReplaceTaskModal.js';
 import { SystemSetupModal } from './components/SystemSetupModal.js';
+import { WorkflowGraph } from './components/WorkflowGraph.js';
+import { WorkflowInspector } from './components/WorkflowInspector.js';
+import { WorkflowStatusChips } from './components/WorkflowStatusChips.js';
+import { TerminalDrawer } from './components/TerminalDrawer.js';
 import {
   isExperimentSpawnPivotTask,
   EXPERIMENT_SPAWN_PIVOT_OPEN_TERMINAL_MESSAGE,
@@ -57,6 +59,7 @@ export function App() {
   const { tasks, workflows, clearTasks, refreshTasks } = useTasks();
   const invoker = useInvoker();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>({ type: 'none' });
   const [hasLoadedPlan, setHasLoadedPlan] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
@@ -66,12 +69,17 @@ export function App() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; taskId: string } | null>(null);
   const [remoteTargets, setRemoteTargets] = useState<string[]>([]);
   const [executionAgents, setExecutionAgents] = useState<string[]>([]);
-  const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
+  const [statusFilters, setStatusFilters] = useState<Set<WorkflowStatus>>(new Set());
   const [systemDiagnostics, setSystemDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [showSystemSetup, setShowSystemSetup] = useState(false);
   const [showSystemBanner, setShowSystemBanner] = useState(false);
   const [installSkillsPending, setInstallSkillsPending] = useState(false);
   const [installSkillsError, setInstallSkillsError] = useState<string | null>(null);
+  const [attentionMode, setAttentionMode] = useState(false);
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [advancedMetadataExpanded, setAdvancedMetadataExpanded] = useState(false);
+  const [terminalCollapsed, setTerminalCollapsed] = useState(true);
+  const [workflowContextMenu, setWorkflowContextMenu] = useState<{ x: number; y: number; workflowId: string } | null>(null);
   const uiPerfThrottleRef = useRef<Record<string, number>>({});
 
   const refreshSystemDiagnostics = useCallback(() => {
@@ -145,7 +153,43 @@ export function App() {
     };
   }, []);
 
-  const handleStatusClick = useCallback((filterKey: string, event: React.MouseEvent) => {
+  const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) ?? null : null;
+  const contextMenuTask = contextMenu ? tasks.get(contextMenu.taskId) ?? null : null;
+  const selectedWorkflow = useMemo(() => {
+    if (selectedWorkflowId) {
+      return workflows.get(selectedWorkflowId) ?? null;
+    }
+    if (selectedTask?.config.workflowId) {
+      return workflows.get(selectedTask.config.workflowId) ?? null;
+    }
+    return null;
+  }, [selectedWorkflowId, selectedTask, workflows]);
+  const miniDagTasks = useMemo(() => {
+    const activeWorkflowId = selectedWorkflow?.id ?? selectedWorkflowId;
+    if (!activeWorkflowId) return new Map<string, TaskState>();
+    const next = new Map<string, TaskState>();
+    for (const task of tasks.values()) {
+      if (task.config.workflowId === activeWorkflowId) {
+        next.set(task.id, task);
+      }
+    }
+    return next;
+  }, [selectedWorkflow, selectedWorkflowId, tasks]);
+
+  useEffect(() => {
+    if (selectedTask?.config.workflowId) {
+      setSelectedWorkflowId(selectedTask.config.workflowId);
+      return;
+    }
+    if (selectedWorkflowId && workflows.has(selectedWorkflowId)) {
+      return;
+    }
+    const firstWorkflowId = workflows.keys().next().value as string | undefined;
+    setSelectedWorkflowId(firstWorkflowId ?? null);
+  }, [selectedTask, selectedWorkflowId, workflows]);
+
+  const handleStatusClick = useCallback((filterKey: WorkflowStatus, event: React.MouseEvent) => {
+    setAttentionMode(false);
     setStatusFilters(prev => {
       if (event.ctrlKey || event.metaKey) {
         // Toggle: add if absent, remove if present
@@ -159,15 +203,12 @@ export function App() {
       } else {
         // Isolate: if already the sole filter, clear all; otherwise set to this filter only
         if (prev.size === 1 && prev.has(filterKey)) {
-          return new Set<string>();
+          return new Set<WorkflowStatus>();
         }
         return new Set([filterKey]);
       }
     });
   }, []);
-
-  const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) ?? null : null;
-  const contextMenuTask = contextMenu ? tasks.get(contextMenu.taskId) ?? null : null;
   const missingRequiredTool = systemDiagnostics?.tools.find((tool) => tool.required && !tool.installed) ?? null;
   const installedAgentCount = systemDiagnostics?.tools.filter((tool) => (tool.id === 'claude' || tool.id === 'codex') && tool.installed).length ?? 0;
   const needsBundledSkillsPrompt = Boolean(systemDiagnostics?.isPackaged && systemDiagnostics?.bundledSkills?.promptRecommended);
@@ -175,6 +216,10 @@ export function App() {
   // ── DAG interaction ───────────────────────────────────────
   const handleTaskClick = useCallback((task: TaskState) => {
     setSelectedTaskId(task.id);
+    if (task.config.workflowId) {
+      setSelectedWorkflowId(task.config.workflowId);
+    }
+    setWorkflowContextMenu(null);
   }, []);
 
   const handleTaskDoubleClick = useCallback(async (task: TaskState) => {
@@ -191,7 +236,25 @@ export function App() {
 
   const handleTaskContextMenu = useCallback((task: TaskState, event: React.MouseEvent) => {
     setSelectedTaskId(task.id);
+    if (task.config.workflowId) {
+      setSelectedWorkflowId(task.config.workflowId);
+    }
+    setWorkflowContextMenu(null);
     setContextMenu({ x: event.clientX, y: event.clientY, taskId: task.id });
+  }, []);
+
+  const handleWorkflowClick = useCallback((workflowId: string) => {
+    setSelectedWorkflowId(workflowId);
+    setContextMenu(null);
+    setWorkflowContextMenu(null);
+  }, []);
+
+  const handleWorkflowContextMenu = useCallback((event: React.MouseEvent<HTMLDivElement>, workflowId: string) => {
+    event.preventDefault();
+    setSelectedWorkflowId(workflowId);
+    setSelectedTaskId(null);
+    setContextMenu(null);
+    setWorkflowContextMenu({ x: event.clientX, y: event.clientY, workflowId });
   }, []);
 
   const handleRestartTask = useCallback(async (taskId: string) => {
@@ -291,11 +354,14 @@ export function App() {
     try {
       await window.invoker?.deleteWorkflow(workflowId);
       setSelectedTaskId(null);
+      if (selectedWorkflowId === workflowId) {
+        setSelectedWorkflowId(null);
+      }
       refreshTasks();
     } catch (err) {
       console.error('Delete Workflow failed:', err);
     }
-  }, [refreshTasks]);
+  }, [refreshTasks, selectedWorkflowId]);
 
   const handleFix = useCallback(async (taskId: string, agentName: string) => {
     setContextMenu(null);
@@ -348,8 +414,18 @@ export function App() {
     }
   }, []);
 
+  const handleOpenWorkflowPr = useCallback((workflowId: string) => {
+    const workflowTasks = [...tasks.values()].filter((task) => task.config.workflowId === workflowId);
+    const reviewUrl = workflowTasks.find((task) => task.execution.reviewUrl)?.execution.reviewUrl;
+    if (reviewUrl) {
+      window.open(reviewUrl, '_blank', 'noopener,noreferrer');
+    }
+    setWorkflowContextMenu(null);
+  }, [tasks]);
+
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
+    setWorkflowContextMenu(null);
   }, []);
 
   const handleRefresh = useCallback(() => {
@@ -405,8 +481,10 @@ export function App() {
       setPlanName(null);
       setOnFinish('merge');
       setSelectedTaskId(null);
+      setSelectedWorkflowId(null);
       setModal({ type: 'none' });
-      setStatusFilters(new Set());
+      setStatusFilters(new Set<WorkflowStatus>());
+      setAttentionMode(false);
     } catch (err) {
       console.error('Failed to clear:', err);
     }
@@ -425,7 +503,9 @@ export function App() {
       setHasStarted(false);
       setPlanName(null);
       setSelectedTaskId(null);
+      setSelectedWorkflowId(null);
       setModal({ type: 'none' });
+      setAttentionMode(false);
     } catch (err) {
       console.error('Failed to delete workflows:', err);
     }
@@ -574,7 +654,7 @@ export function App() {
   }, [refreshSystemDiagnostics]);
 
   return (
-    <div className="h-screen flex flex-col bg-gray-900 text-gray-100">
+    <div className="h-screen flex flex-col bg-gray-900 text-gray-100" onClick={() => setWorkflowContextMenu(null)}>
       {/* Top bar */}
       <TopBar
         planName={planName}
@@ -622,75 +702,144 @@ export function App() {
 
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: DAG visualization (60%) */}
-        <div className="w-3/5 border-r border-gray-700">
-          {viewMode === 'queue' ? (
-            <div className="h-full">
-              <QueueView
-                tasks={tasks}
-                onTaskClick={handleTaskClick}
-                onCancel={handleCancelTask}
-                selectedTaskId={selectedTaskId}
-              />
-            </div>
-          ) : viewMode === 'history' ? (
-            <div className="h-full">
-              <HistoryView onTaskClick={handleTaskClick} selectedTaskId={selectedTaskId} />
-            </div>
-          ) : viewMode === 'timeline' ? (
-            <div className="h-full">
-              <TimelineView tasks={tasks} onTaskClick={handleTaskClick} selectedTaskId={selectedTaskId} />
-            </div>
-          ) : tasks.size === 0 ? (
-            <div className="h-full flex items-center justify-center text-gray-500 text-sm">
-              Load a plan to get started
-            </div>
-          ) : (
-            <div className="h-full">
-              <TaskDAG
-                tasks={tasks}
-                workflows={workflows}
-                selectedTaskId={selectedTaskId}
-                onTaskClick={handleTaskClick}
-                onTaskDoubleClick={handleTaskDoubleClick}
-                onTaskContextMenu={handleTaskContextMenu}
-                statusFilters={statusFilters}
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Right: Task panel (40%) */}
-        <div className="w-2/5 flex flex-col">
-          <div className="flex-1 overflow-hidden bg-gray-800">
-            <TaskPanel
-              task={selectedTask}
-              allTasks={tasks}
-              baseBranch={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.baseBranch : undefined}
-              workflowRepoUrl={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.repoUrl : undefined}
-              mergeMode={selectedTask?.config.workflowId ? workflows.get(selectedTask.config.workflowId)?.mergeMode : undefined}
-              remoteTargets={remoteTargets}
-              executionAgents={executionAgents}
-              onProvideInput={openInputModal}
-              onApprove={openApprovalModal}
-              onReject={(task) => {
-                setModal({ type: 'approval', task, action: 'reject' });
+        <nav className="w-24 border-r border-gray-800 bg-gray-950/60 flex flex-col justify-between py-3">
+          <div className="space-y-1 px-2">
+            <button
+              data-testid="rail-home"
+              onClick={() => {
+                setViewMode('dag');
+                setAttentionMode(false);
               }}
-              onSelectExperiment={openExperimentModal}
-              onEditCommand={handleEditCommand}
-              onEditPrompt={handleEditPrompt}
-              onEditType={handleEditType}
-              onEditAgent={handleEditAgent}
-              onSetExternalGatePolicies={handleSetExternalGatePolicies}
-              onSetMergeBranch={invoker?.setMergeBranch}
-              onSetMergeMode={invoker?.setMergeMode}
+              className={`w-full rounded px-2 py-1.5 text-left text-xs ${viewMode === 'dag' && !attentionMode ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800/70'}`}
+            >
+              Home
+            </button>
+            <button
+              data-testid="rail-timeline"
+              onClick={() => {
+                setViewMode('timeline');
+                setAttentionMode(false);
+              }}
+              className={`w-full rounded px-2 py-1.5 text-left text-xs ${viewMode === 'timeline' ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800/70'}`}
+            >
+              Timeline
+            </button>
+            <button
+              data-testid="rail-history"
+              onClick={() => {
+                setViewMode('history');
+                setAttentionMode(false);
+              }}
+              className={`w-full rounded px-2 py-1.5 text-left text-xs ${viewMode === 'history' ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800/70'}`}
+            >
+              History
+            </button>
+            <button
+              data-testid="rail-queue"
+              onClick={() => {
+                setViewMode('queue');
+                setAttentionMode(false);
+              }}
+              className={`w-full rounded px-2 py-1.5 text-left text-xs ${viewMode === 'queue' ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800/70'}`}
+            >
+              Queue
+            </button>
+            <button
+              data-testid="rail-attention"
+              onClick={() => {
+                setViewMode('dag');
+                setAttentionMode(true);
+                setStatusFilters(new Set<WorkflowStatus>(['failed', 'blocked', 'stale']));
+              }}
+              className={`w-full rounded px-2 py-1.5 text-left text-xs ${attentionMode ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800/70'}`}
+            >
+              Attention
+            </button>
+          </div>
+          <div className="px-2">
+            <button
+              data-testid="rail-settings"
+              onClick={() => setShowSystemSetup(true)}
+              className="w-full rounded px-2 py-1.5 text-left text-xs text-gray-300 hover:bg-gray-800/70"
+            >
+              Settings
+            </button>
+          </div>
+        </nav>
+
+        <div className="flex-1 flex overflow-hidden">
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="flex-1 relative overflow-hidden border-r border-gray-800 bg-gray-900">
+              {viewMode === 'queue' ? (
+                <QueueView
+                  tasks={tasks}
+                  onTaskClick={handleTaskClick}
+                  onCancel={handleCancelTask}
+                  selectedTaskId={selectedTaskId}
+                />
+              ) : viewMode === 'history' ? (
+                <HistoryView onTaskClick={handleTaskClick} selectedTaskId={selectedTaskId} />
+              ) : viewMode === 'timeline' ? (
+                <TimelineView tasks={tasks} onTaskClick={handleTaskClick} selectedTaskId={selectedTaskId} />
+              ) : (
+                <>
+                  <WorkflowGraph
+                    tasks={tasks}
+                    workflows={workflows}
+                    selectedWorkflowId={selectedWorkflow?.id ?? null}
+                    statusFilters={statusFilters}
+                    onSelectWorkflow={handleWorkflowClick}
+                    onWorkflowContextMenu={handleWorkflowContextMenu}
+                  />
+                  {selectedWorkflow && miniDagTasks.size > 0 && (
+                    <div className="absolute top-3 right-3 h-[280px] w-[420px] rounded border border-gray-700 bg-gray-900/95 overflow-hidden shadow-lg">
+                      <div className="px-2 py-1 text-[11px] text-gray-300 border-b border-gray-700">
+                        {selectedWorkflow.name} task DAG
+                      </div>
+                      <div className="h-[250px]">
+                        <TaskDAG
+                          tasks={miniDagTasks}
+                          workflows={workflows}
+                          selectedTaskId={selectedTaskId}
+                          onTaskClick={handleTaskClick}
+                          onTaskDoubleClick={handleTaskDoubleClick}
+                          onTaskContextMenu={handleTaskContextMenu}
+                          statusFilters={new Set()}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {viewMode === 'dag' && (
+              <>
+                <WorkflowStatusChips
+                  workflows={workflows}
+                  activeFilters={statusFilters}
+                  onStatusClick={handleStatusClick}
+                />
+                <TerminalDrawer
+                  collapsed={terminalCollapsed}
+                  onToggle={() => setTerminalCollapsed((prev) => !prev)}
+                />
+              </>
+            )}
+          </div>
+
+          <div className={`${inspectorCollapsed ? 'w-16' : 'w-96'} transition-all duration-150`}>
+            <WorkflowInspector
+              workflow={selectedWorkflow}
+              task={selectedTask}
+              collapsed={inspectorCollapsed}
+              advancedExpanded={advancedMetadataExpanded}
+              onToggleCollapsed={() => setInspectorCollapsed((prev) => !prev)}
+              onToggleAdvanced={() => setAdvancedMetadataExpanded((prev) => !prev)}
             />
           </div>
         </div>
       </div>
-
-      {/* Status bar */}
-      <StatusBar tasks={tasks} activeFilters={statusFilters} onStatusClick={handleStatusClick} />
 
       {/* Modals */}
       {modal.type === 'input' && (
@@ -736,6 +885,63 @@ export function App() {
           onInstallBundledSkills={handleInstallBundledSkills}
           onClose={() => setShowSystemSetup(false)}
         />
+      )}
+
+      {workflowContextMenu && (
+        <div
+          className="fixed z-50 min-w-[200px] rounded border border-gray-700 bg-gray-900 shadow-lg"
+          style={{ left: workflowContextMenu.x, top: workflowContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              handleWorkflowClick(workflowContextMenu.workflowId);
+              setWorkflowContextMenu(null);
+            }}
+            className="w-full px-3 py-2 text-left text-xs text-gray-200 hover:bg-gray-800"
+          >
+            Open Workflow
+          </button>
+          <button
+            onClick={() => handleOpenWorkflowPr(workflowContextMenu.workflowId)}
+            className="w-full px-3 py-2 text-left text-xs text-gray-200 hover:bg-gray-800"
+          >
+            Open PR
+          </button>
+          <button
+            onClick={() => {
+              void handleRetryWorkflow(workflowContextMenu.workflowId);
+              setWorkflowContextMenu(null);
+            }}
+            className="w-full px-3 py-2 text-left text-xs text-gray-200 hover:bg-gray-800"
+          >
+            Retry Workflow
+          </button>
+          <button
+            onClick={() => {
+              void handleRecreateWithRebase(workflowContextMenu.workflowId);
+              setWorkflowContextMenu(null);
+            }}
+            className="w-full px-3 py-2 text-left text-xs text-gray-200 hover:bg-gray-800"
+          >
+            Rebase Workflow
+          </button>
+          <button
+            onClick={() => {
+              navigator.clipboard.writeText(workflowContextMenu.workflowId).catch(() => {});
+              setWorkflowContextMenu(null);
+            }}
+            className="w-full px-3 py-2 text-left text-xs text-gray-200 hover:bg-gray-800"
+          >
+            Copy Workflow ID
+          </button>
+          <button
+            disabled
+            className="w-full px-3 py-2 text-left text-xs text-gray-500 cursor-not-allowed"
+          >
+            Fork From Here (coming soon)
+          </button>
+        </div>
       )}
 
       {contextMenu && contextMenuTask && (

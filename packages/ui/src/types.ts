@@ -151,7 +151,7 @@ export type TaskDelta =
 export interface WorkflowMeta {
   id: string;
   name: string;
-  status: string;
+  status: WorkflowStatus;
   baseBranch?: string;
   featureBranch?: string;
   onFinish?: string;
@@ -161,9 +161,19 @@ export interface WorkflowMeta {
   reviewProvider?: string;
 }
 
+export type WorkflowStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'blocked'
+  | 'review_ready'
+  | 'awaiting_approval'
+  | 'stale';
+
 // ── Workflow Status ─────────────────────────────────────────
 
-export interface WorkflowStatus {
+export interface WorkflowStatusCounts {
   total: number;
   completed: number;
   failed: number;
