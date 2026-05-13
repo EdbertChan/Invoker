@@ -35,21 +35,6 @@ import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
 
-const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
-
-// Prevent desktop-wide freezes on Linux (Chromium GPU + X11/Wayland compositors).
-// Defense-in-depth: API-level disable, command-line flags, and env var (LIBGL_ALWAYS_SOFTWARE).
-if (process.platform === 'linux' && !enableTestCompositor) {
-  app.disableHardwareAcceleration();
-  app.commandLine.appendSwitch('no-sandbox');
-  app.commandLine.appendSwitch('no-zygote');
-  app.commandLine.appendSwitch('disable-dev-shm-usage');
-  app.commandLine.appendSwitch('disable-gpu');
-  app.commandLine.appendSwitch('disable-gpu-compositing');
-  app.commandLine.appendSwitch('disable-gpu-sandbox');
-  app.commandLine.appendSwitch('disable-software-rasterizer');
-}
-
 import { Orchestrator, CommandService, OrchestratorErrorCode } from '@invoker/workflow-core';
 import type {
   PlanDefinition,
@@ -62,7 +47,7 @@ import { makeEnvelope, CommandError } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
-import { IpcBus, Channels, TransportError, TransportErrorCode } from '@invoker/transport';
+import { IpcBus, Channels } from '@invoker/transport';
 import {
   WorkspaceProbeAdapter,
   ContainerProbeAdapter,
@@ -149,46 +134,37 @@ import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import { evaluateExecutingStall } from './executing-stall.js';
 import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
 import { persistShutdownDiagnostic } from './shutdown-diagnostic.js';
+import {
+  configureEarlyElectronRuntime,
+  registerProcessErrorLogging,
+} from './bootstrap/app-bootstrap.js';
+import {
+  registerGuiMutationHandler as registerGuiIpcMutationHandler,
+  registerOwnerIpcDelegationHandlers,
+  registerWorkflowScopedGuiMutationHandler as registerWorkflowScopedGuiIpcMutationHandler,
+  type GuiMutationPayload,
+  type HeadlessExecMutationPayload,
+  type HeadlessResumeMutationPayload,
+  type HeadlessRunMutationPayload,
+} from './ipc/ipc-registration.js';
 
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
 
 // ── Detect headless mode ─────────────────────────────────────
 
-// Electron passes extra args after `--` or interleaves them.
-// We look for `--headless` anywhere in process.argv.
-const headlessIndex = process.argv.indexOf('--headless');
-const directInstallSkills = process.argv.includes('--install-skills') || process.argv.slice(2).includes('install-skills');
-const isHeadless = headlessIndex !== -1 || directInstallSkills;
-
-// In headless mode, extract the CLI args after --headless
-let cliArgs = headlessIndex !== -1
-  ? process.argv.slice(headlessIndex + 1)
-  : directInstallSkills
-    ? ['install-skills']
-    : [];
-
-// Parse --wait-for-approval flag
-const waitForApprovalIndex = cliArgs.indexOf('--wait-for-approval');
-const waitForApproval = waitForApprovalIndex !== -1;
-if (waitForApproval) {
-  cliArgs = [...cliArgs.slice(0, waitForApprovalIndex), ...cliArgs.slice(waitForApprovalIndex + 1)];
-}
-
-// Parse --no-track / --do-not-track flag
-const noTrackIndex = cliArgs.findIndex((arg) => arg === '--no-track' || arg === '--do-not-track');
-const noTrack = noTrackIndex !== -1;
-if (noTrack) {
-  cliArgs = [...cliArgs.slice(0, noTrackIndex), ...cliArgs.slice(noTrackIndex + 1)];
-}
-
-// Set app name early so Electron uses "invoker" as WM_CLASS (X11) and app_id (Wayland).
-// --class tells Chromium to set WM_CLASS explicitly, preventing GNOME from
-// grouping Invoker with other Electron apps (e.g. Slack).
-app.name = 'invoker';
-if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('class', 'invoker');
-}
+const {
+  enableTestCompositor,
+  isHeadless,
+  cliArgs,
+  waitForApproval,
+  noTrack,
+} = configureEarlyElectronRuntime({
+  app,
+  argv: process.argv,
+  env: process.env,
+  platform: process.platform,
+});
 
 // ── Shared state ─────────────────────────────────────────────
 
@@ -230,28 +206,6 @@ function resolveMaxConcurrentWorkflowDrains(): number {
 
 const maxConcurrentWorkflowDrains = resolveMaxConcurrentWorkflowDrains();
 
-interface GuiMutationPayload {
-  channel: string;
-  args: unknown[];
-}
-
-interface HeadlessRunMutationPayload {
-  planPath: string;
-  traceId?: string;
-}
-
-interface HeadlessResumeMutationPayload {
-  workflowId: string;
-  traceId?: string;
-}
-
-interface HeadlessExecMutationPayload {
-  args: string[];
-  waitForApproval?: boolean;
-  noTrack?: boolean;
-  traceId?: string;
-}
-
 // Root logger: created early in initServices() once persistence is available.
 // Before initServices(), use the pre-init logger (file-only, no DB).
 let logger: Logger = new FileAndDbLogger({ module: 'main' });
@@ -259,21 +213,7 @@ const buildSha = typeof __BUILD_SHA__ !== 'undefined' ? __BUILD_SHA__ : 'dev';
 const buildVersion = typeof __BUILD_VERSION__ !== 'undefined' ? __BUILD_VERSION__ : 'dev';
 logger.info(`Invoker ${buildVersion} (${buildSha})`, { module: 'startup' });
 
-process.on('uncaughtException', (err) => {
-  try {
-    logger.error(`uncaughtException: ${err instanceof Error ? err.stack ?? err.message : String(err)}`, { module: 'process' });
-  } catch {
-    console.error('[process] uncaughtException:', err);
-  }
-});
-
-process.on('unhandledRejection', (reason) => {
-  try {
-    logger.error(`unhandledRejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`, { module: 'process' });
-  } catch {
-    console.error('[process] unhandledRejection:', reason);
-  }
-});
+registerProcessErrorLogging(() => logger);
 
 const repoRoot = resolveRepoRoot(__dirname, { fallback: process.resourcesPath });
 const invokerConfig: InvokerConfig = (() => {
@@ -977,97 +917,34 @@ if (isHeadless) {
           return { workflowId, tasks };
         };
 
-        messageBus.onRequest('headless.run', async (req: unknown) => {
-          noteStandaloneOwnerActivity();
-          const { planPath, traceId } = req as { planPath: string; traceId?: string };
-          logger.info(
-            `headless.run received trace=${traceId ?? '<none>'} planPath="${planPath}" ownerId=${workflowMutationOwnerId} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          const result = await executeStandaloneHeadlessRun({ planPath });
-          logger.info(
-            `headless.run accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          return result;
-        });
-        messageBus.onRequest('headless.owner-ping', async () => {
-          noteStandaloneOwnerActivity();
-          return {
-            ok: true,
-            ownerId: workflowMutationOwnerId,
-            mode: 'standalone',
-          };
-        });
-        messageBus.onRequest('headless.query', async (req: unknown) => {
-          noteStandaloneOwnerActivity();
-          const { kind, reset } = req as { kind?: string; reset?: boolean };
-          if (kind === 'ui-perf') {
-            if (reset) {
-              headlessDeps.resetUiPerfStats?.();
-            }
-            return {
-              ownerMode: 'standalone',
-              ...(headlessDeps.getUiPerfStats?.() ?? {}),
-            };
-          }
-          if (kind === 'queue') {
-            return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
-          }
-          throw new Error(`Unsupported headless query: ${String(kind)}`);
-        });
-        messageBus.onRequest('headless.resume', async (req: unknown) => {
-          noteStandaloneOwnerActivity();
-          const { workflowId, traceId } = req as { workflowId: string; traceId?: string };
-          logger.info(
-            `headless.resume received trace=${traceId ?? '<none>'} workflowId="${workflowId}" ownerId=${workflowMutationOwnerId} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          const result = await executeStandaloneHeadlessResume({ workflowId });
-          logger.info(
-            `headless.resume accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          return result;
-        });
-        messageBus.onRequest('headless.exec', async (req: unknown) => {
-          noteStandaloneOwnerActivity();
-          const { args, waitForApproval: delegatedWait, noTrack: delegatedNoTrack, traceId } =
-            req as { args: string[]; waitForApproval?: boolean; noTrack?: boolean; traceId?: string };
-          if (!Array.isArray(args) || args.length === 0) {
-            throw new Error('Missing delegated headless command arguments');
-          }
-          logger.info(
-            `headless.exec received trace=${traceId ?? '<none>'} args="${args.join(' ')}" ownerId=${workflowMutationOwnerId} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          const payload: HeadlessExecMutationPayload = {
-            args,
-            waitForApproval: delegatedWait,
-            noTrack: delegatedNoTrack,
-            traceId,
-          };
-          const { workflowId, priority } = classifyStandaloneHeadlessExecMutation(payload);
-          if (delegatedNoTrack && workflowId && workflowMutationCoordinator) {
-            const intentId = workflowMutationCoordinator.submit(workflowId, priority, 'headless.exec', [payload], {
-              deferDrain: true,
-            });
-            logger.info(
-              `headless.exec accepted trace=${traceId ?? '<none>'} workflow="${workflowId}" intent=${intentId} noTrack=true priority=${priority} mode=standalone`,
-              { module: 'ipc-delegate' },
-            );
-            return { ok: true, intentId };
-          }
-          await runStandaloneWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => {
-            await runHeadless(args, {
+        registerOwnerIpcDelegationHandlers({
+          messageBus,
+          workflowMutationOwnerId,
+          mode: 'standalone',
+          logger,
+          getUiPerfStats: () => headlessDeps.getUiPerfStats?.() ?? {},
+          resetUiPerfStats: () => headlessDeps.resetUiPerfStats?.(),
+          getQueueStatus: () => orchestrator.getQueueStatus() as unknown as Record<string, unknown>,
+          executeHeadlessRun: executeStandaloneHeadlessRun,
+          executeHeadlessResume: executeStandaloneHeadlessResume,
+          executeHeadlessExec: async (payload) => {
+            await runHeadless(payload.args, {
               ...headlessDeps,
-              waitForApproval: delegatedWait,
-              noTrack: delegatedNoTrack,
+              waitForApproval: payload.waitForApproval,
+              noTrack: payload.noTrack,
               signal: activeMutationContext?.signal,
               mutationTiming: activeMutationContext?.mutationTiming,
             });
-          });
-          return { ok: true };
+            return { ok: true };
+          },
+          classifyHeadlessExecMutation: classifyStandaloneHeadlessExecMutation,
+          runWorkflowMutation: runStandaloneWorkflowMutation,
+          submitNoTrackMutation: workflowMutationCoordinator
+            ? (workflowId, priority, channel, args) => workflowMutationCoordinator!.submit(workflowId, priority, channel, args, {
+              deferDrain: true,
+            })
+            : undefined,
+          onOwnerActivity: noteStandaloneOwnerActivity,
         });
       }
 
@@ -1975,23 +1852,14 @@ if (isHeadless) {
     handler: (...args: unknown[]) => Promise<TResult>,
   ): void {
     guiMutationHandlers.set(channel, handler as (...args: unknown[]) => Promise<unknown>);
-    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
-      if (ownerMode) {
-        return handler(...args);
-      }
-      const translated = translateGuiMutationToHeadless({ channel, args });
-      if (!translated) {
-        throw new Error(`No owner delegation route is available for ${channel}`);
-      }
-      try {
-        return await messageBus.request<typeof translated.request, TResult>(translated.channel, translated.request);
-      } catch (err) {
-        if (err instanceof TransportError && err.code === TransportErrorCode.NO_HANDLER) {
-          throw new Error('No mutation owner is available');
-        }
-        throw err;
-      }
-    });
+    registerGuiIpcMutationHandler<TResult>({
+      ipcMain,
+      messageBus,
+      getOwnerMode: () => ownerMode,
+      translateGuiMutationToHeadless,
+      workflowMutationDispatcher,
+      runWorkflowMutation,
+    }, channel, handler);
   }
 
   function registerWorkflowScopedGuiMutationHandler<TResult = unknown>(
@@ -2000,11 +1868,15 @@ if (isHeadless) {
     priority: WorkflowMutationPriority,
     handler: (...args: unknown[]) => Promise<TResult>,
   ): void {
-    workflowMutationDispatcher.set(channel, (...args: unknown[]) => handler(...args));
-    registerGuiMutationHandler(channel, async (...args: unknown[]) => {
-      const workflowId = resolveWorkflowId(...args);
-      return runWorkflowMutation(workflowId, priority, channel, args, () => handler(...args));
-    });
+    guiMutationHandlers.set(channel, handler as (...args: unknown[]) => Promise<unknown>);
+    registerWorkflowScopedGuiIpcMutationHandler<TResult>({
+      ipcMain,
+      messageBus,
+      getOwnerMode: () => ownerMode,
+      translateGuiMutationToHeadless,
+      workflowMutationDispatcher,
+      runWorkflowMutation,
+    }, channel, resolveWorkflowId, priority, handler);
   }
 
   function createWindow(): void {
@@ -2553,83 +2425,24 @@ if (isHeadless) {
       workflowMutationDispatcher.set('surface:approve-task', async (taskIdArg: unknown) => {
         await performSharedApproveTask(String(taskIdArg), 'surface');
       });
-      messageBus.onRequest('headless.owner-ping', async () => ({
-        ok: true,
-        ownerId: workflowMutationOwnerId,
+      registerOwnerIpcDelegationHandlers({
+        messageBus,
+        workflowMutationOwnerId,
         mode: 'gui',
-      }));
-      messageBus.onRequest('headless.query', async (req: unknown) => {
-        const { kind, reset } = req as { kind?: string; reset?: boolean };
-        if (kind === 'ui-perf') {
-          if (reset) {
-            resetUiPerfStats();
-          }
-          return {
-            ownerMode: 'gui',
-            ...getUiPerfStats(),
-          };
-        }
-        if (kind === 'queue') {
-          return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
-        }
-        throw new Error(`Unsupported headless query: ${String(kind)}`);
-      });
-      messageBus.onRequest('headless.run', async (req: unknown) => {
-        const { planPath, traceId } = req as { planPath: string; traceId?: string };
-        logger.info(
-          `headless.run received trace=${traceId ?? '<none>'} planPath="${planPath}" ownerId=${workflowMutationOwnerId} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        const result = await executeHeadlessRun({ planPath });
-        logger.info(
-          `headless.run accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        return result;
-      });
-
-      messageBus.onRequest('headless.resume', async (req: unknown) => {
-        const { workflowId, traceId } = req as { workflowId: string; traceId?: string };
-        logger.info(
-          `headless.resume received trace=${traceId ?? '<none>'} workflowId="${workflowId}" ownerId=${workflowMutationOwnerId} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        const result = await executeHeadlessResume({ workflowId });
-        logger.info(
-          `headless.resume accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        return result;
-      });
-
-      messageBus.onRequest('headless.exec', async (req: unknown) => {
-        const { args, waitForApproval: delegatedWait, noTrack: delegatedNoTrack, traceId } =
-          req as { args: string[]; waitForApproval?: boolean; noTrack?: boolean; traceId?: string };
-        if (!Array.isArray(args) || args.length === 0) {
-          throw new Error('Missing delegated headless command arguments');
-        }
-        logger.info(
-          `headless.exec received trace=${traceId ?? '<none>'} args="${args.join(' ')}" ownerId=${workflowMutationOwnerId} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        const payload: HeadlessExecMutationPayload = {
-          args,
-          waitForApproval: delegatedWait,
-          noTrack: delegatedNoTrack,
-          traceId,
-        };
-        const { workflowId, priority } = classifyHeadlessExecMutation(payload);
-        if (delegatedNoTrack && workflowId && workflowMutationCoordinator) {
-          const intentId = workflowMutationCoordinator.submit(workflowId, priority, 'headless.exec', [payload], {
+        logger,
+        getUiPerfStats,
+        resetUiPerfStats,
+        getQueueStatus: () => orchestrator.getQueueStatus() as unknown as Record<string, unknown>,
+        executeHeadlessRun,
+        executeHeadlessResume,
+        executeHeadlessExec,
+        classifyHeadlessExecMutation,
+        runWorkflowMutation,
+        submitNoTrackMutation: workflowMutationCoordinator
+          ? (workflowId, priority, channel, args) => workflowMutationCoordinator!.submit(workflowId, priority, channel, args, {
             deferDrain: true,
-          });
-          logger.info(
-            `headless.exec accepted trace=${traceId ?? '<none>'} workflow="${workflowId}" intent=${intentId} noTrack=true priority=${priority} mode=gui`,
-            { module: 'ipc-delegate' },
-          );
-          return { ok: true, intentId };
-        }
-        return runWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => executeHeadlessExec(payload));
+          })
+          : undefined,
       });
       logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
       recordStartupMark('owner-ipc-ready');
