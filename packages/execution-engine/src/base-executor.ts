@@ -33,6 +33,8 @@ export interface BaseEntry {
   heartbeatTimer?: ReturnType<typeof setInterval>;
   /** Timestamp when the heartbeat was started, for max duration enforcement. */
   heartbeatStartedAt?: number;
+  /** Child process exited and executor-side result recording/push is still running. */
+  finalizing?: boolean;
 }
 
 export interface ClaudeSessionParams {
@@ -154,6 +156,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       entry.heartbeatTimer = undefined;
     }
     entry.completed = true;
+    entry.finalizing = false;
     entry.completionResponse = response;
     for (const cb of entry.completeListeners) {
       cb(response);
@@ -187,6 +190,11 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       }
 
       if (child.exitCode !== null || child.killed) {
+        if (entry.finalizing) {
+          this.emitHeartbeat(executionId);
+          return;
+        }
+
         clearInterval(entry.heartbeatTimer);
         entry.heartbeatTimer = undefined;
 
@@ -872,7 +880,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     },
   ): Promise<void> {
     const entry = this.entries.get(executionId);
-    if (entry) entry.completed = true;
+    if (entry) entry.finalizing = true;
     const bufferedOutput = entry?.outputBuffer.join('') ?? '';
     const semanticFailure = this.detectSemanticFailure(request, bufferedOutput, exitCode);
     const effectiveExitCode = (exitCode === 0 && semanticFailure)

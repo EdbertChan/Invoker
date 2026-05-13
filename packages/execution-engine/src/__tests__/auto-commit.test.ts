@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execSync } from 'node:child_process';
+import { execSync, type ChildProcess } from 'node:child_process';
 import { BaseExecutor, type BaseEntry, MergeConflictError, type SetupBranchOptions } from '../base-executor.js';
 import type { WorkRequest, WorkRequestInputs, WorkResponse } from '@invoker/contracts';
 import type { ExecutorHandle, TerminalSpec } from '../executor.js';
@@ -67,6 +67,10 @@ class TestExecutor extends BaseExecutor<BaseEntry> {
     opts?: { branch?: string; originalBranch?: string },
   ): Promise<void> {
     return this.handleProcessExit(executionId, request, cwd, exitCode, opts);
+  }
+
+  testStartHeartbeat(executionId: string, child: ChildProcess): void {
+    this.startHeartbeat(executionId, child);
   }
 
   testBuildCommandAndArgs(request: WorkRequest, claudeCommand?: string) {
@@ -2097,6 +2101,44 @@ describe('BaseExecutor.handleProcessExit push semantics', () => {
     expect(response?.status).toBe('failed');
     expect(response?.outputs.exitCode).toBe(1);
     expect(response?.outputs.error).toBe('push denied');
+  });
+
+  it('keeps heartbeating after child exit while result finalization is still running', async () => {
+    vi.useFakeTimers();
+    try {
+      execSync('git checkout -b invoker/slow-finalize', { cwd: cloneDir });
+
+      const req = makeRequest('task-slow-finalize', { description: 'x' });
+      const entry = executor.registerTestEntry('e-slow-finalize', req);
+      const heartbeats: string[] = [];
+      entry.heartbeatListeners.add((taskId) => { heartbeats.push(taskId); });
+
+      const child = {
+        exitCode: 0,
+        killed: false,
+        kill: vi.fn(),
+      } as unknown as ChildProcess;
+
+      executor.testStartHeartbeat('e-slow-finalize', child);
+      vi.spyOn(BaseExecutor.prototype as any, 'recordTaskResult').mockImplementation(
+        () => new Promise<string | null>((resolve) => {
+          setTimeout(() => resolve(null), 65_000);
+        }),
+      );
+
+      const pending = executor.testHandleProcessExit('e-slow-finalize', req, cloneDir, 0, { branch: 'invoker/slow-finalize' });
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(heartbeats).toEqual(['task-slow-finalize']);
+      expect(entry.completionResponse).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(35_000);
+      await pending;
+
+      expect(entry.completionResponse?.status).toBe('completed');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('marks codex ai_task as failed when semantic sandbox denial appears in output despite exit 0', async () => {
