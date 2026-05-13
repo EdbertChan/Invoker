@@ -129,7 +129,7 @@ import {
   selectFailureRecoveryRoute,
   selectExperiments as sharedSelectExperiments,
   setWorkflowMergeMode,
-  StaleLineageError,
+  isStaleLineageError,
 } from './workflow-actions.js';
 import { spawn, execSync } from 'node:child_process';
 import { openExternalTerminalForTask } from './open-terminal-for-task.js';
@@ -3460,8 +3460,9 @@ if (isHeadless) {
           started: result.started,
         });
       } catch (err) {
-        if (err instanceof StaleLineageError) {
-          logger.info(`resolve-conflict discarded stale result: ${err.message}`, { module: 'ipc' });
+        if (isStaleLineageError(err)) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.info(`resolve-conflict discarded stale result: ${message}`, { module: 'ipc' });
           return;
         }
         await finalizeMutationWithGlobalTopup({
@@ -3493,8 +3494,9 @@ if (isHeadless) {
           started,
         });
       } catch (err) {
-        if (err instanceof StaleLineageError) {
-          logger.info(`fix-with-agent discarded stale result: ${err.message}`, { module: 'ipc' });
+        if (isStaleLineageError(err)) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.info(`fix-with-agent discarded stale result: ${message}`, { module: 'ipc' });
           return;
         }
         await finalizeMutationWithGlobalTopup({

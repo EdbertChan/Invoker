@@ -14,7 +14,7 @@ import type {
   InvalidationScope,
   TaskState,
 } from '@invoker/workflow-core';
-import { OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
+import { OrchestratorError, OrchestratorErrorCode, StaleTaskLineageError } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { TaskRunner } from '@invoker/execution-engine';
 import { normalizeMergeModeForPersistence } from './merge-mode.js';
@@ -48,8 +48,16 @@ export interface TaskLineageSnapshot {
  */
 export function captureTaskLineage(
   taskId: string,
-  orchestrator: Pick<Orchestrator, 'getTask'>,
+  orchestrator: Pick<Orchestrator, 'getTask'> & Partial<Pick<Orchestrator, 'getTaskLineage'>>,
 ): TaskLineageSnapshot {
+  const lineage = orchestrator.getTaskLineage?.(taskId);
+  if (lineage) {
+    return {
+      taskId,
+      selectedAttemptId: lineage.selectedAttemptId,
+      generation: lineage.generation,
+    };
+  }
   const task = orchestrator.getTask(taskId);
   return {
     taskId,
@@ -65,7 +73,7 @@ export function captureTaskLineage(
  */
 export function assertLineageCurrent(
   snapshot: TaskLineageSnapshot,
-  orchestrator: Pick<Orchestrator, 'getTask'>,
+  orchestrator: Pick<Orchestrator, 'getTask'> & Partial<Pick<Orchestrator, 'getTaskLineage'>>,
   signal?: AbortSignal,
 ): void {
   if (signal?.aborted) {
@@ -84,6 +92,10 @@ export function assertLineageCurrent(
       + `gen ${snapshot.generation} → ${current.generation})`,
     );
   }
+}
+
+export function isStaleLineageError(err: unknown): boolean {
+  return err instanceof StaleLineageError || err instanceof StaleTaskLineageError;
 }
 
 function captureFixMutationLineages(
@@ -727,7 +739,7 @@ export async function resolveConflictAction(
     assertLineageCurrent(activeLineage, orchestrator, signal);
     return await finalizeAppliedFix(taskId, savedError, deps, signal, activeLineage);
   } catch (err) {
-    if (err instanceof StaleLineageError) throw err;
+    if (isStaleLineageError(err)) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     try {
       assertLineageCurrent(activeLineage, orchestrator, signal);
@@ -802,7 +814,7 @@ export async function fixWithAgentAction(
       started: result.started,
     };
   } catch (err) {
-    if (err instanceof StaleLineageError) throw err;
+    if (isStaleLineageError(err)) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const errorLabel = options.failureOutputLabel
       ?? (recoveryRoute.kind === 'resolveConflict' ? 'Resolve Conflict' : `Fix with ${options.agentName ?? 'Claude'}`);
@@ -1168,7 +1180,7 @@ export async function autoFixOnFailure(
     });
     if (runnable.length > 0) await taskExecutor.executeTasks(runnable);
   } catch (err) {
-    if (err instanceof StaleLineageError) throw err;
+    if (isStaleLineageError(err)) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const diagnostics = formatAutoFixDiagnostics(err);
     persistence.logEvent?.(taskId, 'debug.auto-fix', {

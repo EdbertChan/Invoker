@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Orchestrator } from '@invoker/workflow-core';
+import { StaleTaskLineageError } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { TaskRunner } from '@invoker/execution-engine';
 import {
@@ -2076,6 +2077,28 @@ describe('deleteAllWorkflows', () => {
 // ── Lineage guard unit tests ──────────────────────────────────
 
 describe('captureTaskLineage', () => {
+  it('prefers orchestrator getTaskLineage when available', () => {
+    const orchestrator = {
+      getTaskLineage: vi.fn(() => ({
+        taskId: 'task-a',
+        selectedAttemptId: 'att-db',
+        generation: 8,
+      })),
+      getTask: vi.fn(() => makeTask({
+        execution: { selectedAttemptId: 'att-cache', generation: 3 },
+      })),
+    };
+
+    const snapshot = captureTaskLineage('task-a', orchestrator as unknown as Orchestrator);
+
+    expect(snapshot).toEqual({
+      taskId: 'task-a',
+      selectedAttemptId: 'att-db',
+      generation: 8,
+    });
+    expect(orchestrator.getTask).not.toHaveBeenCalled();
+  });
+
   it('captures selectedAttemptId and generation from task', () => {
     const orchestrator = {
       getTask: vi.fn(() => makeTask({
@@ -2233,6 +2256,39 @@ describe('fixWithAgentAction lineage guard', () => {
     })).rejects.toThrow(StaleLineageError);
 
     expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+  });
+
+  it('treats orchestrator stale-lineage write rejection as a discarded late fix', async () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+      })),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(() => {
+        throw new StaleTaskLineageError('setFixAwaitingApproval skipped for stale task lineage task-a');
+      }),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockResolvedValue(undefined),
+      resolveConflict: vi.fn(),
+    };
+
+    await expect(fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    })).rejects.toThrow(StaleTaskLineageError);
+
+    expect(taskExecutor.fixWithAgent).toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
   });
 

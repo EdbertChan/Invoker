@@ -52,6 +52,7 @@ export class OrchestratorError extends Error {
 }
 
 export interface ExecutionLineageGuard {
+  taskId?: string;
   selectedAttemptId?: string;
   generation: number;
 }
@@ -3588,6 +3589,16 @@ export class Orchestrator {
 
   getTask(taskId: string): TaskState | undefined {
     return this.stateGetTask(taskId);
+  }
+
+  getTaskLineage(taskId: string): ExecutionLineageGuard & { taskId: string } {
+    this.refreshFromDb();
+    const task = this.stateGetTask(taskId);
+    return {
+      taskId,
+      selectedAttemptId: task?.execution.selectedAttemptId,
+      generation: this.getExecutionGeneration(task),
+    };
   }
 
   getAutoFixRetryBudget(taskId: string): number {
