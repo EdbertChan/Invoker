@@ -130,6 +130,49 @@ function respondForTask(
 }
 
 describe('Orchestrator launch claims', () => {
+  it('keeps the public orchestrator scheduling and transition signatures callable', () => {
+    type PublicApiProof = Pick<
+      Orchestrator,
+      | 'startExecution'
+      | 'handleWorkerResponse'
+      | 'retryTask'
+      | 'retryWorkflow'
+      | 'recreateTask'
+      | 'recreateWorkflow'
+      | 'resumeWorkflow'
+      | 'approve'
+      | 'provideInput'
+      | 'setTaskAwaitingApproval'
+      | 'setTaskReviewReady'
+      | 'setFixAwaitingApproval'
+      | 'beginConflictResolution'
+      | 'revertConflictResolution'
+      | 'autoStartExternallyUnblockedReadyTasks'
+    >;
+
+    const surface: Array<keyof PublicApiProof> = [
+      'startExecution',
+      'handleWorkerResponse',
+      'retryTask',
+      'retryWorkflow',
+      'recreateTask',
+      'recreateWorkflow',
+      'resumeWorkflow',
+      'approve',
+      'provideInput',
+      'setTaskAwaitingApproval',
+      'setTaskReviewReady',
+      'setFixAwaitingApproval',
+      'beginConflictResolution',
+      'revertConflictResolution',
+      'autoStartExternallyUnblockedReadyTasks',
+    ];
+
+    for (const method of surface) {
+      expect(typeof Orchestrator.prototype[method]).toBe('function');
+    }
+  });
+
   it('startExecution returns each started task exactly once', () => {
     const { orchestrator } = makeOrchestrator();
     const plan: PlanDefinition = {
@@ -245,5 +288,35 @@ describe('Orchestrator launch claims', () => {
     orchestrator.syncAllFromDb();
     const startedAfterApprove = await orchestrator.approve(approvalRootId);
     expect(startedAfterApprove.map((task) => task.id)).toContain(approvalDownstreamId);
+  });
+
+  it('keeps approval transitions on the selected attempt unchanged', () => {
+    const { orchestrator, persistence } = makeOrchestrator();
+    orchestrator.loadPlan({
+      name: 'claim-transition',
+      onFinish: 'none',
+      tasks: [{ id: 't1', description: 'one', command: 'echo one' }],
+    });
+
+    const taskId = taskIdBySuffix(orchestrator, 't1');
+    const [started] = orchestrator.startExecution();
+    const attemptId = started!.execution.selectedAttemptId!;
+
+    orchestrator.setTaskAwaitingApproval(taskId, {
+      execution: {
+        agentSessionId: 'session-1',
+        branch: 'feature/task',
+        commit: 'abc123',
+      },
+    });
+
+    const task = orchestrator.getTask(taskId)!;
+    const attempt = persistence.loadAttempt(attemptId)!;
+    expect(task.status).toBe('awaiting_approval');
+    expect(task.execution.agentSessionId).toBe('session-1');
+    expect(attempt.status).toBe('needs_input');
+    expect(attempt.agentSessionId).toBe('session-1');
+    expect(attempt.branch).toBe('feature/task');
+    expect(attempt.commit).toBe('abc123');
   });
 });
