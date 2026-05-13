@@ -88,6 +88,12 @@ function createRemote(localRepo: string): string {
   return remote;
 }
 
+function createEmptyCommits(repo: string, count: number): void {
+  for (let i = 1; i <= count; i++) {
+    execSync(`git commit --allow-empty -m "commit ${i}"`, { cwd: repo });
+  }
+}
+
 describe('fetch status visibility in task output', () => {
   let executor: TestExecutor;
   let tmpDir: string;
@@ -168,11 +174,8 @@ describe('fetch status visibility in task output', () => {
       execSync('git config user.email "test@test.com"', { cwd: secondClone });
       execSync('git config user.name "Test"', { cwd: secondClone });
 
-      // Push 101 commits to trigger loud warning
-      for (let i = 1; i <= 101; i++) {
-        writeFileSync(join(secondClone, `file${i}.txt`), `content${i}`);
-        execSync(`git add -A && git commit -m "commit ${i}"`, { cwd: secondClone });
-      }
+      // Use empty commits here to keep the >100 behind scenario fast enough for test timeouts.
+      createEmptyCommits(secondClone, 101);
       execSync('git push', { cwd: secondClone });
 
       const executionId = 'test-exec-very-behind';
@@ -187,7 +190,7 @@ describe('fetch status visibility in task output', () => {
 
       // Cleanup
       rmSync(secondClone, { recursive: true, force: true });
-    });
+    }, 40_000);
 
     it('handles new branch without remote tracking', async () => {
       // Create a new local branch

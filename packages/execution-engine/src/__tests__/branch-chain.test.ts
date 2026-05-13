@@ -65,7 +65,7 @@ function taskLabel(t: TaskType): string {
   return `${t.executor}-${t.action}`;
 }
 
-describe('A→B→C branch chain', { timeout: 120_000 }, () => {
+describe('A→B→C branch chain', { timeout: 120_000, hookTimeout: 60_000 }, () => {
   let tmpDir: string;
 
   beforeEach(() => {

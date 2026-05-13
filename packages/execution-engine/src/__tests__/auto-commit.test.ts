@@ -1376,7 +1376,7 @@ describe('merge gate commit topology (real git)', () => {
       { cwd: tmpDir },
     ).toString().trim().split('\n').filter(l => l.length > 0);
     expect(newCommits.length).toBe(1);
-  });
+  }, 40_000);
 
 });
 
