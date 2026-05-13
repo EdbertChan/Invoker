@@ -332,12 +332,7 @@ export function parsePlan(yamlContent: string): PlanDefinition {
         `Task "${task.id}" has executorType "docker" but is missing required field "dockerImage"`,
       );
     }
-    if (task.remoteTargetId !== undefined) {
-      throw new PlanParseError(
-        `Task "${task.id}" uses unsupported field "remoteTargetId". Use "poolId" instead.`,
-      );
-    }
-    if (resolvedExecutorType === 'ssh' && !task.poolId) {
+    if (resolvedExecutorType === 'ssh' && !task.poolId && !task.remoteTargetId) {
       throw new PlanParseError(
         `Task "${task.id}" has executorType "ssh" but is missing required field "poolId"`,
       );
@@ -356,6 +351,7 @@ export function parsePlan(yamlContent: string): PlanDefinition {
       featureBranch: task.featureBranch,
       executorType: resolvedExecutorType,
       dockerImage: task.dockerImage,
+      remoteTargetId: task.remoteTargetId,
       poolId: task.poolId,
       executionAgent: task.executionAgent?.trim() || undefined,
     };

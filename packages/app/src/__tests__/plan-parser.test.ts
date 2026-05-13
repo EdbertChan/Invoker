@@ -719,7 +719,7 @@ tasks:
       expect(plan.tasks[0].dockerImage).toBe('node:20');
     });
 
-    it('rejects executorType ssh with legacy remoteTargetId', () => {
+    it('accepts executorType ssh with legacy remoteTargetId until scheduler pool assignment support', () => {
       const yaml = `
 name: SSH With Target
 repoUrl: git@github.com:test/repo.git
@@ -730,7 +730,9 @@ tasks:
     executorType: ssh
     remoteTargetId: prod-server-1
 `;
-      expect(() => parsePlan(yaml)).toThrow('uses unsupported field "remoteTargetId". Use "poolId" instead.');
+      const plan = parsePlan(yaml);
+      expect(plan.tasks[0].executorType).toBe('ssh');
+      expect(plan.tasks[0].remoteTargetId).toBe('prod-server-1');
     });
 
     it('accepts executorType ssh with poolId', () => {
