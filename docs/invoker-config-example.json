@@ -43,14 +43,9 @@
     }
   },
 
-  "heavyweightCommandRouting": {
-    "comment": "Auto-route heavyweight shell commands like pnpm test to a remote target",
-    "remoteTargetId": "staging-server",
-    "matchers": [
-      {
-        "regex": "\\bpnpm(?:\\s|$)"
-      }
-    ]
+  "executionPools": {
+    "ssh-light": ["staging-server", "build-server-b"],
+    "mixed": ["local", "staging-server"]
   },
 
   "autoFixRetries": 3,
@@ -62,10 +57,10 @@
       "~/.invoker/config.json - Default user-level settings",
       "INVOKER_REPO_CONFIG_PATH=/path/to/config.json - Explicit override for repo/test-specific config"
     ],
-    "executor_types": [
-      "worktree - Git worktree isolation (default)",
-      "docker - Docker container execution",
-      "ssh - Remote SSH execution"
+    "routing": [
+      "Tasks without poolId run locally",
+      "Tasks with poolId use executionPools",
+      "Pool member local runs locally; other members reference remoteTargets keys"
     ]
   }
 }
