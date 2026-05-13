@@ -62,7 +62,7 @@ import { makeEnvelope, CommandError } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
-import { IpcBus, Channels, TransportError, TransportErrorCode } from '@invoker/transport';
+import { IpcBus, Channels } from '@invoker/transport';
 import {
   WorkspaceProbeAdapter,
   ContainerProbeAdapter,
@@ -148,6 +148,11 @@ import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './work
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
 import { persistShutdownDiagnostic } from './shutdown-diagnostic.js';
+import { startGuiAppBootstrap } from './bootstrap/app-bootstrap.js';
+import {
+  createGuiMutationRegistration,
+  registerBootstrapStateSyncHandler,
+} from './ipc/ipc-registration.js';
 
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
@@ -1967,42 +1972,18 @@ if (isHeadless) {
     });
   }
 
-  function registerGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    guiMutationHandlers.set(channel, handler as (...args: unknown[]) => Promise<unknown>);
-    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
-      if (ownerMode) {
-        return handler(...args);
-      }
-      const translated = translateGuiMutationToHeadless({ channel, args });
-      if (!translated) {
-        throw new Error(`No owner delegation route is available for ${channel}`);
-      }
-      try {
-        return await messageBus.request<typeof translated.request, TResult>(translated.channel, translated.request);
-      } catch (err) {
-        if (err instanceof TransportError && err.code === TransportErrorCode.NO_HANDLER) {
-          throw new Error('No mutation owner is available');
-        }
-        throw err;
-      }
-    });
-  }
-
-  function registerWorkflowScopedGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    resolveWorkflowId: (...args: unknown[]) => string | undefined,
-    priority: WorkflowMutationPriority,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    workflowMutationDispatcher.set(channel, (...args: unknown[]) => handler(...args));
-    registerGuiMutationHandler(channel, async (...args: unknown[]) => {
-      const workflowId = resolveWorkflowId(...args);
-      return runWorkflowMutation(workflowId, priority, channel, args, () => handler(...args));
-    });
-  }
+  const {
+    registerGuiMutationHandler,
+    registerWorkflowScopedGuiMutationHandler,
+  } = createGuiMutationRegistration({
+    ipcMain,
+    getMessageBus: () => messageBus,
+    guiMutationHandlers,
+    workflowMutationDispatcher,
+    isOwnerMode: () => ownerMode,
+    translateGuiMutationToHeadless,
+    runWorkflowMutation,
+  });
 
   function createWindow(): void {
     recordStartupMark('createWindow.begin');
@@ -2484,27 +2465,34 @@ if (isHeadless) {
     }, 0);
   }
 
-  app.whenReady().then(async () => {
-    recordStartupMark('app.whenReady');
-    ownerMode = true;
-    try {
-      recordStartupMark('initServices.start');
-      await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      recordStartupMark('initServices.end', { ownerMode: true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!message.includes('[db-writer-lock]')) {
-        process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
-        app.quit();
-        return;
+  startGuiAppBootstrap({
+    app,
+    BrowserWindow,
+    recordStartupMark,
+    logger,
+    createWindow,
+    onError: (err) => {
+      process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+      app.quit();
+    },
+    initialize: async () => {
+      ownerMode = true;
+      try {
+        recordStartupMark('initServices.start');
+        await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
+        recordStartupMark('initServices.end', { ownerMode: true });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes('[db-writer-lock]')) {
+          throw err;
+        }
+        recordStartupMark('initServices.readOnly.start');
+        await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
+        ownerMode = false;
+        recordStartupMark('initServices.readOnly.end', { ownerMode: false });
       }
-      recordStartupMark('initServices.readOnly.start');
-      await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      ownerMode = false;
-      recordStartupMark('initServices.readOnly.end', { ownerMode: false });
-    }
 
-    if (ownerMode) {
+      if (ownerMode) {
       rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
         persistence,
@@ -2709,14 +2697,12 @@ if (isHeadless) {
     });
 
     // Register IPC handlers
-    ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
-      event.returnValue = {
-        tasks: orchestrator.getAllTasks(),
-        workflows: listWorkflowsByStartupRecency(),
-        initialWorkflowId: startupWorkflowId,
-        appStartedAtEpochMs: appProcessStartedAt,
-      };
-    });
+    registerBootstrapStateSyncHandler(ipcMain, () => ({
+      tasks: orchestrator.getAllTasks(),
+      workflows: listWorkflowsByStartupRecency(),
+      initialWorkflowId: startupWorkflowId,
+      appStartedAtEpochMs: appProcessStartedAt,
+    }));
 
     registerGuiMutationHandler('invoker:load-plan', async (planTextArg: unknown) => {
       const planText = String(planTextArg);
@@ -3681,24 +3667,7 @@ if (isHeadless) {
     });
 
     seedUiSnapshotCache();
-    createWindow();
-    recordStartupMark('createWindow.end');
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
-    });
-  }).catch((err) => {
-    process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-    app.quit();
-  });
-
-  app.on('window-all-closed', () => {
-    logger.info('window-all-closed', { module: 'window' });
-    if (process.platform !== 'darwin') {
-      app.quit();
-    }
+    },
   });
 
   let isQuitting = false;
