@@ -1658,6 +1658,7 @@ async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promi
     logger: deps.logger,
     context: 'headless.rebase-and-retry',
     mutationTiming: deps.mutationTiming,
+    signal: deps.signal,
   });
 
   const te = createHeadlessExecutor(deps);
@@ -1701,6 +1702,7 @@ async function headlessRecreateWithRebase(workflowTarget: string, deps: Headless
     logger: deps.logger,
     context: 'headless.recreate-with-rebase',
     mutationTiming: deps.mutationTiming,
+    signal: deps.signal,
   });
 
   const te = createHeadlessExecutor(deps);
@@ -1745,6 +1747,7 @@ async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps):
     logger: deps.logger,
     context: 'headless.recreate-workflow',
     mutationTiming: deps.mutationTiming,
+    signal: deps.signal,
   });
   const started = deps.mutationTiming
     ? await deps.mutationTiming.span(
@@ -1893,6 +1896,7 @@ async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDeps): Pr
     logger: deps.logger,
     context: 'headless.retry-workflow',
     mutationTiming: deps.mutationTiming,
+    signal: deps.signal,
   });
   const envelope = makeEnvelope('retry-workflow', 'headless', 'workflow', { workflowId });
   const result = deps.mutationTiming

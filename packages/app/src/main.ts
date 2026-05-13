@@ -3135,6 +3135,7 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.cancel-workflow',
+          signal: activeMutationContext?.signal,
         });
         await finalizeMutationWithGlobalTopup({
           orchestrator,
@@ -3195,6 +3196,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = activeMutationContext?.mutationTiming
           ? await activeMutationContext.mutationTiming.span(
@@ -3281,6 +3283,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.retry-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
         const result = activeMutationContext?.mutationTiming
@@ -3326,6 +3329,7 @@ if (isHeadless) {
             logger,
             context: 'ipc.rebase-and-retry',
             mutationTiming: activeMutationContext?.mutationTiming,
+            signal: activeMutationContext?.signal,
           });
         }
         const started = await rebaseAndRetry(taskId, {
@@ -3367,6 +3371,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-with-rebase',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = await recreateWithRebase(workflowId, {
           orchestrator,
