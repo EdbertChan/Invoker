@@ -9,8 +9,6 @@ onFinish: pull_request
 mergeMode: external_review
 baseBranch: master
 repoUrl: git@github.com:example-org/acme-repo.git
-executorType: worktree
-
 tasks:
   - id: implement-typed-plan-validator
     description: |
@@ -90,8 +88,7 @@ tasks:
       Layer: app_regression
       Feature state: active
     command: "bash scripts/test-plan-to-invoker-skill.sh"
-    executorType: ssh
-    remoteTargetId: remote_digital_ocean_1
+    poolId: remote_digital_ocean_1
     dependencies:
       - add-validator-tests
 
@@ -111,8 +108,7 @@ tasks:
       Layer: app_regression
       Feature state: active
     command: "pnpm run test:all"
-    executorType: ssh
-    remoteTargetId: remote_digital_ocean_1
+    poolId: remote_digital_ocean_1
     dependencies:
       - implement-typed-plan-validator
       - add-validator-tests
