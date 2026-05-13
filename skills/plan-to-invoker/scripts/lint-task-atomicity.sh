@@ -269,6 +269,11 @@ function flush_task(    wc, and_count, valid_id, d, desc_lower, idx) {
     implement_artifact_by_suffix[suffix] = artifact_path
   }
 
+  if (id ~ /^verify-/) {
+    suffix = task_suffix(id, "verify-")
+    verify_id_by_suffix[suffix] = id
+  }
+
   if (id ~ /^cleanup-experiment-artifacts-/) {
     suffix = task_suffix(id, "cleanup-experiment-artifacts-")
     cleanup_id_by_suffix[suffix] = id
@@ -422,6 +427,7 @@ END {
       experiment_artifact = experiment_artifact_by_suffix[suffix]
       implement_id = implement_id_by_suffix[suffix]
       implement_artifact = implement_artifact_by_suffix[suffix]
+      verify_id = verify_id_by_suffix[suffix]
       cleanup_id = cleanup_id_by_suffix[suffix]
       cleanup_artifact = cleanup_artifact_by_suffix[suffix]
 
@@ -444,6 +450,9 @@ END {
           }
           if (implement_id != "" && !csv_has(cleanup_deps, implement_id)) {
             errors[++errn] = "Task \"" cleanup_id "\" must depend on \"" implement_id "\""
+          }
+          if (verify_id != "" && !csv_has(cleanup_deps, verify_id)) {
+            errors[++errn] = "Task \"" cleanup_id "\" must depend on \"" verify_id "\" when targeted verification exists"
           }
           if (experiment_artifact != "" && cleanup_artifact != "" && cleanup_artifact != experiment_artifact) {
             errors[++errn] = "Tasks \"" experiment_id "\" and \"" cleanup_id "\" must reference the same experiment artifact path"
