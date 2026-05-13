@@ -689,7 +689,7 @@ tasks:
       expect(() => parsePlan(yaml)).toThrow('executorType "docker" but is missing required field "dockerImage"');
     });
 
-    it('rejects executorType ssh without remoteTargetId', () => {
+    it('rejects executorType ssh without poolId', () => {
       const yaml = `
 name: SSH No Target
 repoUrl: git@github.com:test/repo.git
@@ -700,7 +700,7 @@ tasks:
     executorType: ssh
 `;
       expect(() => parsePlan(yaml)).toThrow(PlanParseError);
-      expect(() => parsePlan(yaml)).toThrow('executorType "ssh" but is missing required field "remoteTargetId"');
+      expect(() => parsePlan(yaml)).toThrow('executorType "ssh" but is missing required field "poolId"');
     });
 
     it('accepts executorType docker with dockerImage', () => {
@@ -719,7 +719,7 @@ tasks:
       expect(plan.tasks[0].dockerImage).toBe('node:20');
     });
 
-    it('accepts executorType ssh with remoteTargetId', () => {
+    it('rejects executorType ssh with legacy remoteTargetId', () => {
       const yaml = `
 name: SSH With Target
 repoUrl: git@github.com:test/repo.git
@@ -730,9 +730,23 @@ tasks:
     executorType: ssh
     remoteTargetId: prod-server-1
 `;
+      expect(() => parsePlan(yaml)).toThrow('uses unsupported field "remoteTargetId". Use "poolId" instead.');
+    });
+
+    it('accepts executorType ssh with poolId', () => {
+      const yaml = `
+name: SSH With Pool
+repoUrl: git@github.com:test/repo.git
+tasks:
+  - id: deploy
+    description: Deploy via SSH pool
+    command: echo deploy
+    executorType: ssh
+    poolId: ssh-light
+`;
       const plan = parsePlan(yaml);
       expect(plan.tasks[0].executorType).toBe('ssh');
-      expect(plan.tasks[0].remoteTargetId).toBe('prod-server-1');
+      expect(plan.tasks[0].poolId).toBe('ssh-light');
     });
 
     it('accepts worktree executorType without docker or ssh fields', () => {
