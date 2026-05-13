@@ -5,7 +5,7 @@
     {
       "pattern": "verify-routing-ok",
       "executorType": "worktree",
-      "remoteTargetId": "dummy-target"
+      "poolId": "dummy-target"
     }
   ],
   "remoteTargets": {
