@@ -21,6 +21,8 @@ export interface BaseEntry {
   completeListeners: Set<(response: WorkResponse) => void>;
   heartbeatListeners: Set<(taskId: string) => void>;
   completed: boolean;
+  /** True after the child exits while git/result finalization is still running. */
+  finalizing?: boolean;
   /** Buffered output chunks for replay when new listeners are added. */
   outputBuffer: string[];
   /** Total bytes currently buffered for eviction tracking. */
@@ -183,6 +185,11 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       if (entry.completed) {
         clearInterval(entry.heartbeatTimer);
         entry.heartbeatTimer = undefined;
+        return;
+      }
+
+      if ((child.exitCode !== null || child.killed) && entry.finalizing) {
+        this.emitHeartbeat(executionId);
         return;
       }
 
@@ -872,81 +879,102 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     },
   ): Promise<void> {
     const entry = this.entries.get(executionId);
-    if (entry) entry.completed = true;
-    const bufferedOutput = entry?.outputBuffer.join('') ?? '';
-    const semanticFailure = this.detectSemanticFailure(request, bufferedOutput, exitCode);
-    const effectiveExitCode = (exitCode === 0 && semanticFailure)
-      ? (semanticFailure.syntheticExitCode ?? 86)
-      : exitCode;
-
-    const signalInfo = opts?.signal ? ` signal=${opts.signal}` : '';
-    this.emitOutput(executionId,
-      `[${this.type}] Process exited: actionId=${request.actionId} exitCode=${effectiveExitCode}${signalInfo}\n`);
-    if (semanticFailure) {
-      this.emitOutput(
-        executionId,
-        `[${this.type}] Semantic failure detected (${semanticFailure.code}): ${semanticFailure.message}\n`,
-      );
-    }
-
-    let commitHash: string | undefined;
-    let status: 'completed' | 'failed' = effectiveExitCode === 0 ? 'completed' : 'failed';
+    if (entry) entry.finalizing = true;
+    let response: WorkResponse;
     try {
-      const hash = await this.recordTaskResult(cwd, request, effectiveExitCode);
-      commitHash = hash ?? undefined;
-    } catch (err) {
+      const bufferedOutput = entry?.outputBuffer.join('') ?? '';
+      const semanticFailure = this.detectSemanticFailure(request, bufferedOutput, exitCode);
+      const effectiveExitCode = (exitCode === 0 && semanticFailure)
+        ? (semanticFailure.syntheticExitCode ?? 86)
+        : exitCode;
+
+      const signalInfo = opts?.signal ? ` signal=${opts.signal}` : '';
       this.emitOutput(executionId,
-        `[${this.type}] recordTaskResult error: ${err}\n`);
-      if (effectiveExitCode === 0) status = 'failed';
-    }
-
-    let pushError: string | undefined;
-    if (opts?.branch) {
-      pushError = await this.pushBranchToRemote(cwd, opts.branch, executionId);
-    }
-    if (effectiveExitCode === 0 && pushError !== undefined && opts?.branch) {
-      status = 'failed';
-    }
-
-    if (opts?.originalBranch) {
-      await this.restoreBranch(cwd, opts.originalBranch);
-    }
-
-    // When the command fails, capture the tail of the output buffer so the
-    // UI error section shows what went wrong (not just "Exit code: N").
-    let error: string | undefined;
-    if (effectiveExitCode !== 0 && entry) {
-      const allOutput = entry.outputBuffer.join('');
-      const lines = allOutput.split('\n');
-      const tail = lines.slice(-50).join('\n').trim();
-      if (tail) {
-        error = tail.length > 3000 ? tail.slice(-3000) : tail;
+        `[${this.type}] Process exited: actionId=${request.actionId} exitCode=${effectiveExitCode}${signalInfo}\n`);
+      if (semanticFailure) {
+        this.emitOutput(
+          executionId,
+          `[${this.type}] Semantic failure detected (${semanticFailure.code}): ${semanticFailure.message}\n`,
+        );
       }
-    }
-    if (semanticFailure) {
-      error = semanticFailure.message;
-    }
-    if (status === 'failed' && effectiveExitCode === 0 && pushError) {
-      error = pushError;
-    }
 
-    const agentSessionId = opts?.agentSessionId;
+      let commitHash: string | undefined;
+      let status: 'completed' | 'failed' = effectiveExitCode === 0 ? 'completed' : 'failed';
+      try {
+        const hash = await this.recordTaskResult(cwd, request, effectiveExitCode);
+        commitHash = hash ?? undefined;
+      } catch (err) {
+        this.emitOutput(executionId,
+          `[${this.type}] recordTaskResult error: ${err}\n`);
+        if (effectiveExitCode === 0) status = 'failed';
+      }
 
-    const response: WorkResponse = {
-      requestId: request.requestId,
-      actionId: request.actionId,
-      executionGeneration: request.executionGeneration,
-      status,
-      outputs: {
-        exitCode: status === 'failed' && effectiveExitCode === 0 ? 1 : effectiveExitCode,
-        commitHash,
-        agentSessionId,
-        agentName: opts?.agentName,
-        branch: opts?.branch,
-        ...(error ? { error } : {}),
-        ...(opts?.branch ? { summary: `branch=${opts.branch} commit=${commitHash ?? 'unknown'}` } : {}),
-      },
-    };
+      let pushError: string | undefined;
+      if (opts?.branch) {
+        pushError = await this.pushBranchToRemote(cwd, opts.branch, executionId);
+      }
+      if (effectiveExitCode === 0 && pushError !== undefined && opts?.branch) {
+        status = 'failed';
+      }
+
+      if (opts?.originalBranch) {
+        await this.restoreBranch(cwd, opts.originalBranch);
+      }
+
+      // When the command fails, capture the tail of the output buffer so the
+      // UI error section shows what went wrong (not just "Exit code: N").
+      let error: string | undefined;
+      if (effectiveExitCode !== 0 && entry) {
+        const allOutput = entry.outputBuffer.join('');
+        const lines = allOutput.split('\n');
+        const tail = lines.slice(-50).join('\n').trim();
+        if (tail) {
+          error = tail.length > 3000 ? tail.slice(-3000) : tail;
+        }
+      }
+      if (semanticFailure) {
+        error = semanticFailure.message;
+      }
+      if (status === 'failed' && effectiveExitCode === 0 && pushError) {
+        error = pushError;
+      }
+
+      const agentSessionId = opts?.agentSessionId;
+
+      response = {
+        requestId: request.requestId,
+        actionId: request.actionId,
+        executionGeneration: request.executionGeneration,
+        status,
+        outputs: {
+          exitCode: status === 'failed' && effectiveExitCode === 0 ? 1 : effectiveExitCode,
+          commitHash,
+          agentSessionId,
+          agentName: opts?.agentName,
+          branch: opts?.branch,
+          ...(error ? { error } : {}),
+          ...(opts?.branch ? { summary: `branch=${opts.branch} commit=${commitHash ?? 'unknown'}` } : {}),
+        },
+      };
+    } catch (err) {
+      const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+      this.emitOutput(executionId, `[${this.type}] finalize error: ${message}\n`);
+      response = {
+        requestId: request.requestId,
+        actionId: request.actionId,
+        executionGeneration: request.executionGeneration,
+        status: 'failed',
+        outputs: {
+          exitCode: exitCode === 0 ? 1 : exitCode,
+          error: message,
+          agentSessionId: opts?.agentSessionId,
+          agentName: opts?.agentName,
+          branch: opts?.branch,
+        },
+      };
+    } finally {
+      if (entry) entry.finalizing = false;
+    }
     this.emitComplete(executionId, response);
   }
 

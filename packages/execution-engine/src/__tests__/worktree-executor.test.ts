@@ -1111,10 +1111,11 @@ describe('WorktreeExecutor', () => {
 
     /**
      * Regression: emitComplete runs only after handleProcessExit, which awaits
-     * pushBranchToRemote. An unbounded hang there means the agent child can exit
-     * while the task never completes (documented in repro plan).
+     * pushBranchToRemote. While that finalization is pending the entry must not
+     * be marked completed, otherwise heartbeat recovery and supervisors treat
+     * the exited child as a stale task with no live execution.
      */
-    it('does not emitComplete while pushBranchToRemote is pending (hung push blocks completion)', async () => {
+    it('keeps exited tasks finalizing, not completed, while pushBranchToRemote is pending', async () => {
       const pushSpy = vi
         .spyOn(BaseExecutor.prototype as any, 'pushBranchToRemote')
         .mockImplementation(() => new Promise<string | undefined>(() => { /* never resolves */ }));
@@ -1124,6 +1125,7 @@ describe('WorktreeExecutor', () => {
           cacheDir: '/fake/cache',
           worktreeBaseDir: '/fake/worktrees',
           claudeCommand: '/bin/echo',
+          heartbeatIntervalMs: 50,
         });
         mockPool(claudeExecutor);
         const { taskProcess } = setupSpawnMock();
@@ -1138,11 +1140,20 @@ describe('WorktreeExecutor', () => {
         claudeExecutor.onComplete(handle, () => {
           completed = true;
         });
+        let heartbeatCount = 0;
+        claudeExecutor.onHeartbeat(handle, () => {
+          heartbeatCount++;
+        });
 
+        (taskProcess as any).exitCode = 0;
         taskProcess.emit('close', 0, null);
 
         await new Promise((resolve) => setTimeout(resolve, 400));
         expect(completed).toBe(false);
+        expect(heartbeatCount).toBeGreaterThan(0);
+        const entry = (claudeExecutor as any).entries.get(handle.executionId);
+        expect(entry?.finalizing).toBe(true);
+        expect(entry?.completed).toBe(false);
       } finally {
         pushSpy.mockRestore();
       }
