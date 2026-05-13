@@ -2295,8 +2295,6 @@ if (isHeadless) {
           autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
           killRunningTask,
         }),
-        deleteWorkflow: performDeleteWorkflow,
-        detachWorkflow: performDetachWorkflow,
       });
       recordStartupMark('api-server.started');
 

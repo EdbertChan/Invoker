@@ -701,7 +701,9 @@ export class Orchestrator {
   /**
    * Refresh the in-memory graph from the database.
    * Called at the start of every public mutation to ensure
-   * we see any external changes before proceeding.
+   * we see any external changes before proceeding. INV-130 keeps
+   * API write handlers behind WorkflowMutationFacade; these public
+   * mutations remain the authoritative DB-first state boundary.
    */
   private refreshFromDb(): void {
     if (this.activeWorkflowIds.size === 0) return;
