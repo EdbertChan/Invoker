@@ -105,8 +105,17 @@ export interface InvokerConfig {
      * Used for SSH executing-stall liveness checks. Default: 30.
      */
     remoteHeartbeatIntervalSeconds?: number;
+    /** Maximum tasks that may run concurrently on this SSH machine. Default: 1. */
+    maxConcurrentTasks?: number;
   }>;
+  /**
+   * Named execution pools. Each member is either reserved local worktree member
+   * "local" or an SSH machine ID declared in remoteTargets.
+   */
+  executionPools?: Record<string, string[]>;
 }
+
+const LOCAL_POOL_MEMBER = 'local';
 
 function readJsonSafe(path: string): InvokerConfig {
   if (!existsSync(path)) {
@@ -126,7 +135,38 @@ function readJsonSafe(path: string): InvokerConfig {
     throw new Error(`Invalid Invoker config at ${path}: expected a JSON object`);
   }
 
-  return parsed as InvokerConfig;
+  const config = parsed as InvokerConfig;
+  validateExecutionPools(config, path);
+  return config;
+}
+
+function validateExecutionPools(config: InvokerConfig, path: string): void {
+  const pools = config.executionPools;
+  if (pools === undefined) return;
+  if (typeof pools !== 'object' || pools === null || Array.isArray(pools)) {
+    throw new Error(`Invalid Invoker config at ${path}: "executionPools" must be an object`);
+  }
+  const remoteTargetIds = new Set(Object.keys(config.remoteTargets ?? {}));
+  for (const [poolId, members] of Object.entries(pools)) {
+    if (!Array.isArray(members)) {
+      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId} must be an array`);
+    }
+    if (members.length === 0) {
+      throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId} must not be empty`);
+    }
+    for (const member of members) {
+      if (typeof member !== 'string' || member.trim() === '') {
+        throw new Error(`Invalid Invoker config at ${path}: executionPools.${poolId} members must be non-empty strings`);
+      }
+      if (member === LOCAL_POOL_MEMBER) continue;
+      if (!remoteTargetIds.has(member)) {
+        throw new Error(
+          `Invalid Invoker config at ${path}: executionPools.${poolId} member "${member}" ` +
+          `must be "${LOCAL_POOL_MEMBER}" or a key in remoteTargets`,
+        );
+      }
+    }
+  }
 }
 
 export function loadConfig(): InvokerConfig {

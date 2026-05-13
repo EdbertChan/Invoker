@@ -137,4 +137,63 @@ describe('loadConfig', () => {
     expect(config.imageStorage).toEqual(imageStorage);
   });
 
+  it('reads local execution pool members', () => {
+    writeFileSync(
+      join(fakeHome, '.invoker', 'config.json'),
+      JSON.stringify({ executionPools: { localOnly: ['local'] } }),
+    );
+    const config = loadConfig();
+    expect(config.executionPools?.localOnly).toEqual(['local']);
+  });
+
+  it('reads SSH execution pool members backed by remoteTargets', () => {
+    writeFileSync(
+      join(fakeHome, '.invoker', 'config.json'),
+      JSON.stringify({
+        remoteTargets: {
+          'remote-1': {
+            host: '127.0.0.1',
+            user: 'runner',
+            sshKeyPath: '~/.ssh/id_ed25519',
+            maxConcurrentTasks: 2,
+          },
+        },
+        executionPools: { sshLight: ['remote-1'] },
+      }),
+    );
+    const config = loadConfig();
+    expect(config.executionPools?.sshLight).toEqual(['remote-1']);
+    expect(config.remoteTargets?.['remote-1']?.maxConcurrentTasks).toBe(2);
+  });
+
+  it('reads mixed local and SSH execution pool members', () => {
+    writeFileSync(
+      join(fakeHome, '.invoker', 'config.json'),
+      JSON.stringify({
+        remoteTargets: {
+          'remote-1': { host: '127.0.0.1', user: 'runner', sshKeyPath: '~/.ssh/id_ed25519' },
+        },
+        executionPools: { mixed: ['local', 'remote-1'] },
+      }),
+    );
+    const config = loadConfig();
+    expect(config.executionPools?.mixed).toEqual(['local', 'remote-1']);
+  });
+
+  it('rejects execution pool members missing from remoteTargets', () => {
+    writeFileSync(
+      join(fakeHome, '.invoker', 'config.json'),
+      JSON.stringify({ executionPools: { sshLight: ['missing-remote'] } }),
+    );
+    expect(() => loadConfig()).toThrow('executionPools.sshLight member "missing-remote" must be "local" or a key in remoteTargets');
+  });
+
+  it('rejects empty execution pools', () => {
+    writeFileSync(
+      join(fakeHome, '.invoker', 'config.json'),
+      JSON.stringify({ executionPools: { empty: [] } }),
+    );
+    expect(() => loadConfig()).toThrow('executionPools.empty must not be empty');
+  });
+
 });
