@@ -145,6 +145,14 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     }
   }
 
+  protected startFinalizationHeartbeat(executionId: string): ReturnType<typeof setInterval> | undefined {
+    const entry = this.entries.get(executionId);
+    if (!entry) return undefined;
+    return setInterval(() => {
+      this.emitHeartbeat(executionId);
+    }, this.heartbeatIntervalMs);
+  }
+
   protected emitComplete(executionId: string, response: WorkResponse): void {
     const entry = this.entries.get(executionId);
     if (!entry) return;
@@ -873,6 +881,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
   ): Promise<void> {
     const entry = this.entries.get(executionId);
     if (entry) entry.completed = true;
+    const finalizationHeartbeat = this.startFinalizationHeartbeat(executionId);
     const bufferedOutput = entry?.outputBuffer.join('') ?? '';
     const semanticFailure = this.detectSemanticFailure(request, bufferedOutput, exitCode);
     const effectiveExitCode = (exitCode === 0 && semanticFailure)
@@ -947,7 +956,11 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
         ...(opts?.branch ? { summary: `branch=${opts.branch} commit=${commitHash ?? 'unknown'}` } : {}),
       },
     };
-    this.emitComplete(executionId, response);
+    try {
+      this.emitComplete(executionId, response);
+    } finally {
+      if (finalizationHeartbeat) clearInterval(finalizationHeartbeat);
+    }
   }
 
   /**

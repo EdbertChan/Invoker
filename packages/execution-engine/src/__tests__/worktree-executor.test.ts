@@ -1761,6 +1761,47 @@ describe('WorktreeExecutor', () => {
       }
     });
 
+    it('continues heartbeating while post-exit finalization is still running', async () => {
+      vi.useFakeTimers();
+      try {
+        const { taskProcess } = setupSpawnMock();
+        const heartbeats: string[] = [];
+        const responses: WorkResponse[] = [];
+        let finishPush!: () => void;
+        const pushPromise = new Promise<string | undefined>((resolve) => {
+          finishPush = () => resolve(undefined);
+        });
+
+        vi.spyOn(BaseExecutor.prototype as any, 'recordTaskResult').mockResolvedValue('commit-1');
+        vi.spyOn(BaseExecutor.prototype as any, 'pushBranchToRemote').mockReturnValue(pushPromise);
+
+        const request = makeRequest();
+        const handle = await executor.start(request);
+
+        executor.onHeartbeat(handle, (taskId) => { heartbeats.push(taskId); });
+        executor.onComplete(handle, (response) => { responses.push(response); });
+
+        taskProcess.emit('close', 0, null);
+        await vi.advanceTimersByTimeAsync(250);
+
+        expect(responses).toHaveLength(0);
+        expect(heartbeats.length).toBeGreaterThanOrEqual(2);
+        expect(heartbeats.every((taskId) => taskId === 'action-1')).toBe(true);
+
+        finishPush();
+        await vi.runAllTimersAsync();
+
+        expect(responses).toHaveLength(1);
+        expect(responses[0].status).toBe('completed');
+        const heartbeatCountAfterCompletion = heartbeats.length;
+
+        await vi.advanceTimersByTimeAsync(250);
+        expect(heartbeats).toHaveLength(heartbeatCountAfterCompletion);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('max duration timeout kills process when exceeded', async () => {
       vi.useFakeTimers();
       try {
