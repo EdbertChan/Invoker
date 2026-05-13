@@ -137,6 +137,8 @@ import { persistShutdownDiagnostic } from './shutdown-diagnostic.js';
 import {
   configureEarlyElectronRuntime,
   registerProcessErrorLogging,
+  startGuiAppBootstrap,
+  startHeadlessAppBootstrap,
 } from './bootstrap/app-bootstrap.js';
 import {
   registerGuiMutationHandler as registerGuiIpcMutationHandler,
@@ -533,7 +535,9 @@ const RED = '\x1b[31m';
 // ══════════════════════════════════════════════════════════════
 
 if (isHeadless) {
-  app.whenReady().then(async () => {
+  startHeadlessAppBootstrap({
+    app,
+    run: async () => {
     const agentRegistry = registerBuiltinAgents();
     const command = cliArgs[0];
     const readOnlyMode = isHeadlessReadOnlyCommand(cliArgs);
@@ -975,9 +979,11 @@ if (isHeadless) {
       if (messageBus) messageBus.disconnect();
     }
     process.exit(exitCode);
-  }).catch((err) => {
-    process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
+    },
+    onError: (err) => {
+      process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    },
   });
 } else {
   // ══════════════════════════════════════════════════════════════
@@ -2361,9 +2367,16 @@ if (isHeadless) {
     }, 0);
   }
 
-  app.whenReady().then(async () => {
-    recordStartupMark('app.whenReady');
-    ownerMode = true;
+  startGuiAppBootstrap({
+    app,
+    browserWindow: BrowserWindow,
+    platform: process.platform,
+    logger,
+    createWindow,
+    seedUiSnapshotCache,
+    recordStartupMark,
+    run: async () => {
+      ownerMode = true;
     try {
       recordStartupMark('initServices.start');
       await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
@@ -2371,9 +2384,7 @@ if (isHeadless) {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (!message.includes('[db-writer-lock]')) {
-        process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
-        app.quit();
-        return;
+        throw err;
       }
       recordStartupMark('initServices.readOnly.start');
       await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
@@ -3535,25 +3546,11 @@ if (isHeadless) {
       });
     });
 
-    seedUiSnapshotCache();
-    createWindow();
-    recordStartupMark('createWindow.end');
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
-    });
-  }).catch((err) => {
-    process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-    app.quit();
-  });
-
-  app.on('window-all-closed', () => {
-    logger.info('window-all-closed', { module: 'window' });
-    if (process.platform !== 'darwin') {
+    },
+    onError: (err) => {
+      process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
       app.quit();
-    }
+    },
   });
 
   let isQuitting = false;

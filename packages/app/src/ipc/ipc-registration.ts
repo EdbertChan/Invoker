@@ -114,7 +114,7 @@ export interface OwnerIpcRegistrationDeps {
     priority: WorkflowMutationPriority,
     channel: string,
     args: unknown[],
-  ) => string;
+  ) => string | number;
   onOwnerActivity?: () => void;
 }
 

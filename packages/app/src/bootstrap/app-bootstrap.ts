@@ -1,4 +1,4 @@
-import type { App } from 'electron';
+import type { App, BrowserWindow } from 'electron';
 import type { Logger } from '@invoker/contracts';
 
 export interface StartupMode {
@@ -18,6 +18,22 @@ interface AppBootstrapOptions {
   argv: string[];
   env: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
+}
+
+interface ReadyBootstrapOptions {
+  app: Pick<App, 'whenReady'>;
+  onError: (err: unknown) => void;
+  run: () => Promise<void>;
+}
+
+export interface GuiAppBootstrapOptions extends ReadyBootstrapOptions {
+  app: Pick<App, 'whenReady' | 'on' | 'quit'>;
+  browserWindow: Pick<typeof BrowserWindow, 'getAllWindows'>;
+  platform: NodeJS.Platform;
+  logger: Logger;
+  createWindow: () => void;
+  seedUiSnapshotCache: () => void;
+  recordStartupMark: (mark: string, data?: Record<string, unknown>) => void;
 }
 
 export function resolveStartupMode(argv: string[]): StartupMode {
@@ -80,6 +96,33 @@ export function configureEarlyElectronRuntime(options: AppBootstrapOptions): App
     ...resolveStartupMode(options.argv),
     enableTestCompositor,
   };
+}
+
+export function startHeadlessAppBootstrap(options: ReadyBootstrapOptions): void {
+  options.app.whenReady().then(options.run).catch(options.onError);
+}
+
+export function startGuiAppBootstrap(options: GuiAppBootstrapOptions): void {
+  options.app.whenReady().then(async () => {
+    options.recordStartupMark('app.whenReady');
+    await options.run();
+    options.seedUiSnapshotCache();
+    options.createWindow();
+    options.recordStartupMark('createWindow.end');
+
+    options.app.on('activate', () => {
+      if (options.browserWindow.getAllWindows().length === 0) {
+        options.createWindow();
+      }
+    });
+  }).catch(options.onError);
+
+  options.app.on('window-all-closed', () => {
+    options.logger.info('window-all-closed', { module: 'window' });
+    if (options.platform !== 'darwin') {
+      options.app.quit();
+    }
+  });
 }
 
 export function registerProcessErrorLogging(getLogger: () => Logger): void {
