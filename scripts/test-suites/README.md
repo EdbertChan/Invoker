@@ -53,6 +53,7 @@ The orchestrator is **`scripts/run-all-tests.sh`**, invoked as **`pnpm run test:
 
 - Long E2E wrappers should be split into thin suite shards so resume and later parallelism operate on smaller units.
 - Current shards:
+  - `required/08-large-file-guardrail.sh`: repository large-file guardrail plus deterministic oversized fixture proof
   - `required/20-e2e-dry-run.sh`: `case-1.*`
   - `required/21-e2e-dry-run-downstream.sh`: `case-2.*`
   - `required/22-e2e-dry-run-github.sh`: `case-4.*`
