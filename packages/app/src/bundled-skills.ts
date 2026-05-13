@@ -203,10 +203,10 @@ export function installBundledSkills(
 
   for (const target of targets) {
     mkdirSync(target.path, { recursive: true });
+    clearManagedTarget(target.path);
     for (const skillName of bundledSkillNames) {
       const sourceDir = path.join(sourceRoot, skillName);
       const targetDir = path.join(target.path, `${MANAGED_PREFIX}${skillName}`);
-      rmSync(targetDir, { recursive: true, force: true });
       cpSync(sourceDir, targetDir, { recursive: true, force: true });
     }
     manifestTargets[target.id] = {
@@ -233,4 +233,13 @@ export function installBundledSkills(
 
 export function resolveInstalledBundledSkillDir(skillName: string): string {
   return path.join(homedir(), '.codex', 'skills', `${MANAGED_PREFIX}${skillName}`);
+}
+
+function clearManagedTarget(targetPath: string): void {
+  if (!existsSync(targetPath)) return;
+  const entries = readdirSync(targetPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(MANAGED_PREFIX)) continue;
+    rmSync(path.join(targetPath, entry.name), { recursive: true, force: true });
+  }
 }

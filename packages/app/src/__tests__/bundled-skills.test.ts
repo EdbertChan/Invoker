@@ -70,6 +70,10 @@ describe('bundled-skills', () => {
     try {
       writeSkill(resourcesRoot, 'plan-to-invoker');
       writeSkill(resourcesRoot, 'make-pr');
+      mkdirSync(join(codexHome, '.codex', 'skills', 'invoker-stale-skill'), { recursive: true });
+      writeFileSync(join(codexHome, '.codex', 'skills', 'invoker-stale-skill', 'SKILL.md'), '# stale\n');
+      mkdirSync(join(codexHome, '.codex', 'skills', 'custom-skill'), { recursive: true });
+      writeFileSync(join(codexHome, '.codex', 'skills', 'custom-skill', 'SKILL.md'), '# custom\n');
 
       const installed = installBundledSkills({
         isPackaged: true,
@@ -89,6 +93,8 @@ describe('bundled-skills', () => {
         expect(existsSync(join(targetRoot, 'invoker-make-pr', 'scripts', 'check.sh'))).toBe(true);
         expect(readFileSync(join(targetRoot, 'invoker-plan-to-invoker', 'SKILL.md'), 'utf-8')).toContain('plan-to-invoker');
       }
+      expect(existsSync(join(codexHome, '.codex', 'skills', 'invoker-stale-skill'))).toBe(false);
+      expect(existsSync(join(codexHome, '.codex', 'skills', 'custom-skill', 'SKILL.md'))).toBe(true);
 
       expect(installed.targets).toHaveLength(3);
       expect(installed.targets.every((target) => target.installed)).toBe(true);
