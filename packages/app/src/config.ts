@@ -137,7 +137,7 @@ export interface InvokerConfig {
    *
    * If both `pattern` and `regex` are present, a rule matches if either matches.
    * Tasks with commands matching a rule MUST explicitly declare the required executorType
-   * and remoteTargetId in the plan YAML, or plan loading will fail with a validation error.
+   * and poolId in the plan YAML, or plan loading will fail with a validation error.
    * Only applies to tasks that have a command (not prompt-only tasks).
    */
   executorRoutingRules?: Array<{
@@ -147,8 +147,8 @@ export interface InvokerConfig {
     regex?: string;
     /** Required executor type for matching commands (e.g. "ssh", "docker", "worktree"). */
     executorType: string;
-    /** Required remote target ID for matching commands; must correspond to an entry in remoteTargets. */
-    remoteTargetId: string;
+    /** Required execution pool ID for matching commands. */
+    poolId: string;
   }>;
 }
 

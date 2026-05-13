@@ -422,6 +422,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     maxConcurrency: effectiveMaxConcurrency,
     defaultAutoFixRetries: invokerConfig.autoFixRetries,
     executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
+    availablePoolIds: Object.keys(invokerConfig.remoteTargets ?? {}),
     deferRunningUntilLaunch: true,
   });
   commandService = new CommandService(orchestrator);
@@ -2829,6 +2830,7 @@ if (isHeadless) {
         maxConcurrency: effectiveMaxConcurrency,
         defaultAutoFixRetries: invokerConfig.autoFixRetries,
         executorRoutingRules: invokerConfig.executorRoutingRules ?? [],
+        availablePoolIds: Object.keys(invokerConfig.remoteTargets ?? {}),
         deferRunningUntilLaunch: true,
       });
       commandService = new CommandService(orchestrator);
