@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+echo "==> Running workspace package test subset (full regression: pnpm run test:all)"
+
 if [ -n "${INVOKER_WORKSPACE_TEST_CONCURRENCY:-}" ]; then
   CONCURRENCY="$INVOKER_WORKSPACE_TEST_CONCURRENCY"
 elif [ -n "${CI:-}" ]; then

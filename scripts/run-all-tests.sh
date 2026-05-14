@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Mark nested invocations so required suite wrappers can call `pnpm test`
+# without recursing back into the full orchestrator.
+export INVOKER_TEST_ALL_ACTIVE=1
+
 EXTENDED="${INVOKER_TEST_ALL_EXTENDED:-0}"
 DANGEROUS="${INVOKER_TEST_ALL_DANGEROUS:-0}"
 FAIL_FAST="${INVOKER_TEST_ALL_FAIL_FAST:-0}"
