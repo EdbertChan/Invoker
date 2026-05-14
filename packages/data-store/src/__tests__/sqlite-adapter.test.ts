@@ -272,6 +272,39 @@ describe('SQLiteAdapter', () => {
       );
     });
 
+    it('derives stale workflow states from task rows', () => {
+      adapter.saveWorkflow({ ...testWorkflow, status: 'running' });
+      adapter.saveTask('wf-1', makeTask('t1', { status: 'stale' }));
+      adapter.saveTask('wf-1', makeTask('t2', { status: 'stale' }));
+
+      let loaded = adapter.loadWorkflow('wf-1');
+      expect(loaded!.status).toBe('stale');
+      expect(loaded!.rollup?.countsByStatus.stale).toBe(2);
+
+      adapter.updateTask('t1', { status: 'completed' });
+
+      loaded = adapter.loadWorkflow('wf-1');
+      expect(loaded!.status).toBe('completed');
+      expect(loaded!.rollup?.countsByStatus.completed).toBe(1);
+      expect(loaded!.rollup?.countsByStatus.stale).toBe(1);
+    });
+
+    it('recomputes workflow status on every read after task state changes', () => {
+      adapter.saveWorkflow({ ...testWorkflow, status: 'completed' });
+      adapter.saveTask('wf-1', makeTask('t1', { status: 'pending' }));
+      expect(adapter.loadWorkflow('wf-1')!.status).toBe('pending');
+
+      adapter.updateTask('t1', { status: 'running' });
+      expect(adapter.loadWorkflow('wf-1')!.status).toBe('running');
+
+      adapter.updateTask('t1', { status: 'failed', execution: { error: 'live failure' } });
+      const loaded = adapter.loadWorkflow('wf-1')!;
+      expect(loaded.status).toBe('failed');
+      expect(loaded.rollup?.failedTasks).toEqual([
+        expect.objectContaining({ taskId: 't1', error: 'live failure' }),
+      ]);
+    });
+
     it('derives listWorkflows with one aggregate rollup per workflow', () => {
       adapter.saveWorkflow({ ...testWorkflow, status: 'running' });
       adapter.saveWorkflow({

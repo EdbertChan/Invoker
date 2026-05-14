@@ -5,9 +5,11 @@ import { workflowStatusVisual } from '../lib/workflow-status.js';
 interface WorkflowInspectorProps {
   workflow: WorkflowMeta | null;
   task: TaskState | null;
+  remoteTargets?: string[];
   executionAgents: string[];
   collapsed: boolean;
   advancedExpanded: boolean;
+  onEditType?: (taskId: string, executorType: string, remoteTargetId?: string) => void;
   onEditAgent?: (taskId: string, agentName: string) => void;
   onEditPrompt?: (taskId: string, newPrompt: string) => void;
   onEditCommand?: (taskId: string, newCommand: string) => void;
@@ -18,6 +20,14 @@ interface WorkflowInspectorProps {
 function summarizePrompt(task: TaskState | null): string {
   if (!task) return 'No task selected.';
   return task.config.prompt ?? task.config.command ?? 'No prompt or command available.';
+}
+
+function effectiveExecutorSelectValue(task: TaskState | null): string {
+  if (!task) return 'worktree';
+  if (task.config.executorType === 'ssh' && task.config.remoteTargetId) {
+    return `ssh:${task.config.remoteTargetId}`;
+  }
+  return task.config.executorType ?? 'worktree';
 }
 
 function InspectorToggleIcon({ collapsed }: { collapsed: boolean }): JSX.Element {
@@ -51,9 +61,11 @@ function primaryIssueText(issue: WorkflowRollupTaskIssue): string {
 export function WorkflowInspector({
   workflow,
   task,
+  remoteTargets,
   executionAgents,
   collapsed,
   advancedExpanded,
+  onEditType,
   onEditAgent,
   onEditPrompt,
   onEditCommand,
@@ -107,6 +119,8 @@ export function WorkflowInspector({
     ? Object.entries(rollup.countsByStatus).filter(([, count]) => count > 0)
     : [];
   const reviewUrl = task?.execution.reviewUrl;
+  const executorSelectValue = effectiveExecutorSelectValue(task);
+  const canEditExecutor = Boolean(task && onEditType && !task.config.isMergeNode);
   const canEditPrompt = Boolean(task && ((task.config.prompt !== undefined && onEditPrompt) || (task.config.command !== undefined && onEditCommand)));
 
   return (
@@ -145,6 +159,33 @@ export function WorkflowInspector({
             </select>
           ) : (
             <div className="mt-1 text-gray-100">{agent || 'n/a'}</div>
+          )}
+          {canEditExecutor && (
+            <>
+              <div className="mt-2 text-[11px] uppercase tracking-wide text-gray-400">Run on</div>
+              <select
+                data-testid="workflow-inspector-executor-select"
+                value={executorSelectValue}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value.startsWith('ssh:')) {
+                    onEditType?.(task!.id, 'ssh', value.slice(4));
+                  } else {
+                    onEditType?.(task!.id, value);
+                  }
+                }}
+                disabled={task?.status === 'running' || task?.status === 'fixing_with_ai'}
+                className="mt-1 w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option value="worktree">Worktree</option>
+                <option value="docker">Docker</option>
+                {remoteTargets?.map((targetId) => (
+                  <option key={targetId} value={`ssh:${targetId}`}>
+                    SSH: {targetId}
+                  </option>
+                ))}
+              </select>
+            </>
           )}
           <div className="mt-2 text-[11px] uppercase tracking-wide text-gray-400">Prompt</div>
           <textarea
@@ -285,7 +326,6 @@ export function WorkflowInspector({
               <div>target branch: {workflow?.featureBranch ?? task?.config.featureBranch ?? 'n/a'}</div>
               <div>base branch: {workflow?.baseBranch ?? 'n/a'}</div>
               <div>heartbeat: {String(task?.execution.lastHeartbeatAt ?? 'n/a')}</div>
-              <div>executor: {task?.config.executorType ?? 'n/a'}</div>
             </div>
           )}
         </section>

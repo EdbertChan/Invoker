@@ -1100,9 +1100,11 @@ export function App() {
             <WorkflowInspector
               workflow={selectedWorkflow}
               task={selectedTask}
+              remoteTargets={remoteTargets}
               executionAgents={executionAgents}
               collapsed={inspectorCollapsed}
               advancedExpanded={advancedMetadataExpanded}
+              onEditType={handleEditType}
               onEditAgent={handleEditAgent}
               onEditPrompt={handleEditPrompt}
               onEditCommand={handleEditCommand}

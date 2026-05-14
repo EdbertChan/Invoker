@@ -23,7 +23,6 @@ import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, Exter
 import type { RunnerKind } from '@invoker/workflow-graph';
 import { createTaskState, createAttempt } from '@invoker/workflow-graph';
 import type { WorkflowDerivedStatus } from '@invoker/workflow-graph';
-import { computeWorkflowRollup } from '@invoker/workflow-graph';
 import type { Logger, WorkResponse } from '@invoker/contracts';
 import { normalizeRunnerKind } from '@invoker/workflow-graph';
 
@@ -798,7 +797,7 @@ export class Orchestrator {
     }
     this.stateMachine.restoreTask(updated);
     if (!opts?.skipWorkflowStatusSync && changes.status !== undefined && existing.config.workflowId) {
-      this.syncWorkflowStatus(existing.config.workflowId);
+      this.touchWorkflow(existing.config.workflowId);
     }
     return updated;
   }
@@ -829,16 +828,13 @@ export class Orchestrator {
     };
   }
 
-  private syncWorkflowStatus(workflowId: string): void {
+  private touchWorkflow(workflowId: string): void {
     if (!this.persistence.updateWorkflow) return;
 
     const tasks = this.stateMachine.getAllTasks().filter((task) => task.config.workflowId === workflowId);
     if (tasks.length === 0) return;
 
-    const { status } = computeWorkflowRollup(tasks);
-
     this.persistence.updateWorkflow(workflowId, {
-      status,
       updatedAt: new Date().toISOString(),
     });
   }
@@ -929,7 +925,7 @@ export class Orchestrator {
       }
 
       for (const workflowId of workflowsToSync) {
-        this.syncWorkflowStatus(workflowId);
+        this.touchWorkflow(workflowId);
       }
     });
 
@@ -4169,7 +4165,7 @@ export class Orchestrator {
 
   private checkWorkflowCompletion(): void {
     for (const wfId of this.activeWorkflowIds) {
-      this.syncWorkflowStatus(wfId);
+      this.touchWorkflow(wfId);
     }
   }
 

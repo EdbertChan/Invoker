@@ -115,4 +115,28 @@ describe('WorkflowInspector', () => {
     fireEvent.blur(screen.getByTestId('workflow-inspector-prompt-input'));
     expect(onEditPrompt).toHaveBeenCalledWith('task-1', 'Fix failing tests and update docs');
   });
+
+  it('edits the selected task executor from a primary inspector control', () => {
+    const onEditType = vi.fn();
+
+    render(
+      <WorkflowInspector
+        workflow={workflow}
+        task={makeTask({ status: 'pending' })}
+        remoteTargets={['remote-a']}
+        executionAgents={['claude', 'codex']}
+        collapsed={false}
+        advancedExpanded={false}
+        onEditType={onEditType}
+        onToggleCollapsed={() => {}}
+        onToggleAdvanced={() => {}}
+      />,
+    );
+
+    const select = screen.getByTestId('workflow-inspector-executor-select');
+    expect(select).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: 'ssh:remote-a' } });
+    expect(onEditType).toHaveBeenCalledWith('task-1', 'ssh', 'remote-a');
+  });
 });

@@ -111,5 +111,12 @@ test.describe('Workflow status composition', () => {
     ]);
     workflow = await expectWorkflowStatus(page, 'completed');
     expect(workflow.rollup.countsByStatus.completed).toBe(3);
+
+    await injectTaskStates(page, [
+      { taskId: 'alpha', changes: { status: 'stale' } },
+    ]);
+    workflow = await expectWorkflowStatus(page, 'completed');
+    expect(workflow.rollup.countsByStatus.completed).toBe(2);
+    expect(workflow.rollup.countsByStatus.stale).toBe(1);
   });
 });
