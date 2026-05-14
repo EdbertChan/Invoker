@@ -5,12 +5,13 @@
   "description": "Auditable multi-agent orchestration with a mutating action graph",
   "scripts": {
     "postinstall": "node scripts/electron.cjs --ensure-only",
-    "test": "bash scripts/test-plan-to-invoker-skill.sh && bash scripts/workspace-test.sh",
-    "test:high-resource": "bash scripts/test-plan-to-invoker-skill.sh && INVOKER_VITEST_HIGH_RESOURCE=1 bash scripts/workspace-test.sh",
+    "test": "bash scripts/test-plan-to-invoker-skill.sh && bash scripts/test-large-file-guard.sh && bash scripts/workspace-test.sh",
+    "test:high-resource": "bash scripts/test-plan-to-invoker-skill.sh && bash scripts/test-large-file-guard.sh && INVOKER_VITEST_HIGH_RESOURCE=1 bash scripts/workspace-test.sh",
     "test:low-resource": "pnpm run test",
     "test:low-resource:packages": "bash scripts/workspace-test.sh",
     "test:guarded": "bash scripts/run-with-resource-guard.sh bash scripts/workspace-test.sh",
     "test:plan-to-invoker-skill": "bash scripts/test-plan-to-invoker-skill.sh",
+    "test:large-file-guard": "bash scripts/test-large-file-guard.sh",
     "test:e2e-dry-run": "bash scripts/e2e-dry-run/run-all.sh",
     "test:e2e-chaos": "bash scripts/e2e-chaos/run-matrix.sh",
     "test:e2e-ssh": "bash scripts/e2e-ssh/run-all.sh",
@@ -34,8 +35,9 @@
     "dev:hot": "concurrently \"pnpm --filter @invoker/ui dev\" \"sleep 3 && VITE_DEV_SERVER_URL=http://localhost:5173 pnpm --filter @invoker/app build && VITE_DEV_SERVER_URL=http://localhost:5173 pnpm --filter @invoker/app start\"",
     "check:required-builds": "bash scripts/required-builds.sh",
     "check:deps": "depcruise packages --config .dependency-cruiser.js",
+    "check:large-files": "node scripts/check-large-files.mjs",
     "check:types": "tsc -p tsconfig.typecheck.json",
-    "check:all": "pnpm run check:deps && pnpm run check:types && pnpm run check:required-builds && bash scripts/check-owner-boundary.sh"
+    "check:all": "pnpm run check:deps && pnpm run check:types && pnpm run check:large-files && pnpm run check:required-builds && bash scripts/check-owner-boundary.sh"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -67,6 +67,8 @@ jobs:
         include:
           - name: Dependency Cruise
             command: pnpm run check:deps
+          - name: Large File Guardrails
+            command: pnpm run check:large-files
           - name: Required Package Builds
             command: pnpm run check:required-builds
           - name: TypeScript Types

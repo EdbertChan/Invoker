@@ -1,0 +1,88 @@
+{
+  "defaultMaxLines": 750,
+  "ignoreDirectories": [
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    ".git",
+    ".next",
+    "out",
+    "__tests__",
+    "fixtures"
+  ],
+  "ignoreFiles": [
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "bun.lockb"
+  ],
+  "ignorePathPrefixes": [],
+  "ignorePathSubstrings": [],
+  "ignorePathRegexes": [],
+  "targets": [
+    {
+      "root": "packages",
+      "extensions": [
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs"
+      ],
+      "includePathSubstrings": [
+        "/src/"
+      ],
+      "ignoreDirectories": [
+        "e2e"
+      ],
+      "ignorePathPrefixes": [],
+      "ignorePathSubstrings": [
+        "/e2e/"
+      ],
+      "ignorePathRegexes": [
+        "\\.d\\.ts$",
+        "\\.(test|spec)\\.[cm]?[jt]sx?$"
+      ]
+    },
+    {
+      "root": "scripts",
+      "extensions": [
+        ".sh",
+        ".js",
+        ".mjs",
+        ".cjs"
+      ],
+      "includePathSubstrings": [],
+      "ignoreDirectories": [],
+      "ignorePathPrefixes": [
+        "scripts/e2e-chaos/",
+        "scripts/e2e-dry-run/",
+        "scripts/e2e-ssh/",
+        "scripts/repro/",
+        "scripts/repro-launching-stall/",
+        "scripts/test-suites/"
+      ],
+      "ignorePathSubstrings": [],
+      "ignorePathRegexes": [
+        "^scripts/test-"
+      ]
+    }
+  ],
+  "overrides": {
+    "packages/app/src/headless.ts": 3000,
+    "packages/app/src/main.ts": 4000,
+    "packages/app/src/workflow-actions.ts": 1250,
+    "packages/data-store/src/sqlite-adapter.ts": 2300,
+    "packages/execution-engine/src/base-executor.ts": 1100,
+    "packages/execution-engine/src/conflict-resolver.ts": 800,
+    "packages/execution-engine/src/merge-runner.ts": 1500,
+    "packages/execution-engine/src/ssh-executor.ts": 950,
+    "packages/execution-engine/src/task-runner.ts": 2200,
+    "packages/surfaces/src/slack/slack-surface.ts": 900,
+    "packages/ui/src/App.tsx": 1300,
+    "packages/ui/src/components/TaskPanel.tsx": 1200,
+    "packages/workflow-core/src/orchestrator.ts": 5000
+  }
+}
