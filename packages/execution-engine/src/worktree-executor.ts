@@ -163,12 +163,15 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       upstreamCommits,
       baseHead,
     );
+    const lifecycleTag = request.inputs.lifecycleTag?.trim() ?? '';
     const branch = buildExperimentBranchName(
       request.actionId,
-      request.inputs.lifecycleTag ?? '',
+      lifecycleTag,
       contentHash,
     );
-    traceExecution(`[WorktreeExecutor] branch=${branch} contentHash=${contentHash}`);
+    traceExecution(
+      `[WorktreeExecutor] branch=${branch} lifecycleTag=${lifecycleTag || 'g0.t0.a'} contentHash=${contentHash}`,
+    );
     // Notify the orchestrator before any `git worktree add` so a leaked
     // worktree (process killed mid-acquire) can still be reconciled.
     try {

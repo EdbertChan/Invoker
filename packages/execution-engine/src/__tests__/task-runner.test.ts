@@ -12,6 +12,10 @@ import { EventEmitter } from 'events';
 import { buildCanonicalPrBody, validateCanonicalPrBody } from '../pr-authoring.js';
 import type { PrAuthoringContext } from '../pr-authoring.js';
 
+function mockExperimentBranch(actionId: string): string {
+  return `experiment/${actionId}/g0.t0.amock-mock0000`;
+}
+
 /**
  * Creates a mock executor that auto-completes on start().
  * For merge nodes (no command/prompt), this simulates the executor's
@@ -26,7 +30,7 @@ function createAutoCompleteExecutor() {
         executionId: `exec-${request.actionId}`,
         taskId: request.actionId,
         workspacePath: '/tmp/mock-worktree',
-        branch: `experiment/${request.actionId}-mock`,
+        branch: mockExperimentBranch(request.actionId),
       };
       // Auto-complete after start (simulates no-command path)
       setTimeout(() => {
@@ -124,7 +128,7 @@ describe('TaskRunner', () => {
           executionId: `exec-${request.actionId}`,
           taskId: request.actionId,
           workspacePath: '/tmp/mock-worktree',
-          branch: `experiment/${request.actionId}-mock`,
+          branch: mockExperimentBranch(request.actionId),
         };
       }),
       onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
@@ -247,7 +251,7 @@ describe('TaskRunner', () => {
       executionId: `exec-${request.actionId}`,
       taskId: request.actionId,
       workspacePath: '/tmp/mock-worktree',
-      branch: `experiment/${request.actionId}-mock`,
+      branch: mockExperimentBranch(request.actionId),
     }));
     const executorImpl = {
       type: 'worktree',
@@ -308,7 +312,7 @@ describe('TaskRunner', () => {
       executionId: 'exec-kill',
       taskId: 'kill-task',
       workspacePath: '/tmp/mock-worktree',
-      branch: 'experiment/kill-task-mock',
+      branch: mockExperimentBranch('kill-task'),
     };
     const executorImpl = {
       type: 'worktree',
@@ -377,7 +381,7 @@ describe('TaskRunner', () => {
           executionId: `exec-${request.actionId}`,
           taskId: request.actionId,
           workspacePath: '/tmp/mock-worktree',
-          branch: `experiment/${request.actionId}-mock`,
+          branch: mockExperimentBranch(request.actionId),
         };
       }),
       onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
@@ -438,7 +442,7 @@ describe('TaskRunner', () => {
           executionId: `exec-${request.actionId}`,
           taskId: request.actionId,
           workspacePath: '/tmp/mock-worktree',
-          branch: `experiment/${request.actionId}-mock`,
+          branch: mockExperimentBranch(request.actionId),
         };
       }),
       onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
@@ -499,7 +503,7 @@ describe('TaskRunner', () => {
           executionId: `exec-${request.actionId}`,
           taskId: request.actionId,
           workspacePath: '/tmp/mock-worktree',
-          branch: `experiment/${request.actionId}-mock`,
+          branch: mockExperimentBranch(request.actionId),
         };
       }),
       onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {

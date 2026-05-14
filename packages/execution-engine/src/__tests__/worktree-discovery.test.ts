@@ -72,25 +72,24 @@ describe('findManagedWorktreeByActionId', () => {
 HEAD a
 branch refs/heads/main
 
-worktree /home/u/.invoker/wt/h/experiment-task1-aabb1122
+worktree /home/u/.invoker/wt/h/experiment-task1-g1.t4.a11111111-aabb1122
 HEAD b
-branch refs/heads/experiment/task1-aabb1122
+branch refs/heads/experiment/task1/g1.t4.a11111111-aabb1122
 
-worktree /home/u/.invoker/wt/h/experiment-task2-ccdd3344
+worktree /home/u/.invoker/wt/h/experiment-task2-g2.t0.a22222222-ccdd3344
 HEAD c
-branch refs/heads/experiment/task2-ccdd3344
+branch refs/heads/experiment/task2/g2.t0.a22222222-ccdd3344
 `;
 
-  it('matches worktree with same actionId but different hash suffix', () => {
-    // Looking for actionId "task1" — should match the branch experiment/task1-aabb1122
+  it('matches worktree with same actionId in canonical branch format', () => {
     const result = findManagedWorktreeByActionId(
       porcelain,
       'task1',
       ['/home/u/.invoker/wt/h'],
     );
     expect(result).toEqual({
-      path: '/home/u/.invoker/wt/h/experiment-task1-aabb1122',
-      branch: 'experiment/task1-aabb1122',
+      path: '/home/u/.invoker/wt/h/experiment-task1-g1.t4.a11111111-aabb1122',
+      branch: 'experiment/task1/g1.t4.a11111111-aabb1122',
     });
   });
 
@@ -118,12 +117,22 @@ branch refs/heads/experiment/task2-ccdd3344
 HEAD b
 branch refs/heads/task1-aabb1122
 `;
+    const legacy = `worktree /home/u/.invoker/wt/h/experiment-task1-aabb1122
+HEAD b
+branch refs/heads/experiment/task1-aabb1122
+`;
     const result = findManagedWorktreeByActionId(
       porcelainNoExp,
       'task1',
       ['/home/u/.invoker/wt/h'],
     );
     expect(result).toBeUndefined();
+    const legacyResult = findManagedWorktreeByActionId(
+      legacy,
+      'task1',
+      ['/home/u/.invoker/wt/h'],
+    );
+    expect(legacyResult).toBeUndefined();
   });
 });
 
