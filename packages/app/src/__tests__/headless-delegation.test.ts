@@ -38,6 +38,12 @@ describe('headless delegation enforcement', () => {
       invokerConfig: {} as any,
       initServices: vi.fn(async () => {}),
       wireSlackBot: vi.fn(async () => ({})),
+      runtimeServices: {
+        workspaceProbe: { probeWorkspace: vi.fn(async () => ({ workspacePath: undefined })) },
+        containerProbe: { probeContainer: vi.fn(async () => ({ containerId: undefined })) },
+        sessionProbe: { probeSession: vi.fn(async () => ({ sessionId: undefined, agentName: undefined })) },
+        terminalLauncher: { launchTerminal: vi.fn(async () => ({ result: 'attached' as const })) },
+      },
     };
   });
 
@@ -172,27 +178,32 @@ describe('headless delegation enforcement', () => {
     });
 
     it('allows open-terminal in read-only mode', async () => {
-      mockDeps.persistence.loadTasks = vi.fn(() => [
-        {
-          id: 'wf-1/task-1',
-          execution: { agentSessionId: 'sess-1' },
-        } as any,
-      ]);
-      mockDeps.persistence.loadWorkflow = vi.fn(() => ({
-        id: 'wf-1',
-        name: 'test-workflow',
-        generation: 0,
-        status: 'running' as const,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }));
-      mockDeps.orchestrator.syncFromDb = vi.fn();
+      (mockDeps.persistence as any).getTaskStatus = vi.fn(() => 'completed');
+      const probeWorkspace = vi.fn(async () => ({ workspacePath: '/tmp/wf-1/task-1' }));
+      const probeContainer = vi.fn(async () => ({ containerId: 'ctr-1' }));
+      const probeSession = vi.fn(async () => ({ sessionId: 'sess-1', agentName: 'codex' }));
+      const launchTerminal = vi.fn(async () => ({ result: 'attached' as const }));
+      mockDeps.runtimeServices = {
+        workspaceProbe: { probeWorkspace },
+        containerProbe: { probeContainer },
+        sessionProbe: { probeSession },
+        terminalLauncher: { launchTerminal },
+      };
 
-      // This will fail for other reasons (no actual terminal to open),
-      // but it should NOT throw the read-only error
       await expect(
         runHeadless(['open-terminal', 'wf-1/task-1'], mockDeps)
-      ).rejects.not.toThrow(/persistence is read-only/);
+      ).resolves.toBeUndefined();
+
+      expect(probeWorkspace).toHaveBeenCalledWith('wf-1/task-1');
+      expect(probeContainer).toHaveBeenCalledWith('wf-1/task-1');
+      expect(probeSession).toHaveBeenCalledWith('wf-1/task-1');
+      expect(launchTerminal).toHaveBeenCalledWith({
+        taskId: 'wf-1/task-1',
+        workspacePath: '/tmp/wf-1/task-1',
+        containerId: 'ctr-1',
+        sessionId: 'sess-1',
+        agentName: 'codex',
+      });
     });
 
     it('allows query-select in read-only mode', async () => {

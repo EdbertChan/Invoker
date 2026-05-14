@@ -2451,6 +2451,11 @@ async function headlessCancelWorkflow(workflowId: string, deps: HeadlessDeps): P
 
 async function headlessOpenTerminal(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing taskId. Usage: --headless open-terminal <taskId>');
+  const runtimeLaunch = await tryOpenTerminalViaRuntimeServices(taskId, deps);
+  if (runtimeLaunch?.opened) {
+    process.stdout.write(`Opened terminal for task: ${taskId}\n`);
+    return;
+  }
   const result = await openExternalTerminalForTask({
     taskId,
     persistence: deps.persistence,
@@ -2466,6 +2471,54 @@ async function headlessOpenTerminal(taskId: string, deps: HeadlessDeps): Promise
     process.stderr.write(`Could not open terminal: ${result.reason}\n`);
     process.exitCode = 1;
   }
+}
+
+async function tryOpenTerminalViaRuntimeServices(
+  taskId: string,
+  deps: Pick<HeadlessDeps, 'logger' | 'persistence' | 'runtimeServices'>,
+): Promise<{ opened: boolean; reason?: string } | null> {
+  if (!deps.runtimeServices) {
+    return null;
+  }
+
+  const taskStatus = (deps.persistence as {
+    getTaskStatus?: (id: string) => string | null;
+  }).getTaskStatus?.(taskId);
+  deps.logger.info(`runtime facade open-terminal taskId=${taskId} taskStatus=${taskStatus ?? 'unknown'}`);
+
+  if (taskStatus == null) {
+    return { opened: false, reason: `Task "${taskId}" not found.` };
+  }
+  if (taskStatus === 'running' || taskStatus === 'fixing_with_ai') {
+    return { opened: false, reason: 'Task is still running. View output in logs.' };
+  }
+
+  const [workspace, container, session] = await Promise.all([
+    deps.runtimeServices.workspaceProbe.probeWorkspace(taskId),
+    deps.runtimeServices.containerProbe.probeContainer(taskId),
+    deps.runtimeServices.sessionProbe.probeSession(taskId),
+  ]);
+
+  if (!workspace.workspacePath) {
+    return null;
+  }
+
+  const outcome = await deps.runtimeServices.terminalLauncher.launchTerminal({
+    taskId,
+    workspacePath: workspace.workspacePath,
+    containerId: container.containerId,
+    sessionId: session.sessionId,
+    agentName: session.agentName,
+  });
+
+  if (outcome.result === 'attached') {
+    return { opened: true };
+  }
+
+  deps.logger.warn(
+    `runtime facade terminal launch failed for ${taskId}: ${outcome.reason}${outcome.message ? ` (${outcome.message})` : ''}`,
+  );
+  return { opened: false, reason: outcome.message ?? outcome.reason };
 }
 
 async function headlessDeleteWorkflow(workflowId: string, deps: HeadlessDeps): Promise<void> {
