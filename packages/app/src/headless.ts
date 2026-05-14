@@ -100,6 +100,7 @@ export interface HeadlessDeps {
   /** Abort signal from the workflow mutation coordinator, if running inside a coordinated mutation. */
   signal?: AbortSignal;
   mutationTiming?: WorkflowMutationTiming;
+  /** Runtime facade composed by app startup; headless command logic does not instantiate adapters. */
   runtimeServices?: RuntimeServices;
 }
 

@@ -97,5 +97,21 @@ export function composeRuntimeServices(
 export function composeHeadlessStartup(
   deps: RuntimeServiceDeps,
 ): RuntimeServices {
-  return composeRuntimeServices(deps);
+  const {
+    workspaceProbe,
+    containerProbe,
+    sessionProbe,
+    terminalLauncher,
+    enableDormantBridge,
+    dormantBridgeHook,
+  } = deps;
+
+  return composeRuntimeServices({
+    workspaceProbe,
+    containerProbe,
+    sessionProbe,
+    terminalLauncher,
+    enableDormantBridge,
+    dormantBridgeHook,
+  });
 }
