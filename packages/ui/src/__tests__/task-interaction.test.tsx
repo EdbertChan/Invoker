@@ -68,4 +68,24 @@ describe('Task interaction (component)', () => {
       expect(screen.getByText('echo hello-alpha')).toBeInTheDocument();
     });
   });
+
+  it('clicking workflow graph background dismisses the selected mini DAG', async () => {
+    render(<App />);
+    act(() => mock.setTasks([alpha, beta], workflows));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workflow-node-wf-a')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('workflow-node-wf-a'));
+    await waitFor(() => {
+      expect(screen.getByText(/Workflow A task DAG/)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('workflow-graph-scroll'));
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Workflow A task DAG/)).not.toBeInTheDocument();
+    });
+  });
 });

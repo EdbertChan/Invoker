@@ -36,20 +36,22 @@ describe('App launch (component)', () => {
     expect(screen.getByText('Load a plan to render workflow graph')).toBeInTheDocument();
   });
 
-  it('renders left rail navigation and top controls', () => {
+  it('renders left rail navigation and workflow controls', () => {
     render(<App />);
-    expect(screen.getByText('Open File')).toBeInTheDocument();
+    expect(screen.getByTestId('rail-open-file')).toBeInTheDocument();
     expect(screen.getByTestId('rail-home')).toBeInTheDocument();
     expect(screen.getByTestId('rail-timeline')).toBeInTheDocument();
     expect(screen.getByTestId('rail-history')).toBeInTheDocument();
     expect(screen.getByTestId('rail-queue')).toBeInTheDocument();
     expect(screen.getByTestId('rail-attention')).toBeInTheDocument();
+    expect(screen.getByTestId('rail-refresh')).toBeInTheDocument();
+    expect(screen.getByTestId('rail-clear')).toBeInTheDocument();
   });
 
   it('shows workflow status chips and terminal drawer controls in home view', () => {
     render(<App />);
-    expect(screen.getByText(/running \(/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Expand' })).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-status-pill-running')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Expand terminal drawer' })).toBeInTheDocument();
   });
 
   it('opens system setup from left rail settings', async () => {

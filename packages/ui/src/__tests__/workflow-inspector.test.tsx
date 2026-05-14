@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { WorkflowInspector } from '../components/WorkflowInspector.js';
 import type { TaskState, WorkflowMeta } from '../types.js';
 
@@ -29,6 +29,7 @@ describe('WorkflowInspector', () => {
       <WorkflowInspector
         workflow={workflow}
         task={makeTask()}
+        executionAgents={['codex', 'claude']}
         collapsed={false}
         advancedExpanded={false}
         onToggleCollapsed={() => {}}
@@ -45,6 +46,7 @@ describe('WorkflowInspector', () => {
       <WorkflowInspector
         workflow={workflow}
         task={makeTask()}
+        executionAgents={['codex', 'claude']}
         collapsed={false}
         advancedExpanded={false}
         onToggleCollapsed={() => {}}
@@ -61,18 +63,20 @@ describe('WorkflowInspector', () => {
       <WorkflowInspector
         workflow={workflow}
         task={makeTask()}
+        executionAgents={['codex', 'claude']}
         collapsed={true}
         advancedExpanded={false}
         onToggleCollapsed={() => {}}
         onToggleAdvanced={() => {}}
       />,
     );
-    expect(screen.getByRole('button', { name: 'Show' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Maximize inspector' })).toBeInTheDocument();
 
     rerender(
       <WorkflowInspector
         workflow={workflow}
         task={makeTask()}
+        executionAgents={['codex', 'claude']}
         collapsed={false}
         advancedExpanded={false}
         onToggleCollapsed={() => {}}
@@ -80,5 +84,35 @@ describe('WorkflowInspector', () => {
       />,
     );
     expect(screen.getByText('Workflow 1')).toBeInTheDocument();
+  });
+
+  it('edits the selected task agent and prompt from inspector controls', () => {
+    const onEditAgent = vi.fn();
+    const onEditPrompt = vi.fn();
+
+    render(
+      <WorkflowInspector
+        workflow={workflow}
+        task={makeTask({ status: 'pending' })}
+        executionAgents={['claude', 'codex']}
+        collapsed={false}
+        advancedExpanded={false}
+        onEditAgent={onEditAgent}
+        onEditPrompt={onEditPrompt}
+        onToggleCollapsed={() => {}}
+        onToggleAdvanced={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('workflow-inspector-agent-select'), {
+      target: { value: 'claude' },
+    });
+    expect(onEditAgent).toHaveBeenCalledWith('task-1', 'claude');
+
+    fireEvent.change(screen.getByTestId('workflow-inspector-prompt-input'), {
+      target: { value: 'Fix failing tests and update docs' },
+    });
+    fireEvent.blur(screen.getByTestId('workflow-inspector-prompt-input'));
+    expect(onEditPrompt).toHaveBeenCalledWith('task-1', 'Fix failing tests and update docs');
   });
 });

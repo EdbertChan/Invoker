@@ -1,5 +1,5 @@
-import { useMemo } from 'react';
-import type { MouseEvent } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import type { MouseEvent, PointerEvent } from 'react';
 import type { TaskState, WorkflowMeta, WorkflowStatus } from '../types.js';
 import { deriveWorkflowGraph, layoutWorkflowGraph } from '../lib/workflow-graph.js';
 import { WorkflowNode } from './WorkflowNode.js';
@@ -21,6 +21,16 @@ export function WorkflowGraph({
   onSelectWorkflow,
   onWorkflowContextMenu,
 }: WorkflowGraphProps): JSX.Element {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
+  const pannedRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
   const graph = useMemo(() => deriveWorkflowGraph(workflows, tasks), [workflows, tasks]);
   const positions = useMemo(() => layoutWorkflowGraph(graph), [graph]);
   const width = Math.max(1400, ...[...positions.values()].map((position) => position.x + 320));
@@ -34,8 +44,64 @@ export function WorkflowGraph({
     );
   }
 
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('[data-testid^="workflow-node-"], [role="menu"], button, a, input, textarea, select')) {
+      return;
+    }
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: scroller.scrollLeft,
+      scrollTop: scroller.scrollTop,
+    };
+    pannedRef.current = false;
+    setDragging(true);
+    scroller.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    const scroller = scrollRef.current;
+    if (!drag || !scroller || drag.pointerId !== event.pointerId) return;
+    if (Math.abs(event.clientX - drag.x) > 3 || Math.abs(event.clientY - drag.y) > 3) {
+      pannedRef.current = true;
+    }
+    scroller.scrollLeft = drag.scrollLeft - (event.clientX - drag.x);
+    scroller.scrollTop = drag.scrollTop - (event.clientY - drag.y);
+  };
+
+  const endDrag = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    const scroller = scrollRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (scroller?.hasPointerCapture(event.pointerId)) {
+      scroller.releasePointerCapture(event.pointerId);
+    }
+    dragRef.current = null;
+    setDragging(false);
+  };
+
   return (
-    <div className="h-full w-full overflow-auto">
+    <div
+      ref={scrollRef}
+      className={`h-full w-full overflow-auto ${dragging ? 'cursor-grabbing select-none' : 'cursor-grab'}`}
+      data-testid="workflow-graph-scroll"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onClick={(event) => {
+        if (!pannedRef.current) return;
+        pannedRef.current = false;
+        event.stopPropagation();
+      }}
+    >
       <div className="relative" style={{ width, height }}>
         <svg className="absolute inset-0 pointer-events-none" width={width} height={height}>
           {graph.edges.map((edge) => {

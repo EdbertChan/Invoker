@@ -1,11 +1,16 @@
+import { useEffect, useMemo, useState } from 'react';
 import type { TaskState, WorkflowMeta } from '../types.js';
 import { workflowStatusVisual } from '../lib/workflow-status.js';
 
 interface WorkflowInspectorProps {
   workflow: WorkflowMeta | null;
   task: TaskState | null;
+  executionAgents: string[];
   collapsed: boolean;
   advancedExpanded: boolean;
+  onEditAgent?: (taskId: string, agentName: string) => void;
+  onEditPrompt?: (taskId: string, newPrompt: string) => void;
+  onEditCommand?: (taskId: string, newCommand: string) => void;
   onToggleCollapsed: () => void;
   onToggleAdvanced: () => void;
 }
@@ -15,22 +20,73 @@ function summarizePrompt(task: TaskState | null): string {
   return task.config.prompt ?? task.config.command ?? 'No prompt or command available.';
 }
 
+function InspectorToggleIcon({ collapsed }: { collapsed: boolean }): JSX.Element {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 16 16"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+    >
+      <path d="M3 3.5h10v9H3z" />
+      <path d="M10 3.5v9" />
+      {collapsed ? <path d="M5.5 6 7.5 8l-2 2" /> : <path d="M7.5 6 5.5 8l2 2" />}
+    </svg>
+  );
+}
+
 export function WorkflowInspector({
   workflow,
   task,
+  executionAgents,
   collapsed,
   advancedExpanded,
+  onEditAgent,
+  onEditPrompt,
+  onEditCommand,
   onToggleCollapsed,
   onToggleAdvanced,
 }: WorkflowInspectorProps): JSX.Element {
+  const [promptValue, setPromptValue] = useState('');
+  const [promptDirty, setPromptDirty] = useState(false);
+
+  const promptText = summarizePrompt(task);
+  const agent = task?.config.executionAgent ?? task?.execution.agentName ?? '';
+  const agentOptions = useMemo(() => {
+    const options = new Set(executionAgents);
+    if (agent) options.add(agent);
+    return [...options].filter(Boolean).sort();
+  }, [agent, executionAgents]);
+
+  useEffect(() => {
+    setPromptValue(promptText);
+    setPromptDirty(false);
+  }, [task?.id, promptText]);
+
+  const savePrompt = () => {
+    if (!task || !promptDirty) return;
+    if (task.config.prompt !== undefined) {
+      onEditPrompt?.(task.id, promptValue);
+    } else if (task.config.command !== undefined) {
+      onEditCommand?.(task.id, promptValue);
+    }
+    setPromptDirty(false);
+  };
+
   if (collapsed) {
     return (
       <aside className="h-full w-full border-l border-gray-800 bg-gray-900 flex items-start justify-center pt-3">
         <button
           onClick={onToggleCollapsed}
-          className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+          className="inline-flex h-7 w-7 items-center justify-center rounded border border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white"
+          aria-label="Maximize inspector"
+          title="Maximize inspector"
         >
-          Show
+          <InspectorToggleIcon collapsed={collapsed} />
         </button>
       </aside>
     );
@@ -38,7 +94,7 @@ export function WorkflowInspector({
 
   const visual = workflow ? workflowStatusVisual(workflow.status) : null;
   const reviewUrl = task?.execution.reviewUrl;
-  const agent = task?.config.executionAgent ?? task?.execution.agentName ?? 'n/a';
+  const canEditPrompt = Boolean(task && ((task.config.prompt !== undefined && onEditPrompt) || (task.config.command !== undefined && onEditCommand)));
 
   return (
     <aside className="h-full w-full border-l border-gray-800 bg-gray-900 flex flex-col">
@@ -49,20 +105,82 @@ export function WorkflowInspector({
         </div>
         <button
           onClick={onToggleCollapsed}
-          className="rounded border border-gray-700 px-2 py-1 text-[11px] text-gray-300 hover:bg-gray-800"
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-gray-700 text-gray-300 hover:bg-gray-800 hover:text-white"
+          aria-label="Minimize inspector"
+          title="Minimize inspector"
         >
-          Minimize
+          <InspectorToggleIcon collapsed={collapsed} />
         </button>
       </div>
 
       <div className="flex-1 overflow-auto p-3 space-y-3 text-sm">
         <section className="rounded border border-gray-700 bg-gray-800/70 p-3">
           <div className="text-[11px] uppercase tracking-wide text-gray-400">AI Agent</div>
-          <div className="mt-1 text-gray-100">{agent}</div>
+          {task && onEditAgent && agentOptions.length > 0 ? (
+            <select
+              data-testid="workflow-inspector-agent-select"
+              value={agent}
+              onChange={(event) => onEditAgent(task.id, event.target.value)}
+              className="mt-1 w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none focus:border-blue-500"
+            >
+              {!agent && <option value="">Select agent</option>}
+              {agentOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="mt-1 text-gray-100">{agent || 'n/a'}</div>
+          )}
           <div className="mt-2 text-[11px] uppercase tracking-wide text-gray-400">Prompt</div>
-          <p className="mt-1 text-gray-200 text-xs leading-relaxed whitespace-pre-wrap break-words">
-            {summarizePrompt(task)}
-          </p>
+          <textarea
+            data-testid="workflow-inspector-prompt-input"
+            value={promptValue}
+            onChange={(event) => {
+              setPromptValue(event.target.value);
+              setPromptDirty(event.target.value !== promptText);
+            }}
+            onBlur={savePrompt}
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                event.preventDefault();
+                savePrompt();
+              }
+              if (event.key === 'Escape') {
+                setPromptValue(promptText);
+                setPromptDirty(false);
+                event.currentTarget.blur();
+              }
+            }}
+            readOnly={!canEditPrompt}
+            className={`mt-1 min-h-28 w-full resize-y rounded border px-2 py-2 text-xs leading-relaxed outline-none ${
+              canEditPrompt
+                ? 'border-gray-700 bg-gray-900 text-gray-100 focus:border-blue-500'
+                : 'border-gray-700 bg-gray-900/50 text-gray-400'
+            }`}
+          />
+          {promptDirty && canEditPrompt && (
+            <div className="mt-2 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setPromptValue(promptText);
+                  setPromptDirty(false);
+                }}
+                className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={savePrompt}
+                className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500"
+              >
+                Save
+              </button>
+            </div>
+          )}
         </section>
 
         <section className={`rounded border p-3 ${visual?.borderClass ?? 'border-gray-700'} bg-gray-800/70`}>

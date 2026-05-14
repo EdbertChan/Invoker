@@ -5,7 +5,7 @@
  * Tests right-click, Escape close, click-outside close, and menu items.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
 import { createMockInvoker, makeUITask, type MockInvoker } from './helpers/mock-invoker.js';
 import type { WorkflowMeta } from '../../types.js';
@@ -52,9 +52,15 @@ describe('Context menu (component)', () => {
   beforeEach(() => {
     mock = createMockInvoker();
     mock.install();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => undefined) },
+    });
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     mock.cleanup();
   });
 
@@ -74,7 +80,10 @@ describe('Context menu (component)', () => {
     await waitFor(() => {
       expect(screen.getByText('Open Workflow')).toBeInTheDocument();
       expect(screen.getByText('Retry Workflow')).toBeInTheDocument();
+      expect(screen.getByText('Copy Workflow ID')).toBeInTheDocument();
+      expect(screen.getByText('More')).toBeInTheDocument();
     });
+    expect(screen.queryByText('Recreate Workflow')).not.toBeInTheDocument();
   });
 
   it('task context menu still works in mini DAG', async () => {
@@ -88,5 +97,54 @@ describe('Context menu (component)', () => {
       expect(screen.getByText('Open Terminal')).toBeInTheDocument();
       expect(screen.getByText('Restart Task')).toBeInTheDocument();
     });
+    expect(screen.queryByText('Retry Workflow')).not.toBeInTheDocument();
+    expect(screen.queryByText('Cancel Workflow')).not.toBeInTheDocument();
+    expect(screen.queryByText('Delete Workflow')).not.toBeInTheDocument();
+  });
+
+  it('workflow context menu retries workflow', async () => {
+    await setup();
+    fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-1'));
+    fireEvent.click(await screen.findByText('Retry Workflow'));
+    await waitFor(() => expect(mock.api.retryWorkflow).toHaveBeenCalledWith('wf-1'));
+  });
+
+  it('workflow context menu recreates workflow', async () => {
+    await setup();
+    fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-1'));
+    fireEvent.click(await screen.findByText('More'));
+    fireEvent.click(await screen.findByText('Recreate Workflow'));
+    await waitFor(() => expect(mock.api.recreateWorkflow).toHaveBeenCalledWith('wf-1'));
+  });
+
+  it('workflow context menu recreates workflow with rebase', async () => {
+    await setup();
+    fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-1'));
+    fireEvent.click(await screen.findByText('More'));
+    fireEvent.click(await screen.findByText('Recreate with Rebase'));
+    await waitFor(() => expect(mock.api.recreateWithRebase).toHaveBeenCalledWith('wf-1'));
+  });
+
+  it('workflow context menu cancels workflow', async () => {
+    await setup();
+    fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-1'));
+    fireEvent.click(await screen.findByText('More'));
+    fireEvent.click(await screen.findByText('Cancel Workflow'));
+    await waitFor(() => expect(mock.api.cancelWorkflow).toHaveBeenCalledWith('wf-1'));
+  });
+
+  it('workflow context menu deletes workflow', async () => {
+    await setup();
+    fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-1'));
+    fireEvent.click(await screen.findByText('More'));
+    fireEvent.click(await screen.findByText('Delete Workflow'));
+    await waitFor(() => expect(mock.api.deleteWorkflow).toHaveBeenCalledWith('wf-1'));
+  });
+
+  it('workflow context menu copies workflow id', async () => {
+    await setup();
+    fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-1'));
+    fireEvent.click(await screen.findByText('Copy Workflow ID'));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalledWith('wf-1'));
   });
 });
