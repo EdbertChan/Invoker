@@ -18,25 +18,6 @@ describe('planManagedWorktree', () => {
     });
   });
 
-  it('reuses an actionId worktree by renaming the branch when base is still compatible', () => {
-    const plan = planManagedWorktree({
-      targetBranch: 'experiment/wf/task-5678',
-      targetWorktreePath: '/wt/target',
-      actionIdCandidate: {
-        path: '/wt/existing',
-        branch: 'experiment/wf/task-1234',
-        baseIsAncestorOfHead: true,
-      },
-    });
-
-    expect(plan).toEqual({
-      kind: 'rename_reuse',
-      worktreePath: '/wt/existing',
-      fromBranch: 'experiment/wf/task-1234',
-      toBranch: 'experiment/wf/task-5678',
-    });
-  });
-
   it('reconciles both the canonical target path and stale branch-owner path before recreate', () => {
     const plan = planManagedWorktree({
       targetBranch: 'experiment/wf/task-5678',
@@ -62,11 +43,6 @@ describe('planManagedWorktree', () => {
       exactBranchCandidate: {
         path: '/wt/existing',
         headMatchesTargetBranch: true,
-      },
-      actionIdCandidate: {
-        path: '/wt/action-id',
-        branch: 'experiment/wf/task-1234',
-        baseIsAncestorOfHead: true,
       },
     });
 
@@ -129,15 +105,10 @@ describe('planManagedWorktree', () => {
     expect(plan.kind).toBe('recreate');
   });
 
-  it('creates fresh when an actionId worktree exists but its base is stale', () => {
+  it('creates fresh instead of reusing same-action worktrees with different content', () => {
     const plan = planManagedWorktree({
-      targetBranch: 'experiment/wf/task-5678',
+      targetBranch: 'experiment/wf-1/task/g0.t1.aabc12345-deadbeef',
       targetWorktreePath: '/wt/target',
-      actionIdCandidate: {
-        path: '/wt/action-id',
-        branch: 'experiment/wf/task-1234',
-        baseIsAncestorOfHead: false,
-      },
     });
 
     expect(plan).toEqual({

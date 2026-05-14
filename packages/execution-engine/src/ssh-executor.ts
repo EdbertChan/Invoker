@@ -438,8 +438,8 @@ ${this.buildPayloadExecutionScript(payloadB64)}
         handle.workspacePath =
           remoteWt.startsWith(`${remoteHome}/`) ? `~${remoteWt.slice(remoteHome.length)}` : remoteWt;
         break;
-      case 'rename_reuse':
-        throw new Error('SSH managed workspaces do not support same-task different-branch rename reuse');
+      case 'rename_to_lifecycle':
+        throw new Error('SSH managed workspaces do not support content-equivalent lifecycle rename reuse');
       case 'recreate': {
         // Workspace cleanup is gated by INVOKER_ENABLE_WORKSPACE_CLEANUP. With
         // attemptId mixed into the branch hash, the canonical worktree path

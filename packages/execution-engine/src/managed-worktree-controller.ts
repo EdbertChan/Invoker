@@ -3,12 +3,6 @@ export interface ManagedWorktreeExactCandidate {
   headMatchesTargetBranch: boolean;
 }
 
-export interface ManagedWorktreeActionCandidate {
-  path: string;
-  branch: string;
-  baseIsAncestorOfHead: boolean;
-}
-
 export interface ManagedWorktreeContentCandidate {
   path: string;
   branch: string;
@@ -19,7 +13,6 @@ export interface PlanManagedWorktreeInput {
   targetWorktreePath: string;
   forceFresh?: boolean;
   exactBranchCandidate?: ManagedWorktreeExactCandidate;
-  actionIdCandidate?: ManagedWorktreeActionCandidate;
   /**
    * Worktree found via `findManagedWorktreeByContent`: same actionId, same
    * content hash, *different* lifecycle tag. Cache-equivalent → safe to reuse
@@ -34,12 +27,6 @@ export type ManagedWorktreePlan =
   | {
     kind: 'reuse_exact';
     worktreePath: string;
-  }
-  | {
-    kind: 'rename_reuse';
-    worktreePath: string;
-    fromBranch: string;
-    toBranch: string;
   }
   | {
     kind: 'rename_to_lifecycle';
@@ -81,21 +68,6 @@ export function planManagedWorktree(input: PlanManagedWorktreeInput): ManagedWor
   // creating/resetting the target branch again.
   if (input.exactBranchCandidate && !input.exactBranchCandidate.headMatchesTargetBranch) {
     cleanupPaths.add(input.exactBranchCandidate.path);
-  }
-
-  // Fallback: reuse worktree for same actionId but different hash (preserves
-  // conflict resolutions). Only reuse when the requested base is an ancestor
-  // of the existing worktree's HEAD — this means the worktree already contains
-  // the caller's base revision and only the experiment commits are extra. If
-  // the base has advanced beyond what the worktree contains, skip reuse and
-  // fall through to fresh creation from the new base.
-  if (allowReuse && input.actionIdCandidate?.baseIsAncestorOfHead) {
-    return {
-      kind: 'rename_reuse',
-      worktreePath: input.actionIdCandidate.path,
-      fromBranch: input.actionIdCandidate.branch,
-      toBranch: input.targetBranch,
-    };
   }
 
   return {

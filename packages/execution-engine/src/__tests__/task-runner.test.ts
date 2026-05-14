@@ -1949,8 +1949,7 @@ describe('TaskRunner', () => {
       await executor.executeTask(task);
 
       expect(capturedRequest).toBeDefined();
-      // Lifecycle tag embeds wfGen=3, taskGen=5, attemptShort sanitized from
-      // 'attempt-abc' (truncated to 12 chars, lowercased, kept dash chars).
+      // Lifecycle tag embeds wfGen=3, taskGen=5, and sanitized attempt suffix.
       expect(capturedRequest.inputs.lifecycleTag).toBe('g3.t5.aattempt-abc');
     });
 

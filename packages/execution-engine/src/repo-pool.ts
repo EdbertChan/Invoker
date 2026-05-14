@@ -8,7 +8,6 @@ import {
   abbrevRefMatchesBranch,
   canonicalPathForComparison,
   findContentHashCollisions,
-  findManagedWorktreeByActionId,
   findManagedWorktreeByContent,
   findManagedWorktreeForBranch,
   parseGitWorktreePorcelain,
@@ -425,28 +424,6 @@ export class RepoPool {
       }
     }
 
-    let actionIdCandidate:
-      | { path: string; branch: string; baseIsAncestorOfHead: boolean }
-      | undefined;
-    if (allowReuse && actionId) {
-      const actionIdHit = findManagedWorktreeByActionId(porcelain, actionId, managedPrefixes);
-      if (actionIdHit && existsSync(actionIdHit.path)) {
-        let baseIsAncestorOfHead = true;
-        if (base) {
-          try {
-            await this.execGit(['merge-base', '--is-ancestor', base, 'HEAD'], actionIdHit.path);
-          } catch {
-            baseIsAncestorOfHead = false;
-          }
-        }
-        actionIdCandidate = {
-          path: actionIdHit.path,
-          branch: actionIdHit.branch,
-          baseIsAncestorOfHead,
-        };
-      }
-    }
-
     // Cache-equivalent reuse: same actionId + content hash, different lifecycle
     // tag. This remains available for non-fresh flows only; recreate-style
     // flows must allocate a fresh workspace path as well as a fresh branch.
@@ -486,7 +463,6 @@ export class RepoPool {
       targetWorktreePath: worktreePath,
       forceFresh: opts?.forceFresh,
       exactBranchCandidate,
-      actionIdCandidate,
       contentCandidate,
     });
 
@@ -499,7 +475,7 @@ export class RepoPool {
           cleanupPaths: [worktreePath, plan.worktreePath],
         };
       }
-    } else if (plan.kind === 'rename_reuse' || plan.kind === 'rename_to_lifecycle') {
+    } else if (plan.kind === 'rename_to_lifecycle') {
       const reusable = await this.isReusableManagedWorktree(plan.worktreePath, plan.fromBranch);
       if (!reusable) {
         plan = {
@@ -519,7 +495,6 @@ export class RepoPool {
         );
         mkdirSync(worktreeParent, { recursive: true });
         break;
-      case 'rename_reuse':
       case 'rename_to_lifecycle':
         try {
           await this.execGit(['branch', '-m', plan.fromBranch, plan.toBranch], plan.worktreePath);

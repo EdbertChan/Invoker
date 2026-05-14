@@ -259,7 +259,7 @@ branch refs/heads/experiment/test-task-oldhash
     expect(handle.workspacePath).toMatch(new RegExp(`^~/.invoker/worktrees/${repoHash}/experiment-test-task-g\\d+\\.t\\d+\\.a[a-z0-9_-]*-[0-9a-f]{8}$`));
     expect(handle.workspacePath).not.toBe(`~/.invoker/worktrees/${repoHash}/experiment-test-task-oldhash`);
     expect(setupTaskBranchSpy).toHaveBeenCalledTimes(1);
-    expect(execRemoteCapture).not.toHaveBeenCalledWith(expect.stringContaining('branch -m'), 'rename_reuse_branch');
+    expect(execRemoteCapture).not.toHaveBeenCalledWith(expect.stringContaining('branch -m'), expect.any(String));
   });
 
   it('persists the owning worktree path on startup failure when Git reports a branch owner', async () => {
