@@ -86,7 +86,7 @@ Observed on 2026-05-14:
 
 ```text
 Test Files  46 passed (46)
-Tests       937 passed (937)
+Tests       932 passed (932)
 ```
 
 Thresholds:

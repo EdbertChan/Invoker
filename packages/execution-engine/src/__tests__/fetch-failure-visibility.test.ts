@@ -87,6 +87,19 @@ function createRemote(localRepo: string): string {
   return remote;
 }
 
+function pushCommits(secondClone: string, count: number): void {
+  const script = `
+    parent=$(git rev-parse HEAD)
+    tree=$(git rev-parse HEAD^{tree})
+    for i in $(seq 1 ${count}); do
+      parent=$(printf 'commit %s\n' "$i" | git commit-tree "$tree" -p "$parent")
+    done
+    git update-ref refs/heads/master "$parent"
+  `;
+  execSync(script, { cwd: secondClone, stdio: 'pipe', shell: '/bin/bash' });
+  execSync('git push --force origin master', { cwd: secondClone });
+}
+
 describe('syncFromRemote - fetch failure handling', () => {
   describe('fetch failure (strict by default)', () => {
     let executor: TestExecutor;
@@ -211,12 +224,7 @@ describe('syncFromRemote - fetch failure handling', () => {
       execSync('git config user.email "test@test.com"', { cwd: secondClone });
       execSync('git config user.name "Test"', { cwd: secondClone });
 
-      // Push 5 commits from second clone
-      for (let i = 1; i <= 5; i++) {
-        writeFileSync(join(secondClone, `file${i}.txt`), `content${i}`);
-        execSync(`git add -A && git commit -m "commit ${i}"`, { cwd: secondClone });
-      }
-      execSync('git push', { cwd: secondClone });
+      pushCommits(secondClone, 5);
 
       const executionId = 'test-exec-staleness-1';
       executor.registerTestEntry(executionId, makeRequest('test-action'));
@@ -239,12 +247,7 @@ describe('syncFromRemote - fetch failure handling', () => {
       execSync('git config user.email "test@test.com"', { cwd: secondClone });
       execSync('git config user.name "Test"', { cwd: secondClone });
 
-      // Push 101 commits to trigger loud warning
-      for (let i = 1; i <= 101; i++) {
-        writeFileSync(join(secondClone, `file${i}.txt`), `content${i}`);
-        execSync(`git add -A && git commit -m "commit ${i}"`, { cwd: secondClone });
-      }
-      execSync('git push', { cwd: secondClone });
+      pushCommits(secondClone, 101);
 
       const executionId = 'test-exec-staleness-loud';
       executor.registerTestEntry(executionId, makeRequest('test-action'));
