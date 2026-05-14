@@ -50,8 +50,8 @@ for line in text.splitlines():
 nl = chr(10)
 dest.write_text(nl.join(out) + (nl if text.endswith('\n') else ''), encoding='utf-8')
 " "$ROOT" "$PLAN_SRC" "$PLAN_TMP"
-echo "==> submit-plan (headless run) $PLAN_SRC (repoUrl -> file:// checkout)"
-./submit-plan.sh "$PLAN_TMP"
+echo "==> submit-plan (headless run --no-track) $PLAN_SRC (repoUrl -> file:// checkout)"
+./run.sh --headless --no-track run "$PLAN_TMP"
 
 # Assert the routed task completed through the configured worktree pool member if sqlite3 is available.
 DB="$TMPDB/invoker.db"

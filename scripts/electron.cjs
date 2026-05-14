@@ -159,6 +159,20 @@ function withLinuxSandboxFallback(binaryPath, args) {
   return ['--no-sandbox', ...args];
 }
 
+function resolveElectronLaunch(binaryPath, args) {
+  if (process.platform === 'linux' && !process.env.DISPLAY) {
+    return {
+      command: 'xvfb-run',
+      args: ['--auto-servernum', binaryPath, ...args],
+    };
+  }
+
+  return {
+    command: binaryPath,
+    args,
+  };
+}
+
 function main() {
   const args = process.argv.slice(2);
   Promise.resolve(ensureElectronInstalled()).then((binaryPath) => {
@@ -171,7 +185,8 @@ function main() {
     }
 
     const launchArgs = withLinuxSandboxFallback(binaryPath, args);
-    const child = spawn(binaryPath, launchArgs, {
+    const launch = resolveElectronLaunch(binaryPath, launchArgs);
+    const child = spawn(launch.command, launch.args, {
       cwd: process.cwd(),
       env: process.env,
       stdio: 'inherit',

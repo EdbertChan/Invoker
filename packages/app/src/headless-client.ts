@@ -46,9 +46,23 @@ function electronCommandArgs(args: string[]): string[] {
   ];
 }
 
+function wrapElectronWithXvfb(args: string[]): { command: string; args: string[] } {
+  if (process.platform === 'linux' && !process.env.DISPLAY) {
+    return {
+      command: 'xvfb-run',
+      args: ['--auto-servernum', process.execPath, ...args],
+    };
+  }
+  return {
+    command: process.execPath,
+    args,
+  };
+}
+
 async function runElectronHeadless(args: string[]): Promise<number> {
   const electronLauncher = resolve(repoRoot, 'scripts', 'electron.cjs');
-  const child = spawn(process.execPath, [electronLauncher, ...electronCommandArgs(args)], {
+  const launch = wrapElectronWithXvfb([electronLauncher, ...electronCommandArgs(args)]);
+  const child = spawn(launch.command, launch.args, {
     cwd: repoRoot,
     stdio: 'inherit',
     env: {

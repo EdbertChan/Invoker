@@ -55,13 +55,29 @@ trap cleanup EXIT
 
 query_sqlite_value() {
   local sql="$1"
-  sqlite3 -noheader "$DB_DIR/invoker.db" "$sql"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 -noheader "$DB_DIR/invoker.db" "$sql"
+    return
+  fi
+  python3 - "$DB_DIR/invoker.db" "$sql" <<'PY'
+import sqlite3
+import sys
+
+db_path, sql = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db_path)
+try:
+    row = conn.execute(sql).fetchone()
+    if row and row[0] is not None:
+        print(row[0])
+finally:
+    conn.close()
+PY
 }
 
 sqlite_schema_ready() {
   [[ -f "$DB_DIR/invoker.db" ]] || return 1
   local exists
-  exists="$(sqlite3 -noheader "$DB_DIR/invoker.db" "select count(*) from sqlite_master where type='table' and name='tasks';" 2>/dev/null || true)"
+  exists="$(query_sqlite_value "select count(*) from sqlite_master where type='table' and name='tasks';" 2>/dev/null || true)"
   [[ "$exists" == "1" ]]
 }
 
@@ -118,7 +134,10 @@ wait_for_owner_ready() {
   local started_at
   started_at="$(date +%s)"
   while true; do
-    if [[ -S "$IPC_SOCKET_PATH" ]] || grep -q 'owner-ipc-ready' "$DB_DIR/invoker.log" 2>/dev/null; then
+    # The socket can exist before the owner registers delegation handlers.
+    # Wait for the explicit readiness marker that the GUI owner logs after
+    # headless.owner-ping/headless.run handlers are attached.
+    if grep -q 'owner-ipc-ready' "$DB_DIR/invoker.log" 2>/dev/null; then
       return 0
     fi
     if (( $(date +%s) - started_at >= timeout )); then

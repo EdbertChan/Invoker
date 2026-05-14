@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Submit a plan YAML to Invoker and execute it (headless mode).
-# Uses the same Electron binary as the GUI to avoid ABI mismatches.
+# Route through run.sh so headless submissions share the same bootstrap and
+# owner-delegation path as the rest of the CLI surface.
 #
 # Usage: ./submit-plan.sh <plan.yaml>
 set -e
@@ -20,22 +21,5 @@ if [[ "$PLAN_FILE" != /* ]]; then
   PLAN_FILE="$CALLER_PWD/$PLAN_FILE"
 fi
 
-# Unset ELECTRON_RUN_AS_NODE so Electron loads its full API (not plain Node mode).
-# VS Code terminals set this, which breaks electron imports.
-unset ELECTRON_RUN_AS_NODE
-
-SANDBOX_FLAG=""
-if [ "$(uname)" = "Linux" ]; then
-  SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
-  # shellcheck disable=SC2086
-  if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
-  fi
-fi
-
-if [ "$(uname)" = "Linux" ]; then
-  export LIBGL_ALWAYS_SOFTWARE=1
-fi
-
 echo "==> Submitting plan: $PLAN_FILE"
-./packages/app/node_modules/.bin/electron packages/app/dist/main.js $SANDBOX_FLAG --headless run "$PLAN_FILE"
+./run.sh --headless run "$PLAN_FILE"
