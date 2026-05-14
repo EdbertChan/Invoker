@@ -588,6 +588,7 @@ async function wireSlackBot(deps: SlackBotDeps): Promise<any> {
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
 const RED = '\x1b[31m';
+const DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS = 30_000;
 
 // ══════════════════════════════════════════════════════════════
 // HEADLESS MODE
@@ -653,11 +654,23 @@ if (isHeadless) {
         if (command === 'run') {
           const planPath = cliArgs[1];
           if (!planPath) throw new Error('Missing plan file. Usage: --headless run <plan.yaml>');
-          delegated = isDelegated(await tryDelegateRun(planPath, delegationBus, waitForApproval, noTrack));
+          delegated = isDelegated(await tryDelegateRun(
+            planPath,
+            delegationBus,
+            waitForApproval,
+            noTrack,
+            noTrack ? DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS : undefined,
+          ));
         } else if (command === 'resume') {
           const workflowId = cliArgs[1];
           if (!workflowId) throw new Error('Missing workflowId. Usage: --headless resume <id>');
-          delegated = isDelegated(await tryDelegateResume(workflowId, delegationBus, waitForApproval, noTrack));
+          delegated = isDelegated(await tryDelegateResume(
+            workflowId,
+            delegationBus,
+            waitForApproval,
+            noTrack,
+            noTrack ? DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS : undefined,
+          ));
         } else {
           const timeoutMs = noTrack ? undefined : await resolveDelegationTimeoutMs(cliArgs);
           delegated = isDelegated(await tryDelegateExec(cliArgs, delegationBus, waitForApproval, noTrack, timeoutMs));

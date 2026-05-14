@@ -62,6 +62,23 @@ describe('headless-client', () => {
     expect(exitCode).toBe(0);
   }, 15_000);
 
+  it('uses a longer tracked delegation timeout for recreate under load', async () => {
+    const bus = new LocalBus();
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'gui' }));
+    bus.onRequest('headless.exec', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 9_000));
+      return { ok: true };
+    });
+
+    const exitCode = await runHeadlessClientCommand(['recreate', 'wf-1'], {
+      messageBus: bus,
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      runElectronHeadless: vi.fn(async () => 0),
+    });
+
+    expect(exitCode).toBe(0);
+  }, 15_000);
+
   // --- Regression: owner endpoint scope for headless.run ---
 
   it('delegates headless.run to a standalone-capable owner endpoint', async () => {

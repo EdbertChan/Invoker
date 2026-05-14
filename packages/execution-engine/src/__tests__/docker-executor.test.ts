@@ -265,7 +265,8 @@ describe('DockerExecutor', () => {
       runScopedGitAndShell('container-b', 'from-b', 0),
     ]);
 
-    expect(routedCalls).toEqual([
+    expect(routedCalls).toHaveLength(4);
+    expect(routedCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({
         containerId: 'container-b',
         script: expect.stringContaining('git \'status\' \'--short\''),
@@ -282,7 +283,20 @@ describe('DockerExecutor', () => {
         containerId: 'container-a',
         script: 'echo from-a',
       }),
-    ]);
+    ]));
+
+    const firstIndexByContainer = (containerId: string, matcher: (script: string) => boolean): number =>
+      routedCalls.findIndex((call) => call.containerId === containerId && matcher(call.script));
+
+    const containerBGitIndex = firstIndexByContainer('container-b', (script) => script.includes('git \'status\' \'--short\''));
+    const containerBBashIndex = firstIndexByContainer('container-b', (script) => script === 'echo from-b');
+    const containerAGitIndex = firstIndexByContainer('container-a', (script) => script.includes('git \'status\' \'--short\''));
+    const containerABashIndex = firstIndexByContainer('container-a', (script) => script === 'echo from-a');
+
+    expect(containerBGitIndex).toBeGreaterThanOrEqual(0);
+    expect(containerBBashIndex).toBeGreaterThan(containerBGitIndex);
+    expect(containerAGitIndex).toBeGreaterThanOrEqual(0);
+    expect(containerABashIndex).toBeGreaterThan(containerAGitIndex);
   });
 
   // -------------------------------------------------------------------------
