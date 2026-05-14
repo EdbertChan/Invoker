@@ -10,9 +10,15 @@ FAIL_FAST="${INVOKER_TEST_ALL_FAIL_FAST:-0}"
 RESUME="${INVOKER_TEST_ALL_RESUME:-0}"
 FORCE_RERUN="${INVOKER_TEST_ALL_FORCE_RERUN:-0}"
 JOBS="${INVOKER_TEST_ALL_JOBS:-1}"
+EXPECTED_REQUIRED_SUITES="${INVOKER_TEST_ALL_EXPECT_REQUIRED_SUITES:-12}"
 
 if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [ "$JOBS" -lt 1 ]; then
   echo "ERROR: INVOKER_TEST_ALL_JOBS must be a positive integer" >&2
+  exit 2
+fi
+
+if ! [[ "$EXPECTED_REQUIRED_SUITES" =~ ^[0-9]+$ ]] || [ "$EXPECTED_REQUIRED_SUITES" -lt 1 ]; then
+  echo "ERROR: INVOKER_TEST_ALL_EXPECT_REQUIRED_SUITES must be a positive integer" >&2
   exit 2
 fi
 
@@ -46,6 +52,7 @@ declare -a SKIPPED_UNAVAILABLE=()
 declare -a EXECUTED=()
 declare -a FAILED=()
 declare -a SUITES=()
+declare -a REQUIRED_SUITES=()
 
 load_state() {
   local line mode suite status
@@ -259,8 +266,21 @@ collect_suites() {
 
     while IFS= read -r suite; do
       SUITES+=( "$suite" )
+      if [ "$dir" = "required" ]; then
+        REQUIRED_SUITES+=( "$suite" )
+      fi
     done < <(find "$ROOT/scripts/test-suites/$dir" -maxdepth 1 -type f -name '*.sh' ! -name '_*' | LC_ALL=C sort)
   done
+}
+
+assert_required_suite_registry() {
+  local actual="${#REQUIRED_SUITES[@]}"
+  if [ "$actual" -ne "$EXPECTED_REQUIRED_SUITES" ]; then
+    echo "ERROR: required suite registry count changed (expected $EXPECTED_REQUIRED_SUITES, found $actual)" >&2
+    echo "Update docs/context/inv-67/experiment-brief.md and this guardrail together if the required registry intentionally changed." >&2
+    return 1
+  fi
+  echo "==> Required suite registry count verified: $actual"
 }
 
 should_skip_for_resume() {
@@ -312,6 +332,7 @@ print_summary() {
 
 load_state
 collect_suites
+assert_required_suite_registry
 
 echo "==> Running Invoker test suites (mode=$MODE_KEY, jobs=$JOBS, resume=$RESUME)"
 
