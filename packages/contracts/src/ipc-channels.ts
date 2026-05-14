@@ -563,6 +563,11 @@ type InvokeChannels = typeof IpcChannels;
 type TestOnlyChannels = typeof IpcTestOnlyChannels;
 type EventChannels = typeof IpcEventChannels;
 
+export type InvokerInvokeChannel = keyof InvokeChannels;
+export type InvokerEventChannel = keyof EventChannels;
+export type InvokerInvokeMethod = ChannelToMethod<InvokerInvokeChannel & string>;
+export type InvokerEventMethod = `on${Capitalize<ChannelToMethod<InvokerEventChannel & string>>}`;
+
 /** Invoke methods: each channel becomes an async method on the API. */
 type InvokeMethods = {
   [K in keyof InvokeChannels as ChannelToMethod<K & string>]:

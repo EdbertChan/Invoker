@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { reconciliationNeedsInputWorkResponse } from './reconciliation-needs-input-shim.js';
 import { rid, sid } from './scoped-test-helpers.js';
-import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
+import {
+  Orchestrator,
+  OrchestratorError,
+  OrchestratorErrorCode,
+  PlanConflictError,
+  descriptionForMergeNode,
+} from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
 import { computeWorkflowRollup } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
@@ -5925,11 +5931,16 @@ describe('Orchestrator', () => {
       expect(started.some(t => t.id === 'a')).toBe(true);
     });
 
-    it('throws when workflow has no tasks', () => {
+    it('throws a typed WORKFLOW_NOT_FOUND error when workflow has no tasks', () => {
       const p = new InMemoryPersistence();
       const b = new InMemoryBus();
       const o = new Orchestrator({ persistence: p, messageBus: b, maxConcurrency: 3 });
-      expect(() => o.retryWorkflow('wf-nonexistent')).toThrow('No tasks found');
+      expect(() => o.retryWorkflow('wf-nonexistent')).toThrowError(
+        new OrchestratorError(
+          OrchestratorErrorCode.WORKFLOW_NOT_FOUND,
+          'No tasks found for workflow wf-nonexistent',
+        ),
+      );
     });
   });
 
@@ -5996,6 +6007,19 @@ describe('Orchestrator', () => {
     });
 
     describe('recreateWorkflow clears lineage and preserves the workflow base', () => {
+      it('throws a typed WORKFLOW_NOT_FOUND error when the workflow does not exist', () => {
+        const p = new InMemoryPersistence();
+        const b = new InMemoryBus();
+        const o = new Orchestrator({ persistence: p, messageBus: b, maxConcurrency: 2 });
+
+        expect(() => o.recreateWorkflow('wf-missing')).toThrowError(
+          new OrchestratorError(
+            OrchestratorErrorCode.WORKFLOW_NOT_FOUND,
+            'No tasks found for workflow wf-missing',
+          ),
+        );
+      });
+
       it('clears branch/workspacePath/commit on every task', () => {
         const p = new InMemoryPersistence();
         const b = new InMemoryBus();

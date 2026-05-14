@@ -52,6 +52,13 @@ export class OrchestratorError extends Error {
   }
 }
 
+function missingWorkflowError(workflowId: string): OrchestratorError {
+  return new OrchestratorError(
+    OrchestratorErrorCode.WORKFLOW_NOT_FOUND,
+    `No tasks found for workflow ${workflowId}`,
+  );
+}
+
 function isActiveForInvalidation(status: TaskStatus): boolean {
   return (
     status === 'running' ||
@@ -2159,7 +2166,7 @@ export class Orchestrator {
     let allTasks = this.stateMachine.getAllTasks().filter(
       (t) => t.config.workflowId === workflowId,
     );
-    if (allTasks.length === 0) throw new Error(`No tasks found for workflow ${workflowId}`);
+    if (allTasks.length === 0) throw missingWorkflowError(workflowId);
 
     // Step 18 cancel-first invariant: interrupt any active task in
     // the workflow scope BEFORE the retry reset. Defense-in-depth
@@ -2334,7 +2341,7 @@ export class Orchestrator {
     const allTasks = this.stateMachine.getAllTasks().filter(
       (t) => t.config.workflowId === workflowId,
     );
-    if (allTasks.length === 0) throw new Error(`No tasks found for workflow ${workflowId}`);
+    if (allTasks.length === 0) throw missingWorkflowError(workflowId);
 
     // Step 18 cancel-first invariant: interrupt any active task in
     // the workflow scope BEFORE the recreate reset. Defense-in-depth
@@ -3750,7 +3757,7 @@ export class Orchestrator {
       (t) => t.config.workflowId === workflowId,
     );
     if (allTasks.length === 0) {
-      throw new OrchestratorError('WORKFLOW_NOT_FOUND', `No tasks found for workflow ${workflowId}`);
+      throw missingWorkflowError(workflowId);
     }
 
     const cancellable = new Set([

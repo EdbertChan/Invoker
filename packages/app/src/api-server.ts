@@ -143,6 +143,17 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function applyDeprecationAlias(
+  res: ServerResponse,
+  replacement: string,
+): { deprecated: true; replacement: string } {
+  res.setHeader(
+    'Deprecation',
+    `true; reason="Use ${replacement}"`,
+  );
+  return { deprecated: true, replacement };
+}
+
 export function startApiServer(deps: ApiServerDeps): ApiServer {
   const {
     logger: apiLogger,
@@ -216,18 +227,15 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         const taskId = decodeURIComponent((retryMatch ?? restartMatch)![1]);
         try {
           const result = await mutations.retryTask(taskId);
-          if (isLegacy) {
-            res.setHeader(
-              'Deprecation',
-              'true; reason="Use /api/tasks/:id/retry or /api/tasks/:id/recreate"',
-            );
-          }
+          const deprecation = isLegacy
+            ? applyDeprecationAlias(res, '/api/tasks/:id/retry')
+            : undefined;
           json(res, 200, {
             ok: true,
             taskId,
             action: isLegacy ? 'restarted' : 'retried',
             tasksStarted: result.runnable.length,
-            ...(isLegacy ? { deprecated: true, replacement: '/api/tasks/:id/retry' } : {}),
+            ...deprecation,
           });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
@@ -323,19 +331,16 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         const workflowId = decodeURIComponent((wfRecreateMatch ?? wfRestartMatch)![1]);
         try {
           const result = await mutations.recreateWorkflow(workflowId);
-          if (isLegacy) {
-            res.setHeader(
-              'Deprecation',
-              'true; reason="Use /api/workflows/:id/recreate"',
-            );
-          }
+          const deprecation = isLegacy
+            ? applyDeprecationAlias(res, '/api/workflows/:id/recreate')
+            : undefined;
           const tasksStarted = result.started.filter(t => t.status === 'running').length;
           json(res, 200, {
             ok: true,
             workflowId,
             action: isLegacy ? 'restarted' : 'recreated',
             tasksStarted,
-            ...(isLegacy ? { deprecated: true, replacement: '/api/workflows/:id/recreate' } : {}),
+            ...deprecation,
           });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
@@ -366,19 +371,16 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         try {
           const workflowId = resolveHeadlessTargetWorkflowId(workflowTarget, persistence);
           const result = await mutations.recreateWorkflowFromFreshBase(workflowId);
-          if (isLegacy) {
-            res.setHeader(
-              'Deprecation',
-              'true; reason="Use /api/workflows/:id/recreate-with-rebase"',
-            );
-          }
+          const deprecation = isLegacy
+            ? applyDeprecationAlias(res, '/api/workflows/:id/recreate-with-rebase')
+            : undefined;
           const tasksStarted = result.started.filter(t => t.status === 'running').length;
           json(res, 200, {
             ok: true,
             workflowId,
             action: isLegacy ? 'rebase_and_retried' : 'recreated_with_rebase',
             tasksStarted,
-            ...(isLegacy ? { deprecated: true, replacement: '/api/workflows/:id/recreate-with-rebase' } : {}),
+            ...deprecation,
           });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });

@@ -95,6 +95,7 @@ function createMocks() {
       beginConflictResolution: vi.fn(() => ({ savedError: 'saved-error' })),
       setFixAwaitingApproval: vi.fn(),
       retryTask: vi.fn(() => [makeTask()]),
+      retryWorkflow: vi.fn(() => [makeTask({ id: 'wf-1/task-1', config: { workflowId: 'wf-1' } })]),
       editTaskCommand: vi.fn(() => [makeTask()]),
       editTaskPrompt: vi.fn(() => [makeTask()]),
       editTaskType: vi.fn(() => [makeTask()]),
@@ -197,6 +198,7 @@ beforeEach(() => {
   mocks.orchestrator.getTask.mockImplementation((id: string) => (id === 'task-1' ? makeTask() : undefined));
   mocks.orchestrator.approve.mockResolvedValue([]);
   mocks.orchestrator.retryTask.mockReturnValue([makeTask()]);
+  mocks.orchestrator.retryWorkflow.mockReturnValue([makeTask({ id: 'wf-1/task-1', config: { workflowId: 'wf-1' } })]);
   mocks.orchestrator.beginConflictResolution.mockReturnValue({ savedError: 'saved-error' });
   mocks.orchestrator.editTaskCommand.mockReturnValue([makeTask()]);
   mocks.orchestrator.editTaskPrompt.mockReturnValue([makeTask()]);
@@ -779,6 +781,22 @@ describe('POST /api/workflows/:id/restart', () => {
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledTimes(2);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [topup]);
+  });
+});
+
+describe('POST /api/workflows/:id/retry', () => {
+  it('returns 404 when workflow not found', async () => {
+    mocks.orchestrator.retryWorkflow.mockImplementation(() => {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.WORKFLOW_NOT_FOUND,
+        'No tasks found for workflow wf-missing',
+      );
+    });
+
+    const res = await request(port, 'POST', '/api/workflows/wf-missing/retry');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('No tasks found for workflow wf-missing');
   });
 });
 
