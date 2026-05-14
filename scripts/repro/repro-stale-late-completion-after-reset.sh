@@ -30,6 +30,7 @@ fi
 
 ELECTRON_BIN="$ROOT_DIR/scripts/electron.cjs"
 MAIN_JS="$ROOT_DIR/packages/app/dist/main.js"
+HEADLESS_CLIENT_JS="$ROOT_DIR/packages/app/dist/headless-client.js"
 
 cleanup_mode() {
   if [[ -n "${RESET_WRAPPER_PID:-}" ]]; then
@@ -76,13 +77,44 @@ wait_for_query_status() {
 
 query_sqlite_value() {
   local sql="$1"
-  sqlite3 -noheader "$DB_DIR/invoker.db" "$sql"
+  python3 - "$DB_DIR/invoker.db" "$sql" <<'PY'
+import sqlite3
+import sys
+
+db_path, query = sys.argv[1], sys.argv[2]
+try:
+    con = sqlite3.connect(db_path, timeout=0.5)
+    row = con.execute(query).fetchone()
+    if row and row[0] is not None:
+        sys.stdout.write(str(row[0]))
+finally:
+    try:
+        con.close()
+    except Exception:
+        pass
+PY
 }
 
 sqlite_schema_ready() {
   [[ -f "$DB_DIR/invoker.db" ]] || return 1
   local exists
-  exists="$(sqlite3 -noheader "$DB_DIR/invoker.db" "select count(*) from sqlite_master where type='table' and name='tasks';" 2>/dev/null || true)"
+  exists="$(python3 - "$DB_DIR/invoker.db" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+try:
+    con = sqlite3.connect(db_path, timeout=0.5)
+    row = con.execute("select count(*) from sqlite_master where type='table' and name='tasks';").fetchone()
+    if row and row[0] is not None:
+        sys.stdout.write(str(row[0]))
+finally:
+    try:
+        con.close()
+    except Exception:
+        pass
+PY
+)"
   [[ "$exists" == "1" ]]
 }
 
@@ -94,7 +126,7 @@ submit_workflow_with_retry() {
     : >"$SUBMIT_STDOUT"
     : >"$SUBMIT_STDERR"
     set +e
-    HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless --no-track run "$PLAN_PATH" \
+    HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" --no-track run "$PLAN_PATH" \
       >"$SUBMIT_STDOUT" 2>"$SUBMIT_STDERR"
     local submit_status=$?
     set -e
@@ -154,7 +186,7 @@ run_mode() {
 
   cat > "$CONFIG_PATH" <<'EOF'
 {
-  "maxConcurrency": 1
+  "maxConcurrency": 2
 }
 EOF
 
@@ -215,12 +247,12 @@ EOF
 
   case "$mode" in
     recreate)
-      HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless recreate "$WORKFLOW_ID" \
+      HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" recreate "$WORKFLOW_ID" \
         >"$RESET_STDOUT" 2>"$RESET_STDERR" &
       RESET_WRAPPER_PID=$!
       ;;
     retry-task)
-      HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless retry-task "$PREPARE_ID" \
+      HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" retry-task "$PREPARE_ID" \
         >"$RESET_STDOUT" 2>"$RESET_STDERR" &
       RESET_WRAPPER_PID=$!
       ;;

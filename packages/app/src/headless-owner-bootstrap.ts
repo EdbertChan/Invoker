@@ -52,14 +52,19 @@ export function spawnDetachedStandaloneOwner(
 ): void {
   const electronLauncher = resolve(repoRoot, 'scripts', 'electron.cjs');
   const mainJs = resolve(repoRoot, 'packages', 'app', 'dist', 'main.js');
-  const args = [
+  const electronArgs = [
     electronLauncher,
     ...(process.platform === 'linux' ? ['--no-sandbox'] : []),
     mainJs,
     '--headless',
     'owner-serve',
   ];
-  const child = spawn(process.execPath, args, {
+  const useXvfb = process.platform === 'linux' && !process.env.DISPLAY;
+  const command = useXvfb ? 'xvfb-run' : process.execPath;
+  const args = useXvfb
+    ? ['--auto-servernum', process.execPath, ...electronArgs]
+    : electronArgs;
+  const child = spawn(command, args, {
     cwd: repoRoot,
     detached: true,
     stdio: 'ignore',

@@ -55,13 +55,44 @@ trap cleanup EXIT
 
 query_sqlite_value() {
   local sql="$1"
-  sqlite3 -noheader "$DB_DIR/invoker.db" "$sql"
+  python3 - "$DB_DIR/invoker.db" "$sql" <<'PY'
+import sqlite3
+import sys
+
+db_path, query = sys.argv[1], sys.argv[2]
+try:
+    con = sqlite3.connect(db_path, timeout=0.5)
+    row = con.execute(query).fetchone()
+    if row and row[0] is not None:
+        sys.stdout.write(str(row[0]))
+finally:
+    try:
+        con.close()
+    except Exception:
+        pass
+PY
 }
 
 sqlite_schema_ready() {
   [[ -f "$DB_DIR/invoker.db" ]] || return 1
   local exists
-  exists="$(sqlite3 -noheader "$DB_DIR/invoker.db" "select count(*) from sqlite_master where type='table' and name='tasks';" 2>/dev/null || true)"
+  exists="$(python3 - "$DB_DIR/invoker.db" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+try:
+    con = sqlite3.connect(db_path, timeout=0.5)
+    row = con.execute("select count(*) from sqlite_master where type='table' and name='tasks';").fetchone()
+    if row and row[0] is not None:
+        sys.stdout.write(str(row[0]))
+finally:
+    try:
+        con.close()
+    except Exception:
+        pass
+PY
+)"
   [[ "$exists" == "1" ]]
 }
 

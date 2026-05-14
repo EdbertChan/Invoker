@@ -348,6 +348,7 @@ function installPackagedSkills(mode: import('@invoker/contracts').BundledSkillsI
 
 async function initServices(options?: InitServicesOptions): Promise<void> {
   messageBus = new IpcBus();
+  await messageBus.ready();
   const invokerHomeRoot = resolveInvokerHomeRoot();
   mkdirSync(invokerHomeRoot, { recursive: true });
   const readOnly = options?.readOnly === true;

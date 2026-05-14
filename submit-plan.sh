@@ -38,4 +38,7 @@ if [ "$(uname)" = "Linux" ]; then
 fi
 
 echo "==> Submitting plan: $PLAN_FILE"
-./packages/app/node_modules/.bin/electron packages/app/dist/main.js $SANDBOX_FLAG --headless run "$PLAN_FILE"
+# Route submissions through the headless-client entrypoint so standalone owner
+# bootstrap, delegation, and Linux display handling stay aligned with the rest
+# of the repo.
+env -u INVOKER_HEADLESS_STANDALONE ./run.sh --headless run "$PLAN_FILE"

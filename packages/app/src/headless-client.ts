@@ -255,10 +255,14 @@ export interface HeadlessClientDeps {
   runElectronHeadless: (args: string[]) => Promise<number>;
 }
 
-async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void> {
+async function ensureStandaloneOwnerViaBootstrap(
+  bus: MessageBus,
+  refreshMessageBus?: () => Promise<MessageBus>,
+): Promise<void> {
   const invokerHomeRoot = resolveInvokerHomeRoot();
   const bootstrapLock = tryAcquireOwnerBootstrapLock(invokerHomeRoot);
   const startedAt = Date.now();
+  let messageBus = bus;
   delegationClientLog(`bootstrap begin lockAcquired=${bootstrapLock ? 'true' : 'false'} home=${invokerHomeRoot}`);
   try {
     if (bootstrapLock) {
@@ -269,12 +273,15 @@ async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void>
     let attempts = 0;
     while (Date.now() < deadline) {
       attempts += 1;
-      const owner = await discoverOwner(bus, 500);
+      const owner = await discoverOwner(messageBus, 500);
       if (isStandaloneCapable(owner)) {
         delegationClientLog(
           `bootstrap owner ready attempts=${attempts} elapsedMs=${Date.now() - startedAt} ownerId=${owner.ownerId}`,
         );
         return;
+      }
+      if (refreshMessageBus) {
+        messageBus = await refreshMessageBus();
       }
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
     }
@@ -473,7 +480,7 @@ export async function runHeadlessClient(argv: string[]): Promise<number> {
     await bus.ready();
     return await runHeadlessClientCommand(argv, {
       messageBus: bus,
-      ensureStandaloneOwner: (currentBus) => ensureStandaloneOwnerViaBootstrap(currentBus ?? bus),
+      ensureStandaloneOwner: (currentBus) => ensureStandaloneOwnerViaBootstrap(currentBus ?? bus, refreshMessageBus),
       refreshMessageBus,
       runElectronHeadless,
     });
