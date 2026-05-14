@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Keep these public modes aligned with docs/context/inv-67/experiment-brief.md.
 EXTENDED="${INVOKER_TEST_ALL_EXTENDED:-0}"
 DANGEROUS="${INVOKER_TEST_ALL_DANGEROUS:-0}"
 FAIL_FAST="${INVOKER_TEST_ALL_FAIL_FAST:-0}"
@@ -244,6 +245,16 @@ flush_parallel() {
   return "$failed"
 }
 
+wait_for_parallel_capacity() {
+  local pid
+  for pid in "${!JOB_SUITE[@]}"; do
+    if ! wait_for_one_parallel "$pid"; then
+      return 1
+    fi
+    return 0
+  done
+}
+
 collect_suites() {
   local dir
   for dir in required optional dangerous; do
@@ -323,20 +334,14 @@ for suite in "${SUITES[@]}"; do
 
   if [ "$JOBS" -gt 1 ] && is_parallel_safe "$suite"; then
     while [ "${#JOB_SUITE[@]}" -ge "$JOBS" ]; do
-      for pid in "${!JOB_SUITE[@]}"; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-          if ! wait_for_one_parallel "$pid"; then
-            overall_failed=1
-            if [ "$FAIL_FAST" = "1" ]; then
-              flush_parallel || true
-              print_summary
-              exit 1
-            fi
-          fi
-          break
+      if ! wait_for_parallel_capacity; then
+        overall_failed=1
+        if [ "$FAIL_FAST" = "1" ]; then
+          flush_parallel || true
+          print_summary
+          exit 1
         fi
-      done
-      sleep 0.2
+      fi
     done
     start_parallel_suite "$suite"
     continue
