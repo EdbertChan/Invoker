@@ -71,7 +71,18 @@ export async function tryDelegateResume(
 }
 
 function usesExtendedDelegationTimeout(command: string): boolean {
-  return command === 'rebase' || command === 'rebase-and-retry' || command === 'recreate-with-rebase' || command === 'restart';
+  return command === 'cancel'
+    || command === 'cancel-workflow'
+    || command === 'delete'
+    || command === 'delete-all'
+    || command === 'rebase'
+    || command === 'rebase-and-retry'
+    || command === 'recreate'
+    || command === 'recreate-task'
+    || command === 'recreate-with-rebase'
+    || command === 'restart'
+    || command === 'retry'
+    || command === 'retry-task';
 }
 
 function looksLikeWorkflowId(target: unknown): boolean {
