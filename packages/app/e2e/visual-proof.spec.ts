@@ -203,7 +203,7 @@ test.describe('Visual proof capture', () => {
   test('task panel', async ({ page }) => {
     await loadPlanAndSelectWorkflow(page, MENU_PROOF_PLAN);
     await page.locator('.react-flow__node[data-testid$="task-alpha"]').click();
-    await expect(page.getByText('Inspector')).toBeVisible();
+    await expect(page.getByTestId('workflow-inspector-title')).toBeVisible();
     await expect(page.getByText('sleep 5 && echo hello-alpha')).toBeVisible();
     await captureScreenshot(page, 'task-panel');
     await assertPageScreenshot(page, 'task-panel');

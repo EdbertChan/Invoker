@@ -15,6 +15,7 @@ interface WorkflowInspectorProps {
   onEditAgent?: (taskId: string, agentName: string) => void;
   onEditPrompt?: (taskId: string, newPrompt: string) => void;
   onEditCommand?: (taskId: string, newCommand: string) => void;
+  onSetMergeBranch?: (workflowId: string, baseBranch: string) => Promise<void>;
   onToggleCollapsed: () => void;
   onToggleAdvanced: () => void;
 }
@@ -60,6 +61,19 @@ function primaryIssueText(issue: WorkflowRollupTaskIssue): string {
     ?? 'No detail recorded';
 }
 
+function formatRepoUrl(url: string): string {
+  const sshMatch = url.match(/^git@([^:]+):(.+?)(?:\.git)?$/);
+  if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`;
+
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/^\//, '').replace(/\.git$/, '');
+    return `${parsed.host}/${path}`;
+  } catch {
+    return url;
+  }
+}
+
 export function WorkflowInspector({
   workflow,
   task,
@@ -72,11 +86,14 @@ export function WorkflowInspector({
   onEditAgent,
   onEditPrompt,
   onEditCommand,
+  onSetMergeBranch,
   onToggleCollapsed,
   onToggleAdvanced,
 }: WorkflowInspectorProps): JSX.Element {
   const [promptValue, setPromptValue] = useState('');
   const [promptDirty, setPromptDirty] = useState(false);
+  const [editingTaskContent, setEditingTaskContent] = useState(false);
+  const [branchValue, setBranchValue] = useState('');
 
   const promptText = summarizePrompt(task);
   const agent = task?.config.executionAgent ?? task?.execution.agentName ?? '';
@@ -89,7 +106,12 @@ export function WorkflowInspector({
   useEffect(() => {
     setPromptValue(promptText);
     setPromptDirty(false);
+    setEditingTaskContent(false);
   }, [task?.id, promptText]);
+
+  useEffect(() => {
+    setBranchValue(workflow?.baseBranch ?? '');
+  }, [workflow?.baseBranch, workflow?.id]);
 
   const savePrompt = () => {
     if (!task || !promptDirty) return;
@@ -99,6 +121,17 @@ export function WorkflowInspector({
       onEditCommand?.(task.id, promptValue);
     }
     setPromptDirty(false);
+  };
+
+  const saveTaskContentEdit = () => {
+    if (!task || !showTaskControls) return;
+    if (task.config.prompt !== undefined) {
+      onEditPrompt?.(task.id, promptValue);
+    } else if (task.config.command !== undefined) {
+      onEditCommand?.(task.id, promptValue);
+    }
+    setPromptDirty(false);
+    setEditingTaskContent(false);
   };
 
   if (collapsed) {
@@ -129,6 +162,7 @@ export function WorkflowInspector({
   const canEditExecutor = Boolean(task && onEditType && !task.config.isMergeNode);
   const showTaskControls = Boolean(task && !task.config.isMergeNode);
   const canEditPrompt = Boolean(showTaskControls && task && ((task.config.prompt !== undefined && onEditPrompt) || (task.config.command !== undefined && onEditCommand)));
+  const showMergeGateMetadata = Boolean(task?.config.isMergeNode);
   const taskVisualStatus = task ? getEffectiveVisualStatus(task.status, task.execution) : null;
   const taskStatusColors = taskVisualStatus ? getStatusColor(taskVisualStatus) : null;
   const failedStatusColors = getStatusColor('failed');
@@ -272,33 +306,88 @@ export function WorkflowInspector({
               </>
             )}
             <div className="mt-2 text-[11px] uppercase tracking-wide text-gray-400">Prompt</div>
-            <textarea
-              data-testid="workflow-inspector-prompt-input"
-              value={promptValue}
-              onChange={(event) => {
-                setPromptValue(event.target.value);
-                setPromptDirty(event.target.value !== promptText);
-              }}
-              onBlur={savePrompt}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-                  event.preventDefault();
-                  savePrompt();
-                }
-                if (event.key === 'Escape') {
-                  setPromptValue(promptText);
-                  setPromptDirty(false);
-                  event.currentTarget.blur();
-                }
-              }}
-              readOnly={!canEditPrompt}
-              className={`mt-1 min-h-28 w-full resize-y rounded border px-2 py-2 text-xs leading-relaxed outline-none ${
-                canEditPrompt
-                  ? 'border-gray-700 bg-gray-900 text-gray-100 focus:border-blue-500'
-                  : 'border-gray-700 bg-gray-900/50 text-gray-400'
-              }`}
-            />
-            {promptDirty && canEditPrompt && (
+            {editingTaskContent ? (
+              <div className="mt-1 space-y-2">
+                <textarea
+                  data-testid={task.config.prompt !== undefined ? 'edit-prompt-input' : 'edit-command-input'}
+                  value={promptValue}
+                  onChange={(event) => {
+                    setPromptValue(event.target.value);
+                    setPromptDirty(event.target.value !== promptText);
+                  }}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                      event.preventDefault();
+                      saveTaskContentEdit();
+                    }
+                    if (event.key === 'Escape') {
+                      setPromptValue(promptText);
+                      setPromptDirty(false);
+                      setEditingTaskContent(false);
+                    }
+                  }}
+                  className="min-h-28 w-full resize-y rounded border border-blue-500 bg-gray-900 px-2 py-2 text-xs leading-relaxed text-gray-100 outline-none focus:border-blue-400"
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPromptValue(promptText);
+                      setPromptDirty(false);
+                      setEditingTaskContent(false);
+                    }}
+                    className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                    data-testid="cancel-edit-btn"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveTaskContentEdit}
+                    className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-500"
+                    data-testid={task.config.prompt !== undefined ? 'save-prompt-btn' : 'save-command-btn'}
+                  >
+                    Save & Re-run
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                data-testid="command-display"
+                onDoubleClick={() => {
+                  if (canEditPrompt) setEditingTaskContent(true);
+                }}
+                className="mt-1"
+              >
+                <textarea
+                  data-testid="workflow-inspector-prompt-input"
+                  value={promptValue}
+                  onChange={(event) => {
+                    setPromptValue(event.target.value);
+                    setPromptDirty(event.target.value !== promptText);
+                  }}
+                  onBlur={savePrompt}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                      event.preventDefault();
+                      savePrompt();
+                    }
+                    if (event.key === 'Escape') {
+                      setPromptValue(promptText);
+                      setPromptDirty(false);
+                      event.currentTarget.blur();
+                    }
+                  }}
+                  readOnly={!canEditPrompt}
+                  className={`min-h-28 w-full resize-y rounded border px-2 py-2 text-xs leading-relaxed outline-none ${
+                    canEditPrompt
+                      ? 'border-gray-700 bg-gray-900 text-gray-100 focus:border-blue-500'
+                      : 'border-gray-700 bg-gray-900/50 text-gray-400'
+                  }`}
+                />
+              </div>
+            )}
+            {!editingTaskContent && promptDirty && canEditPrompt && (
               <div className="mt-2 flex justify-end gap-2">
                 <button
                   type="button"
@@ -317,6 +406,52 @@ export function WorkflowInspector({
                 >
                   Save
                 </button>
+              </div>
+            )}
+          </section>
+        )}
+
+        {showMergeGateMetadata && task && (
+          <section className="rounded border border-gray-700 bg-gray-800/70 p-3 space-y-3">
+            {onSetMergeBranch && task.config.workflowId && (
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[11px] uppercase tracking-wide text-gray-400">Target Branch</span>
+                <input
+                  data-testid="target-branch-input"
+                  value={branchValue}
+                  onChange={(event) => setBranchValue(event.target.value)}
+                  onBlur={() => {
+                    const trimmed = branchValue.trim();
+                    if (trimmed && trimmed !== workflow?.baseBranch) {
+                      onSetMergeBranch(task.config.workflowId!, trimmed);
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.currentTarget.blur();
+                    }
+                    if (event.key === 'Escape') {
+                      setBranchValue(workflow?.baseBranch ?? '');
+                    }
+                  }}
+                  className="w-32 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-right font-mono text-xs text-gray-100 outline-none focus:border-blue-500"
+                />
+              </div>
+            )}
+            {task.execution.reviewStatus && (
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[11px] uppercase tracking-wide text-gray-400">Review Status</span>
+                <span className="text-xs text-gray-200" data-testid="pr-status-text">
+                  {task.execution.reviewStatus}
+                </span>
+              </div>
+            )}
+            {!task.execution.reviewUrl && workflow?.repoUrl && (
+              <div className="flex items-center justify-between gap-3" data-testid="pr-target-repo">
+                <span className="text-[11px] uppercase tracking-wide text-gray-400">PR target repo</span>
+                <span className="max-w-[220px] break-all text-right font-mono text-xs text-gray-200" title={workflow.repoUrl}>
+                  {formatRepoUrl(workflow.repoUrl)}
+                </span>
               </div>
             )}
           </section>

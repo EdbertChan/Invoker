@@ -827,6 +827,19 @@ export function App() {
     [invoker],
   );
 
+  const handleSetMergeBranch = useCallback(
+    async (workflowId: string, baseBranch: string) => {
+      if (!invoker) return;
+      try {
+        await invoker.setMergeBranch(workflowId, baseBranch);
+        refreshTasks();
+      } catch (err) {
+        console.error('Failed to set merge branch:', err);
+      }
+    },
+    [invoker, refreshTasks],
+  );
+
   // ── Modal triggers ────────────────────────────────────────
   const openInputModal = useCallback((task: TaskState) => {
     setModal({ type: 'input', task });
@@ -1091,6 +1104,7 @@ export function App() {
               onEditAgent={handleEditAgent}
               onEditPrompt={handleEditPrompt}
               onEditCommand={handleEditCommand}
+              onSetMergeBranch={handleSetMergeBranch}
               onToggleCollapsed={() => setInspectorCollapsed((prev) => !prev)}
               onToggleAdvanced={() => setAdvancedMetadataExpanded((prev) => !prev)}
             />
