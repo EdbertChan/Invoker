@@ -88,7 +88,10 @@ export function composeRuntimeServices(
  *
  * Delegates to `composeRuntimeServices` with the same port contracts,
  * making the headless entry point an explicit routing target rather
- * than an implicit consumer of a module-level variable.
+ * than an implicit consumer of a module-level variable. Headless CLI
+ * commands consume the resulting facade for runtime probes and terminal
+ * launch requests, so parity with the main startup composition must stay
+ * anchored at this thin routing seam.
  *
  * Owner/delegation behavior is unaffected — this function only
  * composes the runtime-domain ports; orchestration and task dispatch

@@ -116,6 +116,36 @@ const YELLOW = '\x1b[33m';
 
 // ── Shared Helpers ───────────────────────────────────────────
 
+type HeadlessRuntimeContext = {
+  workspacePath?: string;
+  containerId?: string;
+  sessionId?: string;
+  agentName?: string;
+};
+
+async function probeHeadlessRuntimeContext(
+  taskId: string,
+  deps: Pick<HeadlessDeps, 'runtimeServices'>,
+): Promise<HeadlessRuntimeContext | null> {
+  const services = deps.runtimeServices;
+  if (!services) {
+    return null;
+  }
+
+  const [workspace, container, session] = await Promise.all([
+    services.workspaceProbe.probeWorkspace(taskId),
+    services.containerProbe.probeContainer(taskId),
+    services.sessionProbe.probeSession(taskId),
+  ]);
+
+  return {
+    workspacePath: workspace.workspacePath,
+    containerId: container.containerId,
+    sessionId: session.sessionId,
+    agentName: session.agentName,
+  };
+}
+
 function headlessHeartbeat(taskId: string, deps: Pick<HeadlessDeps, 'persistence'>): void {
   const now = new Date();
   try { deps.persistence.updateTask(taskId, { execution: { lastHeartbeatAt: now } }); } catch { /* db locked */ }
@@ -2287,14 +2317,18 @@ export async function resolveAgentSession(
   };
 }
 
-async function headlessSession(taskId: string | undefined, deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence' | 'executionAgentRegistry'>): Promise<void> {
+async function headlessSession(
+  taskId: string | undefined,
+  deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence' | 'executionAgentRegistry' | 'runtimeServices'>,
+): Promise<void> {
   if (!taskId) throw new Error('Usage: --headless session <taskId>');
   taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
   const task = deps.orchestrator.getTask(taskId);
   if (!task) throw new Error(`Task "${taskId}" not found`);
+  const runtimeContext = await probeHeadlessRuntimeContext(taskId, deps);
 
-  let sessionId = task.execution.agentSessionId ?? task.execution.lastAgentSessionId;
-  let agentName = task.execution.agentName ?? task.execution.lastAgentName ?? 'claude';
+  let sessionId = runtimeContext?.sessionId ?? task.execution.agentSessionId ?? task.execution.lastAgentSessionId;
+  let agentName = runtimeContext?.agentName ?? task.execution.agentName ?? task.execution.lastAgentName ?? 'claude';
 
   // Fallback: if current execution dropped agentSessionId, recover the most
   // recent session from task event payloads.
@@ -2451,6 +2485,30 @@ async function headlessCancelWorkflow(workflowId: string, deps: HeadlessDeps): P
 
 async function headlessOpenTerminal(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing taskId. Usage: --headless open-terminal <taskId>');
+  taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+
+  const runtimeContext = await probeHeadlessRuntimeContext(taskId, deps);
+  if (deps.runtimeServices && runtimeContext?.workspacePath) {
+    const task = deps.orchestrator.getTask(taskId);
+    if (task && (task.status === 'running' || task.status === 'fixing_with_ai')) {
+      process.stderr.write('Could not open terminal: Task is still running. View output in logs.\n');
+      process.exitCode = 1;
+      return;
+    }
+
+    const launchResult = await deps.runtimeServices.terminalLauncher.launchTerminal({
+      taskId,
+      workspacePath: runtimeContext.workspacePath,
+      containerId: runtimeContext.containerId,
+      sessionId: runtimeContext.sessionId,
+      agentName: runtimeContext.agentName,
+    });
+    if (launchResult.result === 'attached') {
+      process.stdout.write(`Opened terminal for task: ${taskId}\n`);
+      return;
+    }
+  }
+
   const result = await openExternalTerminalForTask({
     taskId,
     persistence: deps.persistence,
