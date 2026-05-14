@@ -67,7 +67,7 @@ export interface RuntimeServices {
 export function composeRuntimeServices(
   deps: RuntimeServiceDeps,
 ): RuntimeServices {
-  const services = Object.freeze({
+  const services: RuntimeServices = Object.freeze({
     workspaceProbe: deps.workspaceProbe,
     containerProbe: deps.containerProbe,
     sessionProbe: deps.sessionProbe,
