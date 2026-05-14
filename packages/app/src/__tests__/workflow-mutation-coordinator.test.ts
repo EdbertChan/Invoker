@@ -56,5 +56,44 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('passes cancellation-aware metadata to each running mutation', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const contextSeen: Array<{
+      workflowId: string;
+      priority: string;
+      channel: string | undefined;
+      mutationId: string | number | undefined;
+      args: readonly unknown[] | undefined;
+      abortedAtStart: boolean;
+      timingLooksValid: boolean;
+    }> = [];
+
+    await c.enqueue(
+      'wf-meta',
+      'high',
+      async (context) => {
+        contextSeen.push({
+          workflowId: context.workflowId,
+          priority: context.priority,
+          channel: context.channel,
+          mutationId: context.mutationId,
+          args: context.args,
+          abortedAtStart: context.signal.aborted,
+          timingLooksValid: context.startedAtMs >= context.enqueuedAtMs,
+        });
+      },
+      { channel: 'invoker:recreate-task', args: ['wf-meta/task-1'], mutationId: 'intent-1' },
+    );
+
+    expect(contextSeen).toEqual([{
+      workflowId: 'wf-meta',
+      priority: 'high',
+      channel: 'invoker:recreate-task',
+      mutationId: 'intent-1',
+      args: ['wf-meta/task-1'],
+      abortedAtStart: false,
+      timingLooksValid: true,
+    }]);
+  });
+});

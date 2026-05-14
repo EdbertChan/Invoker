@@ -6,6 +6,22 @@ export type WorkflowCancelResult = {
   runningCancelled: string[];
 };
 
+export class WorkflowMutationInvalidatedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowMutationInvalidatedError';
+  }
+}
+
+export type WorkflowMutationHardPreemptFenceKind = 'recreate' | 'delete';
+
+export function formatWorkflowMutationSupersededReason(
+  fenceKind: WorkflowMutationHardPreemptFenceKind,
+  newIntentId: number,
+): string {
+  return `Superseded by ${fenceKind} intent #${newIntentId}`;
+}
+
 type PreemptWorkflowExecution = (workflowId: string) => Promise<WorkflowCancelResult | void>;
 
 export async function preemptWorkflowBeforeMutation(

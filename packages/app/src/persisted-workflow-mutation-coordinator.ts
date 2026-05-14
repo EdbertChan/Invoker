@@ -5,7 +5,13 @@ import {
   type WorkflowMutationPriority,
 } from '@invoker/data-store';
 import type { Logger } from '@invoker/contracts';
+import type { WorkflowMutationDispatchContext } from './workflow-mutation-coordinator.js';
 import { createWorkflowMutationTiming, type WorkflowMutationTiming } from './workflow-mutation-timing.js';
+import {
+  formatWorkflowMutationSupersededReason,
+  WorkflowMutationInvalidatedError,
+  type WorkflowMutationHardPreemptFenceKind,
+} from './workflow-preemption.js';
 
 type Deferred<T> = {
   resolve: (value: T) => void;
@@ -18,10 +24,8 @@ type InvalidationSignal = {
   abortController: AbortController;
 };
 
-export type WorkflowMutationContext = {
-  signal: AbortSignal;
+export type WorkflowMutationContext = WorkflowMutationDispatchContext & {
   intentId: number;
-  workflowId: string;
   mutationTiming?: WorkflowMutationTiming;
 };
 
@@ -31,13 +35,6 @@ function envMs(name: string, fallback: number): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return parsed;
-}
-
-class WorkflowMutationInvalidatedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'WorkflowMutationInvalidatedError';
-  }
 }
 
 export class PersistedWorkflowMutationCoordinator {
@@ -242,6 +239,12 @@ export class PersistedWorkflowMutationCoordinator {
         signal: invalidation.abortController.signal,
         intentId: intent.id,
         workflowId,
+        priority: intent.priority,
+        channel: intent.channel,
+        args: intent.args,
+        mutationId: intent.id,
+        enqueuedAtMs: Date.parse(intent.createdAt),
+        startedAtMs: intentStartedAtMs,
         mutationTiming: timing,
       };
       const dispatchPromise = timing.span(
@@ -372,7 +375,7 @@ export class PersistedWorkflowMutationCoordinator {
     if (!activeIntent || activeIntent.status !== 'running') {
       return;
     }
-    const reason = `Superseded by ${fenceKind} intent #${newIntentId}`;
+    const reason = formatWorkflowMutationSupersededReason(fenceKind, newIntentId);
     this.persistence.failWorkflowMutationIntent(activeIntentId, reason);
     this.createTiming(workflowId, activeIntent.channel, activeIntent.id, activeIntent.args)
       .mark('PersistedWorkflowMutationCoordinator.invalidateSupersededRunningIntent', 'invalidated', {
@@ -388,7 +391,10 @@ export class PersistedWorkflowMutationCoordinator {
     );
   }
 
-  private hardPreemptFenceKind(channel: string, args: unknown[]): string | null {
+  private hardPreemptFenceKind(
+    channel: string,
+    args: unknown[],
+  ): WorkflowMutationHardPreemptFenceKind | null {
     if (
       channel === 'invoker:recreate-workflow'
       || channel === 'invoker:recreate-task'

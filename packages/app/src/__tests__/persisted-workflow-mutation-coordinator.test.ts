@@ -8,6 +8,15 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+}
+
 async function waitFor(condition: () => boolean, attempts: number = 20): Promise<void> {
   for (let i = 0; i < attempts; i += 1) {
     if (condition()) return;
@@ -1283,6 +1292,11 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(capturedContext!.signal.aborted).toBe(false);
     expect(capturedContext!.workflowId).toBe('wf-1');
     expect(capturedContext!.intentId).toBe(1);
+    expect(capturedContext!.priority).toBe('normal');
+    expect(capturedContext!.channel).toBe('invoker:fix-with-agent');
+    expect(capturedContext!.args).toEqual(['wf-1/blocker-task', null]);
+    expect(capturedContext!.mutationId).toBe(1);
+    expect(capturedContext!.startedAtMs).toBeGreaterThanOrEqual(capturedContext!.enqueuedAtMs);
 
     const recreateTask = coordinator.enqueue<void>(
       'wf-1',
@@ -1517,5 +1531,121 @@ describe('PersistedWorkflowMutationCoordinator', () => {
 
     expect(iterationsBeforeAbort).toBeGreaterThan(0);
     await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
+  });
+
+  it('preempting recreate-task aborts superseded fix work before a stale side effect can run', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const allowStaleWrite = deferred();
+    const events: string[] = [];
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, args, context) => {
+        if (channel === 'invoker:fix-with-agent') {
+          events.push('fix:start');
+          await Promise.race([allowStaleWrite.promise, waitForAbort(context.signal)]);
+          if (context.signal.aborted) {
+            events.push('fix:aborted');
+            return;
+          }
+          events.push('fix:stale-write');
+          return;
+        }
+        events.push(`${channel}:${String(args[0])}`);
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await waitFor(() => events.includes('fix:start'));
+
+    const recreateTask = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:recreate-task',
+      ['wf-1/target-task'],
+    );
+    await recreateTask;
+    allowStaleWrite.resolve();
+    await Promise.resolve();
+
+    await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
+    expect(events).toEqual([
+      'fix:start',
+      'fix:aborted',
+      'invoker:recreate-task:wf-1/target-task',
+    ]);
+  });
+
+  it('preempting delete-workflow aborts superseded fix work before a stale side effect can run', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const allowStaleWrite = deferred();
+    const events: string[] = [];
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, args, context) => {
+        if (channel === 'invoker:fix-with-agent') {
+          events.push('fix:start');
+          await Promise.race([allowStaleWrite.promise, waitForAbort(context.signal)]);
+          if (context.signal.aborted) {
+            events.push('fix:aborted');
+            return;
+          }
+          events.push('fix:stale-write');
+          return;
+        }
+        events.push(`${channel}:${String(args[0])}`);
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await waitFor(() => events.includes('fix:start'));
+
+    const deleteWorkflow = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:delete-workflow',
+      ['wf-1'],
+    );
+    await deleteWorkflow;
+    allowStaleWrite.resolve();
+    await Promise.resolve();
+
+    await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
+    expect(events).toEqual([
+      'fix:start',
+      'fix:aborted',
+      'invoker:delete-workflow:wf-1',
+    ]);
   });
 });
