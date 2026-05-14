@@ -6,6 +6,18 @@ export type WorkflowCancelResult = {
   runningCancelled: string[];
 };
 
+export type WorkflowMutationCancellationMetadata = {
+  intentId: number;
+  workflowId: string;
+  channel: string;
+  args: unknown[];
+};
+
+export type WorkflowMutationCancellationContext = WorkflowMutationCancellationMetadata & {
+  signal: AbortSignal;
+  mutationTiming?: WorkflowMutationTiming;
+};
+
 type PreemptWorkflowExecution = (workflowId: string) => Promise<WorkflowCancelResult | void>;
 
 export async function preemptWorkflowBeforeMutation(

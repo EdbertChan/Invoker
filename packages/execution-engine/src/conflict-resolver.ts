@@ -47,7 +47,12 @@ export interface ConflictResolverHost {
   execGitIn(args: string[], dir: string): Promise<string>;
   createMergeWorktree(ref: string, label: string, repoUrl?: string): Promise<string>;
   removeMergeWorktree(dir: string): Promise<void>;
-  spawnAgentFix(prompt: string, cwd: string, agentName?: string): Promise<{ stdout: string; sessionId: string }>;
+  spawnAgentFix(
+    prompt: string,
+    cwd: string,
+    agentName?: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ stdout: string; sessionId: string }>;
   getRemoteTargetConfig?(targetId: string): RemoteTargetConfig | undefined;
 }
 
@@ -167,6 +172,7 @@ export async function resolveConflictImpl(
   taskId: string,
   savedError?: string,
   agentName?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'resolve-conflict-start',
@@ -217,7 +223,7 @@ export async function resolveConflictImpl(
     if (!target) {
       throw new Error(`No remote target config for "${poolMemberId}" — cannot resolve conflict on remote`);
     }
-    await resolveConflictRemote(host, task, taskBranch, conflictInfo, rawCwd, target, agentName);
+    await resolveConflictRemote(host, task, taskBranch, conflictInfo, rawCwd, target, agentName, signal);
     return;
   }
 
@@ -272,7 +278,7 @@ export async function resolveConflictImpl(
         `5. Completing the merge with 'git commit --no-edit'`,
       ].join('\n');
 
-      await host.spawnAgentFix(prompt, cwd, agentName);
+      await host.spawnAgentFix(prompt, cwd, agentName, { signal });
     }
 
     console.log(`[resolveConflict] Successfully resolved conflict for ${taskId}`);
@@ -338,6 +344,7 @@ async function resolveConflictRemote(
   remoteCwd: string,
   target: RemoteTargetConfig,
   agentName?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const conflictFilesList = conflictInfo.conflictFiles.join(', ');
   const prompt = [
@@ -375,7 +382,7 @@ else
 fi
 `;
 
-  await execRemoteSsh(target, script, 'remote_conflict_fix');
+  await execRemoteSsh(target, script, 'remote_conflict_fix', signal);
   console.log(`[resolveConflict] Successfully resolved remote conflict for ${task.id}`);
 }
 
@@ -439,6 +446,7 @@ export async function fixWithAgentImpl(
   taskOutput: string,
   agentName?: string,
   savedError?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'fix-with-agent-start',
@@ -491,6 +499,7 @@ export async function fixWithAgentImpl(
       target,
       agentName,
       host.agentRegistry,
+      signal,
     );
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${remoteAgentBin} (remote)] Output:\n${output}`);
@@ -539,7 +548,7 @@ export async function fixWithAgentImpl(
       workspacePath: cwd,
       agent: agentLabel,
     });
-    const { stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName);
+    const { stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName, { signal });
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${agentLabel}] Output:\n${output}`);
     }
@@ -597,6 +606,7 @@ export function spawnRemoteAgentFixImpl(
   target: RemoteTargetConfig,
   agentName?: string,
   agentRegistry?: AgentRegistry,
+  signal?: AbortSignal,
 ): Promise<{ stdout: string; sessionId: string }> {
   const promptTransport = materializeRemotePrompt(prompt);
   const { shellCommand: agentCmd, sessionId } = buildRemoteAgentCommand(
@@ -638,6 +648,7 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
     const child = spawn('ssh', sshArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
+      signal,
     });
     child.stdin?.write(script);
     child.stdin?.end();
@@ -672,6 +683,7 @@ export function spawnAgentFixViaRegistry(
   cwd: string,
   agent: ExecutionAgent,
   driver?: SessionDriver,
+  options?: { signal?: AbortSignal },
 ): Promise<{ stdout: string; sessionId: string }> {
   const promptTransport = materializeLocalPrompt(prompt);
   const spec = agent.buildFixCommand?.(promptTransport.effectivePrompt);
@@ -687,6 +699,7 @@ export function spawnAgentFixViaRegistry(
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
+      signal: options?.signal,
     });
     let stdout = '';
     let stderr = '';
@@ -730,7 +743,12 @@ export function spawnAgentFixViaRegistry(
   });
 }
 
-function execRemoteSsh(target: RemoteTargetConfig, script: string, phase?: string): Promise<string> {
+function execRemoteSsh(
+  target: RemoteTargetConfig,
+  script: string,
+  phase?: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const sshArgs = [
     ...buildSshConnectionArgs({
       sshKeyPath: target.sshKeyPath,
@@ -745,6 +763,7 @@ function execRemoteSsh(target: RemoteTargetConfig, script: string, phase?: strin
     const child = spawn('ssh', sshArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
+      signal,
     });
     child.stdin?.write(script);
     child.stdin?.end();

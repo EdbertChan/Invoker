@@ -33,6 +33,7 @@
 
 import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, mkdirSync } from 'node:fs';
 
 const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
@@ -206,7 +207,14 @@ const workflowMutationDispatcher = new Map<string, (...args: unknown[]) => Promi
  * cleared afterward. Allows fix-with-agent and conflict-resolution
  * handlers to read the AbortSignal without changing every handler signature.
  */
-let activeMutationContext: import('./persisted-workflow-mutation-coordinator.js').WorkflowMutationContext | undefined;
+const activeMutationContextStorage =
+  new AsyncLocalStorage<import('./persisted-workflow-mutation-coordinator.js').WorkflowMutationContext>();
+
+function getActiveMutationContext():
+  | import('./persisted-workflow-mutation-coordinator.js').WorkflowMutationContext
+  | undefined {
+  return activeMutationContextStorage.getStore();
+}
 let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
 let writerLock: DbWriterLockResult | null = null;
 const workflowMutationOwnerId = `owner-${process.pid}-${Date.now()}`;
@@ -1066,8 +1074,8 @@ if (isHeadless) {
               ...headlessDeps,
               waitForApproval: delegatedWait,
               noTrack: delegatedNoTrack,
-              signal: activeMutationContext?.signal,
-              mutationTiming: activeMutationContext?.mutationTiming,
+              signal: getActiveMutationContext()?.signal,
+              mutationTiming: getActiveMutationContext()?.mutationTiming,
             });
           });
           return { ok: true };
@@ -1384,7 +1392,7 @@ if (isHeadless) {
         recoveryRoute,
         recreateOutputLabel: source === 'auto-fix' ? 'Auto-fix' : 'Fix with AI',
         failureOutputLabel: source === 'auto-fix' ? 'Auto-fix' : `Fix with ${agentName ?? 'Claude'}`,
-        signal: activeMutationContext?.signal,
+        signal: getActiveMutationContext()?.signal,
       },
     );
     return result.started;
@@ -1702,8 +1710,8 @@ if (isHeadless) {
       orchestrator, persistence, executorRegistry, messageBus,
       commandService,
       repoRoot, invokerConfig, initServices, wireSlackBot,
-      signal: activeMutationContext?.signal,
-      mutationTiming: activeMutationContext?.mutationTiming,
+      signal: getActiveMutationContext()?.signal,
+      mutationTiming: getActiveMutationContext()?.mutationTiming,
       cancelTask: (taskId: string) => performCancelTask(taskId),
       cancelWorkflow: (workflowId: string) => performCancelWorkflow(workflowId),
       waitForApproval: payload.waitForApproval,
@@ -2525,12 +2533,7 @@ if (isHeadless) {
           if (!handler) {
             throw new Error(`No workflow mutation dispatcher registered for ${channel}`);
           }
-          activeMutationContext = context;
-          try {
-            return await handler(...args);
-          } finally {
-            activeMutationContext = undefined;
-          }
+          return await activeMutationContextStorage.run(context, () => handler(...args));
         },
         { maxConcurrentWorkflowDrains, logger },
       );
@@ -3201,10 +3204,10 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.recreate-workflow',
-          mutationTiming: activeMutationContext?.mutationTiming,
+          mutationTiming: getActiveMutationContext()?.mutationTiming,
         });
-        const started = activeMutationContext?.mutationTiming
-          ? await activeMutationContext.mutationTiming.span(
+        const started = getActiveMutationContext()?.mutationTiming
+          ? await getActiveMutationContext()!.mutationTiming!.span(
             'main.ipc.recreate-workflow.sharedRecreateWorkflow',
             undefined,
             async () => sharedRecreateWorkflow(workflowId, { persistence, orchestrator }),
@@ -3218,7 +3221,7 @@ if (isHeadless) {
             logger,
             context: 'ipc.recreate-workflow',
             started,
-            mutationTiming: activeMutationContext?.mutationTiming,
+            mutationTiming: getActiveMutationContext()?.mutationTiming,
           });
         } finally {
           remoteFetchForPool.enabled = true;
@@ -3238,8 +3241,8 @@ if (isHeadless) {
       const taskId = String(taskIdArg);
       logger.info(`recreate-task: "${taskId}"`, { module: 'ipc' });
       try {
-        if (activeMutationContext?.mutationTiming) {
-          await activeMutationContext.mutationTiming.span(
+        if (getActiveMutationContext()?.mutationTiming) {
+          await getActiveMutationContext()!.mutationTiming!.span(
             'main.ipc.recreate-task.preemptTaskSubgraph',
             { taskId },
             () => preemptTaskSubgraph(taskId),
@@ -3247,8 +3250,8 @@ if (isHeadless) {
         } else {
           await preemptTaskSubgraph(taskId);
         }
-        const started = activeMutationContext?.mutationTiming
-          ? await activeMutationContext.mutationTiming.span(
+        const started = getActiveMutationContext()?.mutationTiming
+          ? await getActiveMutationContext()!.mutationTiming!.span(
             'main.ipc.recreate-task.sharedRecreateTask',
             { taskId },
             async () => sharedRecreateTask(taskId, { persistence, orchestrator }),
@@ -3262,7 +3265,7 @@ if (isHeadless) {
             logger,
             context: 'ipc.recreate-task',
             started,
-            mutationTiming: activeMutationContext?.mutationTiming,
+            mutationTiming: getActiveMutationContext()?.mutationTiming,
           });
         } finally {
           remoteFetchForPool.enabled = true;
@@ -3287,11 +3290,11 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.retry-workflow',
-          mutationTiming: activeMutationContext?.mutationTiming,
+          mutationTiming: getActiveMutationContext()?.mutationTiming,
         });
         const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
-        const result = activeMutationContext?.mutationTiming
-          ? await activeMutationContext.mutationTiming.span(
+        const result = getActiveMutationContext()?.mutationTiming
+          ? await getActiveMutationContext()!.mutationTiming!.span(
             'main.ipc.retry-workflow.commandService.retryWorkflow',
             undefined,
             () => commandService.retryWorkflow(envelope),
@@ -3306,7 +3309,7 @@ if (isHeadless) {
             logger,
             context: 'ipc.retry-workflow',
             started: result.data,
-            mutationTiming: activeMutationContext?.mutationTiming,
+            mutationTiming: getActiveMutationContext()?.mutationTiming,
           });
         } finally {
           remoteFetchForPool.enabled = true;
@@ -3332,7 +3335,7 @@ if (isHeadless) {
             preemptWorkflowExecution,
             logger,
             context: 'ipc.rebase-and-retry',
-            mutationTiming: activeMutationContext?.mutationTiming,
+            mutationTiming: getActiveMutationContext()?.mutationTiming,
           });
         }
         const started = await rebaseAndRetry(taskId, {
@@ -3340,7 +3343,7 @@ if (isHeadless) {
           persistence,
           repoRoot,
           taskExecutor: requireTaskExecutor(),
-          mutationTiming: activeMutationContext?.mutationTiming,
+          mutationTiming: getActiveMutationContext()?.mutationTiming,
         });
         await dispatchStartedTasksWithGlobalTopup({
           orchestrator,
@@ -3348,7 +3351,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.rebase-and-retry',
           started,
-          mutationTiming: activeMutationContext?.mutationTiming,
+          mutationTiming: getActiveMutationContext()?.mutationTiming,
         });
       } catch (err) {
         logger.error(`rebase-and-retry failed: ${err}`, { module: 'ipc' });
@@ -3373,14 +3376,14 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.recreate-with-rebase',
-          mutationTiming: activeMutationContext?.mutationTiming,
+          mutationTiming: getActiveMutationContext()?.mutationTiming,
         });
         const started = await recreateWithRebase(workflowId, {
           orchestrator,
           persistence,
           repoRoot,
           taskExecutor: requireTaskExecutor(),
-          mutationTiming: activeMutationContext?.mutationTiming,
+          mutationTiming: getActiveMutationContext()?.mutationTiming,
         });
         await dispatchStartedTasksWithGlobalTopup({
           orchestrator,
@@ -3388,7 +3391,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-with-rebase',
           started,
-          mutationTiming: activeMutationContext?.mutationTiming,
+          mutationTiming: getActiveMutationContext()?.mutationTiming,
         });
       } catch (err) {
         logger.error(`recreate-with-rebase failed: ${err}`, { module: 'ipc' });
@@ -3499,7 +3502,7 @@ if (isHeadless) {
           persistence,
           taskExecutor: requireTaskExecutor(),
           autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
-        }, agentName, activeMutationContext?.signal);
+        }, agentName, getActiveMutationContext()?.signal);
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
