@@ -149,6 +149,8 @@ import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import { evaluateExecutingStall } from './executing-stall.js';
 import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
 import { persistShutdownDiagnostic } from './shutdown-diagnostic.js';
+import { bootstrapApp } from './bootstrap/app-bootstrap.js';
+import { registerIpcHandlers } from './ipc/ipc-registration.js';
 
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
@@ -2496,26 +2498,26 @@ if (isHeadless) {
   }
 
   app.whenReady().then(async () => {
-    recordStartupMark('app.whenReady');
-    ownerMode = true;
-    try {
+    const initializeOwnerRuntime = async (): Promise<boolean> => {
+      ownerMode = true;
+      try {
       recordStartupMark('initServices.start');
       await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
       recordStartupMark('initServices.end', { ownerMode: true });
-    } catch (err) {
+      } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (!message.includes('[db-writer-lock]')) {
         process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
         app.quit();
-        return;
+          return ownerMode;
       }
       recordStartupMark('initServices.readOnly.start');
       await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
       ownerMode = false;
       recordStartupMark('initServices.readOnly.end', { ownerMode: false });
-    }
+      }
 
-    if (ownerMode) {
+      if (ownerMode) {
       rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
         persistence,
@@ -2538,11 +2540,15 @@ if (isHeadless) {
       logger.info('Launched in follower mode; mutation execution is delegated to the current owner', {
         module: 'init',
       });
-    }
+      }
+
+      return ownerMode;
+    };
 
     // ── IPC Delegation Handlers — peer → owner ────────────────
     // Peer processes delegate write-heavy commands to the owner process via IpcBus.
-    if (ownerMode) {
+    const registerOwnerDelegationHandlers = (): void => {
+      if (ownerMode) {
       workflowMutationDispatcher.set('headless.exec', async (payloadArg: unknown) => {
         return executeHeadlessExec(payloadArg as HeadlessExecMutationPayload);
       });
@@ -2639,33 +2645,35 @@ if (isHeadless) {
       });
       logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
       recordStartupMark('owner-ipc-ready');
-    }
+      }
+    };
 
-    bootstrapInitialWorkflowState();
-
-    // Relaunch orphaned running tasks and start any pending-but-ready tasks.
-    if (!ownerMode) {
+    const runStartupLifecycle = (): void => {
+      // Relaunch orphaned running tasks and start any pending-but-ready tasks.
+      if (!ownerMode) {
       logger.info('follower mode startup: auto-run and orphan relaunch disabled', { module: 'init' });
-    } else if (invokerConfig.disableAutoRunOnStartup) {
+      } else if (invokerConfig.disableAutoRunOnStartup) {
       logger.info('auto-run on startup disabled by config — skipping orphan relaunch', { module: 'init' });
-    } else {
+      } else {
       const allStarted = relaunchOrphansAndStartReady(orchestrator, logger, 'init');
       if (allStarted.length > 0) {
         requireTaskExecutor().executeTasks(allStarted);
       }
       requireTaskExecutor().resumeMergeGatePolling();
-    }
+      }
 
-    const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
-    logger.info(`Database: ${dbPath}`, { module: 'init' });
-    logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
-    logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
-    logger.info('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig), module: 'startup' });
-    recordStartupMark('startup.ready-for-window');
+      const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
+      logger.info(`Database: ${dbPath}`, { module: 'init' });
+      logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
+      logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
+      logger.info('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig), module: 'startup' });
+      recordStartupMark('startup.ready-for-window');
+    };
 
     // Forward deltas to renderer and keep snapshot cache in sync so
     // the db-poll doesn't re-emit deltas the messageBus already delivered.
-    messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
+    const subscribeRuntimeBridges = (): void => {
+      messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
       uiPerfStats.mainDeltaToUi += 1;
       if (traceUiDeltaFlow) {
         logger.debug(`delta→ui: ${JSON.stringify(delta)}`, { module: 'ui' });
@@ -2700,7 +2708,7 @@ if (isHeadless) {
       }
     });
 
-    uiPerfLogInterval = setInterval(() => {
+      uiPerfLogInterval = setInterval(() => {
       const snapshot = {
         ts: new Date().toISOString(),
         metric: 'main_delta_flow',
@@ -2713,14 +2721,15 @@ if (isHeadless) {
       }
     }, 10000);
 
-    messageBus.subscribe(Channels.TASK_OUTPUT, (data: unknown) => {
+      messageBus.subscribe(Channels.TASK_OUTPUT, (data: unknown) => {
       if (mainWindow && !mainWindow.isDestroyed() && uiInteractive) {
         mainWindow.webContents.send('invoker:task-output', data);
       }
     });
+    };
 
-    // Register IPC handlers
-    ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
+    function registerBootstrapAndPlanChannels(): void {
+      ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
       event.returnValue = {
         tasks: orchestrator.getAllTasks(),
         workflows: listWorkflowsByStartupRecency(),
@@ -2729,7 +2738,7 @@ if (isHeadless) {
       };
     });
 
-    registerGuiMutationHandler('invoker:load-plan', async (planTextArg: unknown) => {
+      registerGuiMutationHandler('invoker:load-plan', async (planTextArg: unknown) => {
       const planText = String(planTextArg);
       const { parsePlan } = await import('./plan-parser.js');
       const plan = parsePlan(planText);
@@ -2739,8 +2748,8 @@ if (isHeadless) {
       orchestrator.loadPlan(plan, { allowGraphMutation: invokerConfig.allowGraphMutation });
     });
 
-    if (process.env.NODE_ENV === 'test') {
-      ipcMain.handle(
+      if (process.env.NODE_ENV === 'test') {
+        ipcMain.handle(
         'invoker:inject-task-states',
         async (_event, updates: Array<{ taskId: string; changes: TaskStateChanges }>) => {
           for (const { taskId, changes } of updates) {
@@ -2765,9 +2774,11 @@ if (isHeadless) {
           orchestrator.syncAllFromDb();
         },
       );
+      }
     }
 
-    registerGuiMutationHandler('invoker:start', async () => {
+    function registerWorkflowLifecycleChannels(): void {
+      registerGuiMutationHandler('invoker:start', async () => {
       logger.info('start', { module: 'ipc' });
       const started = orchestrator.startExecution();
       logger.info(`startExecution returned ${started.length} tasks: [${started.map(t => t.id).join(', ')}]`, { module: 'ipc' });
@@ -3130,7 +3141,7 @@ if (isHeadless) {
       },
     );
 
-    registerWorkflowScopedGuiMutationHandler(
+      registerWorkflowScopedGuiMutationHandler(
       'invoker:cancel-workflow',
       (workflowIdArg: unknown) => String(workflowIdArg),
       'high',
@@ -3156,12 +3167,14 @@ if (isHeadless) {
       }
       },
     );
+    }
 
-    ipcMain.handle('invoker:get-queue-status', () => {
+    function registerQueueAndPerfChannels(): void {
+      ipcMain.handle('invoker:get-queue-status', () => {
       return orchestrator.getQueueStatus();
     });
 
-    ipcMain.handle('invoker:report-ui-perf', (_event, metric: string, data?: Record<string, unknown>) => {
+      ipcMain.handle('invoker:report-ui-perf', (_event, metric: string, data?: Record<string, unknown>) => {
       const payload = {
         ts: new Date().toISOString(),
         metric,
@@ -3184,11 +3197,13 @@ if (isHeadless) {
       }
     });
 
-    ipcMain.handle('invoker:get-ui-perf-stats', () => ({
+      ipcMain.handle('invoker:get-ui-perf-stats', () => ({
       ...getUiPerfStats(),
     }));
+    }
 
-    registerWorkflowScopedGuiMutationHandler(
+    function registerWorkflowMutationChannels(): void {
+      registerWorkflowScopedGuiMutationHandler(
       'invoker:recreate-workflow',
       (workflowIdArg: unknown) => String(workflowIdArg),
       'high',
@@ -3634,7 +3649,7 @@ if (isHeadless) {
       }
     });
 
-    registerGuiMutationHandler(
+      registerGuiMutationHandler(
       'invoker:set-task-external-gate-policies',
       async (taskIdArg: unknown, updatesArg: unknown) => {
         const taskId = String(taskIdArg);
@@ -3657,8 +3672,10 @@ if (isHeadless) {
         }
       },
     );
+    }
 
-    ipcMain.handle('invoker:get-remote-targets', () => {
+    function registerUtilityChannels(): void {
+      ipcMain.handle('invoker:get-remote-targets', () => {
       return Object.keys(loadConfig().remoteTargets ?? {});
     });
 
@@ -3715,7 +3732,7 @@ if (isHeadless) {
     });
 
     // ── External terminal launcher ──────────────────────────────
-    ipcMain.handle('invoker:open-terminal', async (_event, taskId: string): Promise<{ opened: boolean; reason?: string }> => {
+      ipcMain.handle('invoker:open-terminal', async (_event, taskId: string): Promise<{ opened: boolean; reason?: string }> => {
       logger.info(`invoked for task="${taskId}"`, { module: 'open-terminal' });
       return openExternalTerminalForTask({
         taskId,
@@ -3728,15 +3745,33 @@ if (isHeadless) {
           'Task is still running or being fixed with AI. View output in the terminal panel below.',
       });
     });
+    }
 
-    seedUiSnapshotCache();
-    createWindow();
-    recordStartupMark('createWindow.end');
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
+    await bootstrapApp({
+      initializeOwnerRuntime,
+      registerOwnerDelegationHandlers,
+      bootstrapInitialWorkflowState,
+      runStartupLifecycle,
+      subscribeRuntimeBridges,
+      registerIpcHandlers: () => {
+        registerIpcHandlers({
+          registerBootstrapAndPlanChannels,
+          registerWorkflowLifecycleChannels,
+          registerQueueAndPerfChannels,
+          registerWorkflowMutationChannels,
+          registerUtilityChannels,
+        });
+      },
+      seedUiSnapshotCache,
+      createWindow,
+      recordStartupMark,
+      bindActivationHandler: () => {
+        app.on('activate', () => {
+          if (BrowserWindow.getAllWindows().length === 0) {
+            createWindow();
+          }
+        });
+      },
     });
   }).catch((err) => {
     process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
