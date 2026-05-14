@@ -62,7 +62,7 @@ import { makeEnvelope, CommandError } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
-import { IpcBus, Channels, TransportError, TransportErrorCode } from '@invoker/transport';
+import { IpcBus, Channels } from '@invoker/transport';
 import {
   WorkspaceProbeAdapter,
   ContainerProbeAdapter,
@@ -149,6 +149,8 @@ import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import { evaluateExecutingStall } from './executing-stall.js';
 import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
 import { persistShutdownDiagnostic } from './shutdown-diagnostic.js';
+import { bootstrapGuiApp, bootstrapHeadlessApp, runGuiStartup } from './bootstrap/app-bootstrap.js';
+import { createGuiMutationRegistrars } from './ipc/ipc-registration.js';
 
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
@@ -593,7 +595,9 @@ const RED = '\x1b[31m';
 // ══════════════════════════════════════════════════════════════
 
 if (isHeadless) {
-  app.whenReady().then(async () => {
+  bootstrapHeadlessApp({
+    app,
+    run: async () => {
     const agentRegistry = registerBuiltinAgents();
     const command = cliArgs[0];
     const readOnlyMode = isHeadlessReadOnlyCommand(cliArgs);
@@ -1098,24 +1102,27 @@ if (isHeadless) {
       if (messageBus) messageBus.disconnect();
     }
     process.exit(exitCode);
-  }).catch((err) => {
-    process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
+    },
+    onError: (err) => {
+      process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(1);
+    },
   });
 } else {
   // ══════════════════════════════════════════════════════════════
   // GUI MODE
   // ══════════════════════════════════════════════════════════════
-  if (process.env.NODE_ENV !== 'test') {
-    const gotTheLock = app.requestSingleInstanceLock();
-    if (!gotTheLock) {
-      app.quit();
-    } else {
-      setupGuiMode();
-    }
-  } else {
-    setupGuiMode();
-  }
+  bootstrapGuiApp({
+    app,
+    isTest: process.env.NODE_ENV === 'test',
+    setupGuiMode,
+    onWindowAllClosed: () => {
+      logger.info('window-all-closed', { module: 'window' });
+      if (process.platform !== 'darwin') {
+        app.quit();
+      }
+    },
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1131,6 +1138,18 @@ if (isHeadless) {
   const taskHandles = new Map<string, { handle: ExecutorHandle; executor: Executor }>();
   const launchingTasks = new Set<string>();
   const guiMutationHandlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+  const {
+    registerGuiMutationHandler,
+    registerWorkflowScopedGuiMutationHandler,
+  } = createGuiMutationRegistrars({
+    ipcMain,
+    guiMutationHandlers,
+    workflowMutationDispatcher,
+    isOwnerMode: () => ownerMode,
+    messageBus: () => messageBus,
+    translateGuiMutationToHeadless,
+    runWorkflowMutation,
+  });
   let dbPollInterval: ReturnType<typeof setInterval> | null = null;
   let activityPollInterval: ReturnType<typeof setInterval> | null = null;
   let uiPerfLogInterval: ReturnType<typeof setInterval> | null = null;
@@ -1970,43 +1989,6 @@ if (isHeadless) {
     });
   }
 
-  function registerGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    guiMutationHandlers.set(channel, handler as (...args: unknown[]) => Promise<unknown>);
-    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
-      if (ownerMode) {
-        return handler(...args);
-      }
-      const translated = translateGuiMutationToHeadless({ channel, args });
-      if (!translated) {
-        throw new Error(`No owner delegation route is available for ${channel}`);
-      }
-      try {
-        return await messageBus.request<typeof translated.request, TResult>(translated.channel, translated.request);
-      } catch (err) {
-        if (err instanceof TransportError && err.code === TransportErrorCode.NO_HANDLER) {
-          throw new Error('No mutation owner is available');
-        }
-        throw err;
-      }
-    });
-  }
-
-  function registerWorkflowScopedGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    resolveWorkflowId: (...args: unknown[]) => string | undefined,
-    priority: WorkflowMutationPriority,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    workflowMutationDispatcher.set(channel, (...args: unknown[]) => handler(...args));
-    registerGuiMutationHandler(channel, async (...args: unknown[]) => {
-      const workflowId = resolveWorkflowId(...args);
-      return runWorkflowMutation(workflowId, priority, channel, args, () => handler(...args));
-    });
-  }
-
   function createWindow(): void {
     recordStartupMark('createWindow.begin');
     const iconPath = path.join(__dirname, 'assets', 'icons', 'png', '256x256.png');
@@ -2489,7 +2471,9 @@ if (isHeadless) {
     }, 0);
   }
 
-  app.whenReady().then(async () => {
+  runGuiStartup({
+    app,
+    start: async () => {
     recordStartupMark('app.whenReady');
     ownerMode = true;
     try {
@@ -3731,16 +3715,11 @@ if (isHeadless) {
         createWindow();
       }
     });
-  }).catch((err) => {
-    process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-    app.quit();
-  });
-
-  app.on('window-all-closed', () => {
-    logger.info('window-all-closed', { module: 'window' });
-    if (process.platform !== 'darwin') {
+    },
+    onError: (err) => {
+      process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
       app.quit();
-    }
+    },
   });
 
   let isQuitting = false;
