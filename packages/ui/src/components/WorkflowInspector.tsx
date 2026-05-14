@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { TaskState, WorkflowMeta } from '../types.js';
+import type { TaskState, WorkflowMeta, WorkflowRollupTaskIssue } from '../types.js';
 import { workflowStatusVisual } from '../lib/workflow-status.js';
 
 interface WorkflowInspectorProps {
@@ -37,6 +37,15 @@ function InspectorToggleIcon({ collapsed }: { collapsed: boolean }): JSX.Element
       {collapsed ? <path d="M5.5 6 7.5 8l-2 2" /> : <path d="M7.5 6 5.5 8l2 2" />}
     </svg>
   );
+}
+
+function primaryIssueText(issue: WorkflowRollupTaskIssue): string {
+  return issue.error
+    ?? issue.protocolErrorMessage
+    ?? issue.pendingFixError
+    ?? issue.inputPrompt
+    ?? issue.reviewUrl
+    ?? 'No detail recorded';
 }
 
 export function WorkflowInspector({
@@ -93,6 +102,10 @@ export function WorkflowInspector({
   }
 
   const visual = workflow ? workflowStatusVisual(workflow.status) : null;
+  const rollup = workflow?.rollup;
+  const nonZeroCounts = rollup
+    ? Object.entries(rollup.countsByStatus).filter(([, count]) => count > 0)
+    : [];
   const reviewUrl = task?.execution.reviewUrl;
   const canEditPrompt = Boolean(task && ((task.config.prompt !== undefined && onEditPrompt) || (task.config.command !== undefined && onEditCommand)));
 
@@ -188,9 +201,58 @@ export function WorkflowInspector({
           <div className={`mt-1 text-xs ${visual?.textClass ?? 'text-gray-300'}`}>
             {workflow?.status?.replaceAll('_', ' ') ?? 'unknown'}
           </div>
+          {rollup && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {nonZeroCounts.map(([status, count]) => (
+                <span
+                  key={status}
+                  className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[10px] uppercase text-gray-300"
+                >
+                  {status.replaceAll('_', ' ')} {count}
+                </span>
+              ))}
+            </div>
+          )}
           {task?.execution.error && (
             <p className="mt-2 text-xs text-red-300 break-words">{task.execution.error}</p>
           )}
+          {rollup?.failedTasks.length ? (
+            <div className="mt-3 space-y-2">
+              <div className="text-[11px] uppercase tracking-wide text-red-300">Failed Tasks</div>
+              {rollup.failedTasks.map((failedTask) => (
+                <div key={failedTask.taskId} className="rounded border border-red-900/70 bg-red-950/30 p-2">
+                  <div className="truncate text-xs font-medium text-red-200">{failedTask.description}</div>
+                  <div className="mt-1 break-words text-[11px] text-red-300">{primaryIssueText(failedTask)}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {rollup?.fixingTasks.length ? (
+            <div className="mt-3 space-y-2">
+              <div className="text-[11px] uppercase tracking-wide text-cyan-300">Fixing with AI</div>
+              {rollup.fixingTasks.map((fixingTask) => (
+                <div key={fixingTask.taskId} className="rounded border border-cyan-900/70 bg-cyan-950/20 p-2">
+                  <div className="truncate text-xs font-medium text-cyan-100">{fixingTask.description}</div>
+                  <div className="mt-1 text-[11px] text-cyan-300">
+                    {fixingTask.agentName ?? fixingTask.agentSessionId ?? 'Agent session pending'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {rollup?.waitingTasks.length ? (
+            <div className="mt-3 space-y-2">
+              <div className="text-[11px] uppercase tracking-wide text-amber-300">Waiting Tasks</div>
+              {rollup.waitingTasks.map((waitingTask) => (
+                <div key={waitingTask.taskId} className="rounded border border-amber-900/70 bg-amber-950/20 p-2">
+                  <div className="truncate text-xs font-medium text-amber-100">{waitingTask.description}</div>
+                  <div className="mt-1 break-words text-[11px] text-amber-300">
+                    {waitingTask.status.replaceAll('_', ' ')} · {primaryIssueText(waitingTask)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </section>
 
         <section className="rounded border border-gray-700 bg-gray-800/70 p-3">

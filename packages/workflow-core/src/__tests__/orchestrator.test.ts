@@ -300,6 +300,40 @@ describe('Orchestrator', () => {
   });
 
   describe('workflow status transitions during retry paths', () => {
+    it('stores a newly loaded workflow as pending while all tasks are pending', () => {
+      orchestrator.loadPlan({
+        name: 'Pending workflow',
+        onFinish: 'none',
+        tasks: [
+          { id: 't1', description: 'First', command: 'echo 1' },
+          { id: 't2', description: 'Second', command: 'echo 2', dependencies: ['t1'] },
+        ],
+      });
+
+      const workflowId = orchestrator.getWorkflowIds()[0]!;
+
+      expect(persistence.workflows.get(workflowId)?.status).toBe('pending');
+    });
+
+    it('rolls workflow status up from active and waiting task states', () => {
+      orchestrator.loadPlan({
+        name: 'Status rollup',
+        onFinish: 'none',
+        tasks: [{ id: 't1', description: 'First', command: 'echo 1' }],
+      });
+
+      const workflowId = orchestrator.getWorkflowIds()[0]!;
+      const taskId = orchestrator.getAllTasks().find(
+        (task) => task.config.workflowId === workflowId && !task.config.isMergeNode,
+      )!.id;
+
+      orchestrator.startExecution();
+      expect(persistence.workflows.get(workflowId)?.status).toBe('running');
+
+      orchestrator.setTaskAwaitingApproval(taskId);
+      expect(persistence.workflows.get(workflowId)?.status).toBe('awaiting_approval');
+    });
+
     it('clears stale failed workflow status when a failed task is restarted', () => {
       orchestrator.loadPlan({
         name: 'Retry workflow',
@@ -1884,9 +1918,9 @@ describe('Orchestrator', () => {
 
       orchestrator.setTaskAwaitingApproval('a1');
 
-      // Workflow should NOT be marked completed because a task is awaiting_approval
+      // Workflow should expose the waiting state instead of collapsing it to completed.
       const workflows = persistence.listWorkflows();
-      expect(workflows[0].status).toBe('running');
+      expect(workflows[0].status).toBe('awaiting_approval');
     });
 
     it('includes additionalChanges in task state and delta', () => {
@@ -2803,7 +2837,7 @@ describe('Orchestrator', () => {
       );
 
       const wf = Array.from(persistence.workflows.values())[0];
-      expect(wf.status).toBe('running');
+      expect(wf.status).toBe('blocked');
     });
 
     it('updates workflow status to completed (no bogus __workflow__ event)', () => {

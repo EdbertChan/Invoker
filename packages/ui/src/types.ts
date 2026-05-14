@@ -152,6 +152,7 @@ export interface WorkflowMeta {
   id: string;
   name: string;
   status: WorkflowStatus;
+  rollup?: WorkflowRollup;
   baseBranch?: string;
   featureBranch?: string;
   onFinish?: string;
@@ -164,6 +165,7 @@ export interface WorkflowMeta {
 export type WorkflowStatus =
   | 'pending'
   | 'running'
+  | 'fixing_with_ai'
   | 'completed'
   | 'failed'
   | 'blocked'
@@ -179,6 +181,32 @@ export interface WorkflowStatusCounts {
   failed: number;
   running: number;
   pending: number;
+}
+
+export interface WorkflowRollupTaskIssue {
+  taskId: string;
+  description: string;
+  status: TaskStatus;
+  error?: string;
+  protocolErrorCode?: string;
+  protocolErrorMessage?: string;
+  pendingFixError?: string;
+  exitCode?: number;
+  completedAt?: string;
+  agentSessionId?: string;
+  agentName?: string;
+  reviewUrl?: string;
+  inputPrompt?: string;
+}
+
+export type WorkflowTaskStatusCounts = Record<TaskStatus, number>;
+
+export interface WorkflowRollup {
+  status: WorkflowStatus;
+  countsByStatus: WorkflowTaskStatusCounts;
+  failedTasks: WorkflowRollupTaskIssue[];
+  fixingTasks: WorkflowRollupTaskIssue[];
+  waitingTasks: WorkflowRollupTaskIssue[];
 }
 
 // ── Task Output Data ────────────────────────────────────────

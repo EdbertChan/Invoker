@@ -7,6 +7,7 @@ describe('workflow-status', () => {
     const statuses: WorkflowStatus[] = [
       'pending',
       'running',
+      'fixing_with_ai',
       'completed',
       'failed',
       'blocked',
@@ -26,6 +27,7 @@ describe('workflow-status', () => {
     const statuses: WorkflowStatus[] = [
       'pending',
       'running',
+      'fixing_with_ai',
       'completed',
       'failed',
       'blocked',

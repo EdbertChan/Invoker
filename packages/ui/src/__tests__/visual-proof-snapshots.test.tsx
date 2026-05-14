@@ -64,7 +64,7 @@ describe('Visual proof snapshots', () => {
       expect(screen.getByText('Beta')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByText('Alpha'));
+    fireEvent.click(screen.getByTestId('workflow-node-wf-alpha'));
     await waitFor(() => {
       expect(screen.getByText(/Alpha task DAG/i)).toBeInTheDocument();
       expect(screen.getByText('Inspector')).toBeInTheDocument();

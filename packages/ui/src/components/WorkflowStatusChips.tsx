@@ -7,12 +7,13 @@ interface WorkflowStatusChipsProps {
   onStatusClick: (status: WorkflowStatus, event: MouseEvent<HTMLButtonElement>) => void;
 }
 
-const ALWAYS_VISIBLE: WorkflowStatus[] = ['completed', 'running', 'failed', 'pending'];
+const ALWAYS_VISIBLE: WorkflowStatus[] = ['completed', 'running', 'fixing_with_ai', 'failed', 'pending'];
 const OPTIONAL_VISIBLE: WorkflowStatus[] = ['review_ready', 'awaiting_approval', 'blocked', 'stale'];
 
 const STATUS_LABELS: Record<WorkflowStatus, string> = {
   pending: 'Pending',
   running: 'Running',
+  fixing_with_ai: 'Fixing',
   completed: 'Completed',
   failed: 'Failed',
   blocked: 'Blocked',
@@ -24,6 +25,7 @@ const STATUS_LABELS: Record<WorkflowStatus, string> = {
 const STATUS_TEXT_CLASSES: Record<WorkflowStatus, string> = {
   pending: 'text-gray-300/70',
   running: 'text-blue-300/70',
+  fixing_with_ai: 'text-cyan-300/70',
   completed: 'text-green-300/70',
   failed: 'text-red-300/70',
   blocked: 'text-gray-400/70',

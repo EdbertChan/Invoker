@@ -22,6 +22,8 @@ import { TaskScheduler } from './scheduler.js';
 import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, ExternalDependency, TaskStatus } from '@invoker/workflow-graph';
 import type { RunnerKind } from '@invoker/workflow-graph';
 import { createTaskState, createAttempt } from '@invoker/workflow-graph';
+import type { WorkflowDerivedStatus } from '@invoker/workflow-graph';
+import { computeWorkflowRollup } from '@invoker/workflow-graph';
 import type { Logger, WorkResponse } from '@invoker/contracts';
 import { normalizeRunnerKind } from '@invoker/workflow-graph';
 
@@ -152,7 +154,7 @@ export interface OrchestratorPersistence {
     name: string;
     description?: string;
     visualProof?: boolean;
-    status: 'running' | 'completed' | 'failed';
+    status: WorkflowDerivedStatus;
     createdAt: string;
     updatedAt: string;
     repoUrl?: string;
@@ -162,7 +164,7 @@ export interface OrchestratorPersistence {
     featureBranch?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
   }): void;
-  updateWorkflow?(workflowId: string, changes: { status?: string; updatedAt?: string; baseBranch?: string; generation?: number; mergeMode?: 'manual' | 'automatic' | 'external_review' }): void;
+  updateWorkflow?(workflowId: string, changes: { status?: WorkflowDerivedStatus | string; updatedAt?: string; baseBranch?: string; generation?: number; mergeMode?: 'manual' | 'automatic' | 'external_review' }): void;
   saveTask(workflowId: string, task: TaskState): void;
   updateTask(taskId: string, changes: TaskStateChanges): void;
   logEvent?(taskId: string, eventType: string, payload?: unknown): void;
@@ -833,29 +835,7 @@ export class Orchestrator {
     const tasks = this.stateMachine.getAllTasks().filter((task) => task.config.workflowId === workflowId);
     if (tasks.length === 0) return;
 
-    const settled = tasks.every(
-      (task) =>
-        task.status === 'completed' ||
-        task.status === 'failed' ||
-        task.status === 'needs_input' ||
-        task.status === 'review_ready' ||
-        task.status === 'awaiting_approval' ||
-        task.status === 'blocked' ||
-        task.status === 'stale',
-    );
-
-    const hasPendingInput = tasks.some(
-      (task) =>
-        task.status === 'needs_input' ||
-        task.status === 'awaiting_approval' ||
-        task.status === 'review_ready',
-    );
-
-    let status = 'running';
-    if (settled && !hasPendingInput) {
-      const allSucceeded = tasks.every((task) => task.status === 'completed' || task.status === 'stale');
-      status = allSucceeded ? 'completed' : 'failed';
-    }
+    const { status } = computeWorkflowRollup(tasks);
 
     this.persistence.updateWorkflow(workflowId, {
       status,
@@ -1355,7 +1335,7 @@ export class Orchestrator {
       name: plan.name,
       description: plan.description,
       visualProof: plan.visualProof,
-      status: 'running',
+      status: 'pending',
       repoUrl: plan.repoUrl,
       intermediateRepoUrl: plan.intermediateRepoUrl,
       onFinish: plan.onFinish,

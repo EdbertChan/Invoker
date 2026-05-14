@@ -3,6 +3,7 @@ import type { WorkflowStatus } from '../types.js';
 const WORKFLOW_STATUS_SET: ReadonlySet<WorkflowStatus> = new Set<WorkflowStatus>([
   'pending',
   'running',
+  'fixing_with_ai',
   'completed',
   'failed',
   'blocked',
@@ -38,6 +39,13 @@ export function workflowStatusVisual(status: WorkflowStatus): WorkflowStatusVisu
         borderClass: 'border-blue-400/70',
         railClass: 'bg-blue-400',
         textClass: 'text-blue-300',
+        pulse: true,
+      };
+    case 'fixing_with_ai':
+      return {
+        borderClass: 'border-cyan-400/70',
+        railClass: 'bg-cyan-400',
+        textClass: 'text-cyan-300',
         pulse: true,
       };
     case 'failed':
@@ -87,5 +95,5 @@ export function workflowStatusVisual(status: WorkflowStatus): WorkflowStatusVisu
 }
 
 export function isWorkflowStatusActive(status: WorkflowStatus): boolean {
-  return status === 'running';
+  return status === 'running' || status === 'fixing_with_ai';
 }

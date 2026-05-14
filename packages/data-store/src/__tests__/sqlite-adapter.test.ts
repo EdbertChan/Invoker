@@ -248,6 +248,54 @@ describe('SQLiteAdapter', () => {
       expect(loaded!.name).toBe('Test Workflow');
       expect(loaded!.status).toBe('running');
     });
+
+    it('derives workflow status and rollup details from task rows', () => {
+      adapter.saveWorkflow({ ...testWorkflow, status: 'completed' });
+      adapter.saveTask('wf-1', makeTask('t1', {
+        status: 'failed',
+        execution: { error: 'first failure', exitCode: 10 },
+      }));
+      adapter.saveTask('wf-1', makeTask('t2', {
+        status: 'failed',
+        execution: { error: 'second failure', exitCode: 20 },
+      }));
+
+      const loaded = adapter.loadWorkflow('wf-1');
+
+      expect(loaded!.status).toBe('failed');
+      expect(loaded!.rollup?.countsByStatus.failed).toBe(2);
+      expect(loaded!.rollup?.failedTasks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ taskId: 't1', error: 'first failure', exitCode: 10 }),
+          expect.objectContaining({ taskId: 't2', error: 'second failure', exitCode: 20 }),
+        ]),
+      );
+    });
+
+    it('derives listWorkflows with one aggregate rollup per workflow', () => {
+      adapter.saveWorkflow({ ...testWorkflow, status: 'running' });
+      adapter.saveWorkflow({
+        ...testWorkflow,
+        id: 'wf-2',
+        name: 'Second Workflow',
+        status: 'running',
+      });
+      adapter.saveTask('wf-1', makeTask('wf1-a', { status: 'pending' }));
+      adapter.saveTask('wf-1', makeTask('wf1-b', { status: 'pending' }));
+      adapter.saveTask('wf-2', makeTask('wf2-a', { status: 'completed' }));
+      adapter.saveTask('wf-2', makeTask('wf2-b', { status: 'fixing_with_ai', execution: { isFixingWithAI: true, agentName: 'codex' } }));
+
+      const workflows = adapter.listWorkflows();
+      const first = workflows.find((workflow) => workflow.id === 'wf-1')!;
+      const second = workflows.find((workflow) => workflow.id === 'wf-2')!;
+
+      expect(first.status).toBe('pending');
+      expect(first.rollup?.countsByStatus.pending).toBe(2);
+      expect(second.status).toBe('fixing_with_ai');
+      expect(second.rollup?.fixingTasks).toEqual([
+        expect.objectContaining({ taskId: 'wf2-b', agentName: 'codex' }),
+      ]);
+    });
   });
 
   describe('updateWorkflow', () => {

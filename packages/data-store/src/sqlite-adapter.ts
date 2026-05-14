@@ -8,8 +8,19 @@
 import initSqlJs, { type Database as SqlJsDatabase } from 'sql.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { TaskState, TaskStateChanges, Attempt, TaskStatus } from '@invoker/workflow-core';
-import { normalizeRunnerKind } from '@invoker/workflow-core';
+import type {
+  TaskState,
+  TaskStateChanges,
+  Attempt,
+  TaskStatus,
+  WorkflowRollup,
+  WorkflowRollupTaskSummary,
+} from '@invoker/workflow-core';
+import {
+  computeWorkflowRollupFromCountsAndIssues,
+  createEmptyWorkflowTaskStatusCounts,
+  normalizeRunnerKind,
+} from '@invoker/workflow-core';
 import type { PersistenceAdapter, Workflow, TaskEvent, ActivityLogEntry, Conversation, ConversationMessage } from './adapter.js';
 
 /**
@@ -722,14 +733,17 @@ export class SQLiteAdapter implements PersistenceAdapter {
   loadWorkflow(workflowId: string): Workflow | undefined {
     const row = this.queryOne('SELECT * FROM workflows WHERE id = ?', [workflowId]);
     if (!row) return undefined;
-    return this.rowToWorkflow(row);
+    const rollup = this.loadWorkflowRollups([workflowId]).get(workflowId);
+    return this.rowToWorkflow(row, rollup);
   }
 
   listWorkflows(): Workflow[] {
     const rows = this.queryAll(
       'SELECT * FROM workflows ORDER BY created_at DESC',
     );
-    return rows.map((row: any) => this.rowToWorkflow(row));
+    const workflowIds = rows.map((row: any) => String(row.id));
+    const rollups = this.loadWorkflowRollups(workflowIds);
+    return rows.map((row: any) => this.rowToWorkflow(row, rollups.get(String(row.id))));
   }
 
   // ── Tasks ─────────────────────────────────────────────
@@ -1658,13 +1672,90 @@ export class SQLiteAdapter implements PersistenceAdapter {
 
   // ── Helpers ───────────────────────────────────────────
 
-  private rowToWorkflow(row: any): Workflow {
+  private loadWorkflowRollups(workflowIds: string[]): Map<string, WorkflowRollup> {
+    const rollups = new Map<string, WorkflowRollup>();
+    if (workflowIds.length === 0) return rollups;
+
+    const placeholders = workflowIds.map(() => '?').join(', ');
+    const countsByWorkflow = new Map<string, ReturnType<typeof createEmptyWorkflowTaskStatusCounts>>();
+    for (const workflowId of workflowIds) {
+      countsByWorkflow.set(workflowId, createEmptyWorkflowTaskStatusCounts());
+    }
+
+    const countRows = this.queryAll(
+      `SELECT workflow_id, status, COUNT(*) AS count
+       FROM tasks
+       WHERE workflow_id IN (${placeholders})
+       GROUP BY workflow_id, status`,
+      workflowIds,
+    );
+    for (const row of countRows as Array<{ workflow_id: string; status: TaskStatus; count: number }>) {
+      const counts = countsByWorkflow.get(String(row.workflow_id));
+      if (counts && row.status in counts) {
+        counts[row.status] = Number(row.count);
+      }
+    }
+
+    const issueRows = this.queryAll(
+      `SELECT id, workflow_id, description, status, error, protocol_error_code, protocol_error_message,
+              pending_fix_error, exit_code, completed_at, agent_session_id, agent_name,
+              review_url, input_prompt, is_fixing_with_ai
+       FROM tasks
+       WHERE workflow_id IN (${placeholders})
+         AND (
+           status IN ('failed', 'fixing_with_ai', 'needs_input', 'blocked', 'review_ready', 'awaiting_approval')
+           OR is_fixing_with_ai = 1
+         )
+       ORDER BY id ASC`,
+      workflowIds,
+    );
+
+    const issuesByWorkflow = new Map<string, WorkflowRollupTaskSummary[]>();
+    for (const row of issueRows as any[]) {
+      const workflowId = String(row.workflow_id);
+      const issues = issuesByWorkflow.get(workflowId) ?? [];
+      issues.push({
+        id: String(row.id),
+        description: String(row.description),
+        status: row.status as TaskStatus,
+        execution: {
+          error: row.error ?? undefined,
+          protocolErrorCode: row.protocol_error_code ?? undefined,
+          protocolErrorMessage: row.protocol_error_message ?? undefined,
+          pendingFixError: row.pending_fix_error ?? undefined,
+          exitCode: row.exit_code ?? undefined,
+          completedAt: row.completed_at ?? undefined,
+          agentSessionId: row.agent_session_id ?? undefined,
+          agentName: row.agent_name ?? undefined,
+          reviewUrl: row.review_url ?? undefined,
+          inputPrompt: row.input_prompt ?? undefined,
+          isFixingWithAI: row.is_fixing_with_ai === 1,
+        },
+      });
+      issuesByWorkflow.set(workflowId, issues);
+    }
+
+    for (const workflowId of workflowIds) {
+      const counts = countsByWorkflow.get(workflowId) ?? createEmptyWorkflowTaskStatusCounts();
+      const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+      if (total === 0) continue;
+      rollups.set(
+        workflowId,
+        computeWorkflowRollupFromCountsAndIssues(counts, issuesByWorkflow.get(workflowId) ?? []),
+      );
+    }
+
+    return rollups;
+  }
+
+  private rowToWorkflow(row: any, rollup?: WorkflowRollup): Workflow {
     return {
       id: row.id,
       name: row.name,
       description: row.description ?? undefined,
       visualProof: row.visual_proof === 1,
-      status: row.status,
+      status: rollup?.status ?? row.status,
+      rollup,
       planFile: row.plan_file ?? undefined,
       repoUrl: row.repo_url ?? undefined,
       intermediateRepoUrl: row.intermediate_repo_url ?? undefined,
