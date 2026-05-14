@@ -88,6 +88,16 @@ function createMockProcess(): ChildProcess & EventEmitter {
   return proc;
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 /**
  * Sets up mockedSpawn to handle both git commands and task commands.
  *
@@ -1114,16 +1124,19 @@ describe('WorktreeExecutor', () => {
      * pushBranchToRemote. An unbounded hang there means the agent child can exit
      * while the task never completes (documented in repro plan).
      */
-    it('does not emitComplete while pushBranchToRemote is pending (hung push blocks completion)', async () => {
+    it('keeps heartbeats alive while post-exit finalization is pending', async () => {
+      vi.useFakeTimers();
+      const pushDeferred = createDeferred<string | undefined>();
       const pushSpy = vi
         .spyOn(BaseExecutor.prototype as any, 'pushBranchToRemote')
-        .mockImplementation(() => new Promise<string | undefined>(() => { /* never resolves */ }));
+        .mockImplementation(() => pushDeferred.promise);
 
       try {
         const claudeExecutor = new WorktreeExecutor({
           cacheDir: '/fake/cache',
           worktreeBaseDir: '/fake/worktrees',
           claudeCommand: '/bin/echo',
+          heartbeatIntervalMs: 20,
         });
         mockPool(claudeExecutor);
         const { taskProcess } = setupSpawnMock();
@@ -1135,16 +1148,32 @@ describe('WorktreeExecutor', () => {
         const handle = await claudeExecutor.start(request);
 
         let completed = false;
+        let heartbeatCount = 0;
+        const outputLines: string[] = [];
+        claudeExecutor.onHeartbeat(handle, () => {
+          heartbeatCount += 1;
+        });
+        claudeExecutor.onOutput(handle, (data) => {
+          outputLines.push(data);
+        });
         claudeExecutor.onComplete(handle, () => {
           completed = true;
         });
 
+        (taskProcess as any).exitCode = 0;
         taskProcess.emit('close', 0, null);
 
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        await vi.advanceTimersByTimeAsync(80);
         expect(completed).toBe(false);
+        expect(heartbeatCount).toBeGreaterThan(0);
+        expect(outputLines.some((line) => line.includes('Heartbeat detected orphaned process'))).toBe(false);
+
+        pushDeferred.resolve(undefined);
+        await vi.runAllTimersAsync();
+        expect(completed).toBe(true);
       } finally {
         pushSpy.mockRestore();
+        vi.useRealTimers();
       }
     });
 

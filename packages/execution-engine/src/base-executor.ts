@@ -163,6 +163,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       clearInterval(entry.heartbeatTimer);
       entry.heartbeatTimer = undefined;
     }
+    entry.finalizingAfterClose = false;
     entry.completed = true;
     entry.completionResponse = response;
     for (const cb of entry.completeListeners) {
@@ -911,7 +912,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     },
   ): Promise<void> {
     const entry = this.entries.get(executionId);
-    if (entry) entry.completed = true;
+    if (entry) entry.finalizingAfterClose = true;
     const bufferedOutput = entry?.outputBuffer.join('') ?? '';
     const semanticFailure = this.detectSemanticFailure(request, bufferedOutput, exitCode);
     const effectiveExitCode = (exitCode === 0 && semanticFailure)
