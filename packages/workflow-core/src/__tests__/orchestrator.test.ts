@@ -6567,7 +6567,7 @@ describe('Orchestrator', () => {
       };
     }
 
-    it('re-selecting with an ACTIVE downstream cancels first, then recreates downstream', () => {
+    it('re-selecting with an ACTIVE downstream cancels first, then retries downstream', () => {
       const { reconId, exp1Id, exp2Id, downstreamId } = setupReconciliationWithDownstream();
 
       // Initial selection unblocks downstream → downstream auto-starts.
@@ -6575,29 +6575,29 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(downstreamId)?.status).toBe('running');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiment(reconId, exp2Id);
 
       expect(cancelSpy).toHaveBeenCalledWith(downstreamId);
-      expect(recreateSpy).toHaveBeenCalledWith(downstreamId);
+      expect(retrySpy).toHaveBeenCalledWith(downstreamId);
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        recreateSpy.mock.invocationCallOrder[0],
+        retrySpy.mock.invocationCallOrder[0],
       );
 
       // New winner persisted on the recon.
       expect(orchestrator.getTask(reconId)?.execution.selectedExperiment).toBe(exp2Id);
 
       cancelSpy.mockRestore();
-      recreateSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
-    it('re-selecting an INACTIVE downstream skips cancel but still recreates downstream', () => {
+    it('re-selecting an INACTIVE downstream skips cancel but still retries downstream', () => {
       const { reconId, exp1Id, exp2Id, downstreamId } = setupReconciliationWithDownstream();
 
       orchestrator.selectExperiment(reconId, exp1Id);
       // Fail downstream so it's no longer active. Re-selection MUST
-      // NOT cancel a non-active downstream, but the recreate-class state
+      // NOT cancel a non-active downstream, but the retry-class state
       // reset still applies so the new winner's input is consumed.
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: downstreamId, status: 'failed', outputs: { exitCode: 1, error: 'oops' } }),
@@ -6605,22 +6605,22 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(downstreamId)?.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiment(reconId, exp2Id);
 
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(recreateSpy).toHaveBeenCalledWith(downstreamId);
+      expect(retrySpy).toHaveBeenCalledWith(downstreamId);
 
       cancelSpy.mockRestore();
-      recreateSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
-    it('initial selection does NOT cancel and does NOT recreate downstream', () => {
+    it('initial selection does NOT cancel and does NOT retry downstream', () => {
       const { reconId, exp1Id, downstreamId } = setupReconciliationWithDownstream();
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiment(reconId, exp1Id);
 
@@ -6629,11 +6629,11 @@ describe('Orchestrator', () => {
       // The existing "completes reconciliation task and unblocks
       // downstream" path applies.
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(recreateSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
       expect(orchestrator.getTask(downstreamId)?.status).toBe('running');
 
       cancelSpy.mockRestore();
-      recreateSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('re-selection bumps downstream execution generation by exactly one', () => {
@@ -6716,7 +6716,7 @@ describe('Orchestrator', () => {
       };
     }
 
-    it('re-selecting a CHANGED merged set with an ACTIVE downstream cancels first, then recreates downstream', () => {
+    it('re-selecting a CHANGED merged set with an ACTIVE downstream cancels first, then retries downstream', () => {
       const { reconId, exp1Id, exp2Id, exp3Id, directDownstream } =
         setupMergedReconciliationWithDownstream();
 
@@ -6734,7 +6734,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(dsId)?.status).toBe('running');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -6744,9 +6744,9 @@ describe('Orchestrator', () => {
       );
 
       expect(cancelSpy).toHaveBeenCalledWith(dsId);
-      expect(recreateSpy).toHaveBeenCalled();
+      expect(retrySpy).toHaveBeenCalled();
       const cancelOrder = cancelSpy.mock.invocationCallOrder[0];
-      const restartOrder = recreateSpy.mock.invocationCallOrder[0];
+      const restartOrder = retrySpy.mock.invocationCallOrder[0];
       expect(cancelOrder).toBeLessThan(restartOrder);
 
       // New merged lineage persisted on the recon.
@@ -6756,10 +6756,10 @@ describe('Orchestrator', () => {
       expect(recon.execution.commit).toBe('merged13');
 
       cancelSpy.mockRestore();
-      recreateSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
-    it('re-selecting a CHANGED merged set with INACTIVE downstream skips cancel but still recreates downstream', () => {
+    it('re-selecting a CHANGED merged set with INACTIVE downstream skips cancel but still retries downstream', () => {
       const { reconId, exp1Id, exp2Id, exp3Id, directDownstream } =
         setupMergedReconciliationWithDownstream();
 
@@ -6771,7 +6771,7 @@ describe('Orchestrator', () => {
       );
       const dsId = directDownstream()[0];
       // Fail downstream so it's no longer active. Re-selection MUST
-      // NOT cancel a non-active downstream, but the recreate-class state
+      // NOT cancel a non-active downstream, but the retry-class state
       // reset still applies so the new merged lineage is consumed.
       orchestrator.handleWorkerResponse(
         makeResponse({ actionId: dsId, status: 'failed', outputs: { exitCode: 1, error: 'oops' } }),
@@ -6779,7 +6779,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(dsId)?.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -6789,18 +6789,18 @@ describe('Orchestrator', () => {
       );
 
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(recreateSpy).toHaveBeenCalled();
+      expect(retrySpy).toHaveBeenCalled();
 
       cancelSpy.mockRestore();
-      recreateSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
-    it('initial multi-select does NOT cancel and does NOT recreate downstream', () => {
+    it('initial multi-select does NOT cancel and does NOT retry downstream', () => {
       const { reconId, exp1Id, exp2Id, directDownstream } =
         setupMergedReconciliationWithDownstream();
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -6814,13 +6814,13 @@ describe('Orchestrator', () => {
       // existing "completes reconciliation task and unblocks
       // downstream" path applies.
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(recreateSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
       for (const id of directDownstream()) {
         expect(orchestrator.getTask(id)?.status).toBe('running');
       }
 
       cancelSpy.mockRestore();
-      recreateSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('re-selection bumps each affected downstream execution generation by exactly one', () => {
@@ -6874,7 +6874,7 @@ describe('Orchestrator', () => {
       );
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       orchestrator.selectExperiments(
         reconId,
@@ -6884,10 +6884,10 @@ describe('Orchestrator', () => {
       );
 
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(recreateSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
 
       cancelSpy.mockRestore();
-      recreateSpy.mockRestore();
+      retrySpy.mockRestore();
     });
 
     it('same merged set in different ORDER is still treated as the same set', () => {
@@ -6901,7 +6901,7 @@ describe('Orchestrator', () => {
       );
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
-      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
 
       // Reverse order — `selectedExperiments` is a SET (merged
       // lineage), not an ordered tuple, so this must NOT be treated
@@ -6914,10 +6914,10 @@ describe('Orchestrator', () => {
       );
 
       expect(cancelSpy).not.toHaveBeenCalled();
-      expect(recreateSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
 
       cancelSpy.mockRestore();
-      recreateSpy.mockRestore();
+      retrySpy.mockRestore();
     });
   });
 

@@ -254,6 +254,8 @@ export const IpcChannels = {
     response: void;
   },
   'invoker:select-experiment': {} as {
+    // INV-91: keep experiment selection on the typed registry so
+    // renderer, IPC, and transport adapters share one mutation surface.
     request: [taskId: string, experimentId: string | string[]];
     response: void;
   },

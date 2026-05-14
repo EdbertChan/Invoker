@@ -1819,9 +1819,8 @@ export class Orchestrator {
    * reconciliation task's own spec. The chart's "Why" column reads
    * "Downstream execution inputs changed". `applyInvalidation('task',
    * 'retryTask', reconId, deps)` is wired to today's
-   * `Orchestrator.restartTask` via `buildInvalidationDeps` (the
-   * compatibility seam Step 1 introduced; Step 13 will rename
-   * `restartTask` → `retryTask` to close the matrix).
+   * `Orchestrator.retryTask` via the shared mutation path selected
+   * in `docs/context/inv-91/experiment-brief.md`.
    *
    * Sequence (mirrors `applyInvalidation`'s contract for the
    * synchronous orchestrator-internal seam — see `invalidation-policy.ts`
@@ -1845,9 +1844,8 @@ export class Orchestrator {
    *      reconciliation task and unblocks downstream").
    *   3. **Retry-class reset of downstream (re-selection only).** When
    *      the recon was previously completed with a *different* winner,
-   *      every direct downstream consumer is reset via `restartTask`,
-   *      which is the current `retryTask` compatibility wire.
-   *      `restartTask` cascades to its own descendants and bumps each
+   *      every direct downstream consumer is reset via `retryTask`.
+   *      `retryTask` cascades to its own descendants and bumps each
    *      affected task's execution generation exactly once via
    *      `withBumpedExecutionGeneration` (single source of truth for the
    *      retry reset shape — Step 7 deliberately reuses it instead of
@@ -1933,7 +1931,7 @@ export class Orchestrator {
         .filter((t) => t.dependencies.includes(reconId))
         .map((t) => t.id);
       for (const dsId of directDownstream) {
-        this.recreateTask(dsId);
+        this.retryTask(dsId);
       }
     }
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(reconId);
@@ -2018,7 +2016,7 @@ export class Orchestrator {
         .map((t) => t.id);
       for (const dsId of directDownstreamAfter) {
         if (this.stateGetTask(dsId)) {
-          this.recreateTask(dsId);
+          this.retryTask(dsId);
         }
       }
     }

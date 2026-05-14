@@ -95,6 +95,8 @@ function createMocks() {
       beginConflictResolution: vi.fn(() => ({ savedError: 'saved-error' })),
       setFixAwaitingApproval: vi.fn(),
       retryTask: vi.fn(() => [makeTask()]),
+      selectExperiment: vi.fn(() => [makeTask()]),
+      selectExperiments: vi.fn(() => [makeTask()]),
       editTaskCommand: vi.fn(() => [makeTask()]),
       editTaskPrompt: vi.fn(() => [makeTask()]),
       editTaskType: vi.fn(() => [makeTask()]),
@@ -134,6 +136,7 @@ function createMocks() {
       resolveConflict: vi.fn().mockResolvedValue(undefined),
       fixWithAgent: vi.fn().mockResolvedValue(undefined),
       commitApprovedFix: vi.fn().mockResolvedValue(undefined),
+      mergeExperimentBranches: vi.fn().mockResolvedValue({ branch: 'merge/experiments', commit: 'commit-1' }),
     },
     killRunningTask: vi.fn().mockResolvedValue(undefined),
     deleteWorkflow: vi.fn().mockResolvedValue(undefined),
@@ -197,6 +200,8 @@ beforeEach(() => {
   mocks.orchestrator.getTask.mockImplementation((id: string) => (id === 'task-1' ? makeTask() : undefined));
   mocks.orchestrator.approve.mockResolvedValue([]);
   mocks.orchestrator.retryTask.mockReturnValue([makeTask()]);
+  mocks.orchestrator.selectExperiment.mockReturnValue([makeTask()]);
+  mocks.orchestrator.selectExperiments.mockReturnValue([makeTask()]);
   mocks.orchestrator.beginConflictResolution.mockReturnValue({ savedError: 'saved-error' });
   mocks.orchestrator.editTaskCommand.mockReturnValue([makeTask()]);
   mocks.orchestrator.editTaskPrompt.mockReturnValue([makeTask()]);
@@ -218,6 +223,7 @@ beforeEach(() => {
   mocks.taskExecutor.executeTasks.mockResolvedValue(undefined);
   mocks.taskExecutor.publishAfterFix.mockResolvedValue(undefined);
   mocks.taskExecutor.resolveConflict.mockResolvedValue(undefined);
+  mocks.taskExecutor.mergeExperimentBranches.mockResolvedValue({ branch: 'merge/experiments', commit: 'commit-1' });
   mocks.taskExecutor.fixWithAgent.mockResolvedValue(undefined);
   mocks.taskExecutor.commitApprovedFix.mockResolvedValue(undefined);
 });
@@ -397,6 +403,48 @@ describe('POST /api/tasks/:id/restart', () => {
     expect(res.status).toBe(200);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledTimes(1);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledWith([scoped]);
+  });
+});
+
+describe('POST /api/tasks/:id/select-experiment', () => {
+  it('selects one experiment via facade selectExperiment', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/select-experiment', {
+      experimentId: 'exp-1',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('selected_experiment');
+    expect(mocks.orchestrator.selectExperiment).toHaveBeenCalledWith('task-1', 'exp-1');
+    expect(mocks.orchestrator.selectExperiments).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
+  });
+
+  it('selects multiple experiments via facade selectExperiments', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/select-experiment', {
+      experimentId: ['exp-1', 'exp-2'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('selected_experiments');
+    expect(mocks.orchestrator.selectExperiments).toHaveBeenCalledWith(
+      'task-1',
+      ['exp-1', 'exp-2'],
+      'merge/experiments',
+      'commit-1',
+    );
+    expect(mocks.orchestrator.selectExperiment).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
+  });
+
+  it('returns 400 when experimentId is missing', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/select-experiment', {});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Missing "experimentId"');
+    expect(mocks.orchestrator.selectExperiment).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.selectExperiments).not.toHaveBeenCalled();
   });
 });
 

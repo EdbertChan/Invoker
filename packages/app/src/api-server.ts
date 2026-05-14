@@ -24,6 +24,7 @@
  *   POST   /api/tasks/:id/approve
  *   POST   /api/tasks/:id/reject       body: { reason? }
  *   POST   /api/tasks/:id/input        body: { text }
+ *   POST   /api/tasks/:id/select-experiment  body: { experimentId: string | string[] }
  *   POST   /api/tasks/:id/edit         body: { command }
  *   POST   /api/tasks/:id/edit-prompt  body: { prompt }
  *   POST   /api/tasks/:id/edit-type    body: { runnerKind, poolMemberId? }
@@ -242,6 +243,32 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         try {
           const result = await mutations.recreateTask(taskId);
           json(res, 200, { ok: true, taskId, action: 'recreated', tasksStarted: result.runnable.length });
+        } catch (err) {
+          json(res, httpStatusForError(err), { error: errorMessage(err) });
+        }
+        return;
+      }
+
+      // POST /api/tasks/:id/select-experiment  body: { experimentId: string | string[] }
+      const selectExperimentMatch = path.match(/^\/api\/tasks\/([^/]+)\/select-experiment$/);
+      if (method === 'POST' && selectExperimentMatch) {
+        const taskId = decodeURIComponent(selectExperimentMatch[1]);
+        try {
+          const body = await readBody(req);
+          const { experimentId } = JSON.parse(body);
+          if (typeof experimentId !== 'string' && !Array.isArray(experimentId)) {
+            json(res, 400, { error: 'Missing "experimentId" in request body' });
+            return;
+          }
+          const result = Array.isArray(experimentId)
+            ? await mutations.selectExperiments(taskId, experimentId)
+            : await mutations.selectExperiment(taskId, experimentId);
+          json(res, 200, {
+            ok: true,
+            taskId,
+            action: Array.isArray(experimentId) ? 'selected_experiments' : 'selected_experiment',
+            tasksStarted: result.runnable.length,
+          });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }
