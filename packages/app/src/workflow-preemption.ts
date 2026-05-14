@@ -1,10 +1,76 @@
 import type { Logger } from '@invoker/contracts';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
 
+export type WorkflowMutationFenceKind = 'recreate' | 'delete';
+
 export type WorkflowCancelResult = {
   cancelled: string[];
   runningCancelled: string[];
 };
+
+export function classifyHardPreemptingWorkflowMutation(
+  channel: string,
+  args: unknown[],
+): WorkflowMutationFenceKind | null {
+  if (
+    channel === 'invoker:recreate-workflow'
+    || channel === 'invoker:recreate-task'
+    || channel === 'invoker:recreate-with-rebase'
+  ) {
+    return 'recreate';
+  }
+  if (
+    channel === 'invoker:delete-workflow'
+    || channel === 'invoker:delete-all-workflows'
+    || channel === 'invoker:delete-all-workflows-bulk'
+  ) {
+    return 'delete';
+  }
+  if (channel !== 'headless.exec') {
+    return null;
+  }
+  const payload = args[0] as { args?: unknown[] } | undefined;
+  const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
+  if (rawArgs[0] === 'recreate' || rawArgs[0] === 'recreate-task' || rawArgs[0] === 'recreate-with-rebase') {
+    return 'recreate';
+  }
+  if (rawArgs[0] === 'delete' || rawArgs[0] === 'delete-workflow' || rawArgs[0] === 'delete-all') {
+    return 'delete';
+  }
+  return null;
+}
+
+export function isWorkflowQueueFenceMutation(channel: string, args: unknown[]): boolean {
+  if (
+    channel === 'invoker:retry-workflow'
+    || channel === 'invoker:recreate-workflow'
+    || channel === 'invoker:recreate-task'
+    || channel === 'invoker:recreate-with-rebase'
+    || channel === 'invoker:delete-workflow'
+    || channel === 'invoker:delete-all-workflows'
+    || channel === 'invoker:delete-all-workflows-bulk'
+  ) {
+    return true;
+  }
+  if (channel !== 'headless.exec') {
+    return false;
+  }
+  const payload = args[0] as { args?: unknown[] } | undefined;
+  const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
+  const command = typeof rawArgs[0] === 'string' ? rawArgs[0] : '';
+  const target = typeof rawArgs[1] === 'string' ? rawArgs[1] : '';
+  if (command === 'recreate-task') {
+    return true;
+  }
+  if (command === 'delete' || command === 'delete-workflow' || command === 'delete-all') {
+    return true;
+  }
+  const isWorkflowId = /^wf-[^/]+$/.test(target);
+  if (!isWorkflowId) {
+    return false;
+  }
+  return command === 'recreate' || command === 'recreate-with-rebase' || command === 'retry';
+}
 
 type PreemptWorkflowExecution = (workflowId: string) => Promise<WorkflowCancelResult | void>;
 

@@ -231,6 +231,73 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     ]);
   });
 
+  it('aborts superseded fix work on recreate-task fences before late side effects run', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const gate = deferred();
+    const sideEffects: string[] = [];
+    let invalidatedBy: WorkflowMutationContext['cancellation']['invalidatedBy'];
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, args, context) => {
+        if (channel === 'invoker:fix-with-agent') {
+          await new Promise<void>((resolve) => {
+            context.cancellation.signal.addEventListener('abort', () => {
+              invalidatedBy = context.cancellation.invalidatedBy;
+              resolve();
+            }, { once: true });
+            void gate.promise.then(() => {
+              if (!context.cancellation.signal.aborted) {
+                sideEffects.push(`stale-fix:${String(args[0])}`);
+              }
+              resolve();
+            });
+          });
+          return;
+        }
+        sideEffects.push(`${channel}:${String(args[0])}`);
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await waitFor(() => adapter.listWorkflowMutationIntents('wf-1', ['running']).length === 1);
+
+    const recreateTask = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:recreate-task',
+      ['wf-1/target-task'],
+    );
+    await recreateTask;
+    await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
+
+    gate.resolve();
+    await waitFor(() => invalidatedBy !== undefined);
+    expect(sideEffects).toEqual(['invoker:recreate-task:wf-1/target-task']);
+    expect(invalidatedBy).toMatchObject({
+      workflowId: 'wf-1',
+      intentId: 2,
+      channel: 'invoker:recreate-task',
+      kind: 'recreate',
+      reason: 'Superseded by recreate intent #2',
+    });
+  });
+
   it('invalidates an older running workflow intent when headless recreate-task is enqueued', async () => {
     const adapter = await SQLiteAdapter.create(':memory:');
     adapters.push(adapter);
@@ -791,6 +858,73 @@ describe('PersistedWorkflowMutationCoordinator', () => {
       'invoker:fix-with-agent:wf-1/blocker-task',
       'invoker:delete-workflow:wf-1',
     ]);
+  });
+
+  it('aborts superseded fix work on delete fences before late side effects run', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const gate = deferred();
+    const sideEffects: string[] = [];
+    let invalidatedBy: WorkflowMutationContext['cancellation']['invalidatedBy'];
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, args, context) => {
+        if (channel === 'invoker:fix-with-agent') {
+          await new Promise<void>((resolve) => {
+            context.cancellation.signal.addEventListener('abort', () => {
+              invalidatedBy = context.cancellation.invalidatedBy;
+              resolve();
+            }, { once: true });
+            void gate.promise.then(() => {
+              if (!context.cancellation.signal.aborted) {
+                sideEffects.push(`stale-fix:${String(args[0])}`);
+              }
+              resolve();
+            });
+          });
+          return;
+        }
+        sideEffects.push(`${channel}:${String(args[0])}`);
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await waitFor(() => adapter.listWorkflowMutationIntents('wf-1', ['running']).length === 1);
+
+    const deleteWorkflow = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:delete-workflow',
+      ['wf-1'],
+    );
+    await deleteWorkflow;
+    await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
+
+    gate.resolve();
+    await waitFor(() => invalidatedBy !== undefined);
+    expect(sideEffects).toEqual(['invoker:delete-workflow:wf-1']);
+    expect(invalidatedBy).toMatchObject({
+      workflowId: 'wf-1',
+      intentId: 2,
+      channel: 'invoker:delete-workflow',
+      kind: 'delete',
+      reason: 'Superseded by delete intent #2',
+    });
   });
 
   it('evicts older queued workflow intents when internal delete-workflow fence starts', async () => {

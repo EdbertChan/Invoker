@@ -1,13 +1,39 @@
 export type WorkflowMutationPriority = 'high' | 'normal';
 
+export type WorkflowMutationCancellationKind = 'recreate' | 'delete';
+
+export type WorkflowMutationCancellationMetadata = {
+  workflowId: string;
+  intentId: number;
+  channel: string;
+  args: unknown[];
+  kind: WorkflowMutationCancellationKind;
+  reason: string;
+};
+
+export type WorkflowMutationCancellationContext = {
+  signal: AbortSignal;
+  invalidatedBy?: WorkflowMutationCancellationMetadata;
+};
+
+export type WorkflowMutationDispatchContext = {
+  signal: AbortSignal;
+  intentId: number;
+  workflowId: string;
+  cancellation: WorkflowMutationCancellationContext;
+};
+
 type Job<T> = {
-  run: () => Promise<T>;
+  context: WorkflowMutationDispatchContext;
+  abortController: AbortController;
+  run: (context: WorkflowMutationDispatchContext) => Promise<T>;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
 };
 
 type WorkflowQueues = {
-  running: boolean;
+  nextIntentId: number;
+  running: Job<unknown> | null;
   high: Job<unknown>[];
   normal: Job<unknown>[];
 };
@@ -16,7 +42,7 @@ type WorkflowQueues = {
  * Per-workflow async mutation coordinator.
  *
  * High-priority jobs run before normal queued jobs for the same workflow.
- * Running jobs are never interrupted.
+ * Running jobs may be invalidated when a higher-authority fence takes over.
  */
 export class WorkflowMutationCoordinator {
   private readonly queues = new Map<string, WorkflowQueues>();
@@ -24,12 +50,29 @@ export class WorkflowMutationCoordinator {
   enqueue<T>(
     workflowId: string,
     priority: WorkflowMutationPriority,
-    run: () => Promise<T>,
+    run: (context: WorkflowMutationDispatchContext) => Promise<T>,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const state = this.queues.get(workflowId) ?? { running: false, high: [], normal: [] };
+      const state = this.queues.get(workflowId) ?? {
+        nextIntentId: 1,
+        running: null,
+        high: [],
+        normal: [],
+      };
       this.queues.set(workflowId, state);
-      const job: Job<T> = { run, resolve, reject };
+      const abortController = new AbortController();
+      const intentId = state.nextIntentId;
+      state.nextIntentId += 1;
+      const cancellation: WorkflowMutationCancellationContext = {
+        signal: abortController.signal,
+      };
+      const context: WorkflowMutationDispatchContext = {
+        signal: abortController.signal,
+        intentId,
+        workflowId,
+        cancellation,
+      };
+      const job: Job<T> = { context, abortController, run, resolve, reject };
       if (priority === 'high') {
         state.high.push(job as Job<unknown>);
       } else {
@@ -37,6 +80,17 @@ export class WorkflowMutationCoordinator {
       }
       this.drain(workflowId);
     });
+  }
+
+  invalidateRunning(workflowId: string, metadata: WorkflowMutationCancellationMetadata): boolean {
+    const state = this.queues.get(workflowId);
+    const running = state?.running;
+    if (!running) {
+      return false;
+    }
+    running.context.cancellation.invalidatedBy = metadata;
+    running.abortController.abort(new Error(metadata.reason));
+    return true;
   }
 
   private drain(workflowId: string): void {
@@ -49,16 +103,15 @@ export class WorkflowMutationCoordinator {
       return;
     }
 
-    state.running = true;
-    void next.run()
+    state.running = next;
+    void next.run(next.context)
       .then((value) => next.resolve(value))
       .catch((err) => next.reject(err))
       .finally(() => {
         const s = this.queues.get(workflowId);
         if (!s) return;
-        s.running = false;
+        s.running = null;
         this.drain(workflowId);
       });
   }
 }
-

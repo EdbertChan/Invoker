@@ -5,6 +5,15 @@ import {
   type WorkflowMutationPriority,
 } from '@invoker/data-store';
 import type { Logger } from '@invoker/contracts';
+import {
+  type WorkflowMutationCancellationContext,
+  type WorkflowMutationCancellationMetadata,
+  type WorkflowMutationDispatchContext,
+} from './workflow-mutation-coordinator.js';
+import {
+  classifyHardPreemptingWorkflowMutation,
+  isWorkflowQueueFenceMutation,
+} from './workflow-preemption.js';
 import { createWorkflowMutationTiming, type WorkflowMutationTiming } from './workflow-mutation-timing.js';
 
 type Deferred<T> = {
@@ -16,12 +25,10 @@ type InvalidationSignal = {
   promise: Promise<never>;
   reject: (error: unknown) => void;
   abortController: AbortController;
+  cancellation: WorkflowMutationCancellationContext;
 };
 
-export type WorkflowMutationContext = {
-  signal: AbortSignal;
-  intentId: number;
-  workflowId: string;
+export type WorkflowMutationContext = WorkflowMutationDispatchContext & {
   mutationTiming?: WorkflowMutationTiming;
 };
 
@@ -242,6 +249,7 @@ export class PersistedWorkflowMutationCoordinator {
         signal: invalidation.abortController.signal,
         intentId: intent.id,
         workflowId,
+        cancellation: invalidation.cancellation,
         mutationTiming: timing,
       };
       const dispatchPromise = timing.span(
@@ -343,10 +351,14 @@ export class PersistedWorkflowMutationCoordinator {
       reject = r;
     });
     const abortController = new AbortController();
+    const cancellation: WorkflowMutationCancellationContext = {
+      signal: abortController.signal,
+    };
     const entry: InvalidationSignal = {
       reject,
       promise,
       abortController,
+      cancellation,
     };
     this.runningIntentInvalidations.set(intentId, entry);
     return entry;
@@ -358,7 +370,7 @@ export class PersistedWorkflowMutationCoordinator {
     channel: string,
     args: unknown[],
   ): void {
-    const fenceKind = this.hardPreemptFenceKind(channel, args);
+    const fenceKind = classifyHardPreemptingWorkflowMutation(channel, args);
     if (!fenceKind) {
       return;
     }
@@ -381,6 +393,17 @@ export class PersistedWorkflowMutationCoordinator {
         reason,
       });
     const invalidation = this.runningIntentInvalidations.get(activeIntentId);
+    if (invalidation) {
+      const cancellationMetadata: WorkflowMutationCancellationMetadata = {
+        workflowId,
+        intentId: newIntentId,
+        channel,
+        args,
+        kind: fenceKind,
+        reason,
+      };
+      invalidation.cancellation.invalidatedBy = cancellationMetadata;
+    }
     invalidation?.abortController.abort(new WorkflowMutationInvalidatedError(reason));
     invalidation?.reject(new WorkflowMutationInvalidatedError(reason));
     process.stderr.write(
@@ -388,61 +411,8 @@ export class PersistedWorkflowMutationCoordinator {
     );
   }
 
-  private hardPreemptFenceKind(channel: string, args: unknown[]): string | null {
-    if (
-      channel === 'invoker:recreate-workflow'
-      || channel === 'invoker:recreate-task'
-      || channel === 'invoker:recreate-with-rebase'
-    ) {
-      return 'recreate';
-    }
-    if (channel === 'invoker:delete-workflow' || channel === 'invoker:delete-all-workflows' || channel === 'invoker:delete-all-workflows-bulk') {
-      return 'delete';
-    }
-    if (channel !== 'headless.exec') {
-      return null;
-    }
-    const payload = args[0] as { args?: unknown[] } | undefined;
-    const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
-    if (rawArgs[0] === 'recreate' || rawArgs[0] === 'recreate-task' || rawArgs[0] === 'recreate-with-rebase') {
-      return 'recreate';
-    }
-    if (rawArgs[0] === 'delete' || rawArgs[0] === 'delete-workflow' || rawArgs[0] === 'delete-all') {
-      return 'delete';
-    }
-    return null;
-  }
-
   private isWorkflowQueueFenceIntent(intent: WorkflowMutationIntent): boolean {
-    if (
-      intent.channel === 'invoker:retry-workflow'
-      || intent.channel === 'invoker:recreate-workflow'
-      || intent.channel === 'invoker:recreate-task'
-      || intent.channel === 'invoker:recreate-with-rebase'
-      || intent.channel === 'invoker:delete-workflow'
-      || intent.channel === 'invoker:delete-all-workflows'
-      || intent.channel === 'invoker:delete-all-workflows-bulk'
-    ) {
-      return true;
-    }
-    if (intent.channel !== 'headless.exec') {
-      return false;
-    }
-    const payload = intent.args[0] as { args?: unknown[] } | undefined;
-    const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
-    const command = typeof rawArgs[0] === 'string' ? rawArgs[0] : '';
-    const target = typeof rawArgs[1] === 'string' ? rawArgs[1] : '';
-    if (command === 'recreate-task') {
-      return true;
-    }
-    if (command === 'delete' || command === 'delete-workflow' || command === 'delete-all') {
-      return true;
-    }
-    const isWorkflowId = /^wf-[^/]+$/.test(target);
-    if (!isWorkflowId) {
-      return false;
-    }
-    return command === 'recreate' || command === 'recreate-with-rebase' || command === 'retry';
+    return isWorkflowQueueFenceMutation(intent.channel, intent.args);
   }
 
   private createTiming(

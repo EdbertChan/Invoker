@@ -56,5 +56,52 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('exposes cancellation metadata when the running mutation is invalidated', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-cancel';
+    const gate = deferred();
+    let invalidatedBy: { kind: string; channel: string; intentId: number } | undefined;
+    let staleWrite = false;
+
+    const running = c.enqueue(wf, 'normal', async (context) => {
+      await new Promise<void>((resolve) => {
+        context.signal.addEventListener('abort', () => {
+          invalidatedBy = context.cancellation.invalidatedBy
+            ? {
+              kind: context.cancellation.invalidatedBy.kind,
+              channel: context.cancellation.invalidatedBy.channel,
+              intentId: context.cancellation.invalidatedBy.intentId,
+            }
+            : undefined;
+          resolve();
+        }, { once: true });
+        void gate.promise.then(() => {
+          if (!context.signal.aborted) {
+            staleWrite = true;
+          }
+          resolve();
+        });
+      });
+    });
+
+    await Promise.resolve();
+    expect(c.invalidateRunning(wf, {
+      workflowId: wf,
+      intentId: 2,
+      channel: 'invoker:recreate-task',
+      args: ['wf-cancel/task-1'],
+      kind: 'recreate',
+      reason: 'Superseded by recreate intent #2',
+    })).toBe(true);
+    gate.resolve();
+    await running;
+
+    expect(staleWrite).toBe(false);
+    expect(invalidatedBy).toEqual({
+      kind: 'recreate',
+      channel: 'invoker:recreate-task',
+      intentId: 2,
+    });
+  });
+});
