@@ -417,6 +417,7 @@ describe('TaskRunner', () => {
     const done = runner.executeTask(task);
     await vi.waitFor(() => expect(seenRequest).toBeDefined());
     expect(seenRequest.inputs.freshWorkspace).toBe(true);
+    expect(seenRequest.inputs.lifecycleTag).toMatch(/^g0\.t1\.a/);
     completeCallback?.({
       requestId: seenRequest.requestId,
       actionId: task.id,
@@ -478,6 +479,7 @@ describe('TaskRunner', () => {
     const done = runner.executeTask(task);
     await vi.waitFor(() => expect(seenRequest).toBeDefined());
     expect(seenRequest.inputs.freshWorkspace).toBe(true);
+    expect(seenRequest.inputs.lifecycleTag).toMatch(/^g0\.t3\.a/);
     completeCallback?.({
       requestId: seenRequest.requestId,
       actionId: task.id,
@@ -539,6 +541,7 @@ describe('TaskRunner', () => {
     const done = runner.executeTask(task);
     await vi.waitFor(() => expect(seenRequest).toBeDefined());
     expect(seenRequest.inputs.freshWorkspace).toBe(false);
+    expect(seenRequest.inputs.lifecycleTag).toMatch(/^g0\.t1\.a/);
     completeCallback?.({
       requestId: seenRequest.requestId,
       actionId: task.id,

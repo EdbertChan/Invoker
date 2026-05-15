@@ -72,25 +72,24 @@ describe('findManagedWorktreeByActionId', () => {
 HEAD a
 branch refs/heads/main
 
-worktree /home/u/.invoker/wt/h/experiment-task1-aabb1122
+worktree /home/u/.invoker/wt/h/experiment-wf-1-task1-g0.t1.aaaa11111-aabb1122
 HEAD b
-branch refs/heads/experiment/task1-aabb1122
+branch refs/heads/experiment/wf-1/task1/g0.t1.aaaa11111-aabb1122
 
-worktree /home/u/.invoker/wt/h/experiment-task2-ccdd3344
+worktree /home/u/.invoker/wt/h/experiment-wf-1-task2-g0.t1.abbb22222-ccdd3344
 HEAD c
-branch refs/heads/experiment/task2-ccdd3344
+branch refs/heads/experiment/wf-1/task2/g0.t1.abbb22222-ccdd3344
 `;
 
-  it('matches worktree with same actionId but different hash suffix', () => {
-    // Looking for actionId "task1" — should match the branch experiment/task1-aabb1122
+  it('matches canonical branch with same actionId but different hash suffix', () => {
     const result = findManagedWorktreeByActionId(
       porcelain,
-      'task1',
+      'wf-1/task1',
       ['/home/u/.invoker/wt/h'],
     );
     expect(result).toEqual({
-      path: '/home/u/.invoker/wt/h/experiment-task1-aabb1122',
-      branch: 'experiment/task1-aabb1122',
+      path: '/home/u/.invoker/wt/h/experiment-wf-1-task1-g0.t1.aaaa11111-aabb1122',
+      branch: 'experiment/wf-1/task1/g0.t1.aaaa11111-aabb1122',
     });
   });
 
@@ -107,20 +106,20 @@ branch refs/heads/experiment/task2-ccdd3344
     // The "main" branch worktree is at /home/u/project, not under managed prefix
     const result = findManagedWorktreeByActionId(
       porcelain,
-      'task1',
+      'wf-1/task1',
       ['/other/prefix'],
     );
     expect(result).toBeUndefined();
   });
 
-  it('does not match branches without experiment/ prefix', () => {
-    const porcelainNoExp = `worktree /home/u/.invoker/wt/h/task1-aabb1122
+  it('does not match branches without canonical experiment shape', () => {
+    const porcelainNoExp = `worktree /home/u/.invoker/wt/h/experiment-wf-1-task1-aabb1122
 HEAD b
-branch refs/heads/task1-aabb1122
+branch refs/heads/experiment/wf-1/task1-aabb1122
 `;
     const result = findManagedWorktreeByActionId(
       porcelainNoExp,
-      'task1',
+      'wf-1/task1',
       ['/home/u/.invoker/wt/h'],
     );
     expect(result).toBeUndefined();

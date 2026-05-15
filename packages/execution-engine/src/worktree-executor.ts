@@ -156,6 +156,9 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     const upstreamCommits = (request.inputs.upstreamContext ?? [])
       .map(c => c.commitHash)
       .filter((h): h is string => !!h);
+    // INV-114 selected design: lifecycle state stays visible in the branch
+    // suffix, while contentHash remains the stable reuse key.
+    const lifecycleTag = request.inputs.lifecycleTag ?? '';
     const contentHash = computeContentHash(
       request.actionId,
       request.inputs.command,
@@ -165,7 +168,7 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     );
     const branch = buildExperimentBranchName(
       request.actionId,
-      request.inputs.lifecycleTag ?? '',
+      lifecycleTag,
       contentHash,
     );
     traceExecution(`[WorktreeExecutor] branch=${branch} contentHash=${contentHash}`);

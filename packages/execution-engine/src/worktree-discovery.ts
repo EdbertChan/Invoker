@@ -74,19 +74,22 @@ export function findManagedWorktreeForBranch(
 }
 
 /**
- * First Invoker-managed worktree whose branch starts with `experiment/{actionId}-`
- * (same task, possibly different hash). Returns the worktree path and branch name.
+ * First Invoker-managed worktree whose canonical experiment branch parses to
+ * the requested actionId (same task, possibly different content hash).
+ * Legacy `experiment/<actionId>-<hash>` branches are intentionally ignored so
+ * reuse decisions stay aligned with the INV-114 content/lifecycle split.
  */
 export function findManagedWorktreeByActionId(
   porcelain: string,
   actionId: string,
   managedPathPrefixes: string[],
 ): { path: string; branch: string } | undefined {
-  const prefix = `experiment/${actionId}-`;
   const entries = parseGitWorktreePorcelain(porcelain);
   for (const e of entries) {
-    if (!e.branch?.startsWith(prefix)) continue;
     if (!pathIsUnderManagedPrefixes(e.path, managedPathPrefixes)) continue;
+    if (!e.branch) continue;
+    const parsed = parseExperimentBranch(e.branch);
+    if (!parsed || parsed.actionId !== actionId) continue;
     return { path: e.path, branch: e.branch };
   }
   return undefined;

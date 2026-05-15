@@ -1,9 +1,8 @@
 /**
- * Integration test: worktree reuse by actionId after conflict resolution.
+ * Integration test: worktree reuse after conflict resolution.
  *
- * Proves that when a task's branch hash changes (e.g. baseHead moved),
- * the pool reuses the existing worktree (renaming the branch) instead of
- * creating a fresh one — preserving merge resolution commits.
+ * Proves the current canonical experiment branch shape is used when the pool
+ * reuses an existing same-action worktree and renames it to the new lifecycle.
  *
  * Uses a real git sandbox (mkdtempSync + git init).
  */
@@ -63,7 +62,7 @@ describe('worktree reuse after conflict resolution (real git)', { timeout: 30_00
     const actionId = 'wf-test/verify-conflict';
 
     // --- First acquire with hash1 ---
-    const branch1 = `experiment/${actionId}-aabb1122`;
+    const branch1 = `experiment/${actionId}/g0.t0.aaaa-aabb1122`;
     const acquired1 = await pool.acquireWorktree(bare, branch1, baseSha, actionId);
 
     // Configure git user in worktree
@@ -101,7 +100,7 @@ describe('worktree reuse after conflict resolution (real git)', { timeout: 30_00
     acquired1.softRelease();
 
     // --- Re-acquire with hash2 (same actionId, different hash) ---
-    const branch2 = `experiment/${actionId}-ccdd3344`;
+    const branch2 = `experiment/${actionId}/g0.t1.abbbb-ccdd3344`;
     const acquired2 = await pool.acquireWorktree(bare, branch2, baseSha, actionId);
 
     // Assert: reused the same worktree path
@@ -164,7 +163,7 @@ describe('worktree reuse after conflict resolution (real git)', { timeout: 30_00
     pool = new RepoPool({ cacheDir, maxWorktrees: 5, worktreeBaseDir });
 
     const actionId = 'wf-test/recreate-conflict';
-    const branch1 = `experiment/${actionId}-aabb1122`;
+    const branch1 = `experiment/${actionId}/g0.t0.aaaa-aabb1122`;
     const acquired1 = await pool.acquireWorktree(bare, branch1, baseSha, actionId);
 
     git(acquired1.worktreePath, 'config user.email "test@test.com"');
@@ -187,7 +186,7 @@ describe('worktree reuse after conflict resolution (real git)', { timeout: 30_00
     const resolutionSha = git(acquired1.worktreePath, 'rev-parse HEAD');
     acquired1.softRelease();
 
-    const branch2 = `experiment/${actionId}-ccdd3344`;
+    const branch2 = `experiment/${actionId}/g0.t1.abbbb-ccdd3344`;
     const acquired2 = await pool.acquireWorktree(bare, branch2, baseSha, actionId, { forceFresh: true });
 
     expect(acquired2.worktreePath).not.toBe(acquired1.worktreePath);
@@ -221,7 +220,7 @@ describe('worktree reuse after conflict resolution (real git)', { timeout: 30_00
     pool = new RepoPool({ cacheDir, maxWorktrees: 5, worktreeBaseDir });
 
     // No prior worktree exists for this actionId — should create fresh
-    const branch = 'experiment/fresh-task-11223344';
+    const branch = 'experiment/fresh-task/g0.t0.aaaa-11223344';
     const acquired = await pool.acquireWorktree(bare, branch, baseSha, 'fresh-task');
 
     const currentBranch = git(acquired.worktreePath, 'rev-parse --abbrev-ref HEAD');
