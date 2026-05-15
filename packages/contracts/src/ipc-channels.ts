@@ -92,6 +92,19 @@ export interface ExternalGatePolicyUpdate {
   gatePolicy: 'completed' | 'review_ready';
 }
 
+export interface ExperimentSelectionPayload {
+  experimentId?: string | string[];
+  experimentIds?: string[];
+}
+
+export interface ExperimentSelectionResult {
+  ok: true;
+  taskId: string;
+  action: 'experiment_selected';
+  experimentIds: string[];
+  tasksStarted: number;
+}
+
 export interface TaskEvent {
   id: number;
   taskId: string;

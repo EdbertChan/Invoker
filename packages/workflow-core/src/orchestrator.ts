@@ -60,6 +60,27 @@ function isActiveForInvalidation(status: TaskStatus): boolean {
     status === 'review_ready'
   );
 }
+
+function selectedExperimentIds(task: TaskState): readonly string[] | undefined {
+  return task.execution.selectedExperiments
+    ?? (task.execution.selectedExperiment !== undefined
+      ? [task.execution.selectedExperiment]
+      : undefined);
+}
+
+function canonicalExperimentIds(ids: readonly string[]): string[] {
+  return Array.from(new Set(ids)).slice().sort();
+}
+
+function isChangedExperimentSelection(
+  previousIds: readonly string[] | undefined,
+  nextIds: readonly string[],
+): boolean {
+  if (previousIds === undefined) return false;
+  const previous = canonicalExperimentIds(previousIds);
+  const next = canonicalExperimentIds(nextIds);
+  return previous.length !== next.length || previous.some((id, i) => id !== next[i]);
+}
 import { getTransitiveDependents } from '@invoker/workflow-graph';
 import { ActionGraph } from '@invoker/workflow-graph';
 import {
@@ -1934,19 +1955,10 @@ export class Orchestrator {
 
     const winner = this.stateGetTask(experimentId);
     const winnerId = winner?.id ?? experimentId;
-    const previousSet = task.execution.selectedExperiments
-      ?? (task.execution.selectedExperiment !== undefined
-        ? [task.execution.selectedExperiment]
-        : undefined);
-    const canonicalize = (ids: readonly string[]) =>
-      Array.from(new Set(ids)).slice().sort();
-    const newCanon = canonicalize([winnerId]);
-    const prevCanon = previousSet ? canonicalize(previousSet) : undefined;
-    const sameAsPrev =
-      prevCanon !== undefined &&
-      prevCanon.length === newCanon.length &&
-      prevCanon.every((id, i) => id === newCanon[i]);
-    const isReSelection = previousSet !== undefined && !sameAsPrev;
+    const isReSelection = isChangedExperimentSelection(
+      selectedExperimentIds(task),
+      [winnerId],
+    );
     const allTasksBefore = this.stateMachine.getAllTasks();
     if (isReSelection) {
       const taskMapBefore = new Map(allTasksBefore.map((t) => [t.id, t]));
@@ -2014,19 +2026,10 @@ export class Orchestrator {
     if (!task || !task.config.isReconciliation) return [];
     const reconId = task.id;
 
-    const previousSet = task.execution.selectedExperiments
-      ?? (task.execution.selectedExperiment !== undefined
-          ? [task.execution.selectedExperiment]
-          : undefined);
-    const canonicalize = (ids: readonly string[]) =>
-      Array.from(new Set(ids)).slice().sort();
-    const newCanon = canonicalize(experimentIds);
-    const prevCanon = previousSet ? canonicalize(previousSet) : undefined;
-    const sameAsPrev =
-      prevCanon !== undefined &&
-      prevCanon.length === newCanon.length &&
-      prevCanon.every((id, i) => id === newCanon[i]);
-    const isReSelection = previousSet !== undefined && !sameAsPrev;
+    const isReSelection = isChangedExperimentSelection(
+      selectedExperimentIds(task),
+      experimentIds,
+    );
 
     const allTasksBefore = this.stateMachine.getAllTasks();
 

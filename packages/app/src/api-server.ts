@@ -24,6 +24,7 @@
  *   POST   /api/tasks/:id/approve
  *   POST   /api/tasks/:id/reject       body: { reason? }
  *   POST   /api/tasks/:id/input        body: { text }
+ *   POST   /api/tasks/:id/select-experiment body: { experimentId | experimentIds }
  *   POST   /api/tasks/:id/edit         body: { command }
  *   POST   /api/tasks/:id/edit-prompt  body: { prompt }
  *   POST   /api/tasks/:id/edit-type    body: { runnerKind, poolMemberId? }
@@ -38,7 +39,11 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import type { Logger } from '@invoker/contracts';
+import type {
+  ExperimentSelectionPayload,
+  ExperimentSelectionResult,
+  Logger,
+} from '@invoker/contracts';
 import {
   OrchestratorError,
   OrchestratorErrorCode,
@@ -141,6 +146,15 @@ function httpStatusForError(err: unknown): number {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function normalizeExperimentSelection(
+  payload: ExperimentSelectionPayload,
+): string[] {
+  const rawIds = payload.experimentIds ?? payload.experimentId;
+  const ids = (Array.isArray(rawIds) ? rawIds : [rawIds])
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  return Array.from(new Set(ids));
 }
 
 export function startApiServer(deps: ApiServerDeps): ApiServer {
@@ -455,6 +469,34 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           }
           mutations.provideInput(taskId, text);
           json(res, 200, { ok: true, taskId, action: 'input_provided' });
+        } catch (err) {
+          json(res, httpStatusForError(err), { error: errorMessage(err) });
+        }
+        return;
+      }
+
+      // POST /api/tasks/:id/select-experiment  body: { experimentId | experimentIds }
+      const selectExperimentMatch = path.match(/^\/api\/tasks\/([^/]+)\/select-experiment$/);
+      if (method === 'POST' && selectExperimentMatch) {
+        const taskId = decodeURIComponent(selectExperimentMatch[1]);
+        try {
+          const body = await readBody(req);
+          const experimentIds = normalizeExperimentSelection(JSON.parse(body));
+          if (experimentIds.length === 0) {
+            json(res, 400, { error: 'Missing "experimentId" or non-empty "experimentIds" in request body' });
+            return;
+          }
+          const result = experimentIds.length === 1
+            ? await mutations.selectExperiment(taskId, experimentIds[0])
+            : await mutations.selectExperiments(taskId, experimentIds);
+          const response: ExperimentSelectionResult = {
+            ok: true,
+            taskId,
+            action: 'experiment_selected',
+            experimentIds,
+            tasksStarted: result.runnable.length,
+          };
+          json(res, 200, response);
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }
