@@ -15,6 +15,7 @@
     "test:e2e-chaos": "bash scripts/e2e-chaos/run-matrix.sh",
     "test:e2e-ssh": "bash scripts/e2e-ssh/run-all.sh",
     "test:all": "bash scripts/run-all-tests.sh",
+    "test:all:required": "pnpm run test:all",
     "test:all:extended": "env INVOKER_TEST_ALL_EXTENDED=1 bash scripts/run-all-tests.sh",
     "test:all:destructive": "env INVOKER_TEST_ALL_EXTENDED=1 INVOKER_TEST_ALL_DANGEROUS=1 bash scripts/run-all-tests.sh",
     "setup": "bash scripts/setup-agent-skills.sh",

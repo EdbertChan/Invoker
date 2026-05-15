@@ -11,6 +11,8 @@ RESUME="${INVOKER_TEST_ALL_RESUME:-0}"
 FORCE_RERUN="${INVOKER_TEST_ALL_FORCE_RERUN:-0}"
 JOBS="${INVOKER_TEST_ALL_JOBS:-1}"
 
+# INV-67 selects this registry orchestrator as the authoritative full-suite
+# surface; docs/context/inv-67/experiment-brief.md records the thresholds.
 if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [ "$JOBS" -lt 1 ]; then
   echo "ERROR: INVOKER_TEST_ALL_JOBS must be a positive integer" >&2
   exit 2
@@ -125,6 +127,7 @@ run_suite() {
   local preflight_reason=""
   local preflight_status=0
   local relpath
+  local suite_status=0
   relpath="$(suite_relpath "$suite")"
 
   preflight_reason="$(suite_preflight "$suite")" || preflight_status=$?
@@ -147,7 +150,11 @@ run_suite() {
   {
     echo "======== ${relpath} ========"
     bash "$suite"
+    suite_status=$?
   } >"$log_file" 2>&1
+  if [ "$suite_status" -ne 0 ]; then
+    return "$suite_status"
+  fi
   printf 'passed'
   return 0
 }
@@ -324,19 +331,16 @@ for suite in "${SUITES[@]}"; do
   if [ "$JOBS" -gt 1 ] && is_parallel_safe "$suite"; then
     while [ "${#JOB_SUITE[@]}" -ge "$JOBS" ]; do
       for pid in "${!JOB_SUITE[@]}"; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-          if ! wait_for_one_parallel "$pid"; then
-            overall_failed=1
-            if [ "$FAIL_FAST" = "1" ]; then
-              flush_parallel || true
-              print_summary
-              exit 1
-            fi
+        if ! wait_for_one_parallel "$pid"; then
+          overall_failed=1
+          if [ "$FAIL_FAST" = "1" ]; then
+            flush_parallel || true
+            print_summary
+            exit 1
           fi
-          break
         fi
+        break
       done
-      sleep 0.2
     done
     start_parallel_suite "$suite"
     continue
