@@ -15,6 +15,8 @@ type DelegateTrackingOptions = {
   timeoutMs?: number;
 };
 
+type DelegationChannel = 'headless.run' | 'headless.resume' | 'headless.exec';
+
 // ---------------------------------------------------------------------------
 // DelegationOutcome — typed result union for delegation attempts
 // ---------------------------------------------------------------------------
@@ -209,7 +211,7 @@ export async function tryDelegateQuery(
 }
 
 async function tryDelegate(
-  channel: string,
+  channel: DelegationChannel,
   payload: unknown,
   messageBus: MessageBus,
   options: DelegateTrackingOptions,

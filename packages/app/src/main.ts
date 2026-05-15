@@ -69,7 +69,7 @@ import {
   SessionProbeAdapter,
   TerminalLauncherAdapter,
 } from '@invoker/runtime-adapters';
-import { composeRuntimeServices, composeHeadlessStartup } from '@invoker/runtime-service';
+import { composeRuntimeServices } from '@invoker/runtime-service';
 import type { RuntimeServices } from '@invoker/runtime-service';
 import type { MessageBus } from '@invoker/transport';
 import {
@@ -113,6 +113,7 @@ import {
   tryDelegateQuery,
   resolveAgentSession,
   createHeadlessExecutor,
+  composeHeadlessRuntimeServices,
   wireHeadlessApproveHook,
   type HeadlessDeps,
 } from './headless.js';
@@ -400,7 +401,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
     terminalLauncher: new TerminalLauncherAdapter(),
   };
   runtimeServices = isHeadless
-    ? composeHeadlessStartup(runtimeServiceDeps)
+    ? composeHeadlessRuntimeServices(runtimeServiceDeps)
     : composeRuntimeServices(runtimeServiceDeps);
 
   executorRegistry = new ExecutorRegistry();

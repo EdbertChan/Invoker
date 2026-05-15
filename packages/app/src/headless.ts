@@ -57,7 +57,7 @@ import { trackWorkflow } from './headless-watch.js';
 import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './workflow-preemption.js';
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
-import type { RuntimeServices } from '@invoker/runtime-service';
+import { composeHeadlessStartup, type RuntimeServiceDeps, type RuntimeServices } from '@invoker/runtime-service';
 
 export { bumpGenerationAndRecreate } from './workflow-actions.js';
 export {
@@ -70,6 +70,10 @@ export {
   tryDelegateRun,
 } from './headless-delegation.js';
 export type { DelegationOutcome } from './headless-delegation.js';
+
+export function composeHeadlessRuntimeServices(deps: RuntimeServiceDeps): RuntimeServices {
+  return composeHeadlessStartup(deps);
+}
 
 // ── HeadlessDeps interface ───────────────────────────────────
 
