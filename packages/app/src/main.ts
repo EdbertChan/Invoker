@@ -2934,7 +2934,7 @@ if (isHeadless) {
       'invoker:delete-workflow',
       (workflowIdArg: unknown) => String(workflowIdArg),
       'high',
-      async (workflowIdArg: unknown) => {
+      async (_context, workflowIdArg: unknown) => {
         const workflowId = String(workflowIdArg);
         logger.info(`delete-workflow: "${workflowId}"`, { module: 'ipc' });
         try {
@@ -2957,7 +2957,7 @@ if (isHeadless) {
       'invoker:detach-workflow',
       (workflowIdArg: unknown) => String(workflowIdArg),
       'high',
-      async (workflowIdArg: unknown, upstreamWorkflowIdArg: unknown) => {
+      async (_context, workflowIdArg: unknown, upstreamWorkflowIdArg: unknown) => {
         const workflowId = String(workflowIdArg);
         const upstreamWorkflowId = String(upstreamWorkflowIdArg);
         logger.info(
@@ -3085,7 +3085,7 @@ if (isHeadless) {
       'invoker:approve',
       (taskIdArg: unknown) => workflowIdForTaskArg(taskIdArg),
       'normal',
-      async (taskIdArg: unknown) => {
+      async (_context, taskIdArg: unknown) => {
       const taskId = String(taskIdArg);
       logger.info(`approve: "${taskId}"`, { module: 'ipc' });
       const { started } = await performSharedApproveTask(taskId, 'ui');
@@ -3146,7 +3146,7 @@ if (isHeadless) {
       'invoker:restart-task',
       (taskIdArg: unknown) => workflowIdForTaskArg(taskIdArg),
       'high',
-      async (taskIdArg: unknown) => {
+      async (_context, taskIdArg: unknown) => {
       const taskId = String(taskIdArg);
       logger.info(`restart-task → retry-task (Step 13 vocabulary): "${taskId}"`, { module: 'ipc' });
       try {
@@ -3183,7 +3183,7 @@ if (isHeadless) {
       'invoker:cancel-task',
       (taskIdArg: unknown) => workflowIdForTaskArg(taskIdArg),
       'high',
-      async (taskIdArg: unknown) => {
+      async (_context, taskIdArg: unknown) => {
       const taskId = String(taskIdArg);
       logger.info(`cancel-task: "${taskId}"`, { module: 'ipc' });
       try {
@@ -3207,7 +3207,7 @@ if (isHeadless) {
       'invoker:cancel-workflow',
       (workflowIdArg: unknown) => String(workflowIdArg),
       'high',
-      async (workflowIdArg: unknown) => {
+      async (_context, workflowIdArg: unknown) => {
       const workflowId = String(workflowIdArg);
       logger.info(`cancel-workflow: "${workflowId}"`, { module: 'ipc' });
       try {
@@ -3552,7 +3552,7 @@ if (isHeadless) {
       'invoker:approve-merge',
       (workflowIdArg: unknown) => String(workflowIdArg),
       'normal',
-      async (workflowIdArg: unknown) => {
+      async (_context, workflowIdArg: unknown) => {
       const workflowId = String(workflowIdArg);
       logger.info(`approve-merge: "${workflowId}"`, { module: 'ipc' });
       try {
