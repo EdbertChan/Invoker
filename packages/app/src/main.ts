@@ -150,7 +150,11 @@ import {
   isDispatchableLaunch,
 } from './global-topup.js';
 import { computeDeferredLaunchTiming } from './deferred-runnable.js';
-import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './workflow-preemption.js';
+import {
+  preemptWorkflowBeforeMutation,
+  throwIfWorkflowMutationAborted,
+  type WorkflowCancelResult,
+} from './workflow-preemption.js';
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import { evaluateExecutingStall } from './executing-stall.js';
 import { listOpenFixIntentsForTask } from './auto-fix-intents.js';
@@ -3209,6 +3213,7 @@ if (isHeadless) {
           preemptWorkflowExecution,
           logger,
           context: 'ipc.cancel-workflow',
+          signal: activeMutationContext?.signal,
         });
         await finalizeMutationWithGlobalTopup({
           orchestrator,
@@ -3286,6 +3291,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = activeMutationContext?.mutationTiming
           ? await activeMutationContext.mutationTiming.span(
@@ -3323,13 +3329,17 @@ if (isHeadless) {
       logger.info(`recreate-task: "${taskId}"`, { module: 'ipc' });
       try {
         if (activeMutationContext?.mutationTiming) {
+          throwIfWorkflowMutationAborted(activeMutationContext.signal);
           await activeMutationContext.mutationTiming.span(
             'main.ipc.recreate-task.preemptTaskSubgraph',
             { taskId },
             () => preemptTaskSubgraph(taskId),
           );
+          throwIfWorkflowMutationAborted(activeMutationContext.signal);
         } else {
+          throwIfWorkflowMutationAborted(activeMutationContext?.signal);
           await preemptTaskSubgraph(taskId);
+          throwIfWorkflowMutationAborted(activeMutationContext?.signal);
         }
         const started = activeMutationContext?.mutationTiming
           ? await activeMutationContext.mutationTiming.span(
@@ -3372,6 +3382,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.retry-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
         const result = activeMutationContext?.mutationTiming
@@ -3417,6 +3428,7 @@ if (isHeadless) {
             logger,
             context: 'ipc.rebase-and-retry',
             mutationTiming: activeMutationContext?.mutationTiming,
+            signal: activeMutationContext?.signal,
           });
         }
         const started = await rebaseAndRetry(taskId, {
@@ -3458,6 +3470,7 @@ if (isHeadless) {
           logger,
           context: 'ipc.recreate-with-rebase',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = await recreateWithRebase(workflowId, {
           orchestrator,

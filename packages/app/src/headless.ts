@@ -54,7 +54,11 @@ import {
 } from './global-topup.js';
 import { resolveHeadlessTargetWorkflowId } from './headless-command-classification.js';
 import { trackWorkflow } from './headless-watch.js';
-import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './workflow-preemption.js';
+import {
+  preemptWorkflowBeforeMutation,
+  throwIfWorkflowMutationAborted,
+  type WorkflowCancelResult,
+} from './workflow-preemption.js';
 import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
 import type { RuntimeServices } from '@invoker/runtime-service';
@@ -1635,6 +1639,7 @@ async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promi
     logger: deps.logger,
     context: 'headless.rebase-and-retry',
     mutationTiming: deps.mutationTiming,
+    signal: deps.signal,
   });
 
   const te = createHeadlessExecutor(deps);
@@ -1678,6 +1683,7 @@ async function headlessRecreateWithRebase(workflowTarget: string, deps: Headless
     logger: deps.logger,
     context: 'headless.recreate-with-rebase',
     mutationTiming: deps.mutationTiming,
+    signal: deps.signal,
   });
 
   const te = createHeadlessExecutor(deps);
@@ -1722,6 +1728,7 @@ async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps):
     logger: deps.logger,
     context: 'headless.recreate-workflow',
     mutationTiming: deps.mutationTiming,
+    signal: deps.signal,
   });
   const started = deps.mutationTiming
     ? await deps.mutationTiming.span(
@@ -1778,13 +1785,17 @@ async function headlessRecreateTask(taskId: string, deps: HeadlessDeps): Promise
   if (!restored) return;
   taskId = restored.resolvedTaskId;
   if (deps.mutationTiming) {
+    throwIfWorkflowMutationAborted(deps.signal);
     await deps.mutationTiming.span(
       'headless.recreate-task.preemptTaskSubgraph',
       { taskId },
       () => preemptTaskSubgraph(taskId, deps),
     );
+    throwIfWorkflowMutationAborted(deps.signal);
   } else {
+    throwIfWorkflowMutationAborted(deps.signal);
     await preemptTaskSubgraph(taskId, deps);
+    throwIfWorkflowMutationAborted(deps.signal);
   }
 
   const started = deps.mutationTiming
@@ -1870,6 +1881,7 @@ async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDeps): Pr
     logger: deps.logger,
     context: 'headless.retry-workflow',
     mutationTiming: deps.mutationTiming,
+    signal: deps.signal,
   });
   const envelope = makeEnvelope('retry-workflow', 'headless', 'workflow', { workflowId });
   const result = deps.mutationTiming

@@ -1320,6 +1320,8 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(capturedContext!.signal.aborted).toBe(false);
     expect(capturedContext!.workflowId).toBe('wf-1');
     expect(capturedContext!.intentId).toBe(1);
+    expect(capturedContext!.channel).toBe('invoker:fix-with-agent');
+    expect(capturedContext!.priority).toBe('normal');
 
     const recreateTask = coordinator.enqueue<void>(
       'wf-1',

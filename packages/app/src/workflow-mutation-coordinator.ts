@@ -1,9 +1,17 @@
 export type WorkflowMutationPriority = 'high' | 'normal';
 
+export type WorkflowMutationRunContext = {
+  signal: AbortSignal;
+  workflowId: string;
+  priority: WorkflowMutationPriority;
+};
+
 type Job<T> = {
-  run: () => Promise<T>;
+  run: (context: WorkflowMutationRunContext) => Promise<T>;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
+  priority: WorkflowMutationPriority;
+  abortController: AbortController;
 };
 
 type WorkflowQueues = {
@@ -24,12 +32,18 @@ export class WorkflowMutationCoordinator {
   enqueue<T>(
     workflowId: string,
     priority: WorkflowMutationPriority,
-    run: () => Promise<T>,
+    run: (context: WorkflowMutationRunContext) => Promise<T>,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const state = this.queues.get(workflowId) ?? { running: false, high: [], normal: [] };
       this.queues.set(workflowId, state);
-      const job: Job<T> = { run, resolve, reject };
+      const job: Job<T> = {
+        run,
+        resolve,
+        reject,
+        priority,
+        abortController: new AbortController(),
+      };
       if (priority === 'high') {
         state.high.push(job as Job<unknown>);
       } else {
@@ -50,15 +64,27 @@ export class WorkflowMutationCoordinator {
     }
 
     state.running = true;
-    void next.run()
-      .then((value) => next.resolve(value))
-      .catch((err) => next.reject(err))
-      .finally(() => {
+    void (async () => {
+      try {
+        const value = await next.run({
+          signal: next.abortController.signal,
+          workflowId,
+          priority: next.priority,
+        });
+        next.abortController.abort();
+        next.resolve(value);
+      } catch (err) {
+        next.abortController.abort();
+        next.reject(err);
+      } finally {
+        if (!next.abortController.signal.aborted) {
+          next.abortController.abort();
+        }
         const s = this.queues.get(workflowId);
         if (!s) return;
         s.running = false;
         this.drain(workflowId);
-      });
+      }
+    })();
   }
 }
-
