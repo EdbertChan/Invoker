@@ -531,7 +531,16 @@ rows = conn.execute(
 def parse_ts(value: str | None):
     if not value:
         return None
-    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(text)
+    except ValueError:
+        ts = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
 
 stuck = []
 for row in rows:
