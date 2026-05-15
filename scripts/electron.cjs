@@ -116,22 +116,20 @@ function ensureElectronInstalled() {
   });
 
   if (install.status !== 0) {
-    process.exit(install.status ?? 1);
+    throw new Error(`Electron installer exited with code ${install.status ?? 1}`);
   }
   if (install.signal) {
-    process.kill(process.pid, install.signal);
-    return null;
+    throw new Error(`Electron installer terminated with signal ${install.signal}`);
   }
 
   const repairedBinary = resolveInstalledElectronBinary(electronPackageDir);
   if (!repairedBinary) {
     return repairElectronWithSystemUnzip(electronPackageDir).then((fallbackBinary) => {
       if (!fallbackBinary) {
-        console.error(
+        throw new Error(
           'Electron is still unavailable after running its installer. ' +
           'If your environment blocks dependency build scripts, run `pnpm approve-builds` or reinstall with network access.',
         );
-        process.exit(1);
       }
 
       return fallbackBinary;
@@ -139,6 +137,10 @@ function ensureElectronInstalled() {
   }
 
   return repairedBinary;
+}
+
+function isEnsureOnlyInvocation(args) {
+  return args.length === 1 && args[0] === '--ensure-only';
 }
 
 function withLinuxSandboxFallback(binaryPath, args) {
@@ -161,12 +163,13 @@ function withLinuxSandboxFallback(binaryPath, args) {
 
 function main() {
   const args = process.argv.slice(2);
+  const ensureOnly = isEnsureOnlyInvocation(args);
   Promise.resolve(ensureElectronInstalled()).then((binaryPath) => {
     if (!binaryPath) {
       process.exit(1);
     }
 
-    if (args.length === 1 && args[0] === '--ensure-only') {
+    if (ensureOnly) {
       return;
     }
 
@@ -189,6 +192,13 @@ function main() {
       process.exit(code ?? 0);
     });
   }).catch((error) => {
+    if (ensureOnly) {
+      console.warn(
+        'Electron install check failed during --ensure-only postinstall; continuing because desktop runtime is not required for this workflow.',
+      );
+      console.warn(error instanceof Error ? error.message : String(error));
+      return;
+    }
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   });
