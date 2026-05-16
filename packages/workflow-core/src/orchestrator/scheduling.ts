@@ -5,8 +5,7 @@ import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchest
 import type { TaskScheduler } from '../scheduler.js';
 import type { TaskRepository } from '../task-repository.js';
 import type { TaskStateMachine } from '../state-machine.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { publishTaskDelta } from './events.js';
 const ATTEMPT_LEASE_MS = 20 * 60 * 1000;
 
 function nextLeaseExpiry(from: Date): Date {
@@ -273,7 +272,7 @@ export function drainSchedulerDomain(host: SchedulingHost): TaskState[] {
       host.deferRunningUntilLaunch ? 'task.launch_claimed' : 'task.running',
       changes,
     );
-    host.messageBus.publish(TASK_DELTA_CHANNEL, host.buildUpdateDelta(task, updated, changes));
+    publishTaskDelta(host, host.buildUpdateDelta(task, updated, changes));
     started.push(updated);
     host.logger.info('[orchestrator] drainScheduler: started', {
       taskId: job.taskId,

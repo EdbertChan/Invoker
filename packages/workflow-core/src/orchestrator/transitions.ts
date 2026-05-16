@@ -5,8 +5,7 @@ import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchest
 import type { TaskScheduler } from '../scheduler.js';
 import type { TaskRepository } from '../task-repository.js';
 import type { TaskStateMachine } from '../state-machine.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { publishTaskDelta } from './events.js';
 
 function tryParseJsonObject(value: string | undefined): Record<string, unknown> | undefined {
   if (!value) return undefined;
@@ -123,7 +122,7 @@ export function handleCompletedDomain(
   const delta = host.buildUpdateDelta(task, completedUpdated, changes);
   const eventName = needsApproval ? 'task.awaiting_approval' : 'task.completed';
   host.persistence.logEvent?.(taskId, eventName, changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host, delta);
 
   try {
     const currentAttemptId = host.stateGetTask(taskId)?.execution.selectedAttemptId;
@@ -202,7 +201,7 @@ export function finalizeFailedTaskDomain(
 
   const delta = host.buildUpdateDelta(existing, updated, changes);
   host.persistence.logEvent?.(taskId, eventName, changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host, delta);
 
   host.checkExperimentCompletion(taskId);
 
@@ -286,6 +285,6 @@ export function handleNeedsInputDomain(
   }
   const delta = host.buildUpdateDelta(needsInputBefore, needsInputUpdated, changes);
   host.persistence.logEvent?.(taskId, 'task.needs_input', changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host, delta);
   return [];
 }
