@@ -9,6 +9,10 @@
  * Forking (forkDirtySubtreeImpl) and versioning (nextVersion) have been
  * removed. Downstream staleness is now derived from attempt lineage via
  * the validity functions in @invoker/graph.
+ *
+ * INV-77 consumes docs/context/inv-77/experiment-brief.md by keeping
+ * merge-gate structure here: leaf reconciliation and detached-merge
+ * invariants stay deterministic and host-backed, not provider- or UI-owned.
  */
 
 import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig } from '@invoker/workflow-graph';

@@ -1,5 +1,9 @@
 /**
  * Merge gate utilities — pure functions for computing the synthetic merge gate node.
+ *
+ * INV-77 consumes docs/context/inv-77/experiment-brief.md by keeping UI
+ * ownership limited to task-snapshot projection: labels, workflow grouping,
+ * leaf detection, and status display.
  */
 
 import type { TaskState, TaskStatus, WorkflowMeta } from '../types.js';

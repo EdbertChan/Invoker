@@ -1,3 +1,10 @@
+/**
+ * INV-77 split-boundary provider contract.
+ *
+ * The execution engine owns only the external review lifecycle here:
+ * create a review gate and poll its approval state. Graph mutation remains
+ * in workflow-core, and UI display projection remains in packages/ui.
+ */
 export interface MergeGateProviderResult {
   url: string;
   identifier: string;
