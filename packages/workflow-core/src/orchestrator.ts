@@ -5017,3 +5017,10 @@ export class Orchestrator {
     return true;
   }
 }
+
+export const INV_91_ORCHESTRATOR_MUTATION_INVARIANT = {
+  mutationAuthority: 'workflow-core',
+  refreshPrimitive: 'refreshFromDb',
+  writePrimitive: 'writeAndSync',
+  deltaChannel: TASK_DELTA_CHANNEL,
+} as const;

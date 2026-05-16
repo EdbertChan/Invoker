@@ -597,3 +597,10 @@ type EventMethods = {
  * Test-only methods are Partial because they are only registered when NODE_ENV === 'test'.
  */
 export type InvokerAPI = InvokeMethods & EventMethods & Partial<TestOnlyMethods>;
+
+export const INV_91_IPC_CONTRACT_INVARIANT = {
+  invokeRegistry: 'IpcChannels',
+  eventRegistry: 'IpcEventChannels',
+  rendererApiType: 'InvokerAPI',
+  derivation: 'registry-derived',
+} as const;

@@ -640,3 +640,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
     }),
   };
 }
+
+export const INV_91_API_WRITE_DELEGATION_INVARIANT = {
+  writeDelegate: 'WorkflowMutationFacade',
+  directOrchestratorWritesAllowed: false,
+  allowedAppLevelHelpers: ['deleteWorkflow', 'detachWorkflow'],
+} as const;
