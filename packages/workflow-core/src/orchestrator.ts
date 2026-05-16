@@ -1,6 +1,10 @@
 /**
  * Orchestrator — Single coordinator for all task state mutations.
  *
+ * INV-91 consumed the experiment verdict in
+ * `docs/context/inv-91/experiment-brief.md`: keep this class as the
+ * mutation owner and reject distributed endpoint/IPC write logic.
+ *
  * ALL writes go through the persistence layer (DB) first. The in-memory
  * graph (via TaskStateMachine) is a read-only cache that is refreshed
  * from the DB. This ensures the DB is always the single source of truth.

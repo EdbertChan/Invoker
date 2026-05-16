@@ -4,6 +4,12 @@
  * Binds to 127.0.0.1 only (no external access). Default port 4100,
  * configurable via INVOKER_API_PORT env var.
  *
+ * INV-91 consumed the experiment verdict in
+ * `docs/context/inv-91/experiment-brief.md`: HTTP handlers parse requests
+ * and format responses, while write endpoints delegate to
+ * WorkflowMutationFacade instead of duplicating mutation, dispatch, or
+ * topup logic.
+ *
  * All write endpoints delegate to a WorkflowMutationFacade instance
  * which encapsulates the mutation → dispatch → topup lifecycle.
  *
@@ -56,9 +62,15 @@ export interface ApiServerDeps {
   orchestrator: Orchestrator;
   persistence: SQLiteAdapter;
   executorRegistry: ExecutorRegistry;
-  /** All write endpoints delegate to the facade for mutation + dispatch + topup. */
+  /**
+   * INV-91 selected this as the HTTP write boundary. New write endpoints
+   * should add a facade method and call it here, not call orchestrator or
+   * persistence directly from the route body.
+   */
   mutations: WorkflowMutationFacade;
+  /** Workflow deletion is an owner-level facade operation supplied by app composition. */
   deleteWorkflow: (workflowId: string) => Promise<void>;
+  /** Workflow detachment is an owner-level facade operation supplied by app composition. */
   detachWorkflow: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
 }
 

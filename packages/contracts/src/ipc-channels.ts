@@ -1,6 +1,11 @@
 /**
  * IPC Channel Registry — Single source of truth for every Electron IPC channel.
  *
+ * INV-91 consumed the experiment verdict in
+ * `docs/context/inv-91/experiment-brief.md`: channel names and renderer
+ * request/response types stay in this registry, with `InvokerAPI` derived
+ * from it instead of maintained by hand.
+ *
  * Each entry maps a channel name to its request tuple and response type.
  * The `InvokerAPI` type is derived from this registry, not hand-written.
  *
