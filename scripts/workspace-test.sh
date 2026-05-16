@@ -21,3 +21,5 @@ echo "==> Running package workspace tests (concurrency=$CONCURRENCY)"
 pnpm -r --workspace-concurrency="$CONCURRENCY" test
 echo "==> Running required package builds"
 bash "$ROOT/scripts/required-builds.sh"
+
+# INV-117 keeps CI package tests serialized unless explicitly overridden.
