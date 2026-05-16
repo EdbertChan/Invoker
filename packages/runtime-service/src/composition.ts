@@ -56,6 +56,31 @@ export interface RuntimeServices {
   readonly terminalLauncher: TerminalLauncher;
 }
 
+type RuntimeServicePortKey = keyof RuntimeServices;
+
+const RUNTIME_SERVICE_PORT_KEYS = Object.freeze([
+  'workspaceProbe',
+  'containerProbe',
+  'sessionProbe',
+  'terminalLauncher',
+] satisfies RuntimeServicePortKey[]);
+
+function assertRuntimeServiceFacadeShape(
+  services: RuntimeServices,
+): void {
+  const actualKeys = Object.keys(services).sort();
+  const expectedKeys = [...RUNTIME_SERVICE_PORT_KEYS].sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index])
+  ) {
+    throw new Error(
+      `RuntimeServices facade shape mismatch: expected ${expectedKeys.join(', ')}, ` +
+        `got ${actualKeys.join(', ')}`,
+    );
+  }
+}
+
 // ── Factory ────────────────────────────────────────────────
 
 /**
@@ -67,18 +92,20 @@ export interface RuntimeServices {
 export function composeRuntimeServices(
   deps: RuntimeServiceDeps,
 ): RuntimeServices {
-  const services = Object.freeze({
+  const services = {
     workspaceProbe: deps.workspaceProbe,
     containerProbe: deps.containerProbe,
     sessionProbe: deps.sessionProbe,
     terminalLauncher: deps.terminalLauncher,
-  });
+  };
+  assertRuntimeServiceFacadeShape(services);
+  const frozenServices = Object.freeze(services);
 
   if (deps.enableDormantBridge === true && deps.dormantBridgeHook) {
-    deps.dormantBridgeHook(services);
+    deps.dormantBridgeHook(frozenServices);
   }
 
-  return services;
+  return frozenServices;
 }
 
 // ── Headless startup composition ──────────────────────────
