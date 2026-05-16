@@ -56,6 +56,13 @@ export interface RuntimeServices {
   readonly terminalLauncher: TerminalLauncher;
 }
 
+const runtimeServiceFacadeKeys = [
+  'workspaceProbe',
+  'containerProbe',
+  'sessionProbe',
+  'terminalLauncher',
+] as const satisfies readonly (keyof RuntimeServices)[];
+
 // ── Factory ────────────────────────────────────────────────
 
 /**
@@ -72,7 +79,10 @@ export function composeRuntimeServices(
     containerProbe: deps.containerProbe,
     sessionProbe: deps.sessionProbe,
     terminalLauncher: deps.terminalLauncher,
-  });
+  } satisfies Record<
+    typeof runtimeServiceFacadeKeys[number],
+    RuntimeServices[typeof runtimeServiceFacadeKeys[number]]
+  >);
 
   if (deps.enableDormantBridge === true && deps.dormantBridgeHook) {
     deps.dormantBridgeHook(services);

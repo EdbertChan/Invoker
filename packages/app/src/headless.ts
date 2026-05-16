@@ -2274,14 +2274,31 @@ export async function resolveAgentSession(
   };
 }
 
-async function headlessSession(taskId: string | undefined, deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence' | 'executionAgentRegistry'>): Promise<void> {
+async function resolveHeadlessSessionSeed(
+  taskId: string,
+  task: TaskState,
+  deps: Pick<HeadlessDeps, 'runtimeServices'>,
+): Promise<{ sessionId?: string; agentName: string }> {
+  const sessionId = task.execution.agentSessionId ?? task.execution.lastAgentSessionId;
+  const agentName = task.execution.agentName ?? task.execution.lastAgentName ?? 'claude';
+  const probed = await deps.runtimeServices?.sessionProbe.probeSession(taskId);
+
+  return {
+    sessionId: probed?.sessionId ?? sessionId,
+    agentName: probed?.agentName ?? agentName,
+  };
+}
+
+async function headlessSession(
+  taskId: string | undefined,
+  deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence' | 'executionAgentRegistry' | 'runtimeServices'>,
+): Promise<void> {
   if (!taskId) throw new Error('Usage: --headless session <taskId>');
   taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
   const task = deps.orchestrator.getTask(taskId);
   if (!task) throw new Error(`Task "${taskId}" not found`);
 
-  let sessionId = task.execution.agentSessionId ?? task.execution.lastAgentSessionId;
-  let agentName = task.execution.agentName ?? task.execution.lastAgentName ?? 'claude';
+  let { sessionId, agentName } = await resolveHeadlessSessionSeed(taskId, task, deps);
 
   // Fallback: if current execution dropped agentSessionId, recover the most
   // recent session from task event payloads.
