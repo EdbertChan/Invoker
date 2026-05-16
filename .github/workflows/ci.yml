@@ -69,6 +69,8 @@ jobs:
             command: pnpm run check:deps
           - name: Required Package Builds
             command: pnpm run check:required-builds
+          - name: Large File Guardrail
+            command: pnpm run check:large-files
           - name: TypeScript Types
             command: pnpm run check:types
 
