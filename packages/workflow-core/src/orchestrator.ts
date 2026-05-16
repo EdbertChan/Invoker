@@ -2038,6 +2038,10 @@ export class Orchestrator {
    * the executor can reuse when the new winner's branch is rebased onto
    * theirs; that is what makes selection retry-class rather than
    * recreate-class in the chart's Decision Table.
+   *
+   * INV-91 keeps this lifecycle centralized here. IPC, HTTP, and
+   * headless surfaces adapt their request shapes to this mutation rather
+   * than duplicating selection, invalidation, or delta publication.
    */
   selectExperiment(taskId: string, experimentId: string): TaskState[] {
     this.refreshFromDb();
@@ -2112,7 +2116,7 @@ export class Orchestrator {
     return started;
   }
 
-    selectExperiments(
+  selectExperiments(
     taskId: string,
     experimentIds: string[],
     combinedBranch?: string,

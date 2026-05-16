@@ -23,6 +23,7 @@
  *   POST   /api/tasks/:id/resolve-conflict  body: { agent? }
  *   POST   /api/tasks/:id/approve
  *   POST   /api/tasks/:id/reject       body: { reason? }
+ *   POST   /api/tasks/:id/select-experiment  body: { experimentId | experimentIds }
  *   POST   /api/tasks/:id/input        body: { text }
  *   POST   /api/tasks/:id/edit         body: { command }
  *   POST   /api/tasks/:id/edit-prompt  body: { prompt }
@@ -38,7 +39,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import type { Logger } from '@invoker/contracts';
+import type { ExperimentSelectionInput, Logger } from '@invoker/contracts';
 import {
   OrchestratorError,
   OrchestratorErrorCode,
@@ -302,6 +303,45 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           }
           mutations.rejectTask(taskId, reason);
           json(res, 200, { ok: true, taskId, action: 'rejected', reason });
+        } catch (err) {
+          json(res, httpStatusForError(err), { error: errorMessage(err) });
+        }
+        return;
+      }
+
+      // POST /api/tasks/:id/select-experiment  body: { experimentId | experimentIds }
+      const selectExperimentMatch = path.match(/^\/api\/tasks\/([^/]+)\/select-experiment$/);
+      if (method === 'POST' && selectExperimentMatch) {
+        const taskId = decodeURIComponent(selectExperimentMatch[1]);
+        try {
+          const body = await readBody(req);
+          const parsed = JSON.parse(body);
+          const selection: ExperimentSelectionInput | undefined = Array.isArray(parsed?.experimentIds)
+            ? parsed.experimentIds
+            : parsed?.experimentId;
+
+          if (typeof selection !== 'string' && !Array.isArray(selection)) {
+            json(res, 400, { error: 'Missing "experimentId" or non-empty "experimentIds" in request body' });
+            return;
+          }
+
+          const experimentIds = (Array.isArray(selection) ? selection : [selection])
+            .filter((id): id is string => typeof id === 'string' && id.length > 0);
+          if (experimentIds.length === 0) {
+            json(res, 400, { error: 'Missing "experimentId" or non-empty "experimentIds" in request body' });
+            return;
+          }
+
+          const result = experimentIds.length === 1
+            ? await mutations.selectExperiment(taskId, experimentIds[0])
+            : await mutations.selectExperiments(taskId, experimentIds);
+          json(res, 200, {
+            ok: true,
+            taskId,
+            experimentIds,
+            action: experimentIds.length === 1 ? 'experiment_selected' : 'experiments_selected',
+            tasksStarted: result.runnable.length,
+          });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }
