@@ -67,6 +67,13 @@ jobs:
         include:
           - name: Dependency Cruise
             command: pnpm run check:deps
+          - name: INV-117 Proof Contract
+            command: |
+              bash -n scripts/workspace-test.sh
+              bash -n scripts/run-all-tests.sh
+              test "$(find scripts/test-suites/required -maxdepth 1 -type f -name '*.sh' ! -name '_*' | wc -l | tr -d ' ')" = 16
+              test "$(find scripts/test-suites/optional -maxdepth 1 -type f -name '*.sh' ! -name '_*' | wc -l | tr -d ' ')" = 7
+              test "$(find scripts/test-suites/dangerous -maxdepth 1 -type f -name '*.sh' ! -name '_*' | wc -l | tr -d ' ')" = 1
           - name: Required Package Builds
             command: pnpm run check:required-builds
           - name: TypeScript Types
@@ -99,6 +106,8 @@ jobs:
         run: ${{ matrix.command }}
 
   required-fast:
+    # INV-117 selected explicit CI evidence surfaces backed by the local
+    # proof runner, not a replacement monolithic pnpm run test:all job.
     needs: build-artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
