@@ -543,6 +543,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       bashFetchNodeRemotes({
         worktreeDir: mergeCwd,
         branchRepoUrl: request.inputs.branchRepoUrl,
+        upstreamBranches: upstreamsToMerge,
       }),
       mergeCwd,
     );
@@ -613,6 +614,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
           bashFetchNodeRemotes({
             worktreeDir: mergeCwd,
             branchRepoUrl: request.inputs.branchRepoUrl,
+            upstreamBranches: upstreams,
           }),
           mergeCwd,
         );

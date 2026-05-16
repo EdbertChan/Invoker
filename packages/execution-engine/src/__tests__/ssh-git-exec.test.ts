@@ -97,7 +97,8 @@ describe('buildMirrorCloneScript', () => {
     expect(script).toContain('INVOKER_HOME=$(echo');
     expect(script).toContain('CLONE="$INVOKER_HOME/repos/$H"');
     expect(script).toContain('if [ ! -d "$CLONE/.git" ]; then git clone "$REPO" "$CLONE"; fi');
-    expect(script).toContain('if ! git -C "$CLONE" fetch --all --prune; then');
+    expect(script).not.toContain('fetch --all --prune');
+    expect(script).toContain("if ! git -C \"$CLONE\" fetch --prune origin '+refs/heads/main:refs/remotes/origin/main'; then");
     expect(script).toContain('__INVOKER_FETCH_FAILED__=1');
     expect(script).toContain('__INVOKER_FETCH_SUCCESS__=1');
     expect(script).toContain('__INVOKER_BASE_REF__');
@@ -149,14 +150,31 @@ describe('buildMirrorCloneScript', () => {
       branchRepoUrl: 'git@github.com:fork/repo.git',
       repoHash: 'abc123',
       baseRef: 'main',
+      upstreamBranches: ['feature/upstream'],
     });
 
     expect(script).toContain('BRANCH_REPO=$(echo');
     expect(script).not.toContain('remote set-url invoker-branches');
     expect(script).not.toContain('remote add invoker-branches');
-    expect(script).toContain('git -C "$CLONE" fetch "$BRANCH_REPO" \'+refs/heads/*:refs/remotes/invoker-branches/*\' --prune');
+    expect(script).toContain("git -C \"$CLONE\" fetch --prune \"$BRANCH_REPO\" '+refs/heads/feature/upstream:refs/remotes/invoker-branches/feature/upstream'");
+    expect(script).not.toContain("'+refs/heads/*:refs/remotes/invoker-branches/*'");
     expect(script).toContain('BRANCH_REPO_FETCH_FAILED=$BRANCH_REPO');
     expect(script).toContain('exit 32');
+  });
+
+  it('targets base and upstream refs during mirror refresh', () => {
+    const script = buildMirrorCloneScript({
+      repoUrl: 'git@github.com:owner/repo.git',
+      repoHash: 'abc123',
+      baseRef: 'release',
+      upstreamBranches: ['feature/a', 'origin/feature/b', 'HEAD'],
+    });
+
+    expect(script).not.toContain('fetch --all --prune');
+    expect(script).toContain("'+refs/heads/release:refs/remotes/origin/release'");
+    expect(script).toContain("'+refs/heads/feature/a:refs/remotes/origin/feature/a'");
+    expect(script).toContain("'+refs/heads/feature/b:refs/remotes/origin/feature/b'");
+    expect(script).not.toContain("'+refs/heads/HEAD:refs/remotes/origin/HEAD'");
   });
 });
 

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, existsSync, rmSync } from 'node:fs';
 import { normalize } from 'node:path';
-import { bashPreserveOrReset, runBashLocal } from './branch-utils.js';
+import { bashPreserveOrReset, buildRemoteTrackingRefspecs, runBashLocal } from './branch-utils.js';
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
 import { createExecutionBench } from './execution-bench.js';
 import { planManagedWorktree } from './managed-worktree-controller.js';
@@ -43,6 +43,11 @@ export interface AcquiredWorktree {
 
 export interface AcquireWorktreeOptions {
   forceFresh?: boolean;
+}
+
+export interface EnsureCloneOptions {
+  baseBranch?: string;
+  upstreamBranches?: string[];
 }
 
 interface RebaseRefreshBatch {
@@ -340,7 +345,7 @@ export class RepoPool {
     return timing.span(functionName, metadata, fn);
   }
 
-  async ensureClone(repoUrl: string): Promise<string> {
+  async ensureClone(repoUrl: string, opts?: EnsureCloneOptions): Promise<string> {
     const bench = createExecutionBench({
       module: 'repo-pool-bench',
       baseMetadata: { repoUrl },
@@ -355,7 +360,7 @@ export class RepoPool {
       return clonePath;
     }
 
-    const promise = this.doEnsureClone(repoUrl);
+    const promise = this.doEnsureClone(repoUrl, opts);
     this.cloneLocks.set(repoUrl, promise);
     try {
       const clonePath = await promise;
@@ -462,7 +467,14 @@ export class RepoPool {
     bench('RepoPool.runPreserveOrResetWithRecovery.retryRunBashLocal.after');
   }
 
-  private async doEnsureClone(repoUrl: string): Promise<string> {
+  private targetedStartupFetchRefspecs(opts: EnsureCloneOptions | undefined): string[] {
+    return buildRemoteTrackingRefspecs([
+      opts?.baseBranch,
+      ...(opts?.upstreamBranches ?? []),
+    ]);
+  }
+
+  private async doEnsureClone(repoUrl: string, opts?: EnsureCloneOptions): Promise<string> {
     const bench = createExecutionBench({
       module: 'repo-pool-bench',
       baseMetadata: { repoUrl },
@@ -471,14 +483,20 @@ export class RepoPool {
     bench('RepoPool.doEnsureClone.begin', { dir, exists: existsSync(dir) });
     if (existsSync(dir)) {
       if (remoteFetchForPool.enabled) {
+        const refspecs = this.targetedStartupFetchRefspecs(opts);
         try {
-          bench('RepoPool.doEnsureClone.gitFetchAllPrune.before', { dir });
-          await this.execGit(['fetch', '--all', '--prune'], dir);
-          bench('RepoPool.doEnsureClone.gitFetchAllPrune.after', { dir });
+          if (refspecs.length > 0) {
+            bench('RepoPool.doEnsureClone.gitFetchTargetedPrune.before', { dir, refspecCount: refspecs.length });
+            await this.execGit(['fetch', '--prune', 'origin', ...refspecs], dir);
+            bench('RepoPool.doEnsureClone.gitFetchTargetedPrune.after', { dir, refspecCount: refspecs.length });
+          } else {
+            bench('RepoPool.doEnsureClone.gitFetchTargetedPrune.skipped', { dir, reason: 'no-target-refs' });
+          }
         } catch (err) {
           console.warn(`[RepoPool] doEnsureClone fetch failed: ${err}`);
-          bench('RepoPool.doEnsureClone.gitFetchAllPrune.failed', {
+          bench('RepoPool.doEnsureClone.gitFetchTargetedPrune.failed', {
             dir,
+            refspecCount: refspecs.length,
             error: err instanceof Error ? err.message : String(err),
           });
         }

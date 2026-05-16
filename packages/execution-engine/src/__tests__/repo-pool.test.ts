@@ -345,13 +345,13 @@ describe('RepoPool', () => {
   describe('fetch resilience (concurrent ref-lock race)', () => {
     afterEach(() => { vi.restoreAllMocks(); });
 
-    function spyFetchToFail(target: RepoPool) {
+    function spyFetchToFail(target: RepoPool, shouldFail: (args: string[]) => boolean = (args) => args[0] === 'fetch') {
       const orig = (target as any).execGit.bind(target);
       vi.spyOn(target as any, 'execGit').mockImplementation(
         (...params: unknown[]) => {
           const args = params[0] as string[];
           const cwd = params[1] as string;
-          if (args[0] === 'fetch' && args.includes('--all')) {
+          if (shouldFail(args)) {
             return Promise.reject(new Error('cannot lock ref: is at X but expected Y'));
           }
           return orig(args, cwd);
@@ -359,18 +359,18 @@ describe('RepoPool', () => {
       );
     }
 
-    it('ensureClone succeeds when fetch --all fails', async () => {
+    it('ensureClone succeeds when targeted fetch fails', async () => {
       await pool.ensureClone(localRepoUrl);
       spyFetchToFail(pool);
 
-      const path = await pool.ensureClone(localRepoUrl);
+      const path = await pool.ensureClone(localRepoUrl, { baseBranch: 'master' });
       expect(path).toBeDefined();
       expect(existsSync(path)).toBe(true);
     });
 
     it('refreshMirrorForRebase succeeds when fetch --all fails', async () => {
       await pool.ensureClone(localRepoUrl);
-      spyFetchToFail(pool);
+      spyFetchToFail(pool, (args) => args[0] === 'fetch' && args.includes('--all'));
 
       const dir = await pool.refreshMirrorForRebase(localRepoUrl, 'master');
       expect(dir).toBeDefined();
@@ -825,8 +825,55 @@ describe('RepoPool', () => {
     expect(shaSkipped).toBe(shaBefore);
 
     remoteFetchForPool.enabled = true;
-    await pool.ensureClone(localRepoUrl);
+    await pool.ensureClone(localRepoUrl, { baseBranch: 'master' });
     const shaFresh = execSync('git rev-parse origin/master', { cwd: clonePath }).toString().trim();
     expect(shaFresh).not.toBe(shaBefore);
+  });
+
+  it('ensureClone fetches only requested base and upstream branch refs on existing clones', async () => {
+    await pool.ensureClone(localRepoUrl);
+    execSync('git checkout -b feature/upstream', { cwd: localRepoUrl });
+    writeFileSync(join(localRepoUrl, 'upstream.txt'), 'upstream');
+    execSync('git add -A && git commit -m "upstream"', { cwd: localRepoUrl });
+    execSync('git checkout master', { cwd: localRepoUrl });
+
+    const calls: string[][] = [];
+    const orig = (pool as any).execGit.bind(pool);
+    vi.spyOn(pool as any, 'execGit').mockImplementation((args: string[], cwd: string) => {
+      if (args[0] === 'fetch') calls.push(args);
+      return orig(args, cwd);
+    });
+
+    await pool.ensureClone(localRepoUrl, {
+      baseBranch: 'master',
+      upstreamBranches: ['feature/upstream', 'origin/feature/upstream', 'HEAD'],
+    });
+
+    expect(calls).toContainEqual([
+      'fetch',
+      '--prune',
+      'origin',
+      '+refs/heads/master:refs/remotes/origin/master',
+      '+refs/heads/feature/upstream:refs/remotes/origin/feature/upstream',
+    ]);
+    expect(calls.flat()).not.toContain('--all');
+    expect(calls.flat()).not.toContain('+refs/heads/*:refs/remotes/origin/*');
+  });
+
+  it('ensureClone skips startup fetch when no target branch refs are derivable', async () => {
+    await pool.ensureClone(localRepoUrl);
+    const calls: string[][] = [];
+    const orig = (pool as any).execGit.bind(pool);
+    vi.spyOn(pool as any, 'execGit').mockImplementation((args: string[], cwd: string) => {
+      if (args[0] === 'fetch') calls.push(args);
+      return orig(args, cwd);
+    });
+
+    await pool.ensureClone(localRepoUrl, {
+      baseBranch: 'HEAD',
+      upstreamBranches: ['HEAD', '0123456789012345678901234567890123456789'],
+    });
+
+    expect(calls).toEqual([]);
   });
 });

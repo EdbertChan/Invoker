@@ -246,7 +246,12 @@ describe('WorktreeExecutor', () => {
   it('start creates git worktree with unique branch', async () => {
     const { taskProcess } = setupSpawnMock();
 
-    const request = makeRequest();
+    const request = makeRequest({
+      inputs: {
+        baseBranch: 'main',
+        upstreamBranches: ['feature/upstream'],
+      },
+    });
     const handle = await executor.start(request);
 
     expect(handle).toBeDefined();
@@ -255,6 +260,10 @@ describe('WorktreeExecutor', () => {
 
     // Verify pool.acquireWorktree was called with the correct branch
     const pool = (executor as any).pool;
+    expect(pool.ensureClone).toHaveBeenCalledWith('git@github.com:test/repo.git', {
+      baseBranch: 'main',
+      upstreamBranches: ['feature/upstream'],
+    });
     expect(pool.acquireWorktree).toHaveBeenCalledTimes(1);
     const [calledUrl, calledBranch] = pool.acquireWorktree.mock.calls[0];
     expect(calledUrl).toBe('git@github.com:test/repo.git');

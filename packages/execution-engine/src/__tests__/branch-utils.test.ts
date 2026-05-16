@@ -11,6 +11,7 @@ import {
   bashPreserveOrReset,
   bashFetchNodeRemotes,
   bashMergeUpstreams,
+  buildRemoteTrackingRefspecs,
   bashEnsureRef,
   parsePreserveResult,
   parseMergeError,
@@ -103,6 +104,27 @@ describe('computeContentHash', () => {
     // Same spec → same content hash, even though branch names differ.
     expect(branchA.endsWith(`-${contentHash}`)).toBe(true);
     expect(branchB.endsWith(`-${contentHash}`)).toBe(true);
+  });
+});
+
+describe('buildRemoteTrackingRefspecs', () => {
+  it('normalizes branch-like refs and ignores non-fetchable refs', () => {
+    expect(buildRemoteTrackingRefspecs([
+      'main',
+      'origin/feature/a',
+      'refs/remotes/origin/feature/b',
+      'refs/heads/release',
+      'HEAD',
+      '0123456789012345678901234567890123456789',
+      'main~1',
+      'refs/tags/v1',
+      'main',
+    ])).toEqual([
+      '+refs/heads/main:refs/remotes/origin/main',
+      '+refs/heads/feature/a:refs/remotes/origin/feature/a',
+      '+refs/heads/feature/b:refs/remotes/origin/feature/b',
+      '+refs/heads/release:refs/remotes/origin/release',
+    ]);
   });
 });
 
@@ -735,6 +757,7 @@ describe('bashMergeUpstreams', () => {
       await runBashLocal(bashFetchNodeRemotes({
         worktreeDir: wtDir,
         branchRepoUrl: intermediateDir,
+        upstreamBranches: ['dep-from-intermediate'],
       }));
       await runBashLocal(bashMergeUpstreams({
         worktreeDir: wtDir,

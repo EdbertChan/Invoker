@@ -6,6 +6,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { buildRemoteTrackingRefspecs } from './branch-utils.js';
 
 export interface SshRemoteErrorMetadata {
   exitCode?: number;
@@ -99,6 +100,8 @@ export interface GitMirrorCloneOpts {
   repoHash: string;
   /** Base ref to resolve (e.g., "main", "origin/master", or "HEAD") */
   baseRef: string;
+  /** Direct upstream dependency branches needed during task startup. */
+  upstreamBranches?: string[];
   /** Remote invoker home directory (e.g., ~/.invoker). Default: $HOME/.invoker */
   invokerHome?: string;
 }
@@ -128,6 +131,21 @@ export function buildMirrorCloneScript(opts: GitMirrorCloneOpts): string {
   const baseB64 = base64Encode(opts.baseRef);
   const { repoHash, invokerHome = '$HOME/.invoker' } = opts;
   const homeB64 = base64Encode(invokerHome);
+  const originRefspecs = buildRemoteTrackingRefspecs([
+    opts.baseRef,
+    ...(opts.upstreamBranches ?? []),
+  ], 'origin');
+  const branchRepoRefspecs = opts.upstreamBranches
+    ? buildRemoteTrackingRefspecs(opts.upstreamBranches, 'invoker-branches')
+    : undefined;
+  const originFetch = originRefspecs.length > 0
+    ? `git -C "$CLONE" fetch --prune origin ${originRefspecs.map(shellPosixSingleQuote).join(' ')}`
+    : 'true';
+  const branchRepoFetch = branchRepoRefspecs
+    ? (branchRepoRefspecs.length > 0
+      ? `git -C "$CLONE" fetch --prune "$BRANCH_REPO" ${branchRepoRefspecs.map(shellPosixSingleQuote).join(' ')}`
+      : 'true')
+    : `git -C "$CLONE" fetch "$BRANCH_REPO" '+refs/heads/*:refs/remotes/invoker-branches/*' --prune`;
 
   return `set -euo pipefail
 REPO=$(echo ${repoB64} | base64 -d)
@@ -143,7 +161,7 @@ fi
 CLONE="$INVOKER_HOME/repos/$H"
 mkdir -p "$(dirname "$CLONE")"
 if [ ! -d "$CLONE/.git" ]; then git clone "$REPO" "$CLONE"; fi
-if ! git -C "$CLONE" fetch --all --prune; then
+if ! ${originFetch}; then
   echo "[WARNING] Git fetch failed for $CLONE" >&2
   echo "[WARNING] Continuing with existing refs. Tasks may use stale commits." >&2
   echo "__INVOKER_FETCH_FAILED__=1"
@@ -151,7 +169,7 @@ else
   echo "__INVOKER_FETCH_SUCCESS__=1"
 fi
 if [ -n "$BRANCH_REPO" ]; then
-  if ! git -C "$CLONE" fetch "$BRANCH_REPO" '+refs/heads/*:refs/remotes/invoker-branches/*' --prune; then
+  if ! ${branchRepoFetch}; then
     echo "BRANCH_REPO_FETCH_FAILED=$BRANCH_REPO" >&2
     exit 32
   fi

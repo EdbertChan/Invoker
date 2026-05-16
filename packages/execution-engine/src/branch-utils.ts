@@ -193,6 +193,41 @@ export interface MergeUpstreamsOpts {
 export interface FetchNodeRemotesOpts {
   worktreeDir: string;
   branchRepoUrl?: string;
+  upstreamBranches?: string[];
+}
+
+const SHA40 = /^[0-9a-f]{40}$/i;
+
+/**
+ * Convert workflow branch inputs into branch names that can be fetched from
+ * refs/heads/<branch>. Commit SHAs, HEAD, rev expressions, and unrelated refs
+ * do not have a single remote branch to target.
+ */
+export function remoteBranchNameForFetch(ref: string | undefined): string | undefined {
+  const r = ref?.trim();
+  if (!r || r === 'HEAD') return undefined;
+  if (SHA40.test(r)) return undefined;
+  if (r.includes('~') || r.includes('^')) return undefined;
+  if (r.startsWith('refs/heads/')) return r.slice('refs/heads/'.length);
+  if (r.startsWith('refs/remotes/origin/')) return r.slice('refs/remotes/origin/'.length);
+  if (r.startsWith('origin/')) return r.slice('origin/'.length);
+  if (r.startsWith('refs/')) return undefined;
+  return r;
+}
+
+export function buildRemoteTrackingRefspecs(
+  refs: Array<string | undefined>,
+  remoteTrackingPrefix = 'origin',
+): string[] {
+  const refspecs: string[] = [];
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    const branch = remoteBranchNameForFetch(ref);
+    if (!branch || seen.has(branch)) continue;
+    seen.add(branch);
+    refspecs.push(`+refs/heads/${branch}:refs/remotes/${remoteTrackingPrefix}/${branch}`);
+  }
+  return refspecs;
 }
 
 /**
@@ -201,14 +236,26 @@ export interface FetchNodeRemotesOpts {
  * fatal instead of silently falling back to stale or incomplete refs.
  */
 export function bashFetchNodeRemotes(opts: FetchNodeRemotesOpts): string {
-  const { worktreeDir, branchRepoUrl } = opts;
+  const { worktreeDir, branchRepoUrl, upstreamBranches } = opts;
   const q = shellQuote;
   const branchRepo = branchRepoUrl?.trim();
+  const originRefspecs = buildRemoteTrackingRefspecs(upstreamBranches ?? [], 'origin');
+  const branchRepoRefspecs = upstreamBranches
+    ? buildRemoteTrackingRefspecs(upstreamBranches, 'invoker-branches')
+    : undefined;
+  const originFetch = originRefspecs.length > 0
+    ? `git -C "$WT_DIR" fetch --prune origin ${originRefspecs.map(q).join(' ')}${branchRepo ? ' || true' : ''}`
+    : 'true';
+  const branchRepoFetch = branchRepoRefspecs
+    ? (branchRepoRefspecs.length > 0
+      ? `git -C "$WT_DIR" fetch --prune invoker-branches ${branchRepoRefspecs.map(q).join(' ')}`
+      : 'true')
+    : "git -C \"$WT_DIR\" fetch invoker-branches '+refs/heads/*:refs/remotes/invoker-branches/*' --prune";
 
   return `set -euo pipefail
 WT_DIR=${q(worktreeDir)}
 if git -C "$WT_DIR" remote get-url origin >/dev/null 2>&1; then
-  git -C "$WT_DIR" fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
+  ${originFetch}
 fi
 ${branchRepo ? `BRANCH_REPO_URL=${q(branchRepo)}
 if git -C "$WT_DIR" remote get-url invoker-branches >/dev/null 2>&1; then
@@ -216,7 +263,7 @@ if git -C "$WT_DIR" remote get-url invoker-branches >/dev/null 2>&1; then
 else
   git -C "$WT_DIR" remote add invoker-branches "$BRANCH_REPO_URL"
 fi
-if ! git -C "$WT_DIR" fetch invoker-branches '+refs/heads/*:refs/remotes/invoker-branches/*' --prune; then
+if ! ${branchRepoFetch}; then
   echo "BRANCH_REPO_FETCH_FAILED=$BRANCH_REPO_URL" >&2
   exit 32
 fi` : ''}
