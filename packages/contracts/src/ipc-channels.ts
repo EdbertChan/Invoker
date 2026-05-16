@@ -92,6 +92,8 @@ export interface ExternalGatePolicyUpdate {
   gatePolicy: 'completed' | 'review_ready';
 }
 
+export type ExperimentSelectionInput = string | string[];
+
 export interface TaskEvent {
   id: number;
   taskId: string;
@@ -340,7 +342,7 @@ export const IpcChannels = {
     response: void;
   },
   'invoker:select-experiment': {} as {
-    request: [taskId: string, experimentId: string | string[]];
+    request: [taskId: string, experimentId: ExperimentSelectionInput];
     response: void;
   },
   /**
