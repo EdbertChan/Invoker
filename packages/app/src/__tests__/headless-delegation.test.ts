@@ -195,6 +195,33 @@ describe('headless delegation enforcement', () => {
       ).rejects.not.toThrow(/persistence is read-only/);
     });
 
+    it('routes open-terminal through injected runtime services when available', async () => {
+      const probeWorkspace = vi.fn(async () => ({ workspacePath: '/tmp/wf-1-task-1' }));
+      const probeContainer = vi.fn(async () => ({ containerId: 'ctr-1' }));
+      const probeSession = vi.fn(async () => ({ sessionId: 'sess-1', agentName: 'codex' }));
+      const launchTerminal = vi.fn(async () => ({ result: 'attached' }));
+      mockDeps.persistence.getTaskStatus = vi.fn(() => 'completed');
+      mockDeps.runtimeServices = {
+        workspaceProbe: { probeWorkspace },
+        containerProbe: { probeContainer },
+        sessionProbe: { probeSession },
+        terminalLauncher: { launchTerminal },
+      } as any;
+
+      await expect(runHeadless(['open-terminal', 'wf-1/task-1'], mockDeps)).resolves.toBeUndefined();
+
+      expect(probeWorkspace).toHaveBeenCalledWith('wf-1/task-1');
+      expect(probeContainer).toHaveBeenCalledWith('wf-1/task-1');
+      expect(probeSession).toHaveBeenCalledWith('wf-1/task-1');
+      expect(launchTerminal).toHaveBeenCalledWith({
+        taskId: 'wf-1/task-1',
+        workspacePath: '/tmp/wf-1-task-1',
+        containerId: 'ctr-1',
+        sessionId: 'sess-1',
+        agentName: 'codex',
+      });
+    });
+
     it('allows query-select in read-only mode', async () => {
       mockDeps.persistence.getSelectedExperiment = vi.fn(() => null);
       await expect(

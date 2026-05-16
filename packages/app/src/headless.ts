@@ -2440,6 +2440,41 @@ async function headlessCancelWorkflow(workflowId: string, deps: HeadlessDeps): P
 
 async function headlessOpenTerminal(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing taskId. Usage: --headless open-terminal <taskId>');
+  if (deps.runtimeServices) {
+    const taskStatus = deps.persistence.getTaskStatus(taskId);
+    if (taskStatus == null) {
+      process.stderr.write(`Could not open terminal: Task "${taskId}" not found.\n`);
+      process.exitCode = 1;
+      return;
+    }
+    if (taskStatus === 'running' || taskStatus === 'fixing_with_ai') {
+      process.stderr.write('Could not open terminal: Task is still running. View output in logs.\n');
+      process.exitCode = 1;
+      return;
+    }
+
+    const [workspace, container, session] = await Promise.all([
+      deps.runtimeServices.workspaceProbe.probeWorkspace(taskId),
+      deps.runtimeServices.containerProbe.probeContainer(taskId),
+      deps.runtimeServices.sessionProbe.probeSession(taskId),
+    ]);
+    const outcome = await deps.runtimeServices.terminalLauncher.launchTerminal({
+      taskId,
+      workspacePath: workspace.workspacePath,
+      containerId: container.containerId,
+      sessionId: session.sessionId,
+      agentName: session.agentName,
+    });
+    if (String(outcome.result) === 'attached') {
+      process.stdout.write(`Opened terminal for task: ${taskId}\n`);
+    } else {
+      const failure = outcome as { message?: string; reason?: string };
+      process.stderr.write(`Could not open terminal: ${failure.message ?? failure.reason ?? 'unknown error'}\n`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   const result = await openExternalTerminalForTask({
     taskId,
     persistence: deps.persistence,
