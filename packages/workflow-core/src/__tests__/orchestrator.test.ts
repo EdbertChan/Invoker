@@ -3,6 +3,7 @@ import { reconciliationNeedsInputWorkResponse } from './reconciliation-needs-inp
 import { rid, sid } from './scoped-test-helpers.js';
 import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
+import { MUTATION_POLICIES } from '../invalidation-policy.js';
 import { computeWorkflowRollup } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
 import type { Logger, WorkResponse } from '@invoker/contracts';
@@ -9879,6 +9880,12 @@ describe('Orchestrator', () => {
         { workflowId: prereqWfId, gatePolicy: 'review_ready' },
       ]);
 
+      expect(orchestrator.getLastInvalidationPlan()).toMatchObject({
+        action: MUTATION_POLICIES.externalGatePolicy.action,
+        scope: 'task',
+        mode: 'scheduleOnly',
+        affectedTaskIds: [leafId],
+      });
       expect(cancelTaskSpy).not.toHaveBeenCalled();
       expect(retryTaskSpy).not.toHaveBeenCalled();
       expect(recreateTaskSpy).not.toHaveBeenCalled();

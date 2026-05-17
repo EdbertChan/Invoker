@@ -77,6 +77,7 @@ import {
   withSchedulerEnqueueCandidates,
   type InvalidationPlan,
 } from './invalidation-plan.js';
+import { MUTATION_POLICIES } from './invalidation-policy.js';
 import {
   isActiveAttempt,
   isDiscardedAttempt,
@@ -3237,8 +3238,8 @@ export class Orchestrator {
    * Update gate policy on one or more external dependencies for a task, then
    * immediately re-evaluate ready tasks that were blocked by external deps.
    *
-   * Step 15 lock-in (`docs/architecture/task-invalidation-roadmap.md`,
-   * chart row "Change external gate policy"): this is the engine's
+   * INV-90 lock-in (`docs/context/inv-90/experiment-brief.md`,
+   * selected approach `externalGatePolicy -> scheduleOnly`): this is the engine's
    * ONLY intentionally non-invalidating execution-spec-adjacent
    * mutation. Per `MUTATION_POLICIES.externalGatePolicy`
    * (`invalidatesExecutionSpec: false`, `invalidateIfActive: false`,
@@ -3277,8 +3278,9 @@ export class Orchestrator {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    const policy = MUTATION_POLICIES.externalGatePolicy;
     this.lastInvalidationPlan = planInvalidation({
-      action: 'scheduleOnly',
+      action: policy.action,
       targetId: task.id,
       tasks: this.stateMachine.getAllTasks(),
     });
