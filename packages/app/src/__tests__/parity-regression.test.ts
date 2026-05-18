@@ -338,10 +338,9 @@ describe('Parity: API endpoints wire to facade methods', () => {
         resolveConflict: vi.fn().mockResolvedValue(undefined),
         fixWithAgent: vi.fn().mockResolvedValue(undefined),
         commitApprovedFix: vi.fn().mockResolvedValue(undefined),
+        closeWorkflowReview: vi.fn().mockResolvedValue(undefined),
       },
       killRunningTask: vi.fn().mockResolvedValue(undefined),
-      deleteWorkflow: vi.fn().mockResolvedValue(undefined),
-      detachWorkflow: vi.fn().mockResolvedValue(undefined),
     };
     return m;
   }
@@ -360,8 +359,6 @@ describe('Parity: API endpoints wire to facade methods', () => {
       persistence: mocks.persistence as any,
       executorRegistry: mocks.executorRegistry as any,
       mutations: facade,
-      deleteWorkflow: mocks.deleteWorkflow,
-      detachWorkflow: mocks.detachWorkflow,
     });
     await new Promise<void>((resolve) => {
       if (api.server.listening) resolve();
@@ -383,8 +380,6 @@ describe('Parity: API endpoints wire to facade methods', () => {
       }
     }
     mocks.killRunningTask.mockClear();
-    mocks.deleteWorkflow.mockClear();
-    mocks.detachWorkflow.mockClear();
 
     // Re-apply default return values
     mocks.orchestrator.retryTask.mockReturnValue([makeTask()]);
@@ -399,11 +394,12 @@ describe('Parity: API endpoints wire to facade methods', () => {
     mocks.orchestrator.cancelWorkflow.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
     mocks.orchestrator.getTask.mockReturnValue(makeTask());
     mocks.orchestrator.recreateWorkflow.mockReturnValue([makeTask()]);
+    mocks.orchestrator.deleteWorkflow.mockImplementation(() => undefined);
+    mocks.orchestrator.detachWorkflow.mockImplementation(() => undefined);
     mocks.persistence.loadWorkflow.mockReturnValue({ id: 'wf-1', generation: 1 });
     mocks.taskExecutor.executeTasks.mockResolvedValue(undefined);
+    mocks.taskExecutor.closeWorkflowReview.mockResolvedValue(undefined);
     mocks.killRunningTask.mockResolvedValue(undefined);
-    mocks.deleteWorkflow.mockResolvedValue(undefined);
-    mocks.detachWorkflow.mockResolvedValue(undefined);
     mocks.orchestrator.forkWorkflow.mockReturnValue({
       sourceWorkflowId: 'wf-1',
       forkedWorkflowId: 'wf-1-fork',
@@ -414,8 +410,8 @@ describe('Parity: API endpoints wire to facade methods', () => {
   /**
    * Each API write endpoint must:
    *   1. Route to the correct orchestrator method (via facade)
-   *   2. Trigger executeTasks for runnable work
-   *   3. Trigger startExecution for global topup
+   *   2. Trigger executeTasks for runnable work where the facade returns launches
+   *   3. Trigger startExecution for global topup where the facade lifecycle requires it
    *   4. Return 200 with { ok: true }
    */
   const apiWriteCases: Array<{
@@ -434,6 +430,8 @@ describe('Parity: API endpoints wire to facade methods', () => {
     { name: 'POST /api/tasks/:id/cancel', method: 'POST', path: '/api/tasks/task-1/cancel', orchestratorMethod: 'cancelTask', expectTopup: true },
     { name: 'POST /api/workflows/:id/cancel', method: 'POST', path: '/api/workflows/wf-1/cancel', orchestratorMethod: 'cancelWorkflow', expectTopup: true },
     { name: 'POST /api/workflows/:id/fork', method: 'POST', path: '/api/workflows/wf-1/fork', orchestratorMethod: 'forkWorkflow', expectTopup: true },
+    { name: 'DELETE /api/workflows/:id', method: 'DELETE', path: '/api/workflows/wf-1', orchestratorMethod: 'deleteWorkflow', expectTopup: false },
+    { name: 'POST /api/workflows/:id/detach', method: 'POST', path: '/api/workflows/wf-1/detach', body: { upstreamWorkflowId: 'wf-0' }, orchestratorMethod: 'detachWorkflow', expectTopup: false },
   ];
 
   for (const { name, method, path, body, orchestratorMethod, expectTopup } of apiWriteCases) {
