@@ -12,6 +12,13 @@ FORCE_RERUN="${INVOKER_TEST_ALL_FORCE_RERUN:-0}"
 JOBS="${INVOKER_TEST_ALL_JOBS:-1}"
 PROOF="${INVOKER_TEST_ALL_PROOF:-0}"
 
+# INV-117 experiment-selected deterministic proof thresholds.
+INV117_REQUIRED_EXECUTED=16
+INV117_EXTENDED_EXECUTED=23
+INV117_DANGEROUS_EXECUTED=24
+INV117_DANGEROUS_EXECUTED_WITH_DOCKER_SKIP=23
+INV117_ALLOWED_DANGEROUS_UNAVAILABLE="dangerous/10-docker-comprehensive.sh"
+
 if [ "$PROOF" = "1" ]; then
   FORCE_RERUN=1
   RESUME=0
@@ -60,16 +67,16 @@ declare -a SUITES=()
 expected_executed_for_mode() {
   case "$MODE_KEY" in
     required)
-      printf '16'
+      printf '%s' "$INV117_REQUIRED_EXECUTED"
       ;;
     extended)
-      printf '23'
+      printf '%s' "$INV117_EXTENDED_EXECUTED"
       ;;
     dangerous)
-      if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" = "dangerous/10-docker-comprehensive.sh" ]; then
-        printf '23'
+      if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" = "$INV117_ALLOWED_DANGEROUS_UNAVAILABLE" ]; then
+        printf '%s' "$INV117_DANGEROUS_EXECUTED_WITH_DOCKER_SKIP"
       else
-        printf '24'
+        printf '%s' "$INV117_DANGEROUS_EXECUTED"
       fi
       ;;
   esac
@@ -345,34 +352,34 @@ validate_proof_thresholds() {
   expected_executed="$(expected_executed_for_mode)"
 
   if [ "${#EXECUTED[@]}" -ne "$expected_executed" ]; then
-    echo "ERROR: INV-67 proof expected Executed=$expected_executed, got ${#EXECUTED[@]}" >&2
+    echo "ERROR: INV-117 proof expected Executed=$expected_executed, got ${#EXECUTED[@]}" >&2
     return 1
   fi
 
   if [ "${#FAILED[@]}" -ne 0 ]; then
-    echo "ERROR: INV-67 proof expected Failed=0, got ${#FAILED[@]}" >&2
+    echo "ERROR: INV-117 proof expected Failed=0, got ${#FAILED[@]}" >&2
     return 1
   fi
 
   if [ "${#SKIPPED_CHECKPOINT[@]}" -ne 0 ]; then
-    echo "ERROR: INV-67 proof expected Skipped by checkpoint=0, got ${#SKIPPED_CHECKPOINT[@]}" >&2
+    echo "ERROR: INV-117 proof expected Skipped by checkpoint=0, got ${#SKIPPED_CHECKPOINT[@]}" >&2
     return 1
   fi
 
   case "$MODE_KEY" in
     required|extended)
       if [ "${#SKIPPED_UNAVAILABLE[@]}" -ne 0 ]; then
-        echo "ERROR: INV-67 proof expected Skipped unavailable=0, got ${#SKIPPED_UNAVAILABLE[@]}" >&2
+        echo "ERROR: INV-117 proof expected Skipped unavailable=0, got ${#SKIPPED_UNAVAILABLE[@]}" >&2
         return 1
       fi
       ;;
     dangerous)
       if [ "${#SKIPPED_UNAVAILABLE[@]}" -gt 1 ]; then
-        echo "ERROR: INV-67 proof expected at most one unavailable skip, got ${#SKIPPED_UNAVAILABLE[@]}" >&2
+        echo "ERROR: INV-117 proof expected at most one unavailable skip, got ${#SKIPPED_UNAVAILABLE[@]}" >&2
         return 1
       fi
-      if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" != "dangerous/10-docker-comprehensive.sh" ]; then
-        echo "ERROR: INV-67 proof only allows unavailable skip for dangerous/10-docker-comprehensive.sh" >&2
+      if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" != "$INV117_ALLOWED_DANGEROUS_UNAVAILABLE" ]; then
+        echo "ERROR: INV-117 proof only allows unavailable skip for $INV117_ALLOWED_DANGEROUS_UNAVAILABLE" >&2
         return 1
       fi
       ;;
