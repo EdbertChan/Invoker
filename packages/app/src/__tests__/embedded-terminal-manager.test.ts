@@ -2,7 +2,7 @@
  * Embedded terminal manager unit + integration tests.
  *
  * Covers:
- *   - openOrReuse returns the same sessionId for the same taskId
+ *   - openOrReuse returns the same sessionId for the same resolved terminal target
  *   - spawn mode wires stdout/stderr → output events and exit
  *   - attached mode forwards executor.onOutput → output events and
  *     executor.sendInput → write()
@@ -73,7 +73,7 @@ describe('EmbeddedTerminalManager', () => {
     expect(spawnFn).toHaveBeenCalledTimes(1);
   });
 
-  it('reopening the same task returns the same session id', () => {
+  it('reopening the same task and terminal target returns the same session id', () => {
     const child = createFakeChild();
     const spawnFn = vi.fn(() => child as unknown as ReturnType<SpawnFn>) as unknown as SpawnFn;
     const mgr = new EmbeddedTerminalManager({ spawnFn });
@@ -84,6 +84,60 @@ describe('EmbeddedTerminalManager', () => {
     expect(second.sessionId).toBe(first.sessionId);
     expect(spawnFn).toHaveBeenCalledTimes(1);
     expect(mgr.list()).toHaveLength(1);
+  });
+
+  it('opens a distinct session when the same task resolves to a different terminal target', () => {
+    const child1 = createFakeChild();
+    const child2 = createFakeChild();
+    const child3 = createFakeChild();
+    const spawnFn = vi
+      .fn()
+      .mockReturnValueOnce(child1)
+      .mockReturnValueOnce(child2)
+      .mockReturnValueOnce(child3) as unknown as SpawnFn;
+    const mgr = new EmbeddedTerminalManager({ spawnFn });
+
+    const first = mgr.openOrReuse({
+      taskId: 'task-1',
+      spec: { command: 'claude', args: ['--resume', 'session-a'], cwd: '/tmp/wt-a' },
+      cwd: '/tmp/wt-a',
+    });
+    const changedSession = mgr.openOrReuse({
+      taskId: 'task-1',
+      spec: { command: 'claude', args: ['--resume', 'session-b'], cwd: '/tmp/wt-a' },
+      cwd: '/tmp/wt-a',
+    });
+    const changedWorkspace = mgr.openOrReuse({
+      taskId: 'task-1',
+      spec: { command: 'claude', args: ['--resume', 'session-b'], cwd: '/tmp/wt-b' },
+      cwd: '/tmp/wt-b',
+    });
+
+    expect(changedSession.sessionId).not.toBe(first.sessionId);
+    expect(changedWorkspace.sessionId).not.toBe(changedSession.sessionId);
+    expect(spawnFn).toHaveBeenCalledTimes(3);
+    expect(mgr.list()).toHaveLength(3);
+  });
+
+  it('preserves the resolved command, args, and cwd when spawning', () => {
+    const child = createFakeChild();
+    const spawnFn = vi.fn(() => child as unknown as ReturnType<SpawnFn>) as unknown as SpawnFn;
+    const mgr = new EmbeddedTerminalManager({ spawnFn });
+
+    const session = mgr.openOrReuse({
+      taskId: 'task-1',
+      spec: { command: 'codex', args: ['resume', 'codex-session-1'], cwd: '/tmp/wt' },
+      cwd: '/tmp/wt',
+    });
+
+    expect(session.command).toBe('codex');
+    expect(session.args).toEqual(['resume', 'codex-session-1']);
+    expect(session.cwd).toBe('/tmp/wt');
+    expect(spawnFn).toHaveBeenCalledWith(
+      'codex',
+      ['resume', 'codex-session-1'],
+      expect.objectContaining({ cwd: '/tmp/wt' }),
+    );
   });
 
   it('fans stdout and stderr through the output event', () => {
