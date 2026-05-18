@@ -2,6 +2,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   applyInvalidation,
+  INV_88_EXPERIMENT_BRIEF_PATH,
   INV_90_EXPERIMENT_BRIEF_PATH,
   INV_90_SUPPORTED_ROUTER_ACTIONS,
   MUTATION_POLICIES,
@@ -31,6 +32,10 @@ function makeDeps(overrides: Partial<MockedDeps> = {}): MockedDeps {
 }
 
 describe('MUTATION_POLICIES', () => {
+  it('keeps the INV-88 typed-dispatch proof artifact addressable', () => {
+    expect(INV_88_EXPERIMENT_BRIEF_PATH).toBe('docs/context/inv-88/experiment-brief.md');
+  });
+
   it('keeps the INV-90 supported router action set aligned with the experiment brief', () => {
     expect(INV_90_EXPERIMENT_BRIEF_PATH).toBe('docs/context/inv-90/experiment-brief.md');
     expect(INV_90_SUPPORTED_ROUTER_ACTIONS).toEqual([

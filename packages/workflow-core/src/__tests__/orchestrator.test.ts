@@ -305,8 +305,8 @@ describe('Orchestrator', () => {
     });
   });
 
-  it('surfaces the INV-90 experiment brief that selected the invalidation router design', () => {
-    expect(Orchestrator.INVALIDATION_EXPERIMENT_BRIEF_PATH).toBe('docs/context/inv-90/experiment-brief.md');
+  it('surfaces the INV-88 experiment brief consumed by typed mutation dispatch', () => {
+    expect(Orchestrator.INVALIDATION_EXPERIMENT_BRIEF_PATH).toBe('docs/context/inv-88/experiment-brief.md');
   });
 
   describe('descriptionForMergeNode', () => {

@@ -77,7 +77,12 @@ import {
   withSchedulerEnqueueCandidates,
   type InvalidationPlan,
 } from './invalidation-plan.js';
-import { INV_90_EXPERIMENT_BRIEF_PATH } from './invalidation-policy.js';
+import {
+  INV_88_EXPERIMENT_BRIEF_PATH,
+  MUTATION_POLICIES,
+  type InvalidationAction,
+  type MutationKey,
+} from './invalidation-policy.js';
 import {
   isActiveAttempt,
   isDiscardedAttempt,
@@ -723,7 +728,7 @@ export interface OrchestratorConfig {
 
 export class Orchestrator {
   private static readonly EXPEDITED_PRIORITY = 100;
-  static readonly INVALIDATION_EXPERIMENT_BRIEF_PATH = INV_90_EXPERIMENT_BRIEF_PATH;
+  static readonly INVALIDATION_EXPERIMENT_BRIEF_PATH = INV_88_EXPERIMENT_BRIEF_PATH;
 
   private readonly stateMachine: TaskStateMachine;
   private readonly responseHandler: ResponseHandler;
@@ -1105,6 +1110,29 @@ export class Orchestrator {
       cancelled.push(t.id);
     }
     return cancelled;
+  }
+
+  private applyTaskInvalidationPolicy(policyKey: MutationKey, taskId: string): TaskState[] {
+    const policy = MUTATION_POLICIES[policyKey];
+    return this.applyTaskInvalidationAction(policy.action, taskId, policyKey);
+  }
+
+  private applyTaskInvalidationAction(
+    action: InvalidationAction,
+    taskId: string,
+    policyKey: MutationKey,
+  ): TaskState[] {
+    switch (action) {
+      case 'retryTask':
+        return this.retryTask(taskId);
+      case 'recreateTask':
+        return this.recreateTask(taskId);
+      default:
+        throw new Error(
+          `Mutation policy ${policyKey} uses action '${action}', ` +
+            'which is not valid for task-scoped orchestrator invalidation',
+        );
+    }
   }
 
   private getExecutionGeneration(task: TaskState | undefined): number {
@@ -2106,7 +2134,7 @@ export class Orchestrator {
         .filter((t) => t.dependencies.includes(reconId))
         .map((t) => t.id);
       for (const dsId of directDownstream) {
-        this.recreateTask(dsId);
+        this.applyTaskInvalidationPolicy('selectedExperiment', dsId);
       }
     }
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(reconId);
@@ -2191,7 +2219,7 @@ export class Orchestrator {
         .map((t) => t.id);
       for (const dsId of directDownstreamAfter) {
         if (this.stateGetTask(dsId)) {
-          this.recreateTask(dsId);
+          this.applyTaskInvalidationPolicy('selectedExperimentSet', dsId);
         }
       }
     }
@@ -2955,7 +2983,10 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', typeChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, typeDelta);
 
-    return hostChanged ? this.recreateTask(taskId) : this.retryTask(taskId);
+    return this.applyTaskInvalidationPolicy(
+      hostChanged ? 'poolMemberId' : 'runnerKind',
+      taskId,
+    );
   }
 
     editTaskPool(taskId: string, poolId: string): TaskState[] {
@@ -3146,7 +3177,7 @@ export class Orchestrator {
     // generation exactly once via `withBumpedExecutionGeneration`
     // while preserving branch/workspacePath lineage — the chart's
     // retry-class semantics for merge-mode mutations.
-    return this.retryTask(taskId);
+    return this.applyTaskInvalidationPolicy('mergeMode', taskId);
   }
 
   /**

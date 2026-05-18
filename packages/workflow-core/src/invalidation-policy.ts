@@ -20,6 +20,7 @@ export type InvalidationAction =
  */
 export type InvalidationScope = 'none' | 'task' | 'workflow';
 
+export const INV_88_EXPERIMENT_BRIEF_PATH = 'docs/context/inv-88/experiment-brief.md' as const;
 export const INV_90_EXPERIMENT_BRIEF_PATH = 'docs/context/inv-90/experiment-brief.md' as const;
 
 export const INV_90_SUPPORTED_ROUTER_ACTIONS: readonly InvalidationAction[] = Object.freeze([
