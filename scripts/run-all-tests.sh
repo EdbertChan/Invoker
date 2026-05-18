@@ -57,19 +57,25 @@ declare -a EXECUTED=()
 declare -a FAILED=()
 declare -a SUITES=()
 
+# INV-117 experiment thresholds from docs/context/inv-117/experiment-brief.md.
+EXPECTED_REQUIRED_SUITES=16
+EXPECTED_EXTENDED_SUITES=23
+EXPECTED_DANGEROUS_SUITES=24
+ALLOWED_DANGEROUS_UNAVAILABLE_SUITE="dangerous/10-docker-comprehensive.sh"
+
 expected_executed_for_mode() {
   case "$MODE_KEY" in
     required)
-      printf '16'
+      printf '%s' "$EXPECTED_REQUIRED_SUITES"
       ;;
     extended)
-      printf '23'
+      printf '%s' "$EXPECTED_EXTENDED_SUITES"
       ;;
     dangerous)
-      if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" = "dangerous/10-docker-comprehensive.sh" ]; then
-        printf '23'
+      if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" = "$ALLOWED_DANGEROUS_UNAVAILABLE_SUITE" ]; then
+        printf '%s' "$EXPECTED_EXTENDED_SUITES"
       else
-        printf '24'
+        printf '%s' "$EXPECTED_DANGEROUS_SUITES"
       fi
       ;;
   esac
@@ -345,34 +351,34 @@ validate_proof_thresholds() {
   expected_executed="$(expected_executed_for_mode)"
 
   if [ "${#EXECUTED[@]}" -ne "$expected_executed" ]; then
-    echo "ERROR: INV-67 proof expected Executed=$expected_executed, got ${#EXECUTED[@]}" >&2
+    echo "ERROR: INV-117 proof expected Executed=$expected_executed, got ${#EXECUTED[@]}" >&2
     return 1
   fi
 
   if [ "${#FAILED[@]}" -ne 0 ]; then
-    echo "ERROR: INV-67 proof expected Failed=0, got ${#FAILED[@]}" >&2
+    echo "ERROR: INV-117 proof expected Failed=0, got ${#FAILED[@]}" >&2
     return 1
   fi
 
   if [ "${#SKIPPED_CHECKPOINT[@]}" -ne 0 ]; then
-    echo "ERROR: INV-67 proof expected Skipped by checkpoint=0, got ${#SKIPPED_CHECKPOINT[@]}" >&2
+    echo "ERROR: INV-117 proof expected Skipped by checkpoint=0, got ${#SKIPPED_CHECKPOINT[@]}" >&2
     return 1
   fi
 
   case "$MODE_KEY" in
     required|extended)
       if [ "${#SKIPPED_UNAVAILABLE[@]}" -ne 0 ]; then
-        echo "ERROR: INV-67 proof expected Skipped unavailable=0, got ${#SKIPPED_UNAVAILABLE[@]}" >&2
+        echo "ERROR: INV-117 proof expected Skipped unavailable=0, got ${#SKIPPED_UNAVAILABLE[@]}" >&2
         return 1
       fi
       ;;
     dangerous)
       if [ "${#SKIPPED_UNAVAILABLE[@]}" -gt 1 ]; then
-        echo "ERROR: INV-67 proof expected at most one unavailable skip, got ${#SKIPPED_UNAVAILABLE[@]}" >&2
+        echo "ERROR: INV-117 proof expected at most one unavailable skip, got ${#SKIPPED_UNAVAILABLE[@]}" >&2
         return 1
       fi
-      if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" != "dangerous/10-docker-comprehensive.sh" ]; then
-        echo "ERROR: INV-67 proof only allows unavailable skip for dangerous/10-docker-comprehensive.sh" >&2
+      if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" != "$ALLOWED_DANGEROUS_UNAVAILABLE_SUITE" ]; then
+        echo "ERROR: INV-117 proof only allows unavailable skip for $ALLOWED_DANGEROUS_UNAVAILABLE_SUITE" >&2
         return 1
       fi
       ;;
