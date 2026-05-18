@@ -144,6 +144,12 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function mutationError(res: ServerResponse, err: unknown): void {
+  // INV-130 keeps deterministic domain-error mapping in the API layer;
+  // mutation semantics stay in the facade/orchestrator.
+  json(res, httpStatusForError(err), { error: errorMessage(err) });
+}
+
 export function startApiServer(deps: ApiServerDeps): ApiServer {
   const {
     logger: apiLogger,
@@ -204,7 +210,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const result = await mutations.cancelTask(taskId);
           json(res, 200, { ok: true, cancelled: result.cancelled, runningCancelled: result.runningCancelled });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -231,7 +237,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             ...(isLegacy ? { deprecated: true, replacement: '/api/tasks/:id/retry' } : {}),
           });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -244,7 +250,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const result = await mutations.recreateTask(taskId);
           json(res, 200, { ok: true, taskId, action: 'recreated', tasksStarted: result.runnable.length });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -270,7 +276,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             status: result.autoApproved ? 'auto_approved' : 'awaiting_approval',
           });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -283,7 +289,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           await mutations.approveTask(taskId);
           json(res, 200, { ok: true, taskId, action: 'approved' });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -304,7 +310,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           mutations.rejectTask(taskId, reason);
           json(res, 200, { ok: true, taskId, action: 'rejected', reason });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -339,7 +345,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             ...(isLegacy ? { deprecated: true, replacement: '/api/workflows/:id/recreate' } : {}),
           });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -353,7 +359,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const tasksStarted = result.started.filter(t => t.status === 'running').length;
           json(res, 200, { ok: true, workflowId, action: 'retried', tasksStarted });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -373,7 +379,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             tasksStarted,
           });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -393,7 +399,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             tasksStarted,
           });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -411,7 +417,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             tasksStarted: result.runnable.length,
           });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -424,7 +430,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const result = await mutations.cancelWorkflow(workflowId);
           json(res, 200, { ok: true, cancelled: result.cancelled, runningCancelled: result.runningCancelled });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -468,7 +474,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           mutations.provideInput(taskId, text);
           json(res, 200, { ok: true, taskId, action: 'input_provided' });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -487,7 +493,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const result = await mutations.editTaskCommand(taskId, command);
           json(res, 200, { ok: true, taskId, action: 'command_edited', tasksStarted: result.runnable.length });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -506,7 +512,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const result = await mutations.editTaskPrompt(taskId, prompt);
           json(res, 200, { ok: true, taskId, action: 'prompt_edited', tasksStarted: result.runnable.length });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -525,7 +531,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const result = await mutations.editTaskType(taskId, runnerKind, poolMemberId);
           json(res, 200, { ok: true, taskId, action: 'type_edited', tasksStarted: result.runnable.length });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -544,7 +550,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const result = await mutations.editTaskAgent(taskId, agent);
           json(res, 200, { ok: true, taskId, action: 'agent_edited', tasksStarted: result.runnable.length });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -564,7 +570,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           const result = await mutations.setTaskExternalGatePolicies(taskId, updates);
           json(res, 200, { ok: true, taskId, action: 'gate_policy_updated', tasksStarted: result.runnable.length });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -577,7 +583,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           await deleteWorkflow(workflowId);
           json(res, 200, { ok: true, workflowId, action: 'deleted' });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -601,7 +607,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             action: 'detached',
           });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }
@@ -620,7 +626,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           await mutations.setWorkflowMergeMode(workflowId, mode);
           json(res, 200, { ok: true, workflowId, action: 'merge_mode_set', mode });
         } catch (err) {
-          json(res, httpStatusForError(err), { error: errorMessage(err) });
+          mutationError(res, err);
         }
         return;
       }

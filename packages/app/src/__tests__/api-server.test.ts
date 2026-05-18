@@ -320,12 +320,26 @@ describe('GET /api/tasks/:id/output', () => {
 // ── Write endpoints ──────────────────────────────────────────
 
 describe('POST /api/tasks/:id/cancel', () => {
-  it('cancels task via facade', async () => {
+  it('cancels task via facade and maps domain errors deterministically', async () => {
     const res = await request(port, 'POST', '/api/tasks/task-1/cancel');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(mocks.orchestrator.cancelTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
+
+    mocks.orchestrator.cancelTask.mockImplementationOnce(() => {
+      throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, 'task missing');
+    });
+    const missing = await request(port, 'POST', '/api/tasks/task-1/cancel');
+    expect(missing.status).toBe(404);
+    expect(missing.body.error).toBe('task missing');
+
+    mocks.orchestrator.cancelTask.mockImplementationOnce(() => {
+      throw new OrchestratorError(OrchestratorErrorCode.TASK_ALREADY_TERMINAL, 'task already closed');
+    });
+    const terminal = await request(port, 'POST', '/api/tasks/task-1/cancel');
+    expect(terminal.status).toBe(409);
+    expect(terminal.body.error).toBe('task already closed');
   });
 });
 
@@ -348,7 +362,7 @@ describe('POST /api/tasks/:id/restart', () => {
     expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
   });
 
-  it('returns 400 on error', async () => {
+  it('returns 400 on non-domain error', async () => {
     mocks.orchestrator.retryTask.mockImplementation(() => {
       throw new Error('task not restartable');
     });
