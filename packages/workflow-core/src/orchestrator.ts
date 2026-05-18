@@ -61,6 +61,21 @@ function isActiveForInvalidation(status: TaskStatus): boolean {
   );
 }
 
+function canonicalExperimentSelection(ids: readonly string[]): string[] {
+  return Array.from(new Set(ids)).slice().sort();
+}
+
+function sameExperimentSelection(
+  previous: readonly string[] | undefined,
+  next: readonly string[],
+): boolean {
+  if (!previous) return false;
+  const prevCanon = canonicalExperimentSelection(previous);
+  const nextCanon = canonicalExperimentSelection(next);
+  return prevCanon.length === nextCanon.length
+    && prevCanon.every((id, i) => id === nextCanon[i]);
+}
+
 import { getTransitiveDependents } from '@invoker/workflow-graph';
 import { ActionGraph } from '@invoker/workflow-graph';
 import {
@@ -1975,75 +1990,23 @@ export class Orchestrator {
   }
 
   /**
-   * Select a winning experiment for a reconciliation task — **retry-class**
-   * invalidation route per Step 7 of
-   * `docs/architecture/task-invalidation-roadmap.md` and the Decision Table
-   * row "Edit selected experiment" in
-   * `docs/architecture/task-invalidation-chart.md`
-   * (`MUTATION_POLICIES.selectedExperiment` → `retryTask` / task scope).
+   * Select a winning experiment for a reconciliation task.
    *
-   * Why retry-class (not recreate-class). The chart classifies single
-   * experiment selection as a downstream-input mutation: the
-   * reconciliation task's *result* (its selected branch/commit) is the
-   * execution input that downstream consumers use, so changing the
-   * winner invalidates downstream attempts but does NOT change the
-   * reconciliation task's own spec. The chart's "Why" column reads
-   * "Downstream execution inputs changed". `applyInvalidation('task',
-   * 'retryTask', reconId, deps)` is wired to today's
-   * `Orchestrator.restartTask` via `buildInvalidationDeps` (the
-   * compatibility seam Step 1 introduced; Step 13 will rename
-   * `restartTask` → `retryTask` to close the matrix).
+   * INV-55 consumes `docs/context/inv-55/experiment-brief.md`: changed
+   * single- or multi-experiment selection is recreate-class
+   * invalidation (`MUTATION_POLICIES.selectedExperiment*` →
+   * `recreateTask`) because it changes downstream execution inputs.
    *
-   * Sequence (mirrors `applyInvalidation`'s contract for the
-   * synchronous orchestrator-internal seam — see `invalidation-policy.ts`
-   * and the Step 5/6 `editTaskType` precedent):
-   *   1. **Cancel-first (Hard Invariant).** Compute the transitive
-   *      downstream subgraph of the reconciliation task and cancel any
-   *      member that is actively executing (`running` or
-   *      `fixing_with_ai`) BEFORE we mutate the recon's
-   *      `selectedExperiment`. This is the "any AFFECTED in-flight
-   *      work" guarantee from the chart: stale downstream attempts
-   *      cannot survive a re-selection because they would consume the
-   *      OLD winner's lineage. For the common initial-selection path
-   *      (recon `needs_input` → `completed` with downstream blocked at
-   *      `pending`) this loop is a no-op — there is nothing active.
-   *   2. **Persist new winner.** `writeAndSync` updates
-   *      `execution.selectedExperiment` (and the recon's
-   *      `branch`/`commit` to mirror the winner's lineage) and emits a
-   *      `task.completed` delta. The reconciliation task's status
-   *      transitions to `completed`; this matches the existing
-   *      "Behavior Today" column in the chart ("completes
-   *      reconciliation task and unblocks downstream").
-   *   3. **Retry-class reset of downstream (re-selection only).** When
-   *      the recon was previously completed with a *different* winner,
-   *      every direct downstream consumer is reset via `restartTask`,
-   *      which is the current `retryTask` compatibility wire.
-   *      `restartTask` cascades to its own descendants and bumps each
-   *      affected task's execution generation exactly once via
-   *      `withBumpedExecutionGeneration` (single source of truth for the
-   *      retry reset shape — Step 7 deliberately reuses it instead of
-   *      duplicating the field list here, mirroring Steps 5/6). For
-   *      the initial-selection path no downstream reset is needed
-   *      because nothing has executed yet against the recon's result.
-   *   4. **Auto-start newly ready tasks.** Existing behavior:
-   *      `findNewlyReadyTasks(reconId)` plus `autoStartReadyTasks`
-   *      unblocks downstream that just became ready due to recon
-   *      completing.
-   *
-   * Public surface is unchanged: same `(taskId, experimentId)` signature
-   * returning `TaskState[]` of newly-started tasks. Active downstream is
-   * NO LONGER silently overwritten with a new winner — that's the whole
-   * point of cancel-first per the chart's Hard Invariant. Prior to
-   * Step 7 there was no general active invalidation model for selection
-   * (per the chart's "Behavior Today" column); this method introduces
-   * one.
-   *
-   * NOTE: `recreateTask`'s lineage-discarding reset shape is
-   * deliberately NOT used here. Downstream tasks may still hold valid
-   * workspace lineage (their own branch, their own workspacePath) that
-   * the executor can reuse when the new winner's branch is rebased onto
-   * theirs; that is what makes selection retry-class rather than
-   * recreate-class in the chart's Decision Table.
+   * Sequence:
+   *   1. Detect initial selection, same-set no-op, or changed
+   *      re-selection with canonical set semantics.
+   *   2. For changed re-selection, cancel active transitive downstream
+   *      work before writing the new reconciliation result.
+   *   3. Persist selected lineage on the reconciliation task.
+   *   4. For changed re-selection only, recreate each direct downstream
+   *      consumer so stale branch/workspace/agent state is cleared and
+   *      the downstream subgraph reruns against the new selected lineage.
+   *   5. Auto-start tasks newly unblocked by the reconciliation result.
    */
   selectExperiment(taskId: string, experimentId: string): TaskState[] {
     this.refreshFromDb();
@@ -2057,14 +2020,7 @@ export class Orchestrator {
       ?? (task.execution.selectedExperiment !== undefined
         ? [task.execution.selectedExperiment]
         : undefined);
-    const canonicalize = (ids: readonly string[]) =>
-      Array.from(new Set(ids)).slice().sort();
-    const newCanon = canonicalize([winnerId]);
-    const prevCanon = previousSet ? canonicalize(previousSet) : undefined;
-    const sameAsPrev =
-      prevCanon !== undefined &&
-      prevCanon.length === newCanon.length &&
-      prevCanon.every((id, i) => id === newCanon[i]);
+    const sameAsPrev = sameExperimentSelection(previousSet, [winnerId]);
     const isReSelection = previousSet !== undefined && !sameAsPrev;
     const allTasksBefore = this.stateMachine.getAllTasks();
     if (isReSelection) {
@@ -2118,7 +2074,7 @@ export class Orchestrator {
     return started;
   }
 
-    selectExperiments(
+  selectExperiments(
     taskId: string,
     experimentIds: string[],
     combinedBranch?: string,
@@ -2137,14 +2093,7 @@ export class Orchestrator {
       ?? (task.execution.selectedExperiment !== undefined
           ? [task.execution.selectedExperiment]
           : undefined);
-    const canonicalize = (ids: readonly string[]) =>
-      Array.from(new Set(ids)).slice().sort();
-    const newCanon = canonicalize(experimentIds);
-    const prevCanon = previousSet ? canonicalize(previousSet) : undefined;
-    const sameAsPrev =
-      prevCanon !== undefined &&
-      prevCanon.length === newCanon.length &&
-      prevCanon.every((id, i) => id === newCanon[i]);
+    const sameAsPrev = sameExperimentSelection(previousSet, experimentIds);
     const isReSelection = previousSet !== undefined && !sameAsPrev;
 
     const allTasksBefore = this.stateMachine.getAllTasks();
