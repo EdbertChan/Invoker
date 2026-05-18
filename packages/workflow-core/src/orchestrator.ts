@@ -77,6 +77,7 @@ import {
   withSchedulerEnqueueCandidates,
   type InvalidationPlan,
 } from './invalidation-plan.js';
+import { INV_90_EXPERIMENT_BRIEF_PATH } from './invalidation-policy.js';
 import {
   isActiveAttempt,
   isDiscardedAttempt,
@@ -722,6 +723,7 @@ export interface OrchestratorConfig {
 
 export class Orchestrator {
   private static readonly EXPEDITED_PRIORITY = 100;
+  static readonly INVALIDATION_EXPERIMENT_BRIEF_PATH = INV_90_EXPERIMENT_BRIEF_PATH;
 
   private readonly stateMachine: TaskStateMachine;
   private readonly responseHandler: ResponseHandler;
