@@ -82,7 +82,10 @@ export async function tryDelegateResume(
 }
 
 function usesExtendedDelegationTimeout(command: string): boolean {
-  return command === 'rebase-retry' || command === 'rebase-recreate' || command === 'restart';
+  return command === 'retry'
+    || command === 'rebase-retry'
+    || command === 'rebase-recreate'
+    || command === 'restart';
 }
 
 function looksLikeWorkflowId(target: unknown): boolean {

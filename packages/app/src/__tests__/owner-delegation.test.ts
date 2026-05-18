@@ -74,6 +74,10 @@ describe('headless→owner delegation', () => {
       expect(delegationTimeoutMs(['restart', 'wf-123'], targetLookup)).toBe(60_000);
     });
 
+    it('uses 60s timeout for workflow-scoped retry', () => {
+      expect(delegationTimeoutMs(['retry', 'wf-1'], targetLookup)).toBe(60_000);
+    });
+
     it('keeps task-scoped rebase-retry at the default timeout', () => {
       expect(delegationTimeoutMs(['rebase-retry', 'wf-123/task-1'], targetLookup)).toBe(5_000);
     });
