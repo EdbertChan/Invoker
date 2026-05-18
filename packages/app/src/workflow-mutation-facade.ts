@@ -1,8 +1,9 @@
 /**
  * WorkflowMutationFacade — Single entry point for mutation + dispatch + topup.
  *
- * Each entrypoint (api-server, headless, main) duplicates the same
- * post-mutation lifecycle:
+ * INV-155 selected this facade as the single write lifecycle boundary.
+ * Entrypoints delegate here instead of duplicating the post-mutation
+ * lifecycle:
  *
  *   1. Call a shared action (workflow-actions.ts)
  *   2. Filter runnable tasks from `started`
