@@ -63,7 +63,7 @@ import { makeEnvelope, CommandError } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
-import { IpcBus, Channels, TransportError, TransportErrorCode } from '@invoker/transport';
+import { IpcBus, Channels } from '@invoker/transport';
 import {
   WorkspaceProbeAdapter,
   ContainerProbeAdapter,
@@ -163,6 +163,15 @@ import {
   resolveActionDiagnosticsStallThresholdMs,
 } from './action-graph-diagnostics.js';
 import { registerReadOnlyIpcHandlers } from './ipc-read-handlers.js';
+import {
+  registerGuiLifecycle,
+  registerGuiReadyBootstrap,
+  startGuiMode,
+} from './bootstrap/app-bootstrap.js';
+import {
+  createGuiIpcRegistrar,
+  registerBootstrapStateSyncIpc,
+} from './ipc/ipc-registration.js';
 
 function isTaskInFlightForForcedStop(task: TaskState): boolean {
   return task.status === 'running'
@@ -1149,16 +1158,11 @@ if (isHeadless) {
   // ══════════════════════════════════════════════════════════════
   // GUI MODE
   // ══════════════════════════════════════════════════════════════
-  if (process.env.NODE_ENV !== 'test') {
-    const gotTheLock = app.requestSingleInstanceLock();
-    if (!gotTheLock) {
-      app.quit();
-    } else {
-      setupGuiMode();
-    }
-  } else {
-    setupGuiMode();
-  }
+  startGuiMode({
+    app,
+    isTest: process.env.NODE_ENV === 'test',
+    setupGuiMode,
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1184,7 +1188,6 @@ if (isHeadless) {
     }
   });
   const launchingTasks = new Set<string>();
-  const guiMutationHandlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
   let dbPollInterval: ReturnType<typeof setInterval> | null = null;
   let activityPollInterval: ReturnType<typeof setInterval> | null = null;
   let uiPerfLogInterval: ReturnType<typeof setInterval> | null = null;
@@ -2085,42 +2088,17 @@ if (isHeadless) {
     });
   }
 
-  function registerGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    guiMutationHandlers.set(channel, handler as (...args: unknown[]) => Promise<unknown>);
-    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
-      if (ownerMode) {
-        return handler(...args);
-      }
-      const translated = translateGuiMutationToHeadless({ channel, args });
-      if (!translated) {
-        throw new Error(`No owner delegation route is available for ${channel}`);
-      }
-      try {
-        return await messageBus.request<typeof translated.request, TResult>(translated.channel, translated.request);
-      } catch (err) {
-        if (err instanceof TransportError && err.code === TransportErrorCode.NO_HANDLER) {
-          throw new Error('No mutation owner is available');
-        }
-        throw err;
-      }
-    });
-  }
-
-  function registerWorkflowScopedGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    resolveWorkflowId: (...args: unknown[]) => string | undefined,
-    priority: WorkflowMutationPriority,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    workflowMutationDispatcher.set(channel, (...args: unknown[]) => handler(...args));
-    registerGuiMutationHandler(channel, async (...args: unknown[]) => {
-      const workflowId = resolveWorkflowId(...args);
-      return runWorkflowMutation(workflowId, priority, channel, args, () => handler(...args));
-    });
-  }
+  const {
+    registerGuiMutationHandler,
+    registerWorkflowScopedGuiMutationHandler,
+  } = createGuiIpcRegistrar({
+    ipcMain,
+    getOwnerMode: () => ownerMode,
+    getMessageBus: () => messageBus,
+    translateGuiMutationToHeadless,
+    workflowMutationDispatcher,
+    runWorkflowMutation,
+  });
 
   function createWindow(): void {
     recordStartupMark('createWindow.begin');
@@ -2559,27 +2537,13 @@ if (isHeadless) {
     }, 0);
   }
 
-  app.whenReady().then(async () => {
-    recordStartupMark('app.whenReady');
-    ownerMode = true;
-    try {
-      recordStartupMark('initServices.start');
-      await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      recordStartupMark('initServices.end', { ownerMode: true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!message.includes('[db-writer-lock]')) {
-        process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
-        app.quit();
-        return;
-      }
-      recordStartupMark('initServices.readOnly.start');
-      await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      ownerMode = false;
-      recordStartupMark('initServices.readOnly.end', { ownerMode: false });
-    }
-
-    if (ownerMode) {
+  registerGuiReadyBootstrap({
+    app,
+    recordStartupMark,
+    initializeOwner: () => initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' }),
+    initializeFollower: () => initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' }),
+    onOwnerReady: () => {
+      ownerMode = true;
       rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
         persistence,
@@ -2598,11 +2562,26 @@ if (isHeadless) {
         },
         { logger },
       );
-    } else {
+    },
+    onFollowerReady: () => {
+      ownerMode = false;
       logger.info('Launched in follower mode; mutation execution is delegated to the current owner', {
         module: 'init',
       });
-    }
+    },
+    isWriterLockError: (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      return message.includes('[db-writer-lock]');
+    },
+    writeFatalError: (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
+    },
+    onError: (err) => {
+      process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+      app.quit();
+    },
+    onReady: async () => {
 
     // ── IPC Delegation Handlers — peer → owner ────────────────
     // Peer processes delegate write-heavy commands to the owner process via IpcBus.
@@ -2784,7 +2763,9 @@ if (isHeadless) {
     });
 
     // Register IPC handlers
-    ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
+    registerBootstrapStateSyncIpc({
+      ipcMain,
+      buildPayload: () => {
       const startedAtMs = Date.now();
       const tasks = orchestrator.getAllTasks();
       const workflows = listWorkflowsByStartupRecency();
@@ -2800,7 +2781,8 @@ if (isHeadless) {
         workflowCount: workflows.length,
         jsonSizeBytes,
       });
-      event.returnValue = payload;
+      return payload;
+      },
     });
     registerGuiMutationHandler('invoker:load-plan', async (planTextArg: unknown) => {
       const planText = String(planTextArg);
@@ -3852,32 +3834,17 @@ if (isHeadless) {
         createWindow();
       }
     });
-  }).catch((err) => {
-    process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-    app.quit();
+    },
   });
 
-  app.on('window-all-closed', () => {
-    logger.info('window-all-closed', { module: 'window' });
-    if (process.platform !== 'darwin') {
-      app.quit();
-    }
-  });
-
-  let isQuitting = false;
-  app.on('before-quit', async (event) => {
-    if (isQuitting) return;
-    isQuitting = true;
-    logger.info('before-quit begin', { module: 'process' });
-    event.preventDefault();
-
-    const safetyTimer = setTimeout(() => {
-      console.error('[quit] Cleanup timed out after 10s, forcing exit');
-      process.exit(1);
-    }, 10_000);
-
-    try {
+  registerGuiLifecycle({
+    app,
+    logger,
+    platform: process.platform,
+    closeApiServer: async () => {
       if (apiServer) await apiServer.close().catch(() => {});
+    },
+    clearIntervals: () => {
       if (dbPollInterval) clearInterval(dbPollInterval);
       if (activityPollInterval) clearInterval(activityPollInterval);
       if (uiPerfLogInterval) clearInterval(uiPerfLogInterval);
@@ -3885,10 +3852,16 @@ if (isHeadless) {
         clearInterval(hourlyBackupInterval);
         hourlyBackupInterval = null;
       }
+    },
+    closeEmbeddedTerminals: () => {
       embeddedTerminalManager.closeAll();
+    },
+    stopExecutors: async () => {
       if (executorRegistry) {
         await Promise.all(executorRegistry.getAll().map(f => f.destroyAll()));
       }
+    },
+    failInFlightTasksForQuit: () => {
       if (orchestrator) {
         for (const task of orchestrator.getAllTasks()) {
           if (task.status === 'running' || task.status === 'fixing_with_ai') {
@@ -3907,14 +3880,16 @@ if (isHeadless) {
           }
         }
       }
+    },
+    closePersistence: () => {
       if (persistence) persistence.close();
+    },
+    releaseWriterLock: () => {
       if (writerLock) writerLock.release();
+    },
+    disconnectMessageBus: () => {
       if (messageBus) messageBus.disconnect();
-    } finally {
-      clearTimeout(safetyTimer);
-      logger.info('before-quit end -> app.exit(0)', { module: 'process' });
-      app.exit(0);
-    }
+    },
   });
 
   // ── Slack Bot (embedded in GUI process) ──────────────────
