@@ -5,7 +5,9 @@
  * configurable via INVOKER_API_PORT env var.
  *
  * All write endpoints delegate to a WorkflowMutationFacade instance
- * which encapsulates the mutation → dispatch → topup lifecycle.
+ * which encapsulates the mutation → dispatch → topup lifecycle. This
+ * consumes the INV-130 experiment verdict: keep the API server thin and
+ * route write behavior through the facade-owned mutation path.
  *
  * Read endpoints:
  *   GET  /api/health
@@ -19,7 +21,9 @@
  *
  * Write endpoints:
  *   POST   /api/tasks/:id/cancel
+ *   POST   /api/tasks/:id/retry
  *   POST   /api/tasks/:id/restart
+ *   POST   /api/tasks/:id/recreate
  *   POST   /api/tasks/:id/resolve-conflict  body: { agent? }
  *   POST   /api/tasks/:id/approve
  *   POST   /api/tasks/:id/reject       body: { reason? }
@@ -30,6 +34,8 @@
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
  *   POST   /api/workflows/:id/detach  body: { upstreamWorkflowId }
+ *   POST   /api/workflows/:id/retry
+ *   POST   /api/workflows/:id/recreate
  *   POST   /api/workflows/:id/restart
  *   POST   /api/workflows/:id/rebase-retry
  *   POST   /api/workflows/:id/rebase-recreate
@@ -52,13 +58,36 @@ import type { ExecutorRegistry } from '@invoker/execution-engine';
 import type { WorkflowMutationFacade } from './workflow-mutation-facade.js';
 import { resolveHeadlessTargetWorkflowId } from './headless-command-classification.js';
 
+type ApiMutationPort = Pick<
+  WorkflowMutationFacade,
+  | 'approveTask'
+  | 'cancelTask'
+  | 'cancelWorkflow'
+  | 'editTaskAgent'
+  | 'editTaskCommand'
+  | 'editTaskPrompt'
+  | 'editTaskType'
+  | 'forkWorkflow'
+  | 'provideInput'
+  | 'rebaseRecreate'
+  | 'rebaseRetry'
+  | 'recreateTask'
+  | 'recreateWorkflow'
+  | 'rejectTask'
+  | 'resolveConflict'
+  | 'retryTask'
+  | 'retryWorkflow'
+  | 'setTaskExternalGatePolicies'
+  | 'setWorkflowMergeMode'
+>;
+
 export interface ApiServerDeps {
   logger?: Logger;
   orchestrator: Orchestrator;
   persistence: SQLiteAdapter;
   executorRegistry: ExecutorRegistry;
-  /** All write endpoints delegate to the facade for mutation + dispatch + topup. */
-  mutations: WorkflowMutationFacade;
+  /** INV-130: write endpoints delegate to this facade port for mutation + dispatch + topup. */
+  mutations: ApiMutationPort;
   deleteWorkflow: (workflowId: string) => Promise<void>;
   detachWorkflow: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
 }

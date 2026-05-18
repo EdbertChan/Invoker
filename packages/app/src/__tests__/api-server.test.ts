@@ -6,6 +6,8 @@
  *
  * All write endpoints route through a WorkflowMutationFacade instance
  * which wraps the mocked orchestrator, persistence, and taskExecutor.
+ * INV-130 keeps the test count fixed while asserting the API calls the
+ * facade boundary before facade-owned mutation, dispatch, and top-up work.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'node:http';
@@ -71,6 +73,7 @@ function request(
 
 let api: ApiServer;
 let port: number;
+let mutations: WorkflowMutationFacade;
 let mocks: {
   orchestrator: Record<string, ReturnType<typeof vi.fn>>;
   persistence: Record<string, ReturnType<typeof vi.fn>>;
@@ -152,13 +155,14 @@ function buildFacade(m: typeof mocks) {
 
 beforeAll(async () => {
   mocks = createMocks();
+  mutations = buildFacade(mocks);
   // Use port 0 for ephemeral port assignment
   process.env.INVOKER_API_PORT = '0';
   api = startApiServer({
     orchestrator: mocks.orchestrator as any,
     persistence: mocks.persistence as any,
     executorRegistry: mocks.executorRegistry as any,
-    mutations: buildFacade(mocks),
+    mutations,
     deleteWorkflow: mocks.deleteWorkflow,
     detachWorkflow: mocks.detachWorkflow,
   });
@@ -180,6 +184,8 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
+  vi.restoreAllMocks();
+
   // Reset all mocks between tests
   for (const group of [mocks.orchestrator, mocks.persistence, mocks.taskExecutor]) {
     for (const fn of Object.values(group)) {
@@ -321,9 +327,13 @@ describe('GET /api/tasks/:id/output', () => {
 
 describe('POST /api/tasks/:id/cancel', () => {
   it('cancels task via facade', async () => {
+    const cancelSpy = vi.spyOn(mutations, 'cancelTask');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/cancel');
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(cancelSpy).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.cancelTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
@@ -331,9 +341,13 @@ describe('POST /api/tasks/:id/cancel', () => {
 
 describe('POST /api/workflows/:id/cancel', () => {
   it('cancels workflow via facade', async () => {
+    const cancelWorkflowSpy = vi.spyOn(mutations, 'cancelWorkflow');
+
     const res = await request(port, 'POST', '/api/workflows/wf-1/cancel');
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(cancelWorkflowSpy).toHaveBeenCalledWith('wf-1');
     expect(mocks.orchestrator.cancelWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
@@ -341,10 +355,14 @@ describe('POST /api/workflows/:id/cancel', () => {
 
 describe('POST /api/tasks/:id/restart', () => {
   it('restarts task via facade retryTask', async () => {
+    const retrySpy = vi.spyOn(mutations, 'retryTask');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/restart');
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('restarted');
+    expect(retrySpy).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
   });
 
@@ -402,10 +420,14 @@ describe('POST /api/tasks/:id/restart', () => {
 
 describe('POST /api/tasks/:id/approve', () => {
   it('approves task via facade', async () => {
+    const approveSpy = vi.spyOn(mutations, 'approveTask');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/approve');
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('approved');
+    expect(approveSpy).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.approve).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
@@ -467,25 +489,37 @@ describe('POST /api/tasks/:id/approve', () => {
 
 describe('POST /api/tasks/:id/resolve-conflict', () => {
   it('tops up globally ready work after resolve-conflict', async () => {
+    const resolveConflictSpy = vi.spyOn(mutations, 'resolveConflict');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/resolve-conflict', { agent: 'claude' });
+
     expect(res.status).toBe(200);
+    expect(resolveConflictSpy).toHaveBeenCalledWith('task-1', 'claude');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
 });
 
 describe('POST /api/tasks/:id/reject', () => {
   it('rejects task without reason', async () => {
+    const rejectSpy = vi.spyOn(mutations, 'rejectTask');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/reject');
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('rejected');
+    expect(rejectSpy).toHaveBeenCalledWith('task-1', undefined);
     expect(mocks.orchestrator.reject).toHaveBeenCalledWith('task-1', undefined);
   });
 
   it('rejects task with reason', async () => {
+    const rejectSpy = vi.spyOn(mutations, 'rejectTask');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/reject', { reason: 'wrong output' });
+
     expect(res.status).toBe(200);
     expect(res.body.reason).toBe('wrong output');
+    expect(rejectSpy).toHaveBeenCalledWith('task-1', 'wrong output');
     expect(mocks.orchestrator.reject).toHaveBeenCalledWith('task-1', 'wrong output');
   });
 
@@ -544,10 +578,14 @@ describe('POST /api/tasks/:id/reject', () => {
 
 describe('POST /api/tasks/:id/input', () => {
   it('provides input to task', async () => {
+    const provideInputSpy = vi.spyOn(mutations, 'provideInput');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/input', { text: 'yes' });
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('input_provided');
+    expect(provideInputSpy).toHaveBeenCalledWith('task-1', 'yes');
     expect(mocks.orchestrator.provideInput).toHaveBeenCalledWith('task-1', 'yes');
   });
 
@@ -560,10 +598,14 @@ describe('POST /api/tasks/:id/input', () => {
 
 describe('POST /api/tasks/:id/edit', () => {
   it('edits task command', async () => {
+    const editCommandSpy = vi.spyOn(mutations, 'editTaskCommand');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/edit', { command: 'npm test' });
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('command_edited');
+    expect(editCommandSpy).toHaveBeenCalledWith('task-1', 'npm test');
     expect(mocks.orchestrator.editTaskCommand).toHaveBeenCalledWith('task-1', 'npm test');
   });
 
@@ -576,10 +618,14 @@ describe('POST /api/tasks/:id/edit', () => {
 
 describe('POST /api/tasks/:id/edit-prompt', () => {
   it('edits task prompt and routes through orchestrator.editTaskPrompt', async () => {
+    const editPromptSpy = vi.spyOn(mutations, 'editTaskPrompt');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/edit-prompt', { prompt: 'do the thing' });
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('prompt_edited');
+    expect(editPromptSpy).toHaveBeenCalledWith('task-1', 'do the thing');
     expect(mocks.orchestrator.editTaskPrompt).toHaveBeenCalledWith('task-1', 'do the thing');
     expect(mocks.orchestrator.editTaskCommand).not.toHaveBeenCalled();
     // Facade dispatches any newly-runnable tasks via the executor.
@@ -621,10 +667,14 @@ describe('POST /api/tasks/:id/edit-prompt', () => {
 
 describe('POST /api/tasks/:id/edit-type', () => {
   it('edits task type', async () => {
+    const editTypeSpy = vi.spyOn(mutations, 'editTaskType');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/edit-type', { runnerKind: 'docker' });
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('type_edited');
+    expect(editTypeSpy).toHaveBeenCalledWith('task-1', 'docker', undefined);
     expect(mocks.orchestrator.editTaskType).toHaveBeenCalledWith('task-1', 'docker', undefined);
   });
 
@@ -658,10 +708,14 @@ describe('POST /api/tasks/:id/edit-type', () => {
 
 describe('POST /api/tasks/:id/edit-agent', () => {
   it('edits task agent and routes through orchestrator.editTaskAgent', async () => {
+    const editAgentSpy = vi.spyOn(mutations, 'editTaskAgent');
+
     const res = await request(port, 'POST', '/api/tasks/task-1/edit-agent', { agent: 'codex' });
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('agent_edited');
+    expect(editAgentSpy).toHaveBeenCalledWith('task-1', 'codex');
     expect(mocks.orchestrator.editTaskAgent).toHaveBeenCalledWith('task-1', 'codex');
     expect(mocks.orchestrator.editTaskCommand).not.toHaveBeenCalled();
     expect(mocks.orchestrator.editTaskPrompt).not.toHaveBeenCalled();
@@ -678,17 +732,22 @@ describe('POST /api/tasks/:id/edit-agent', () => {
 
 describe('POST /api/tasks/:id/gate-policy', () => {
   it('updates gate policy and executes started tasks', async () => {
+    const gatePolicySpy = vi.spyOn(mutations, 'setTaskExternalGatePolicies');
+    const updates = [
+      { workflowId: 'wf-upstream', taskId: '__merge__', gatePolicy: 'review_ready' as const },
+    ];
+
     const res = await request(port, 'POST', '/api/tasks/task-1/gate-policy', {
-      updates: [
-        { workflowId: 'wf-upstream', taskId: '__merge__', gatePolicy: 'review_ready' },
-      ],
+      updates,
     });
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('gate_policy_updated');
+    expect(gatePolicySpy).toHaveBeenCalledWith('task-1', updates);
     expect(mocks.orchestrator.setTaskExternalGatePolicies).toHaveBeenCalledWith(
       'task-1',
-      [{ workflowId: 'wf-upstream', taskId: '__merge__', gatePolicy: 'review_ready' }],
+      updates,
     );
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
   });
@@ -724,11 +783,15 @@ describe('POST /api/tasks/:id/gate-policy', () => {
 
 describe('POST /api/workflows/:id/restart', () => {
   it('restarts workflow via facade recreateWorkflow', async () => {
+    const recreateWorkflowSpy = vi.spyOn(mutations, 'recreateWorkflow');
     mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
+
     const res = await request(port, 'POST', '/api/workflows/wf-1/restart');
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('restarted');
+    expect(recreateWorkflowSpy).toHaveBeenCalledWith('wf-1');
     expect(mocks.persistence.loadWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.persistence.updateWorkflow).toHaveBeenCalled();
   });

@@ -5,6 +5,10 @@
  * graph (via TaskStateMachine) is a read-only cache that is refreshed
  * from the DB. This ensures the DB is always the single source of truth.
  *
+ * API entrypoints must not duplicate this mutation lifecycle. The INV-130
+ * design keeps HTTP parsing in the API server and routes writes through the
+ * WorkflowMutationFacade so orchestration policy remains centralized here.
+ *
  * Pattern for every mutation:
  *   1. refreshFromDb()  — ensure in-memory state is current
  *   2. validate / compute using read-only queries
