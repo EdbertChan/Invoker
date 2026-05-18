@@ -7,11 +7,13 @@ cd "$ROOT"
 if [ -n "${INVOKER_WORKSPACE_TEST_CONCURRENCY:-}" ]; then
   CONCURRENCY="$INVOKER_WORKSPACE_TEST_CONCURRENCY"
 elif [ -n "${CI:-}" ]; then
+  # INV-117 proof contract: CI workspace tests run serially unless explicitly overridden.
   CONCURRENCY=1
 else
   CONCURRENCY=4
 fi
 
+# Keep the INV-117 workspace determinism threshold machine-checkable.
 if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || [ "$CONCURRENCY" -lt 1 ]; then
   echo "ERROR: INVOKER_WORKSPACE_TEST_CONCURRENCY must be a positive integer" >&2
   exit 2
