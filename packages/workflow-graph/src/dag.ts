@@ -16,52 +16,74 @@ import type { TaskState } from './types.js';
 export function topologicalSort(tasks: TaskState[]): TaskState[] {
   if (tasks.length === 0) return [];
 
+  const taskCount = tasks.length;
   const taskIndexById = new Map<string, number>();
-  const inDegree = new Array<number>(tasks.length).fill(0);
-  const adjacency: number[][] = Array.from({ length: tasks.length }, () => []);
+  const inDegree = new Int32Array(taskCount);
 
-  for (let index = 0; index < tasks.length; index++) {
+  for (let index = 0; index < taskCount; index++) {
     taskIndexById.set(tasks[index]!.id, index);
   }
 
-  // Build edges: for each dependency, add an edge from dep -> task
-  for (let taskIndex = 0; taskIndex < tasks.length; taskIndex++) {
+  let edgeCount = 0;
+  for (let taskIndex = 0; taskIndex < taskCount; taskIndex++) {
+    const task = tasks[taskIndex]!;
+    for (const dep of task.dependencies) {
+      if (taskIndexById.has(dep)) {
+        edgeCount++;
+      }
+    }
+  }
+
+  const firstNeighborEdge = new Int32Array(taskCount);
+  firstNeighborEdge.fill(-1);
+  const nextNeighborEdge = new Int32Array(edgeCount);
+  const neighborTaskIndex = new Int32Array(edgeCount);
+  let edgeIndex = 0;
+
+  // Build edges: for each dependency, add an edge from dep -> task.
+  for (let taskIndex = 0; taskIndex < taskCount; taskIndex++) {
     const task = tasks[taskIndex]!;
     for (const dep of task.dependencies) {
       const depIndex = taskIndexById.get(dep);
       if (depIndex !== undefined) {
-        adjacency[depIndex]!.push(taskIndex);
+        neighborTaskIndex[edgeIndex] = taskIndex;
+        nextNeighborEdge[edgeIndex] = firstNeighborEdge[depIndex]!;
+        firstNeighborEdge[depIndex] = edgeIndex;
+        edgeIndex++;
         inDegree[taskIndex]! += 1;
       }
     }
   }
 
   // Seed queue with zero in-degree nodes
-  const queue: number[] = [];
-  for (let index = 0; index < inDegree.length; index++) {
+  const queue = new Int32Array(taskCount);
+  let queueLength = 0;
+  for (let index = 0; index < taskCount; index++) {
     if (inDegree[index] === 0) {
-      queue.push(index);
+      queue[queueLength++] = index;
     }
   }
 
-  const sorted: TaskState[] = [];
+  const sorted = new Array<TaskState>(taskCount);
+  let sortedLength = 0;
 
-  for (let queueIndex = 0; queueIndex < queue.length; queueIndex++) {
+  for (let queueIndex = 0; queueIndex < queueLength; queueIndex++) {
     const taskIndex = queue[queueIndex]!;
-    sorted.push(tasks[taskIndex]!);
+    sorted[sortedLength++] = tasks[taskIndex]!;
 
-    for (const neighbor of adjacency[taskIndex]!) {
+    for (let edge = firstNeighborEdge[taskIndex]!; edge !== -1; edge = nextNeighborEdge[edge]!) {
+      const neighbor = neighborTaskIndex[edge]!;
       const newDegree = inDegree[neighbor]! - 1;
       inDegree[neighbor] = newDegree;
       if (newDegree === 0) {
-        queue.push(neighbor);
+        queue[queueLength++] = neighbor;
       }
     }
   }
 
-  if (sorted.length !== tasks.length) {
+  if (sortedLength !== taskCount) {
     throw new Error(
-      `Cycle detected in task graph. ${tasks.length - sorted.length} task(s) involved in cycle.`,
+      `Cycle detected in task graph. ${taskCount - sortedLength} task(s) involved in cycle.`,
     );
   }
 
