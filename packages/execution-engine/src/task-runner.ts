@@ -241,7 +241,10 @@ export class TaskRunner {
   private pendingPoolSelections = new Map<string, PoolSelection>();
   private freshBaseCommits = new Map<string, FreshBaseCommit>();
 
-  /** In-flight executions keyed by attemptId (with taskId retained for external kill resolution). */
+  /**
+   * INV-113 accepted attempt-scoped execution control; task-id-only tracking was rejected.
+   * In-flight executions are keyed by attemptId, with taskId retained for external kill resolution.
+   */
   private activeExecutions = new Map<string, ActiveExecutionEntry>();
   private launchingAttemptIds = new Set<string>();
 
