@@ -52,6 +52,12 @@ export class OrchestratorError extends Error {
   }
 }
 
+export interface TaskLineageExpectation {
+  taskId: string;
+  selectedAttemptId: string | undefined;
+  generation: number;
+}
+
 function isActiveForInvalidation(status: TaskStatus): boolean {
   return (
     status === 'running' ||
@@ -1798,9 +1804,14 @@ export class Orchestrator {
     this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', additionalChanges);
   }
 
-  setFixAwaitingApproval(taskId: string, originalError: string): void {
+  setFixAwaitingApproval(
+    taskId: string,
+    originalError: string,
+    expectedLineage?: TaskLineageExpectation,
+  ): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
+    if (!this.isExpectedLineageCurrent(task, expectedLineage)) return;
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     const tid = task.id;
     if (task.status !== 'running' && task.status !== 'fixing_with_ai') {
@@ -1924,9 +1935,13 @@ export class Orchestrator {
     return started;
   }
 
-  async resumeTaskAfterFixApproval(taskId: string): Promise<TaskState[]> {
+  async resumeTaskAfterFixApproval(
+    taskId: string,
+    expectedLineage?: TaskLineageExpectation,
+  ): Promise<TaskState[]> {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
+    if (!this.isExpectedLineageCurrent(task, expectedLineage)) return [];
     const isApprovalState = task?.status === 'awaiting_approval' || task?.status === 'review_ready';
     if (!task || !isApprovalState || task.execution.pendingFixError === undefined) {
       return [];
@@ -2831,9 +2846,15 @@ export class Orchestrator {
    * Revert a conflict resolution attempt: restore the task to failed
    * with its original error and re-parsed mergeConflict field.
    */
-  revertConflictResolution(taskId: string, savedError: string, fixError?: string): void {
+  revertConflictResolution(
+    taskId: string,
+    savedError: string,
+    fixError?: string,
+    expectedLineage?: TaskLineageExpectation,
+  ): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
+    if (!this.isExpectedLineageCurrent(task, expectedLineage)) return;
     if (!task) {
       throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     }
@@ -3885,6 +3906,19 @@ export class Orchestrator {
     if (t0) return t0;
     const alt = this.bareToScopedIfUnique(taskId);
     return alt ? sm.getTask(alt) : undefined;
+  }
+
+  private isExpectedLineageCurrent(
+    task: TaskState | undefined,
+    expected?: TaskLineageExpectation,
+  ): boolean {
+    if (!expected) return true;
+    return Boolean(
+      task
+      && task.id === expected.taskId
+      && task.execution.selectedAttemptId === expected.selectedAttemptId
+      && (task.execution.generation ?? 0) === expected.generation,
+    );
   }
 
   getTask(taskId: string): TaskState | undefined {

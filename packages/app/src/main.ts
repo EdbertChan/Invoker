@@ -130,6 +130,7 @@ import {
   resolveConflictAction,
   selectFailureRecoveryRoute,
   selectExperiments as sharedSelectExperiments,
+  StaleLineageError,
   setWorkflowMergeMode,
 } from './workflow-actions.js';
 import { spawn, execSync } from 'node:child_process';
@@ -3556,6 +3557,10 @@ if (isHeadless) {
           scopedTaskIds: [taskId],
         });
       } catch (err) {
+        if (err instanceof StaleLineageError) {
+          logger.info(`resolve-conflict stale result discarded: ${err.message}`, { module: 'ipc' });
+          return;
+        }
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
@@ -3588,6 +3593,10 @@ if (isHeadless) {
           scopedTaskIds: [taskId],
         });
       } catch (err) {
+        if (err instanceof StaleLineageError) {
+          logger.info(`fix-with-agent stale result discarded: ${err.message}`, { module: 'ipc' });
+          return;
+        }
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
