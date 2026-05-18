@@ -53,6 +53,12 @@ Reason:
 Run from the repository root:
 
 ```sh
+cd packages/workflow-core && pnpm test
+```
+
+Focused INV-88 command retained for policy-surface review:
+
+```sh
 pnpm --filter @invoker/workflow-core test -- --run packages/workflow-core/src/__tests__/orchestrator.test.ts packages/workflow-core/src/__tests__/invalidation-policy.test.ts packages/workflow-core/src/__tests__/lifecycle-matrix.test.ts packages/workflow-core/src/__tests__/edit-task-type-invalidation.test.ts packages/workflow-core/src/__tests__/edit-task-prompt-invalidation.test.ts packages/workflow-core/src/__tests__/cancel-first-invariant.test.ts
 ```
 
@@ -60,12 +66,12 @@ Observed output summary on 2026-05-18:
 
 ```text
 Test Files  45 passed (45)
-Tests       995 passed (995)
+Tests       996 passed (996)
 Exit code   0
 ```
 
 Notes:
-- Vitest expanded the package invocation to the workflow-core package test surface.
+- `cd packages/workflow-core && pnpm test` ran the workflow-core package test surface successfully.
 - The package also emitted a pre-existing package export warning about the `types` condition ordering. This warning did not fail the run and is unrelated to INV-88.
 
 ## Expected Outputs and Thresholds
@@ -110,4 +116,4 @@ Acceptance thresholds:
 
 ## Verdict
 
-The typed policy table plus typed dispatcher design meets the deterministic proof threshold. The selected design is more reviewable than inline string dispatch because one policy table declares mutation classification and one dispatcher enforces action/scope compatibility and cancel-first ordering. The observed workflow-core test run passed with `45 passed` test files and `995 passed` tests.
+The typed policy table plus typed dispatcher design meets the deterministic proof threshold. The selected design is more reviewable than inline string dispatch because one policy table declares mutation classification and one dispatcher enforces action/scope compatibility and cancel-first ordering. The observed workflow-core test run passed with `45 passed` test files and `996 passed` tests.
