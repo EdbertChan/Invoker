@@ -125,6 +125,10 @@ class InMemoryPersistence implements OrchestratorPersistence {
     return this.tasks.get(this.resolveBareTaskKey(taskId));
   }
 
+  deleteTask(taskId: string): void {
+    this.tasks.delete(this.resolveBareTaskKey(taskId));
+  }
+
   updateTask(taskId: string, changes: TaskStateChanges): void {
     const resolvedId = this.resolveBareTaskKey(taskId);
     const entry = this.tasks.get(resolvedId);
@@ -2664,6 +2668,57 @@ describe('Orchestrator', () => {
       hydrateOrchestrator.approve('t1');
 
       expect(hydrateOrchestrator.getTask('t1')!.status).toBe('completed');
+    });
+
+    it('hydrateWorkflowFromDb drops tasks deleted from persistence while keeping other workflows loaded', () => {
+      const hydratePersistence = new InMemoryPersistence();
+      hydratePersistence.saveTask('wf-a', {
+        id: 'a1',
+        description: 'Persisted task from workflow A',
+        status: 'completed',
+        dependencies: [],
+        createdAt: new Date(),
+        config: { workflowId: 'wf-a' },
+        execution: {},
+      });
+      hydratePersistence.saveTask('wf-a', {
+        id: 'a2',
+        description: 'Deleted task from workflow A',
+        status: 'pending',
+        dependencies: ['a1'],
+        createdAt: new Date(),
+        config: { workflowId: 'wf-a' },
+        execution: {},
+      });
+      hydratePersistence.saveTask('wf-b', {
+        id: 'b1',
+        description: 'Persisted task from workflow B',
+        status: 'completed',
+        dependencies: [],
+        createdAt: new Date(),
+        config: { workflowId: 'wf-b' },
+        execution: {},
+      });
+
+      const hydrateOrchestrator = new Orchestrator({
+        persistence: hydratePersistence,
+        messageBus: new InMemoryBus(),
+        maxConcurrency: 3,
+      });
+
+      hydrateOrchestrator.hydrateWorkflowFromDb('wf-a');
+      hydrateOrchestrator.hydrateWorkflowFromDb('wf-b');
+      expect(hydrateOrchestrator.getTask('a2')).toBeDefined();
+
+      hydratePersistence.deleteTask('a2');
+      hydrateOrchestrator.hydrateWorkflowFromDb('wf-a');
+
+      // INV-88: persisted rows define the cache contents; a DB-deleted task
+      // must not survive in memory after workflow-scoped hydration.
+      expect(hydrateOrchestrator.getTask('a1')).toBeDefined();
+      expect(hydrateOrchestrator.getTask('a2')).toBeUndefined();
+      expect(hydrateOrchestrator.getTask('b1')).toBeDefined();
+      expect(hydrateOrchestrator.getAllTasks().map((task) => task.id).sort()).toEqual(['a1', 'b1']);
     });
   });
 

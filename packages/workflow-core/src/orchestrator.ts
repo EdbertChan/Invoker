@@ -834,9 +834,16 @@ export class Orchestrator {
 
   private refreshWorkflowFromDb(workflowId: string): void {
     this.activeWorkflowIds.add(workflowId);
-    const tasks = this.persistence.loadTasks(workflowId);
-    for (const task of tasks) {
-      this.stateMachine.restoreTask(task);
+    // INV-88: persistence is the source of truth and the graph is only a
+    // cache. ActionGraph intentionally has no delete primitive, so a
+    // workflow-scoped refresh must rebuild the active cache rather than
+    // overlay persisted rows and leave DB-deleted tasks alive in memory.
+    this.stateMachine.clear();
+    for (const wfId of this.activeWorkflowIds) {
+      const tasks = this.persistence.loadTasks(wfId);
+      for (const task of tasks) {
+        this.stateMachine.restoreTask(task);
+      }
     }
   }
 
