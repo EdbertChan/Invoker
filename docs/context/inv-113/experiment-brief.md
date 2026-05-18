@@ -31,7 +31,7 @@ Concrete source loci:
 - `packages/execution-engine/src/task-runner.ts:493` builds the deterministic failed `WorkResponse` for startup failure.
 - `packages/execution-engine/src/task-runner.ts:990` includes pending and active pool selections in member load.
 - `packages/execution-engine/src/task-runner.ts:1001` selects pool members deterministically by round-robin or least-loaded/index order.
-- `packages/execution-engine/src/task-runner.ts:1098` centralizes executor selection for configured runner kinds, pools, SSH, Docker, merge, and defaults.
+- `packages/execution-engine/src/task-runner.ts:1100` centralizes executor selection for configured runner kinds, pools, SSH, Docker, merge, and defaults.
 
 ## Competing Design Considered
 
@@ -66,7 +66,7 @@ Expected output includes these anchors:
 432:    if (this.launchingAttemptIds.has(attemptId) || this.activeExecutions.has(attemptId)) {
 455:      // Guard: if the task lineage has advanced past this attempt, the
 1001:  private selectPoolMember(poolId: string, pool: ExecutionPoolConfig): ExecutionPoolMember | undefined {
-1098:  selectExecutor(task: TaskState): Executor {
+1100:  selectExecutor(task: TaskState): Executor {
 ```
 
 Threshold: every anchor must be present exactly once except references inside method bodies, which may occur multiple times.
@@ -85,17 +85,18 @@ Expected output includes these INV-113-relevant tests:
 115:  it('sends attemptId and executionGeneration in work requests and preserves them in responses', async () => {
 186:  it('dispatches newly ready tasks after executor startup failure', async () => {
 244:  it('deduplicates concurrent launches for the same attempt', async () => {
-304:  it('kills the active execution for a task by resolving its current attempt', async () => {
-369:  it('kills the selected attempt when an older attempt for the same task is still active', async () => {
-456:  it('does not kill an older active attempt when the selected attempt has no live execution', async () => {
-520:  it('marks recreateTask-style executions as requiring a fresh workspace', async () => {
-581:  it('marks recreateWorkflow-style root task executions as requiring a fresh workspace', async () => {
-642:  it('keeps restart-style executions reusable when branch or workspace state is still present', async () => {
+304:  it('records pending least-loaded pool selections before launch metadata is persisted', async () => {
+421:  it('kills the active execution for a task by resolving its current attempt', async () => {
+486:  it('kills the selected attempt when an older attempt for the same task is still active', async () => {
+573:  it('does not kill an older active attempt when the selected attempt has no live execution', async () => {
+637:  it('marks recreateTask-style executions as requiring a fresh workspace', async () => {
+698:  it('marks recreateWorkflow-style root task executions as requiring a fresh workspace', async () => {
+759:  it('keeps restart-style executions reusable when branch or workspace state is still present', async () => {
 ```
 
 Threshold: all listed tests must exist and remain in `packages/execution-engine/src/__tests__/task-runner.test.ts`.
 
-Verdict: pass if all nine anchors are present; fail if any behavior lacks direct unit coverage.
+Verdict: pass if all ten anchors are present; fail if any behavior lacks direct unit coverage.
 
 ### 3. Execute the proof suite
 
@@ -107,8 +108,8 @@ Expected terminal summary from the 2026-05-18 proof run:
 
 ```text
 Test Files  1 passed (1)
-     Tests  123 passed (123)
-  Duration  11.51s
+     Tests  124 passed (124)
+  Duration  20.85s
 ```
 
 The run also emits a package export-order warning:
@@ -123,7 +124,7 @@ Thresholds:
 
 - Exit code must be `0`.
 - `Test Files` must report `1 passed (1)`.
-- `Tests` must report `123 passed (123)` or more, with zero failures.
+- `Tests` must report `124 passed (124)` or more, with zero failures.
 - Duration should remain under 30 seconds on this worktree class; investigate if it exceeds 30 seconds twice in a row.
 
 Verdict from recorded run: pass.
@@ -135,11 +136,11 @@ Verdict from recorded run: pass.
 | Attempt metadata is stable through request/response | `task-runner.ts:420` | `task-runner.test.ts:115` | Request and response include `attemptId=gen-task-a1` and `executionGeneration=7`. |
 | Startup failure does not stall ready work | `task-runner.ts:493` | `task-runner.test.ts:186` | Failed startup emits failed response and calls `executeTasks([newlyReady])`. |
 | Concurrent duplicate launch is suppressed | `task-runner.ts:432` | `task-runner.test.ts:244` | Executor `start` is called once for two concurrent starts of the same attempt. |
-| Kill targets current selected attempt | `task-runner.ts:341` | `task-runner.test.ts:304`, `task-runner.test.ts:369`, `task-runner.test.ts:456` | Only the selected live attempt is killed; stale active attempts are not killed accidentally. |
-| Recreate uses fresh workspace, restart reuses existing state | `task-runner.ts:659` | `task-runner.test.ts:520`, `task-runner.test.ts:581`, `task-runner.test.ts:642` | Recreate requests set `freshWorkspace=true`; restart with branch/workspace sets `freshWorkspace=false`. |
-| Executor selection remains centralized and deterministic | `task-runner.ts:990`, `task-runner.ts:1001`, `task-runner.ts:1098` | Source anchor command plus full task-runner suite | Selection is reviewable in one module; least-loaded tie breaks by member index. |
+| Pool selection is deterministic before launch metadata persists | `task-runner.ts:990`, `task-runner.ts:1001`, `task-runner.ts:1033` | `task-runner.test.ts:304` | Pending selection for member A counts as load before the second launch selects member B, and logged metadata records `selectionStrategy=leastLoaded`. |
+| Kill targets current selected attempt | `task-runner.ts:341` | `task-runner.test.ts:421`, `task-runner.test.ts:486`, `task-runner.test.ts:573` | Only the selected live attempt is killed; stale active attempts are not killed accidentally. |
+| Recreate uses fresh workspace, restart reuses existing state | `task-runner.ts:659` | `task-runner.test.ts:637`, `task-runner.test.ts:698`, `task-runner.test.ts:759` | Recreate requests set `freshWorkspace=true`; restart with branch/workspace sets `freshWorkspace=false`. |
+| Executor selection remains centralized and deterministic | `task-runner.ts:990`, `task-runner.ts:1001`, `task-runner.ts:1100` | Source anchor command plus full task-runner suite | Selection is reviewable in one module; least-loaded tie breaks by member index. |
 
 ## Final Verdict
 
-The selected centralized TaskRunner design is evidence-backed for INV-113. The deterministic proof suite passed with `123 passed (123)`, and the brief identifies exact source and test anchors reviewers can re-run.
-
+The selected centralized TaskRunner design is evidence-backed for INV-113. The deterministic proof suite passed with `124 passed (124)`, and the brief identifies exact source and test anchors reviewers can re-run.

@@ -1055,15 +1055,17 @@ export class TaskRunner {
     executor: Executor,
     poolSelection: PoolSelection | undefined,
   ): Record<string, unknown> {
+    if (poolSelection) {
+      return {
+        type: 'poolId',
+        poolId: poolSelection.poolId,
+        selectionStrategy: poolSelection.selectionStrategy,
+        poolMemberId: poolSelection.member.id,
+        poolMemberType: poolSelection.member.type,
+      };
+    }
+
     if (executor.type === 'ssh') {
-      if (poolSelection) {
-        return {
-          type: 'poolId',
-          poolId: poolSelection.poolId,
-          selectionStrategy: poolSelection.selectionStrategy,
-          poolMemberId: poolSelection.member.id,
-        };
-      }
       if ((task.config as { poolMemberId?: string }).poolMemberId) {
         return { type: 'explicitPoolMemberId' };
       }
@@ -1110,7 +1112,7 @@ export class TaskRunner {
           poolId: task.config.poolId,
           member,
           memberKey: this.poolMemberKey(member),
-          selectionStrategy: pool.selectionStrategy ?? 'roundRobin',
+          selectionStrategy: pool.selectionStrategy ?? 'leastLoaded',
         });
       }
     }

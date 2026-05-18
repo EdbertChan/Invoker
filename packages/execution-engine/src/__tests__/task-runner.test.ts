@@ -301,6 +301,123 @@ describe('TaskRunner', () => {
     expect(start).toHaveBeenCalledTimes(1);
   });
 
+  it('records pending least-loaded pool selections before launch metadata is persisted', async () => {
+    const startResolvers: Array<() => void> = [];
+    const completeCallbacks = new Map<string, (response: WorkResponse) => void>();
+    const start = vi.fn().mockImplementation(async (request: any) => {
+      await new Promise<void>((resolve) => startResolvers.push(resolve));
+      return {
+        executionId: `exec-${request.actionId}`,
+        taskId: request.actionId,
+        workspacePath: `/tmp/mock-worktree-${request.actionId}`,
+        branch: `experiment/${request.actionId}-mock`,
+      };
+    });
+    const executorImpl = {
+      type: 'worktree',
+      start,
+      onComplete: vi.fn().mockImplementation((handle: any, cb: any) => {
+        completeCallbacks.set(handle.taskId, cb);
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+    const logEvent = vi.fn();
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => undefined,
+        handleWorkerResponse: vi.fn(() => []),
+      } as any,
+      persistence: {
+        updateTask: vi.fn(),
+        updateAttempt: vi.fn(),
+        logEvent,
+      } as any,
+      executorRegistry: {
+        getDefault: () => executorImpl,
+        get: () => executorImpl,
+        getAll: () => [executorImpl],
+      } as any,
+      executionPoolsProvider: () => ({
+        balanced: {
+          members: [
+            { type: 'worktree', id: 'member-a' },
+            { type: 'worktree', id: 'member-b' },
+          ],
+        },
+      }),
+      cwd: '/tmp',
+    });
+
+    const firstTask = makeTask({
+      id: 'pool-first',
+      status: 'running',
+      config: { command: 'echo first', poolId: 'balanced' },
+      execution: { selectedAttemptId: 'pool-first-a1' },
+    });
+    const secondTask = makeTask({
+      id: 'pool-second',
+      status: 'running',
+      config: { command: 'echo second', poolId: 'balanced' },
+      execution: { selectedAttemptId: 'pool-second-a1' },
+    });
+
+    const first = runner.executeTask(firstTask);
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    const second = runner.executeTask(secondTask);
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    startResolvers.forEach((resolve) => resolve());
+
+    await vi.waitFor(() => expect(completeCallbacks.size).toBe(2));
+    expect(logEvent).toHaveBeenCalledWith(
+      'pool-first',
+      'task.executor.selected',
+      expect.objectContaining({
+        reason: expect.objectContaining({
+          type: 'poolId',
+          poolId: 'balanced',
+          selectionStrategy: 'leastLoaded',
+          poolMemberId: 'member-a',
+          poolMemberType: 'worktree',
+        }),
+      }),
+    );
+    expect(logEvent).toHaveBeenCalledWith(
+      'pool-second',
+      'task.executor.selected',
+      expect.objectContaining({
+        reason: expect.objectContaining({
+          type: 'poolId',
+          poolId: 'balanced',
+          selectionStrategy: 'leastLoaded',
+          poolMemberId: 'member-b',
+          poolMemberType: 'worktree',
+        }),
+      }),
+    );
+
+    completeCallbacks.get(firstTask.id)?.({
+      requestId: 'req-pool-first',
+      actionId: firstTask.id,
+      attemptId: 'pool-first-a1',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    completeCallbacks.get(secondTask.id)?.({
+      requestId: 'req-pool-second',
+      actionId: secondTask.id,
+      attemptId: 'pool-second-a1',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    await Promise.all([first, second]);
+  });
+
   it('kills the active execution for a task by resolving its current attempt', async () => {
     let completeCallback: ((response: WorkResponse) => void) | undefined;
     const kill = vi.fn();
