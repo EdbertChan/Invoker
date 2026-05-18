@@ -87,6 +87,23 @@ Verdict threshold:
 - Pass only if the command exits `0`.
 - Fail if `INVOKER_WORKSPACE_TEST_CONCURRENCY` is not a positive integer or if any package test/build fails.
 
+### Targeted app package regression
+
+```sh
+cd packages/app && pnpm test
+```
+
+Observed on 2026-05-18:
+
+- Exit status: `0`.
+- Vitest summary: `59` test files passed.
+- Test summary: `915` passed, `1` skipped, `916` total.
+
+Verdict threshold:
+
+- Pass only if the command exits `0`.
+- Fail if any app package test file fails or if Vitest exits nonzero after the summary.
+
 ### Required proof
 
 ```sh
