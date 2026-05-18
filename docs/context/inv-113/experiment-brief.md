@@ -60,17 +60,17 @@ Expected output threshold:
 
 - Exit code: `0`
 - Test files: `1 passed (1)`
-- Tests: `129 passed (129)`
+- Tests: at least `130` passed and `0` failed after the implementation task consumes the experiment verdict
 - Failure threshold: `0` failed tests
 
 Observed output on 2026-05-18:
 
 ```text
-✓ src/__tests__/task-runner.test.ts (129 tests) 1400ms
+✓ src/__tests__/task-runner.test.ts (130 tests)
 
 Test Files  1 passed (1)
-     Tests  129 passed (129)
-  Duration  2.71s
+     Tests  130 passed (130)
+  Duration  3.49s
 ```
 
 Broader package verification was also run accidentally through the package script and completed successfully:
@@ -83,7 +83,7 @@ Observed output threshold:
 
 - Exit code: `0`
 - Test files: `47 passed (47)`
-- Tests: `963 passed (963)`
+- Tests: `964 passed (964)` after the implementation task adds the same-task different-attempt regression
 
 ## Verdicts
 
@@ -92,7 +92,7 @@ Selected approach: pass.
 Evidence:
 
 - Attempt/generation metadata survives the request/response path (`task-runner.test.ts` lines 115-184).
-- Duplicate launches are suppressed only for the same attempt (`task-runner.test.ts` lines 244-302).
+- Duplicate launches are suppressed only for the same attempt, and same-task different-attempt launches are allowed (`task-runner.test.ts`).
 - Cancellation resolves the selected attempt and avoids stale-attempt termination (`task-runner.test.ts` lines 369-518).
 - Recreate and restart semantics produce deterministic `freshWorkspace` values (`task-runner.test.ts` lines 520-701).
 - Stale startup failures do not persist old workspace/branch/session metadata or emit failed responses (`task-runner.test.ts` lines 1134-1350).
@@ -107,6 +107,6 @@ Reason: it cannot satisfy the selected-attempt cancellation and stale-lineage su
 The architecture remains accepted while all of these hold:
 
 - The scoped command exits `0`.
-- `src/__tests__/task-runner.test.ts` reports at least `129` passing tests and `0` failures.
+- `src/__tests__/task-runner.test.ts` reports at least `130` passing tests and `0` failures.
 - Test coverage continues to include selected-attempt cancellation, stale startup failure suppression, fresh workspace semantics, and branch metadata fail-closed behavior.
 - Any future executor-pool changes preserve attempt-scoped `activeExecutions` and do not key cancellation solely by task id.
