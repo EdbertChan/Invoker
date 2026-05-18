@@ -170,6 +170,7 @@ export async function resolveConflictImpl(
   taskId: string,
   savedError?: string,
   agentName?: string,
+  checkpoint?: () => void,
 ): Promise<void> {
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'resolve-conflict-start',
@@ -221,6 +222,7 @@ export async function resolveConflictImpl(
       throw new Error(`No remote target config for "${poolMemberId}" — cannot resolve conflict on remote`);
     }
     await resolveConflictRemote(host, task, taskBranch, conflictInfo, rawCwd, target, agentName);
+    checkpoint?.();
     return;
   }
 
@@ -276,8 +278,10 @@ export async function resolveConflictImpl(
       ].join('\n');
 
       await host.spawnAgentFix(prompt, cwd, agentName);
+      checkpoint?.();
     }
 
+    checkpoint?.();
     console.log(`[resolveConflict] Successfully resolved conflict for ${taskId}`);
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'resolve-conflict-success',
@@ -466,6 +470,7 @@ export async function fixWithAgentImpl(
   agentName?: string,
   savedError?: string,
   fixContext?: string,
+  checkpoint?: () => void,
 ): Promise<void> {
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'fix-with-agent-start',
@@ -503,6 +508,7 @@ export async function fixWithAgentImpl(
     const resolvedWorkspacePath =
       (await resolveRemoteBranchOwnerPath(task.execution.branch, workspacePath, target)) ?? workspacePath;
     if (resolvedWorkspacePath !== workspacePath) {
+      checkpoint?.();
       host.persistence.updateTask(taskId, {
         execution: {
           workspacePath: resolvedWorkspacePath,
@@ -522,6 +528,7 @@ export async function fixWithAgentImpl(
       agentName,
       host.agentRegistry,
     );
+    checkpoint?.();
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${remoteAgentBin} (remote)] Output:\n${output}`);
     }
@@ -570,6 +577,7 @@ export async function fixWithAgentImpl(
       agent: agentLabel,
     });
     const { stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName);
+    checkpoint?.();
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${agentLabel}] Output:\n${output}`);
     }
@@ -592,6 +600,7 @@ export async function fixWithAgentImpl(
     // Persist session ID even on failure so the session can be audited
     const failedSessionId = err?.sessionId as string | undefined;
     if (failedSessionId) {
+      checkpoint?.();
       host.persistence.updateTask(taskId, {
         execution: {
           agentSessionId: failedSessionId,

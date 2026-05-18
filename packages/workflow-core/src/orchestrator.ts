@@ -163,6 +163,11 @@ export class PlanConflictError extends Error {
   }
 }
 
+export interface TaskLineageExpectation {
+  selectedAttemptId?: string;
+  generation: number;
+}
+
 // ── Adapter Interfaces ──────────────────────────────────────
 
 export interface OrchestratorPersistence {
@@ -721,6 +726,8 @@ export interface OrchestratorConfig {
 // ── Orchestrator ────────────────────────────────────────────
 
 export class Orchestrator {
+  readonly supportsLineageExpectations = true;
+
   private static readonly EXPEDITED_PRIORITY = 100;
 
   private readonly stateMachine: TaskStateMachine;
@@ -1117,6 +1124,20 @@ export class Orchestrator {
         generation: this.getExecutionGeneration(task) + 1,
       },
     };
+  }
+
+  private assertLineageExpectation(task: TaskState, expected: TaskLineageExpectation | undefined): void {
+    if (!expected) return;
+    const generation = this.getExecutionGeneration(task);
+    if (
+      task.execution.selectedAttemptId !== expected.selectedAttemptId ||
+      generation !== expected.generation
+    ) {
+      throw new Error(
+        `Task ${task.id} lineage changed (attempt ${expected.selectedAttemptId} -> ${task.execution.selectedAttemptId}, `
+        + `gen ${expected.generation} -> ${generation})`,
+      );
+    }
   }
 
   private getSelectedAttempt(task: TaskState | undefined): Attempt | undefined {
@@ -1798,10 +1819,15 @@ export class Orchestrator {
     this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', additionalChanges);
   }
 
-  setFixAwaitingApproval(taskId: string, originalError: string): void {
+  setFixAwaitingApproval(
+    taskId: string,
+    originalError: string,
+    expectedLineage?: TaskLineageExpectation,
+  ): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    this.assertLineageExpectation(task, expectedLineage);
     const tid = task.id;
     if (task.status !== 'running' && task.status !== 'fixing_with_ai') {
       throw new Error(`Task ${tid} is not running or fixing with AI (status: ${task.status})`);
@@ -2728,10 +2754,11 @@ export class Orchestrator {
    * Clears terminal failure fields on the row so SQLite does not show stale error/exit/completed.
    * Returns the saved error string so the caller can revert on failure.
    */
-  beginConflictResolution(taskId: string): { savedError: string } {
+  beginConflictResolution(taskId: string, expectedLineage?: TaskLineageExpectation): { savedError: string } {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    this.assertLineageExpectation(task, expectedLineage);
     if (task.status !== 'failed') throw new Error(`Task ${taskId} is not failed (status: ${task.status})`);
 
     const savedError = task.execution.error ?? '';
@@ -2778,10 +2805,14 @@ export class Orchestrator {
    * gate state. Review-gate CI failures use this path because the merge task
    * may still be review_ready/awaiting_approval while the PR checks are red.
    */
-  beginAutoFixSession(taskId: string, opts: { savedError?: string } = {}): { savedError: string } {
+  beginAutoFixSession(
+    taskId: string,
+    opts: { savedError?: string; expectedLineage?: TaskLineageExpectation } = {},
+  ): { savedError: string } {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    this.assertLineageExpectation(task, opts.expectedLineage);
     if (
       task.status !== 'failed' &&
       task.status !== 'review_ready' &&
@@ -2831,12 +2862,18 @@ export class Orchestrator {
    * Revert a conflict resolution attempt: restore the task to failed
    * with its original error and re-parsed mergeConflict field.
    */
-  revertConflictResolution(taskId: string, savedError: string, fixError?: string): void {
+  revertConflictResolution(
+    taskId: string,
+    savedError: string,
+    fixError?: string,
+    expectedLineage?: TaskLineageExpectation,
+  ): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) {
       throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     }
+    this.assertLineageExpectation(task, expectedLineage);
     const id = task.id;
 
     const normalizedSavedError = stripFixFailureWrapper(savedError);

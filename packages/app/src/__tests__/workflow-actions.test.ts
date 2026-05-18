@@ -2254,10 +2254,11 @@ describe('fixWithAgentAction lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('agent crashed');
+    })).rejects.toThrow(StaleLineageError);
 
     // revertConflictResolution must NOT be called when lineage is stale
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
   });
 
   it('proceeds normally when lineage is current', async () => {
@@ -2371,9 +2372,10 @@ describe('resolveConflictAction lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('resolution failed');
+    })).rejects.toThrow(StaleLineageError);
 
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
   });
 });
 
@@ -2479,9 +2481,14 @@ describe('autoFixOnFailure lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('agent crashed');
+    })).rejects.toThrow(StaleLineageError);
 
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).toHaveBeenCalledTimes(1);
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalledWith(
+      'task-a',
+      expect.stringContaining('[Auto-fix] Agent failed'),
+    );
   });
 
   it('throws StaleLineageError when signal is aborted during auto-fix', async () => {

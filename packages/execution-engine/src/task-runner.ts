@@ -201,6 +201,8 @@ export interface TaskRunnerConfig {
 // ── TaskRunner ──────────────────────────────────────────
 
 export class TaskRunner {
+  readonly supportsFixMutationCheckpoints = true;
+
   private static readonly BRANCH_REMOTE_NAME = 'invoker-branches';
   /** @internal */ orchestrator: Orchestrator;
   /** @internal */ persistence: SQLiteAdapter;
@@ -1829,8 +1831,13 @@ export class TaskRunner {
    * Resolve a merge conflict by re-creating the merge state and spawning an agent to fix it.
    * After resolution, the task is restarted so it can proceed normally.
    */
-  async resolveConflict(taskId: string, savedError?: string, agentName?: string): Promise<void> {
-    return this.withAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName));
+  async resolveConflict(
+    taskId: string,
+    savedError?: string,
+    agentName?: string,
+    checkpoint?: () => void,
+  ): Promise<void> {
+    return this.withAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName, checkpoint));
   }
 
   /**
@@ -1843,10 +1850,11 @@ export class TaskRunner {
     agentName?: string,
     savedError?: string,
     fixContext?: string,
+    checkpoint?: () => void,
   ): Promise<void> {
     return this.withAttemptHeartbeat(
       taskId,
-      () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError, fixContext),
+      () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError, fixContext, checkpoint),
     );
   }
 
