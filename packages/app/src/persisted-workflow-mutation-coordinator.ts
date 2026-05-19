@@ -22,6 +22,8 @@ export type WorkflowMutationContext = {
   signal: AbortSignal;
   intentId: number;
   workflowId: string;
+  channel: string;
+  args: readonly unknown[];
   mutationTiming?: WorkflowMutationTiming;
 };
 
@@ -33,7 +35,7 @@ function envMs(name: string, fallback: number): number {
   return parsed;
 }
 
-class WorkflowMutationInvalidatedError extends Error {
+export class WorkflowMutationInvalidatedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'WorkflowMutationInvalidatedError';
@@ -237,6 +239,8 @@ export class PersistedWorkflowMutationCoordinator {
         signal: invalidation.abortController.signal,
         intentId: intent.id,
         workflowId,
+        channel: intent.channel,
+        args: intent.args,
         mutationTiming: timing,
       };
       const dispatchPromise = timing.span(

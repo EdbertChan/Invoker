@@ -56,5 +56,24 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('provides cancellation metadata to running workflow mutations', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-context';
+    let captured: { aborted: boolean; workflowId: string; mutationId: number } | undefined;
+
+    await c.enqueue(wf, 'normal', async (context) => {
+      captured = {
+        aborted: context.signal.aborted,
+        workflowId: context.workflowId,
+        mutationId: context.mutationId,
+      };
+    });
+
+    expect(captured).toEqual({
+      aborted: false,
+      workflowId: wf,
+      mutationId: 1,
+    });
+  });
+});
