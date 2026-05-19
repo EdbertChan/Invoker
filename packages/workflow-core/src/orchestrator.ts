@@ -3787,6 +3787,8 @@ export class Orchestrator {
 
   /**
    * Delete a single workflow: DB first, then scheduler, memory, and publish removal deltas.
+   * API write routes reach this through WorkflowMutationFacade, preserving INV-130's
+   * thin HTTP control-plane boundary while keeping durable state ownership here.
    * Follows the same DB→memory→publish pattern as writeAndSync().
    */
   deleteWorkflow(workflowId: string): void {
@@ -3828,6 +3830,7 @@ export class Orchestrator {
   }
 
   detachWorkflow(workflowId: string, upstreamWorkflowId: string): void {
+    // Keep topology detaches in the orchestrator/persistence path rather than HTTP handlers.
     this.syncAllFromDb();
     this.detachWorkflowInternal(workflowId, upstreamWorkflowId, {
       upstreamWorkflow: this.persistence.loadWorkflow?.(upstreamWorkflowId),
