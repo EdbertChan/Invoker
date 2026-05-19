@@ -2621,6 +2621,9 @@ export class Orchestrator {
    * `docs/architecture/task-invalidation-roadmap.md`, Decision Table
    * row "Rebase and retry" + "Repo/base invalidation inconsistency"
    * in `docs/architecture/task-invalidation-chart.md`).
+   * INV-90 keeps this as the experiment-selected workflow reset path:
+   * clear task lineage like `recreateWorkflow`, but refresh and record
+   * upstream base state first.
    *
    * This is strictly stronger than `recreateWorkflow`:
    *

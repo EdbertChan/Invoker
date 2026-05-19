@@ -2,6 +2,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   applyInvalidation,
+  invalidationActionRequiresCancelFirst,
   MUTATION_POLICIES,
   type InvalidationDeps,
 } from '../invalidation-policy.js';
@@ -85,6 +86,12 @@ describe('MUTATION_POLICIES', () => {
       ([, p]) => p.action === 'scheduleOnly',
     );
     expect(scheduleOnlyEntries.map(([k]) => k)).toEqual(['externalGatePolicy']);
+    expect(MUTATION_POLICIES.rebaseAndRetry.action).toBe('recreateWorkflowFromFreshBase');
+    expect(invalidationActionRequiresCancelFirst(MUTATION_POLICIES.rebaseAndRetry.action)).toBe(true);
+    expect(invalidationActionRequiresCancelFirst(MUTATION_POLICIES.topology.action)).toBe(true);
+    expect(invalidationActionRequiresCancelFirst(MUTATION_POLICIES.externalGatePolicy.action)).toBe(false);
+    expect(invalidationActionRequiresCancelFirst(MUTATION_POLICIES.fixApprove.action)).toBe(false);
+    expect(invalidationActionRequiresCancelFirst(MUTATION_POLICIES.fixReject.action)).toBe(false);
   });
 
   it('is frozen — the policy table is a constant, not a mutable map', () => {
