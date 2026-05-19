@@ -71,6 +71,7 @@ function request(
 
 let api: ApiServer;
 let port: number;
+let mutations: WorkflowMutationFacade;
 let mocks: {
   orchestrator: Record<string, ReturnType<typeof vi.fn>>;
   persistence: Record<string, ReturnType<typeof vi.fn>>;
@@ -80,6 +81,28 @@ let mocks: {
   deleteWorkflow: ReturnType<typeof vi.fn>;
   detachWorkflow: ReturnType<typeof vi.fn>;
 };
+
+const mutationMethodNames = [
+  'approveTask',
+  'rejectTask',
+  'provideInput',
+  'retryTask',
+  'recreateTask',
+  'editTaskCommand',
+  'editTaskPrompt',
+  'editTaskType',
+  'editTaskAgent',
+  'setTaskExternalGatePolicies',
+  'cancelTask',
+  'retryWorkflow',
+  'recreateWorkflow',
+  'rebaseRetry',
+  'rebaseRecreate',
+  'cancelWorkflow',
+  'forkWorkflow',
+  'resolveConflict',
+  'setWorkflowMergeMode',
+] as const;
 
 function createMocks() {
   return {
@@ -152,13 +175,17 @@ function buildFacade(m: typeof mocks) {
 
 beforeAll(async () => {
   mocks = createMocks();
+  mutations = buildFacade(mocks);
+  for (const method of mutationMethodNames) {
+    vi.spyOn(mutations, method);
+  }
   // Use port 0 for ephemeral port assignment
   process.env.INVOKER_API_PORT = '0';
   api = startApiServer({
     orchestrator: mocks.orchestrator as any,
     persistence: mocks.persistence as any,
     executorRegistry: mocks.executorRegistry as any,
-    mutations: buildFacade(mocks),
+    mutations,
     deleteWorkflow: mocks.deleteWorkflow,
     detachWorkflow: mocks.detachWorkflow,
   });
@@ -189,6 +216,9 @@ beforeEach(() => {
   mocks.killRunningTask.mockClear();
   mocks.deleteWorkflow.mockClear();
   mocks.detachWorkflow.mockClear();
+  for (const method of mutationMethodNames) {
+    vi.mocked(mutations[method]).mockClear();
+  }
 
   // Re-apply default return values after clear
   mocks.orchestrator.getWorkflowStatus.mockReturnValue({ total: 1, completed: 0, failed: 0, running: 1, pending: 0 });
@@ -324,6 +354,7 @@ describe('POST /api/tasks/:id/cancel', () => {
     const res = await request(port, 'POST', '/api/tasks/task-1/cancel');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(mutations.cancelTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.cancelTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
@@ -334,6 +365,7 @@ describe('POST /api/workflows/:id/cancel', () => {
     const res = await request(port, 'POST', '/api/workflows/wf-1/cancel');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(mutations.cancelWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.orchestrator.cancelWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
@@ -345,6 +377,7 @@ describe('POST /api/tasks/:id/restart', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('restarted');
+    expect(mutations.retryTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
   });
 
@@ -406,6 +439,7 @@ describe('POST /api/tasks/:id/approve', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('approved');
+    expect(mutations.approveTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.approve).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
@@ -469,6 +503,7 @@ describe('POST /api/tasks/:id/resolve-conflict', () => {
   it('tops up globally ready work after resolve-conflict', async () => {
     const res = await request(port, 'POST', '/api/tasks/task-1/resolve-conflict', { agent: 'claude' });
     expect(res.status).toBe(200);
+    expect(mutations.resolveConflict).toHaveBeenCalledWith('task-1', 'claude');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
 });
@@ -479,6 +514,7 @@ describe('POST /api/tasks/:id/reject', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('rejected');
+    expect(mutations.rejectTask).toHaveBeenCalledWith('task-1', undefined);
     expect(mocks.orchestrator.reject).toHaveBeenCalledWith('task-1', undefined);
   });
 
@@ -486,6 +522,7 @@ describe('POST /api/tasks/:id/reject', () => {
     const res = await request(port, 'POST', '/api/tasks/task-1/reject', { reason: 'wrong output' });
     expect(res.status).toBe(200);
     expect(res.body.reason).toBe('wrong output');
+    expect(mutations.rejectTask).toHaveBeenCalledWith('task-1', 'wrong output');
     expect(mocks.orchestrator.reject).toHaveBeenCalledWith('task-1', 'wrong output');
   });
 
@@ -548,6 +585,7 @@ describe('POST /api/tasks/:id/input', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('input_provided');
+    expect(mutations.provideInput).toHaveBeenCalledWith('task-1', 'yes');
     expect(mocks.orchestrator.provideInput).toHaveBeenCalledWith('task-1', 'yes');
   });
 
@@ -564,6 +602,7 @@ describe('POST /api/tasks/:id/edit', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('command_edited');
+    expect(mutations.editTaskCommand).toHaveBeenCalledWith('task-1', 'npm test');
     expect(mocks.orchestrator.editTaskCommand).toHaveBeenCalledWith('task-1', 'npm test');
   });
 
@@ -580,6 +619,7 @@ describe('POST /api/tasks/:id/edit-prompt', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('prompt_edited');
+    expect(mutations.editTaskPrompt).toHaveBeenCalledWith('task-1', 'do the thing');
     expect(mocks.orchestrator.editTaskPrompt).toHaveBeenCalledWith('task-1', 'do the thing');
     expect(mocks.orchestrator.editTaskCommand).not.toHaveBeenCalled();
     // Facade dispatches any newly-runnable tasks via the executor.
@@ -614,6 +654,7 @@ describe('POST /api/tasks/:id/edit-prompt', () => {
 
   it('does not call editTaskCommand when editing prompt', async () => {
     await request(port, 'POST', '/api/tasks/task-1/edit-prompt', { prompt: 'new prompt' });
+    expect(mutations.editTaskPrompt).toHaveBeenCalledWith('task-1', 'new prompt');
     expect(mocks.orchestrator.editTaskPrompt).toHaveBeenCalledWith('task-1', 'new prompt');
     expect(mocks.orchestrator.editTaskCommand).not.toHaveBeenCalled();
   });
@@ -625,6 +666,7 @@ describe('POST /api/tasks/:id/edit-type', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('type_edited');
+    expect(mutations.editTaskType).toHaveBeenCalledWith('task-1', 'docker', undefined);
     expect(mocks.orchestrator.editTaskType).toHaveBeenCalledWith('task-1', 'docker', undefined);
   });
 
@@ -634,6 +676,7 @@ describe('POST /api/tasks/:id/edit-type', () => {
       poolMemberId: 'remote-1',
     });
     expect(res.status).toBe(200);
+    expect(mutations.editTaskType).toHaveBeenCalledWith('task-1', 'ssh', 'remote-1');
     expect(mocks.orchestrator.editTaskType).toHaveBeenCalledWith('task-1', 'ssh', 'remote-1');
   });
 
@@ -651,6 +694,7 @@ describe('POST /api/tasks/:id/edit-type', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('type_edited');
+    expect(mutations.editTaskType).toHaveBeenCalledWith('task-1', 'ssh', 'remote-b');
     expect(mocks.orchestrator.editTaskType).toHaveBeenCalledWith('task-1', 'ssh', 'remote-b');
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
   });
@@ -662,6 +706,7 @@ describe('POST /api/tasks/:id/edit-agent', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('agent_edited');
+    expect(mutations.editTaskAgent).toHaveBeenCalledWith('task-1', 'codex');
     expect(mocks.orchestrator.editTaskAgent).toHaveBeenCalledWith('task-1', 'codex');
     expect(mocks.orchestrator.editTaskCommand).not.toHaveBeenCalled();
     expect(mocks.orchestrator.editTaskPrompt).not.toHaveBeenCalled();
@@ -686,6 +731,10 @@ describe('POST /api/tasks/:id/gate-policy', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('gate_policy_updated');
+    expect(mutations.setTaskExternalGatePolicies).toHaveBeenCalledWith(
+      'task-1',
+      [{ workflowId: 'wf-upstream', taskId: '__merge__', gatePolicy: 'review_ready' }],
+    );
     expect(mocks.orchestrator.setTaskExternalGatePolicies).toHaveBeenCalledWith(
       'task-1',
       [{ workflowId: 'wf-upstream', taskId: '__merge__', gatePolicy: 'review_ready' }],
@@ -729,6 +778,7 @@ describe('POST /api/workflows/:id/restart', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('restarted');
+    expect(mutations.recreateWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.persistence.loadWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.persistence.updateWorkflow).toHaveBeenCalled();
   });
@@ -800,6 +850,7 @@ describe('POST /api/workflows/:id/rebase-retry', () => {
     expect(res.body.ok).toBe(true);
     expect(res.body.workflowId).toBe('wf-1');
     expect(res.body.action).toBe('rebase_retried');
+    expect(mutations.rebaseRetry).toHaveBeenCalledWith('wf-1');
     expect(mocks.persistence.updateWorkflow).not.toHaveBeenCalled();
     expect(mocks.orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
   });
@@ -813,6 +864,7 @@ describe('POST /api/workflows/:id/fork', () => {
     expect(res.body.ok).toBe(true);
     expect(res.body.sourceWorkflowId).toBe('wf-1');
     expect(res.body.forkedWorkflowId).toBe('wf-1-fork');
+    expect(mutations.forkWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.orchestrator.forkWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
   });
@@ -836,6 +888,7 @@ describe('POST /api/workflows/:id/rebase-recreate', () => {
     expect(res.body.action).toBe('rebase_recreated');
     expect(res.body.tasksStarted).toBe(1);
     expect(res.body.deprecated).toBeUndefined();
+    expect(mutations.rebaseRecreate).toHaveBeenCalledWith('wf-1');
     expect(mocks.orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
   });
 
@@ -917,6 +970,7 @@ describe('POST /api/workflows/:id/merge-mode', () => {
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('merge_mode_set');
     expect(res.body.mode).toBe('automatic');
+    expect(mutations.setWorkflowMergeMode).toHaveBeenCalledWith('wf-1', 'automatic');
     expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { mergeMode: 'automatic' });
   });
 
