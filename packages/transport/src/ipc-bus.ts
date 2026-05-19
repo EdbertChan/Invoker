@@ -1,9 +1,8 @@
 /**
  * IpcBus — Cross-process MessageBus over Unix domain sockets.
  *
- * Uses a deterministic socket path (`~/.invoker/ipc-transport.sock`) so all
- * processes in the same user session converge on a single bus without
- * discovery.
+ * Uses a deterministic socket path so processes for the same Invoker home
+ * converge on a single bus without discovery.
  *
  * ## Server election
  *
@@ -230,8 +229,12 @@ export const SUBSCRIBER_ERROR_RATE_LIMIT_MS = 1_000;
 // Default socket path
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_SOCKET_PATH =
-  process.env.INVOKER_IPC_SOCKET || join(homedir(), '.invoker', 'ipc-transport.sock');
+export function resolveDefaultSocketPath(env: NodeJS.ProcessEnv = process.env): string {
+  return env.INVOKER_IPC_SOCKET
+    || join(env.INVOKER_DB_DIR || join(homedir(), '.invoker'), 'ipc-transport.sock');
+}
+
+export const DEFAULT_SOCKET_PATH = resolveDefaultSocketPath();
 
 /** Default request deadline in milliseconds (30 s). */
 export const DEFAULT_REQUEST_DEADLINE_MS = 30_000;
@@ -290,7 +293,7 @@ export class IpcBus implements MessageBus {
     { source: Socket; awaiting: Set<Socket>; channel: string }
   >();
 
-  constructor(socketPath: string = DEFAULT_SOCKET_PATH, options: IpcBusOptions = {}) {
+  constructor(socketPath: string = resolveDefaultSocketPath(), options: IpcBusOptions = {}) {
     this.socketPath = socketPath;
     this.allowServe = options.allowServe ?? true;
     this.requestDeadlineMs = options.requestDeadlineMs ?? DEFAULT_REQUEST_DEADLINE_MS;

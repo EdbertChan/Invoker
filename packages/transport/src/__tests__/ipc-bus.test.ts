@@ -9,6 +9,7 @@ import {
   IpcBus,
   DEFAULT_REQUEST_DEADLINE_MS,
   MALFORMED_FRAME_RATE_LIMIT_MS,
+  resolveDefaultSocketPath,
   type MalformedFrameEvent,
 } from '../ipc-bus.js';
 import { TransportError, TransportErrorCode } from '../transport-error.js';
@@ -27,6 +28,8 @@ function tempSocketPath(): string {
 
 describe('IpcBus', () => {
   const buses: IpcBus[] = [];
+  const originalInvokerDbDir = process.env.INVOKER_DB_DIR;
+  const originalInvokerIpcSocket = process.env.INVOKER_IPC_SOCKET;
 
   function createBus(socketPath: string): IpcBus {
     const bus = new IpcBus(socketPath);
@@ -39,6 +42,40 @@ describe('IpcBus', () => {
       bus.disconnect();
     }
     buses.length = 0;
+    if (originalInvokerDbDir === undefined) {
+      delete process.env.INVOKER_DB_DIR;
+    } else {
+      process.env.INVOKER_DB_DIR = originalInvokerDbDir;
+    }
+    if (originalInvokerIpcSocket === undefined) {
+      delete process.env.INVOKER_IPC_SOCKET;
+    } else {
+      process.env.INVOKER_IPC_SOCKET = originalInvokerIpcSocket;
+    }
+  });
+
+  it('defaults IPC socket to INVOKER_DB_DIR when no explicit socket is set', async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'ipc-bus-db-dir-'));
+    delete process.env.INVOKER_IPC_SOCKET;
+    process.env.INVOKER_DB_DIR = dbDir;
+
+    const expectedSocket = join(dbDir, 'ipc-transport.sock');
+    expect(resolveDefaultSocketPath()).toBe(expectedSocket);
+
+    const bus = new IpcBus();
+    buses.push(bus);
+    await bus.ready();
+
+    expect(existsSync(expectedSocket)).toBe(true);
+  });
+
+  it('honors INVOKER_IPC_SOCKET over INVOKER_DB_DIR', () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'ipc-bus-db-dir-'));
+    const explicitSocket = join(mkdtempSync(join(tmpdir(), 'ipc-bus-explicit-')), 'explicit.sock');
+    process.env.INVOKER_DB_DIR = dbDir;
+    process.env.INVOKER_IPC_SOCKET = explicitSocket;
+
+    expect(resolveDefaultSocketPath()).toBe(explicitSocket);
   });
 
   // ---------------------------------------------------------------
