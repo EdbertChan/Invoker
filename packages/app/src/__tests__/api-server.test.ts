@@ -71,6 +71,7 @@ function request(
 
 let api: ApiServer;
 let port: number;
+let mutations: WorkflowMutationFacade;
 let mocks: {
   orchestrator: Record<string, ReturnType<typeof vi.fn>>;
   persistence: Record<string, ReturnType<typeof vi.fn>>;
@@ -152,13 +153,14 @@ function buildFacade(m: typeof mocks) {
 
 beforeAll(async () => {
   mocks = createMocks();
+  mutations = buildFacade(mocks);
   // Use port 0 for ephemeral port assignment
   process.env.INVOKER_API_PORT = '0';
   api = startApiServer({
     orchestrator: mocks.orchestrator as any,
     persistence: mocks.persistence as any,
     executorRegistry: mocks.executorRegistry as any,
-    mutations: buildFacade(mocks),
+    mutations,
     deleteWorkflow: mocks.deleteWorkflow,
     detachWorkflow: mocks.detachWorkflow,
   });
@@ -321,31 +323,40 @@ describe('GET /api/tasks/:id/output', () => {
 
 describe('POST /api/tasks/:id/cancel', () => {
   it('cancels task via facade', async () => {
+    const cancelTask = vi.spyOn(mutations, 'cancelTask');
     const res = await request(port, 'POST', '/api/tasks/task-1/cancel');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(cancelTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.cancelTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
+    cancelTask.mockRestore();
   });
 });
 
 describe('POST /api/workflows/:id/cancel', () => {
   it('cancels workflow via facade', async () => {
+    const cancelWorkflow = vi.spyOn(mutations, 'cancelWorkflow');
     const res = await request(port, 'POST', '/api/workflows/wf-1/cancel');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    expect(cancelWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.orchestrator.cancelWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
+    cancelWorkflow.mockRestore();
   });
 });
 
 describe('POST /api/tasks/:id/restart', () => {
   it('restarts task via facade retryTask', async () => {
+    const retryTask = vi.spyOn(mutations, 'retryTask');
     const res = await request(port, 'POST', '/api/tasks/task-1/restart');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('restarted');
+    expect(retryTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
+    retryTask.mockRestore();
   });
 
   it('returns 400 on error', async () => {
@@ -402,12 +413,15 @@ describe('POST /api/tasks/:id/restart', () => {
 
 describe('POST /api/tasks/:id/approve', () => {
   it('approves task via facade', async () => {
+    const approveTask = vi.spyOn(mutations, 'approveTask');
     const res = await request(port, 'POST', '/api/tasks/task-1/approve');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('approved');
+    expect(approveTask).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.approve).toHaveBeenCalledWith('task-1');
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
+    approveTask.mockRestore();
   });
 
   it('routes downstream merge nodes to executeTasks (not publishAfterFix)', async () => {

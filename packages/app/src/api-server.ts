@@ -52,13 +52,36 @@ import type { ExecutorRegistry } from '@invoker/execution-engine';
 import type { WorkflowMutationFacade } from './workflow-mutation-facade.js';
 import { resolveHeadlessTargetWorkflowId } from './headless-command-classification.js';
 
+type ApiWorkflowMutations = Pick<
+  WorkflowMutationFacade,
+  | 'approveTask'
+  | 'cancelTask'
+  | 'cancelWorkflow'
+  | 'editTaskAgent'
+  | 'editTaskCommand'
+  | 'editTaskPrompt'
+  | 'editTaskType'
+  | 'forkWorkflow'
+  | 'provideInput'
+  | 'rebaseRecreate'
+  | 'rebaseRetry'
+  | 'recreateTask'
+  | 'recreateWorkflow'
+  | 'rejectTask'
+  | 'resolveConflict'
+  | 'retryTask'
+  | 'retryWorkflow'
+  | 'setTaskExternalGatePolicies'
+  | 'setWorkflowMergeMode'
+>;
+
 export interface ApiServerDeps {
   logger?: Logger;
   orchestrator: Orchestrator;
   persistence: SQLiteAdapter;
   executorRegistry: ExecutorRegistry;
   /** All write endpoints delegate to the facade for mutation + dispatch + topup. */
-  mutations: WorkflowMutationFacade;
+  mutations: ApiWorkflowMutations;
   deleteWorkflow: (workflowId: string) => Promise<void>;
   detachWorkflow: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
 }

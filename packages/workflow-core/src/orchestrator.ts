@@ -817,9 +817,9 @@ export class Orchestrator {
   // ── DB Sync Helpers ────────────────────────────────────────
 
   /**
-   * Refresh the in-memory graph from the database.
-   * Called at the start of every public mutation to ensure
-   * we see any external changes before proceeding.
+   * INV-130 mutation contract: public write paths must reload persisted task
+   * state before validating or computing changes, then persist through
+   * writeAndSync() before publishing cache deltas.
    */
   private refreshFromDb(): void {
     if (this.activeWorkflowIds.size === 0) return;
@@ -832,6 +832,7 @@ export class Orchestrator {
     }
   }
 
+  /** Targeted form of the INV-130 DB-first refresh for workflow-scoped mutations. */
   private refreshWorkflowFromDb(workflowId: string): void {
     this.activeWorkflowIds.add(workflowId);
     const tasks = this.persistence.loadTasks(workflowId);
