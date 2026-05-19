@@ -71,6 +71,7 @@ function request(
 
 let api: ApiServer;
 let port: number;
+let mutations: WorkflowMutationFacade;
 let mocks: {
   orchestrator: Record<string, ReturnType<typeof vi.fn>>;
   persistence: Record<string, ReturnType<typeof vi.fn>>;
@@ -152,13 +153,14 @@ function buildFacade(m: typeof mocks) {
 
 beforeAll(async () => {
   mocks = createMocks();
+  mutations = buildFacade(mocks);
   // Use port 0 for ephemeral port assignment
   process.env.INVOKER_API_PORT = '0';
   api = startApiServer({
     orchestrator: mocks.orchestrator as any,
     persistence: mocks.persistence as any,
     executorRegistry: mocks.executorRegistry as any,
-    mutations: buildFacade(mocks),
+    mutations,
     deleteWorkflow: mocks.deleteWorkflow,
     detachWorkflow: mocks.detachWorkflow,
   });
@@ -875,32 +877,50 @@ describe('POST /api/workflows/:id/rebase-recreate', () => {
 });
 
 describe('DELETE /api/workflows/:id', () => {
-  it('deletes workflow via deleteWorkflow callback', async () => {
+  it('deletes workflow via facade', async () => {
+    const facadeDeleteWorkflow = vi.spyOn(mutations, 'deleteWorkflow');
+
     const res = await request(port, 'DELETE', '/api/workflows/wf-1');
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('deleted');
-    expect(mocks.deleteWorkflow).toHaveBeenCalledWith('wf-1');
-    expect(mocks.orchestrator.deleteWorkflow).not.toHaveBeenCalled();
+    expect(facadeDeleteWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.orchestrator.deleteWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.deleteWorkflow).not.toHaveBeenCalled();
+
+    facadeDeleteWorkflow.mockRestore();
   });
 
   it('returns 404 when workflow not found', async () => {
-    mocks.deleteWorkflow.mockRejectedValue(new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, 'workflow not found'));
+    mocks.orchestrator.deleteWorkflow.mockImplementationOnce(() => {
+      throw new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, 'workflow not found');
+    });
+
     const res = await request(port, 'DELETE', '/api/workflows/missing');
+
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('workflow not found');
+    expect(mocks.deleteWorkflow).not.toHaveBeenCalled();
   });
 });
 
 describe('POST /api/workflows/:id/detach', () => {
   it('detaches workflow from one upstream workflow', async () => {
+    const facadeDetachWorkflow = vi.spyOn(mutations, 'detachWorkflow');
+
     const res = await request(port, 'POST', '/api/workflows/wf-1/detach', {
       upstreamWorkflowId: 'wf-0',
     });
+
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('detached');
-    expect(mocks.detachWorkflow).toHaveBeenCalledWith('wf-1', 'wf-0');
+    expect(facadeDetachWorkflow).toHaveBeenCalledWith('wf-1', 'wf-0');
+    expect(mocks.orchestrator.detachWorkflow).toHaveBeenCalledWith('wf-1', 'wf-0');
+    expect(mocks.detachWorkflow).not.toHaveBeenCalled();
+
+    facadeDetachWorkflow.mockRestore();
   });
 
   it('returns 400 when upstreamWorkflowId is missing', async () => {

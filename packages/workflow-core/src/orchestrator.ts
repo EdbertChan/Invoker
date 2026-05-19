@@ -4,6 +4,9 @@
  * ALL writes go through the persistence layer (DB) first. The in-memory
  * graph (via TaskStateMachine) is a read-only cache that is refreshed
  * from the DB. This ensures the DB is always the single source of truth.
+ * INV-130 relies on this boundary: API write routes enter through the
+ * WorkflowMutationFacade, then this orchestrator owns the actual state
+ * mutation using the DB-first sequence below.
  *
  * Pattern for every mutation:
  *   1. refreshFromDb()  — ensure in-memory state is current
