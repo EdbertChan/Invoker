@@ -5988,4 +5988,114 @@ console.log(JSON.stringify(out));
     });
   });
 
+  // -------------------------------------------------------------------------
+  // SSH pool concurrency-limit regression tests
+  // Bug 1: selectPoolMember() over-limit fallback returned over-limit members
+  //        instead of undefined, making maxConcurrentTasksPerMember advisory.
+  // Bug 2: Promise.all dispatch raced before pendingPoolSelections was updated,
+  //        so all concurrent tasks observed load=0 for the same pool member.
+  // -------------------------------------------------------------------------
+
+  describe('selectPoolMember – maxConcurrentTasksPerMember hard cap (Bug 1)', () => {
+    it('returns undefined when all members are at the concurrency limit', () => {
+      const tasks = new Map<string, TaskState>();
+      const runner = createExecutorWithTasks(tasks);
+
+      const pool = {
+        members: [{ type: 'ssh' as const, id: 'host-1', host: '1.2.3.4', user: 'root' }],
+        selectionStrategy: 'leastLoaded' as const,
+        maxConcurrentTasksPerMember: 1,
+      };
+
+      // Simulate one task already occupying the member by injecting a
+      // pending pool selection directly into the internal map.
+      // poolMemberKey() returns "type:id", e.g. "ssh:host-1".
+      const member = pool.members[0];
+      const memberKey = `${member.type}:${member.id}`;
+      (runner as any).pendingPoolSelections.set('existing-task', {
+        poolId: 'pool-a',
+        member,
+        memberKey,
+        selectionStrategy: 'leastLoaded',
+      });
+
+      const result = (runner as any).selectPoolMember('pool-a', pool, new Set());
+      expect(result).toBeUndefined();
+    });
+
+    it('returns a member when a member has remaining capacity', () => {
+      const tasks = new Map<string, TaskState>();
+      const runner = createExecutorWithTasks(tasks);
+
+      const pool = {
+        members: [
+          { type: 'ssh' as const, id: 'host-1', host: '1.2.3.4', user: 'root' },
+          { type: 'ssh' as const, id: 'host-2', host: '5.6.7.8', user: 'root' },
+        ],
+        selectionStrategy: 'leastLoaded' as const,
+        maxConcurrentTasksPerMember: 1,
+      };
+
+      // Fill host-1 but leave host-2 free.
+      (runner as any).pendingPoolSelections.set('existing-task', {
+        poolId: 'pool-a',
+        member: pool.members[0],
+        memberKey: 'ssh:host-1',
+        selectionStrategy: 'leastLoaded',
+      });
+
+      const result = (runner as any).selectPoolMember('pool-a', pool, new Set());
+      expect(result).toBeDefined();
+      expect((result as any).id).toBe('host-2');
+    });
+  });
+
+  describe('withPoolSelectionLock – serializes concurrent selections (Bug 2)', () => {
+    it('serializes concurrent selections so load is visible to subsequent waiters', async () => {
+      const tasks = new Map<string, TaskState>();
+      const runner = createExecutorWithTasks(tasks);
+
+      const poolId = 'pool-b';
+      const pool = {
+        members: [{ type: 'ssh' as const, id: 'only-host', host: '9.9.9.9', user: 'root' }],
+        selectionStrategy: 'leastLoaded' as const,
+        maxConcurrentTasksPerMember: 1,
+      };
+      // poolMemberKey() format is "type:id"
+      const memberKey = 'ssh:only-host';
+
+      // Track how many times selectPoolMember returned a member vs undefined.
+      let gotMember = 0;
+      let gotUndefined = 0;
+      let taskCounter = 0;
+
+      // Each call selects a member and immediately registers pendingPoolSelection
+      // if one is returned — exactly as selectExecutor does.
+      const runSelection = () =>
+        (runner as any).withPoolSelectionLock(poolId, () => {
+          const member = (runner as any).selectPoolMember(poolId, pool, new Set());
+          if (member) {
+            gotMember += 1;
+            taskCounter += 1;
+            // Register the selection so the next waiter in the queue sees load=1.
+            (runner as any).pendingPoolSelections.set(`task-${taskCounter}`, {
+              poolId,
+              member,
+              memberKey,
+              selectionStrategy: 'leastLoaded',
+            });
+          } else {
+            gotUndefined += 1;
+          }
+          return member;
+        });
+
+      await Promise.all([runSelection(), runSelection()]);
+
+      // With the mutex in place only one task should have acquired the slot;
+      // the second should have observed load=1 and received undefined.
+      expect(gotMember).toBe(1);
+      expect(gotUndefined).toBe(1);
+    });
+  });
 });

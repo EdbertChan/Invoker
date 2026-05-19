@@ -239,6 +239,13 @@ export class TaskRunner {
   private sshExecutorCache = new Map<string, SshExecutor>();
   private poolRoundRobinCursor = new Map<string, number>();
   private pendingPoolSelections = new Map<string, PoolSelection>();
+  /**
+   * Per-pool promise-chain mutex for pool member selection.
+   * Ensures that selectPoolMember() + pendingPoolSelections.set() is atomic
+   * across concurrent executeTask() calls so the load count is accurate
+   * before the next task queries it.
+   */
+  private poolSelectionLocks = new Map<string, Promise<void>>();
   private freshBaseCommits = new Map<string, FreshBaseCommit>();
 
   /** In-flight executions keyed by attemptId (with taskId retained for external kill resolution). */
@@ -723,7 +730,14 @@ export class TaskRunner {
     let handle!: ExecutorHandle;
     while (true) {
       bench('selectExecutor.start');
-      executor = this.selectExecutor(task, attemptedPoolMemberKeys);
+      // Serialize pool member selection per pool so that selectPoolMember() and
+      // pendingPoolSelections.set() are atomic across concurrent executeTask() calls.
+      // Without this, Promise.all-launched tasks all observe load=0 before any
+      // pendingPoolSelections entries are written, defeating maxConcurrentTasksPerMember.
+      executor = await this.withPoolSelectionLock(
+        task.config.poolId ?? `_nopool_${task.id}`,
+        () => this.selectExecutor(task, attemptedPoolMemberKeys),
+      );
       const poolSelectionForStart = this.pendingPoolSelections.get(task.id);
       bench('selectExecutor.end', {
         executorType: executor.type,
@@ -1072,6 +1086,28 @@ export class TaskRunner {
     return `${member.type}:${member.id}`;
   }
 
+  /**
+   * Serialize pool member selection for a given pool so that the
+   * selectPoolMember() query and the pendingPoolSelections.set() update
+   * are never interleaved across concurrent executeTask() calls.
+   */
+  private async withPoolSelectionLock<T>(poolId: string, fn: () => T): Promise<T> {
+    const prev = this.poolSelectionLocks.get(poolId) ?? Promise.resolve();
+    let resolve!: () => void;
+    const next = new Promise<void>((r) => { resolve = r; });
+    this.poolSelectionLocks.set(poolId, next);
+    await prev;
+    try {
+      return fn();
+    } finally {
+      resolve();
+      // Clean up the lock entry when it is no longer needed to avoid unbounded growth.
+      if (this.poolSelectionLocks.get(poolId) === next) {
+        this.poolSelectionLocks.delete(poolId);
+      }
+    }
+  }
+
   private poolMemberLoad(poolId: string, memberKey: string): number {
     let load = 0;
     for (const selection of this.pendingPoolSelections.values()) {
@@ -1108,9 +1144,10 @@ export class TaskRunner {
       const limit = member.maxConcurrentTasks ?? pool.maxConcurrentTasksPerMember;
       return { member, index, load, hasCapacity: limit === undefined || load < limit };
     });
-    const candidates = scored.some((entry) => entry.hasCapacity)
-      ? scored.filter((entry) => entry.hasCapacity)
-      : scored;
+    const candidates = scored.filter((entry) => entry.hasCapacity);
+    // Hard cap: when all members are at capacity return undefined so the caller
+    // defers the task rather than dispatching it to an over-limit member.
+    if (candidates.length === 0) return undefined;
     candidates.sort((a, b) => a.load - b.load || a.index - b.index);
     return candidates[0]?.member;
   }
