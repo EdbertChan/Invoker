@@ -747,6 +747,11 @@ export class Orchestrator {
    * commit, written by `recreateWorkflowFromFreshBase` whenever its
    * `refreshBase` callback returns a fresh SHA.
    *
+   * INV-90 consumes `docs/context/inv-90/experiment-brief.md`: this
+   * value is the deterministic orchestrator-side signal that the
+   * selected fresh-base design ran, keeping the proof at the unit layer
+   * instead of depending on executor, repository, or wall-clock state.
+   *
    * Step 12 introduces this map as the orchestrator-side observable
    * for the chart's `recreateWorkflowFromFreshBase` semantic
    * (`docs/architecture/task-invalidation-chart.md` rows
@@ -2596,11 +2601,11 @@ export class Orchestrator {
       const after = this.writeAndSync(task.id, changesWithGeneration);
       const priorAttemptId = task.execution.selectedAttemptId;
       this.replaceSelectedAttempt(task);
-    this.logger.info('[agent-session-trace] recreateWorkflow: after writeAndSync', {
-      taskId: task.id,
-      agentSessionId: after.execution.agentSessionId ?? 'null',
-      containerId: after.execution.containerId ?? 'null',
-    });
+      this.logger.info('[agent-session-trace] recreateWorkflow: after writeAndSync', {
+        taskId: task.id,
+        agentSessionId: after.execution.agentSessionId ?? 'null',
+        containerId: after.execution.containerId ?? 'null',
+      });
       const delta: TaskDelta = this.buildUpdateDelta(task, after, changesWithGeneration);
       this.persistence.logEvent?.(task.id, 'task.pending', changesWithGeneration);
       this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
@@ -2621,6 +2626,9 @@ export class Orchestrator {
    * `docs/architecture/task-invalidation-roadmap.md`, Decision Table
    * row "Rebase and retry" + "Repo/base invalidation inconsistency"
    * in `docs/architecture/task-invalidation-chart.md`).
+   * INV-90 keeps this as the experiment-selected workflow reset path:
+   * clear task lineage like `recreateWorkflow`, but refresh and record
+   * upstream base state first.
    *
    * This is strictly stronger than `recreateWorkflow`:
    *
@@ -3016,6 +3024,11 @@ export class Orchestrator {
    * `docs/architecture/task-invalidation-chart.md`
    * (`MUTATION_POLICIES.mergeMode` → `retryTask` / task scope, scoped
    * to the merge node).
+   *
+   * INV-90 consumes `docs/context/inv-90/experiment-brief.md`: the
+   * experiment-selected merge-mode proof requires same-mode no-op,
+   * cancel-before-retry ordering, exactly one generation bump on real
+   * mode changes, and no recreate-class reset.
    *
    * Why retry-class (not recreate-class). The chart classifies a
    * merge-mode change as a merge-node-only execution-policy change:

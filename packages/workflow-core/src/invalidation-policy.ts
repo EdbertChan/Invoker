@@ -42,6 +42,10 @@ export type MutationKey =
   | 'fixReject'
   | 'topology';
 
+// INV-90 consumes `docs/context/inv-90/experiment-brief.md`: keep this
+// table as the executable policy-router evidence. The experiment rejects
+// informal/E2E-only proof, so every mutation key must continue to map to
+// an explicit deterministic action that `applyInvalidation` can route.
 export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>> = Object.freeze({
   command:               { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   prompt:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
@@ -124,6 +128,24 @@ const WORKFLOW_ACTIONS = new Set<InvalidationAction>([
   'recreateWorkflowFromFreshBase',
   'workflowFork',
 ]);
+const NON_CANCELING_ACTIONS = new Set<InvalidationAction>([
+  'none',
+  'scheduleOnly',
+  'fixApprove',
+  'fixReject',
+]);
+
+/**
+ * INV-90 experiment lock-in:
+ * retry/recreate/fork lifecycle routes must cancel affected active work
+ * before invoking their lifecycle dep; schedule-only/fix/none actions are
+ * intentional non-invalidating exceptions.
+ */
+export function invalidationActionRequiresCancelFirst(
+  action: InvalidationAction,
+): boolean {
+  return !NON_CANCELING_ACTIONS.has(action);
+}
 
 export async function applyInvalidation(
   scope: InvalidationScope,
@@ -191,6 +213,10 @@ export async function applyInvalidation(
     throw new Error(
       `applyInvalidation: action '${action}' requires scope 'workflow' (got '${scope}')`,
     );
+  }
+
+  if (!invalidationActionRequiresCancelFirst(action)) {
+    return [];
   }
 
   await deps.cancelInFlight(scope, id);

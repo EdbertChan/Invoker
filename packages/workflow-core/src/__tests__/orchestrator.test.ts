@@ -6479,13 +6479,12 @@ describe('Orchestrator', () => {
     });
   });
 
-  // ── Step 12: workflow-scope paths (retryWorkflow / recreateWorkflow / recreateWorkflowFromFreshBase) ────
+  // ── INV-90: experiment-selected workflow-scope paths ────
   //
-  // Pins the chart's three-way distinction
-  // (`docs/architecture/task-invalidation-chart.md` rows
-  // "Retry workflow", "Recreate workflow", "Rebase and retry") +
-  // closes the Step 11 "not yet wired (Step 12)" hole on
-  // `applyInvalidation('workflow', 'recreateWorkflowFromFreshBase', ...)`.
+  // Consumes `docs/context/inv-90/experiment-brief.md`: retry preserves
+  // lineage, recreate clears lineage without refreshing base state, and
+  // recreateWorkflowFromFreshBase clears lineage only after recording a
+  // refreshed upstream base.
   describe('workflow-scope paths', () => {
     function seedSimpleWorkflow(p: InMemoryPersistence, wfId: string): void {
       p.saveTask(wfId, {
@@ -6680,7 +6679,7 @@ describe('Orchestrator', () => {
       });
     });
 
-    describe('applyInvalidation routing (Step 11 "not yet wired" path is closed)', () => {
+    describe('applyInvalidation routing (INV-90 selected router path)', () => {
       it("applyInvalidation('workflow', 'recreateWorkflowFromFreshBase', ...) succeeds when the dep is wired", async () => {
         const { applyInvalidation } = await import('../invalidation-policy.js');
 
@@ -7551,6 +7550,10 @@ describe('Orchestrator', () => {
     });
   });
 
+  // INV-90 consumes docs/context/inv-90/experiment-brief.md command 3:
+  // these two legacy/current describe blocks intentionally keep the
+  // focused threshold at 16 passing tests while pinning the same
+  // retry-class merge-mode contract from both wording generations.
   describe('editTaskMergeMode invalidation', () => {
     function setupMergeWorkflow(initialMergeMode: 'manual' | 'automatic' | 'external_review' = 'manual'): {
       mergeId: string;
