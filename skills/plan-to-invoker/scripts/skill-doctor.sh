@@ -13,6 +13,9 @@
 #   --verbose           Show detailed output from each sub-check
 #   --warn-delegation  Pass through to atomicity lint (prints advisory delegation-hint warnings)
 #
+# Enforces experiment artifact handoff, verdict consumption, cleanup before final gates,
+# and stack-aware pnpm run test:all placement through lint-task-atomicity.sh.
+#
 # Exit codes:
 #   0 = all checks passed
 #   1 = one or more checks failed
@@ -38,7 +41,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      sed -n '2,22p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     --skip-assumptions)
@@ -310,12 +313,12 @@ if [[ "$SKIP_ATOMICITY" == "false" ]]; then
     atomicity_args+=(--warn-delegation)
     run_check \
       "lint-task-atomicity" \
-      "Lint task atomicity and detail requirements (strict zero-context prompt gating + delegation warnings)" \
+      "Lint task atomicity and detail requirements (strict zero-context prompt gating + experiment handoff + delegation warnings)" \
       bash "$SCRIPT_DIR/lint-task-atomicity.sh" "${atomicity_args[@]}" "$PLAN_FILE"
   else
     run_check \
       "lint-task-atomicity" \
-      "Lint task atomicity and detail requirements (strict zero-context prompt gating)" \
+      "Lint task atomicity and detail requirements (strict zero-context prompt gating + experiment handoff)" \
       bash "$SCRIPT_DIR/lint-task-atomicity.sh" "${atomicity_args[@]}" "$PLAN_FILE"
   fi
 fi

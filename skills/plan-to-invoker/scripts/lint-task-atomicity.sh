@@ -349,6 +349,8 @@ function flush_task(    wc, and_count, valid_id, d, desc_lower, idx) {
     suffix = task_suffix(id, "implement-")
     implement_id_by_suffix[suffix] = id
     implement_artifact_by_suffix[suffix] = artifact_path
+    implement_text_lower = tolower(desc " " prompt_text)
+    implement_consumes_verdicts_by_suffix[suffix] = (implement_text_lower ~ /supported/ && implement_text_lower ~ /rejected/ && implement_text_lower ~ /deferred/)
   }
 
   if (id ~ /^cleanup-experiment-artifacts-/) {
@@ -513,6 +515,8 @@ END {
         errors[++errn] = "Task \"" implement_id "\" must reference experiment artifact path (docs/context/<issue>/experiment-brief.md) in description/prompt"
       } else if (experiment_artifact != "" && implement_artifact != "" && experiment_artifact != implement_artifact) {
         errors[++errn] = "Tasks \"" experiment_id "\" and \"" implement_id "\" must reference the same experiment artifact path"
+      } else if (implement_consumes_verdicts_by_suffix[suffix] != 1) {
+        errors[++errn] = "Task \"" implement_id "\" must explicitly consume the experiment artifact conclusions by mentioning Supported, Rejected, and Deferred verdicts in description/prompt"
       }
 
       if (cleanup_id == "") {
