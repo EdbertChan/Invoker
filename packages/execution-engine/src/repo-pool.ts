@@ -77,11 +77,11 @@ export class ResourceLimitError extends Error {
 }
 
 export class RepoPool {
+  private static readonly cloneLocks = new Map<string, Promise<string>>();
   private readonly cacheDir: string;
   private readonly maxWorktrees: number;
   private readonly worktreeBaseDir?: string;
   private activeWorktrees = new Map<string, Set<string>>();
-  private cloneLocks = new Map<string, Promise<string>>();
   /** Chain of operations per repo to serialize git operations. */
   private repoChains = new Map<string, Promise<unknown>>();
   private pendingRebaseRefreshBatches = new Map<string, RebaseRefreshBatch>();
@@ -98,6 +98,10 @@ export class RepoPool {
 
   private repoKey(repoUrl: string): string {
     return computeRepoCacheKey(repoUrl);
+  }
+
+  private cloneLockKey(repoUrl: string): string {
+    return `${normalize(this.cacheDir)}\0${this.repoKey(repoUrl)}`;
   }
 
   /** Deterministic external worktree path for a branch (requires worktreeBaseDir). */
@@ -443,8 +447,8 @@ export class RepoPool {
     });
     bench('RepoPool.ensureClone.begin');
     // Serialize clone operations per repo to prevent concurrent clone races
-    const repoKey = this.repoKey(repoUrl);
-    const existing = this.cloneLocks.get(repoKey);
+    const lockKey = this.cloneLockKey(repoUrl);
+    const existing = RepoPool.cloneLocks.get(lockKey);
     if (existing) {
       bench('RepoPool.ensureClone.waitForExistingLock.before');
       const clonePath = await existing;
@@ -453,13 +457,15 @@ export class RepoPool {
     }
 
     const promise = this.doEnsureClone(repoUrl);
-    this.cloneLocks.set(repoKey, promise);
+    RepoPool.cloneLocks.set(lockKey, promise);
     try {
       const clonePath = await promise;
       bench('RepoPool.ensureClone.after', { clonePath });
       return clonePath;
     } finally {
-      this.cloneLocks.delete(repoKey);
+      if (RepoPool.cloneLocks.get(lockKey) === promise) {
+        RepoPool.cloneLocks.delete(lockKey);
+      }
       bench('RepoPool.ensureClone.lockDeleted');
     }
   }

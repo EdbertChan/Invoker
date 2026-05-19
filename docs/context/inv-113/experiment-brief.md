@@ -61,6 +61,22 @@ Duration  79.19s (transform 71.60s, setup 0ms, collect 75.51s, tests 851ms, envi
 The package emits an esbuild warning about export condition ordering in `package.json`. That warning is outside this experiment's behavioral threshold and does not fail the command.
 Total duration is also outside the threshold because Vitest transform and collect time varies with local cache state; selected test outcomes and pass counts are the deterministic signal.
 
+Package-level regression verification on 2026-05-19:
+
+```sh
+cd packages/execution-engine && pnpm test
+```
+
+Observed output:
+
+```text
+Test Files  48 passed (48)
+Tests  971 passed (971)
+Duration  336.94s (transform 8.74s, setup 0ms, collect 20.94s, tests 548.34s, environment 64ms, prepare 17.53s)
+```
+
+The package-level command exited with status `0`. The same export-condition warning appeared and remained non-fatal.
+
 ## Evidence thresholds
 
 The experiment passes only if all thresholds hold:

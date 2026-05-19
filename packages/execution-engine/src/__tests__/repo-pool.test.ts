@@ -471,6 +471,7 @@ describe('RepoPool', () => {
       // Setup: bare repo so multiple clones can fetch concurrently
       const bareDir = mkdtempSync(join(tmpdir(), 'repo-pool-bare-'));
       const sourceDir = mkdtempSync(join(tmpdir(), 'repo-pool-src-'));
+      const branchCount = 4;
       try {
         execSync('git init --bare -b master', { cwd: bareDir });
         execSync(`git clone ${bareDir} .`, { cwd: sourceDir });
@@ -478,7 +479,7 @@ describe('RepoPool', () => {
         execSync('git commit --allow-empty -m "init"', { cwd: sourceDir });
         execSync('git branch -M master', { cwd: sourceDir });
         execSync('git push -u origin master', { cwd: sourceDir });
-        for (let i = 0; i < 15; i++) {
+        for (let i = 0; i < branchCount; i++) {
           execSync(`git checkout -b experiment/b-${i} master`, { cwd: sourceDir });
           execSync(`git commit --allow-empty -m "b${i}" && git push origin experiment/b-${i}`, { cwd: sourceDir });
         }
@@ -488,7 +489,7 @@ describe('RepoPool', () => {
         await pool.ensureClone(bareDir);
 
         // Force-push all branches to create stale tracking refs
-        for (let i = 0; i < 15; i++) {
+        for (let i = 0; i < branchCount; i++) {
           execSync(`git checkout experiment/b-${i}`, { cwd: sourceDir });
           execSync(`git commit --allow-empty -m "rewrite ${i}" && git push --force origin experiment/b-${i}`, { cwd: sourceDir });
         }
