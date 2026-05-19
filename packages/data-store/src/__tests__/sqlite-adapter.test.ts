@@ -196,6 +196,38 @@ describe('SQLiteAdapter', () => {
       loaded = adapter.loadTasks('wf-1');
       expect(loaded[0].execution.generation).toBe(5);
     });
+
+    it('persists SSH remote heartbeat metadata on save and update', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const initialRemoteHeartbeat = new Date('2026-05-19T10:00:00.000Z');
+      const updatedRemoteHeartbeat = new Date('2026-05-19T10:01:00.000Z');
+
+      adapter.saveTask('wf-1', makeTask('ssh-task', {
+        config: { runnerKind: 'ssh' },
+        execution: {
+          lastHeartbeatAt: initialRemoteHeartbeat,
+          remoteHeartbeatAt: initialRemoteHeartbeat,
+          heartbeatSource: 'remote_workload',
+        },
+      }));
+
+      let loaded = adapter.loadTask('ssh-task');
+      expect(loaded?.execution.remoteHeartbeatAt?.toISOString()).toBe(initialRemoteHeartbeat.toISOString());
+      expect(loaded?.execution.heartbeatSource).toBe('remote_workload');
+
+      adapter.updateTask('ssh-task', {
+        execution: {
+          lastHeartbeatAt: updatedRemoteHeartbeat,
+          remoteHeartbeatAt: updatedRemoteHeartbeat,
+          heartbeatSource: 'remote_workload',
+        },
+      });
+
+      loaded = adapter.loadTask('ssh-task');
+      expect(loaded?.execution.lastHeartbeatAt?.toISOString()).toBe(updatedRemoteHeartbeat.toISOString());
+      expect(loaded?.execution.remoteHeartbeatAt?.toISOString()).toBe(updatedRemoteHeartbeat.toISOString());
+      expect(loaded?.execution.heartbeatSource).toBe('remote_workload');
+    });
   });
 
   describe('task-state version persistence', () => {
