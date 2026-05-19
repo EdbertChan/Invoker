@@ -3,6 +3,7 @@ import { reconciliationNeedsInputWorkResponse } from './reconciliation-needs-inp
 import { rid, sid } from './scoped-test-helpers.js';
 import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
+import { applyInvalidation, MUTATION_POLICIES } from '../invalidation-policy.js';
 import { computeWorkflowRollup } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
 import type { Logger, WorkResponse } from '@invoker/contracts';
@@ -1928,6 +1929,56 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(leafId)!.config.externalDependencies?.[0]?.gatePolicy).toBe('review_ready');
       expect(started.map((t) => t.id)).toContain(leafId);
       expect(orchestrator.getTask(leafId)!.status).toBe('running');
+    });
+
+    it('setTaskExternalGatePolicies is schedule-only for active tasks', () => {
+      orchestrator.loadPlan({
+        name: 'prereq-workflow-active-gate-edit',
+        tasks: [{ id: 'verify-control-plane-regression', description: 'Prereq task' }],
+      });
+      const prereqTaskId = sid(orchestrator, 0, 'verify-control-plane-regression');
+      const prereqWfId = prereqTaskId.split('/')[0]!;
+      const prereqMergeId = `__merge__${prereqWfId}`;
+
+      orchestrator.loadPlan({
+        name: 'workflow-gated-active-edit',
+        tasks: [
+          {
+            id: 'leaf-a',
+            description: 'leaf starts once upstream merge is review ready',
+            externalDependencies: [{ workflowId: prereqWfId, gatePolicy: 'review_ready' }],
+          },
+        ],
+      });
+      const leafId = sid(orchestrator, 1, 'leaf-a');
+
+      orchestrator.startExecution();
+      orchestrator.handleWorkerResponse(makeResponse({ actionId: prereqTaskId, status: 'completed' }));
+      orchestrator.setTaskAwaitingApproval(prereqMergeId);
+      orchestrator.startExecution();
+      expect(orchestrator.getTask(leafId)!.status).toBe('running');
+      const beforeGeneration = orchestrator.getTask(leafId)!.execution.generation ?? 0;
+
+      const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
+      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+
+      const started = orchestrator.setTaskExternalGatePolicies(leafId, [
+        { workflowId: prereqWfId, gatePolicy: 'completed' },
+      ]);
+
+      const task = orchestrator.getTask(leafId)!;
+      expect(task.config.externalDependencies?.[0]?.gatePolicy).toBe('completed');
+      expect(task.status).toBe('running');
+      expect(task.execution.generation ?? 0).toBe(beforeGeneration);
+      expect(started).toEqual([]);
+      expect(cancelSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
+      expect(recreateSpy).not.toHaveBeenCalled();
+
+      cancelSpy.mockRestore();
+      retrySpy.mockRestore();
+      recreateSpy.mockRestore();
     });
 
     it('setTaskExternalGatePolicies applies targeted updates only', () => {
@@ -6681,6 +6732,44 @@ describe('Orchestrator', () => {
     });
 
     describe('applyInvalidation routing (Step 11 "not yet wired" path is closed)', () => {
+      it('locks the INV-90 selected mutation classes', () => {
+        expect(MUTATION_POLICIES.command.action).toBe('recreateTask');
+        expect(MUTATION_POLICIES.prompt.action).toBe('recreateTask');
+        expect(MUTATION_POLICIES.executionAgent.action).toBe('recreateTask');
+        expect(MUTATION_POLICIES.runnerKind.action).toBe('retryTask');
+        expect(MUTATION_POLICIES.poolMemberId.action).toBe('recreateTask');
+        expect(MUTATION_POLICIES.mergeMode.action).toBe('retryTask');
+        expect(MUTATION_POLICIES.fixContext.action).toBe('retryTask');
+        expect(MUTATION_POLICIES.rebaseAndRetry.action).toBe('recreateWorkflowFromFreshBase');
+        expect(MUTATION_POLICIES.externalGatePolicy).toMatchObject({
+          invalidatesExecutionSpec: false,
+          invalidateIfActive: false,
+          action: 'scheduleOnly',
+        });
+      });
+
+      it("applyInvalidation('task', 'scheduleOnly', ...) skips cancelInFlight", async () => {
+        const order: string[] = [];
+        const cancelInFlight = vi.fn(async () => {
+          order.push('cancelInFlight');
+        });
+
+        await applyInvalidation('task', 'scheduleOnly', 'task-schedule-only', {
+          cancelInFlight,
+          retryTask: async () => [],
+          recreateTask: async () => [],
+          retryWorkflow: async () => [],
+          recreateWorkflow: async () => [],
+          scheduleOnly: async () => {
+            order.push('scheduleOnly');
+            return [];
+          },
+        });
+
+        expect(order).toEqual(['scheduleOnly']);
+        expect(cancelInFlight).not.toHaveBeenCalled();
+      });
+
       it("applyInvalidation('workflow', 'recreateWorkflowFromFreshBase', ...) succeeds when the dep is wired", async () => {
         const { applyInvalidation } = await import('../invalidation-policy.js');
 

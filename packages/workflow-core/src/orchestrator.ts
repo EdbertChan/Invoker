@@ -3342,10 +3342,6 @@ export class Orchestrator {
       targetId: task.id,
       tasks: this.stateMachine.getAllTasks(),
     });
-    if (task.status === 'running' || task.status === 'fixing_with_ai') {
-      throw new Error(`Cannot edit running task ${taskId}`);
-    }
-
     const deps = task.config.externalDependencies;
     if (!deps || deps.length === 0) {
       throw new Error(`Task ${taskId} has no external dependencies`);

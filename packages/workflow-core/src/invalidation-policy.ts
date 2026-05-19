@@ -42,6 +42,10 @@ export type MutationKey =
   | 'fixReject'
   | 'topology';
 
+// INV-90: keep execution mutation tradeoffs explicit. The experiment in
+// docs/context/inv-90/experiment-brief.md rejected an all-recreate route
+// because retry-class and schedule-only mutations have distinct lineage
+// guarantees that tests assert deterministically.
 export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>> = Object.freeze({
   command:               { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   prompt:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
