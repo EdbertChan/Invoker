@@ -331,7 +331,6 @@ describe('Parity: API endpoints wire to facade methods', () => {
         getEvents: vi.fn(() => []),
         getTaskOutput: vi.fn(() => 'output'),
       },
-      executorRegistry: {},
       taskExecutor: {
         executeTasks: vi.fn().mockResolvedValue(undefined),
         publishAfterFix: vi.fn().mockResolvedValue(undefined),
@@ -358,7 +357,6 @@ describe('Parity: API endpoints wire to facade methods', () => {
     api = startApiServer({
       orchestrator: mocks.orchestrator as any,
       persistence: mocks.persistence as any,
-      executorRegistry: mocks.executorRegistry as any,
       mutations: facade,
       deleteWorkflow: mocks.deleteWorkflow,
       detachWorkflow: mocks.detachWorkflow,

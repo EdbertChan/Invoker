@@ -48,7 +48,6 @@ import {
 } from '@invoker/workflow-core';
 import type { Orchestrator } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import type { ExecutorRegistry } from '@invoker/execution-engine';
 import type { WorkflowMutationFacade } from './workflow-mutation-facade.js';
 import { resolveHeadlessTargetWorkflowId } from './headless-command-classification.js';
 
@@ -56,8 +55,11 @@ export interface ApiServerDeps {
   logger?: Logger;
   orchestrator: Orchestrator;
   persistence: SQLiteAdapter;
-  executorRegistry: ExecutorRegistry;
-  /** All write endpoints delegate to the facade for mutation + dispatch + topup. */
+  /**
+   * INV-130: the API server accepts no executor registry or task runner.
+   * Write routes must go through the facade so mutation dispatch/top-up
+   * policy stays outside this local HTTP control plane.
+   */
   mutations: WorkflowMutationFacade;
   deleteWorkflow: (workflowId: string) => Promise<void>;
   detachWorkflow: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;

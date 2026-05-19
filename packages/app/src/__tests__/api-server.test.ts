@@ -71,10 +71,10 @@ function request(
 
 let api: ApiServer;
 let port: number;
+let mutationFacade: WorkflowMutationFacade;
 let mocks: {
   orchestrator: Record<string, ReturnType<typeof vi.fn>>;
   persistence: Record<string, ReturnType<typeof vi.fn>>;
-  executorRegistry: Record<string, ReturnType<typeof vi.fn>>;
   taskExecutor: Record<string, ReturnType<typeof vi.fn>>;
   killRunningTask: ReturnType<typeof vi.fn>;
   deleteWorkflow: ReturnType<typeof vi.fn>;
@@ -127,7 +127,6 @@ function createMocks() {
       getEvents: vi.fn(() => [{ taskId: 'task-1', eventType: 'started', timestamp: '2024-01-01' }]),
       getTaskOutput: vi.fn(() => 'hello world output'),
     },
-    executorRegistry: {},
     taskExecutor: {
       executeTasks: vi.fn().mockResolvedValue(undefined),
       publishAfterFix: vi.fn().mockResolvedValue(undefined),
@@ -152,13 +151,13 @@ function buildFacade(m: typeof mocks) {
 
 beforeAll(async () => {
   mocks = createMocks();
+  mutationFacade = buildFacade(mocks);
   // Use port 0 for ephemeral port assignment
   process.env.INVOKER_API_PORT = '0';
   api = startApiServer({
     orchestrator: mocks.orchestrator as any,
     persistence: mocks.persistence as any,
-    executorRegistry: mocks.executorRegistry as any,
-    mutations: buildFacade(mocks),
+    mutations: mutationFacade,
     deleteWorkflow: mocks.deleteWorkflow,
     detachWorkflow: mocks.detachWorkflow,
   });
@@ -340,6 +339,15 @@ describe('POST /api/workflows/:id/cancel', () => {
 });
 
 describe('POST /api/tasks/:id/restart', () => {
+  it('delegates retry writes through the INV-130 mutation facade boundary', async () => {
+    const retrySpy = vi.spyOn(mutationFacade, 'retryTask');
+    const res = await request(port, 'POST', '/api/tasks/task-1/retry');
+
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('retried');
+    expect(retrySpy).toHaveBeenCalledWith('task-1');
+  });
+
   it('restarts task via facade retryTask', async () => {
     const res = await request(port, 'POST', '/api/tasks/task-1/restart');
     expect(res.status).toBe(200);
