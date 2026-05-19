@@ -35,6 +35,7 @@
 import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
 
@@ -232,13 +233,24 @@ let commandService: CommandService;
 let runtimeServices: RuntimeServices;
 let workflowMutationCoordinator: PersistedWorkflowMutationCoordinator | null = null;
 const workflowMutationDispatcher = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+const mutationContextStorage =
+  new AsyncLocalStorage<import('./persisted-workflow-mutation-coordinator.js').WorkflowMutationContext>();
 /**
- * The mutation context for the currently executing workflow mutation.
- * Set by the coordinator dispatch callback before invoking the handler,
- * cleared afterward. Allows fix-with-agent and conflict-resolution
- * handlers to read the AbortSignal without changing every handler signature.
+ * The mutation context for the current async workflow mutation dispatch.
+ * AsyncLocalStorage keeps concurrent workflow drains from overwriting each
+ * other's AbortSignal/timing context.
  */
-let activeMutationContext: import('./persisted-workflow-mutation-coordinator.js').WorkflowMutationContext | undefined;
+const activeMutationContext: {
+  readonly signal?: AbortSignal;
+  readonly mutationTiming?: import('./workflow-mutation-timing.js').WorkflowMutationTiming;
+} = {
+  get signal() {
+    return mutationContextStorage.getStore()?.signal;
+  },
+  get mutationTiming() {
+    return mutationContextStorage.getStore()?.mutationTiming;
+  },
+};
 let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
 let writerLock: DbWriterLockResult | null = null;
 const workflowMutationOwnerId = `owner-${process.pid}-${Date.now()}`;
@@ -985,12 +997,7 @@ if (isHeadless) {
               if (!handler) {
                 throw new Error(`No workflow mutation dispatcher registered for ${channel}`);
               }
-              activeMutationContext = context;
-              try {
-                return await handler(...args);
-              } finally {
-                activeMutationContext = undefined;
-              }
+              return await mutationContextStorage.run(context, () => handler(...args));
             },
             { logger },
           );
@@ -2624,12 +2631,7 @@ function createEmbeddedTerminalBackendFromConfig(
           if (!handler) {
             throw new Error(`No workflow mutation dispatcher registered for ${channel}`);
           }
-          activeMutationContext = context;
-          try {
-            return await handler(...args);
-          } finally {
-            activeMutationContext = undefined;
-          }
+          return await mutationContextStorage.run(context, () => handler(...args));
         },
         { logger },
       );
@@ -3191,6 +3193,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.cancel-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         await finalizeMutationWithGlobalTopup({
           orchestrator,
@@ -3277,6 +3280,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.recreate-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = activeMutationContext?.mutationTiming
           ? await activeMutationContext.mutationTiming.span(
@@ -3365,6 +3369,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.retry-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
         const result = activeMutationContext?.mutationTiming
@@ -3413,6 +3418,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.rebase-retry',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = await rebaseRetry(target, {
           orchestrator,
@@ -3455,6 +3461,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.rebase-recreate',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = await rebaseRecreate(target, {
           orchestrator,

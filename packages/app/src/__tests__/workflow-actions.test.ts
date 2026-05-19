@@ -2218,6 +2218,43 @@ describe('fixWithAgentAction lineage guard', () => {
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
   });
 
+  it('does not append fix failure output when aborted agent work rejects', async () => {
+    const ac = new AbortController();
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+      })),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn(async () => {
+        ac.abort(new Error('Superseded by recreate'));
+        throw new Error('The operation was aborted');
+      }),
+      resolveConflict: vi.fn(),
+    };
+
+    await expect(fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, {
+      signal: ac.signal,
+    })).rejects.toThrow(StaleLineageError);
+
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+  });
+
   it('skips revertConflictResolution when lineage changed and fix threw', async () => {
     let getTaskCallCount = 0;
     const orchestrator = {

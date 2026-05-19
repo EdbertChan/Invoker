@@ -98,6 +98,24 @@ describe('fix prompt transport for oversized prompts', () => {
     expect(captured.prompt).not.toContain(hugePrompt.slice(0, 200));
   });
 
+  it('passes AbortSignal through local agent fix spawn', async () => {
+    const { spawn } = await import('node:child_process');
+    const agent = makeExecutionAgent((prompt) => ({
+      cmd: 'codex',
+      args: ['exec', '--json', prompt],
+      sessionId: 'local-sess',
+    }));
+    const controller = new AbortController();
+
+    vi.mocked(spawn).mockReturnValueOnce(mockSpawnChild('ok', 0) as any);
+
+    await spawnAgentFixViaRegistry('small prompt', '/tmp', agent, undefined, controller.signal);
+
+    expect(vi.mocked(spawn).mock.calls[0][2]).toMatchObject({
+      signal: controller.signal,
+    });
+  });
+
   it('remote fix path writes oversized prompt to remote temp file and passes short bootstrap prompt', async () => {
     const { spawn } = await import('node:child_process');
     const buildFixCommand = vi.fn((prompt: string) => ({
@@ -136,6 +154,36 @@ describe('fix prompt transport for oversized prompts', () => {
     expect(stdinScript).toContain('PROMPT_FILE=');
     expect(stdinScript).toContain('base64 -d > "$PROMPT_FILE"');
     expect(stdinScript).toContain("trap 'rm -f \"$PROMPT_FILE\"' EXIT");
+  });
+
+  it('passes AbortSignal through remote agent fix SSH spawn', async () => {
+    const { spawn } = await import('node:child_process');
+    const buildFixCommand = vi.fn((prompt: string) => ({
+      cmd: 'codex',
+      args: ['exec', '--json', prompt],
+      sessionId: 'remote-sess',
+    }));
+    const registry = {
+      get: () => ({ name: 'codex', buildFixCommand }),
+      getOrThrow: () => ({ name: 'codex', buildFixCommand }),
+      getSessionDriver: () => undefined,
+    } as unknown as AgentRegistry;
+    const controller = new AbortController();
+
+    vi.mocked(spawn).mockReturnValueOnce(mockSpawnChild('remote ok', 0) as any);
+
+    await spawnRemoteAgentFixImpl(
+      'small prompt',
+      '/home/user/worktree',
+      { host: '1.2.3.4', user: 'invoker', sshKeyPath: '/tmp/key' },
+      'codex',
+      registry,
+      controller.signal,
+    );
+
+    expect(vi.mocked(spawn).mock.calls[0][2]).toMatchObject({
+      signal: controller.signal,
+    });
   });
 });
 
@@ -220,4 +268,3 @@ describe('spawn errors during agent fix surface diagnostic info', () => {
     expect(caught!.message).toContain('Killed');
   });
 });
-
