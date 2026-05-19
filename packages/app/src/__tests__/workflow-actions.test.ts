@@ -2290,6 +2290,37 @@ describe('fixWithAgentAction lineage guard', () => {
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
     expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
   });
+
+  it('still reverts fixing state when failure-output append is locked', async () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+      })),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(() => {
+        throw new Error('database is locked');
+      }),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockRejectedValue(new Error('agent crashed')),
+      resolveConflict: vi.fn(),
+    };
+
+    await expect(fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    })).rejects.toThrow('agent crashed');
+
+    expect(orchestrator.revertConflictResolution).toHaveBeenCalledWith('task-a', 'boom', 'agent crashed');
+  });
 });
 
 describe('resolveConflictAction lineage guard', () => {

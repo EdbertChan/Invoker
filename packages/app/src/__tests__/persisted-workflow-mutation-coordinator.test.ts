@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SQLiteAdapter } from '@invoker/data-store';
 import { PersistedWorkflowMutationCoordinator, type WorkflowMutationContext } from '../persisted-workflow-mutation-coordinator.js';
 import { dispatchStartedTasksWithGlobalTopup } from '../global-topup.js';
@@ -113,6 +113,90 @@ describe('PersistedWorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['first', 'second']);
     expect(adapter.listWorkflowMutationLeases()).toHaveLength(0);
+  });
+
+  it('retries terminal intent persistence when failure cleanup hits a transient db lock', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const originalFail = adapter.failWorkflowMutationIntent.bind(adapter);
+    let failCalls = 0;
+    adapter.failWorkflowMutationIntent = ((intentId, error) => {
+      failCalls += 1;
+      if (failCalls === 1) {
+        throw new Error('database is locked');
+      }
+      return originalFail(intentId, error);
+    }) as typeof adapter.failWorkflowMutationIntent;
+
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async () => {
+        throw new Error('agent crashed');
+      },
+    );
+
+    await expect(coordinator.enqueue<void>('wf-1', 'normal', 'invoker:fix-with-agent', ['wf-1/task-a', 'codex']))
+      .rejects.toThrow('agent crashed');
+
+    const intent = adapter.listWorkflowMutationIntents('wf-1')[0];
+    expect(intent?.status).toBe('failed');
+    expect(intent?.error).toContain('agent crashed');
+    expect(failCalls).toBe(2);
+  });
+
+  it('does not abort a running intent when lease renewal hits a transient db lock', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const originalRenew = adapter.renewWorkflowMutationLease.bind(adapter);
+    let renewCalls = 0;
+    adapter.renewWorkflowMutationLease = ((workflowId, ownerId, options) => {
+      renewCalls += 1;
+      if (renewCalls === 1) {
+        throw new Error('database is locked');
+      }
+      return originalRenew(workflowId, ownerId, options);
+    }) as typeof adapter.renewWorkflowMutationLease;
+    const logger = {
+      debug: () => {},
+      info: () => {},
+      warn: vi.fn(),
+      error: () => {},
+      child: () => logger,
+    };
+
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async () => 'ok',
+      { logger },
+    );
+
+    await expect(coordinator.enqueue<string>('wf-1', 'normal', 'mut', []))
+      .resolves.toBe('ok');
+
+    const intent = adapter.listWorkflowMutationIntents('wf-1')[0];
+    expect(intent?.status).toBe('completed');
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('database is locked'),
+      { module: 'workflow-mutation-coordinator' },
+    );
   });
 
   it('evicts older queued workflow intents when a delegated recreate fence starts', async () => {

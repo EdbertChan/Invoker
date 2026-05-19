@@ -3309,6 +3309,84 @@ describe('TaskRunner', () => {
         vi.useRealTimers();
       }
     });
+
+    it('keeps executor heartbeats non-fatal when persistence is temporarily locked', async () => {
+      vi.useFakeTimers();
+      try {
+        const receivedHeartbeats: string[] = [];
+        const heartbeatCallbacks: Array<(taskId: string) => void> = [];
+        let completeCallback: ((response: WorkResponse) => void) | undefined;
+        const handle = { executionId: 'exec-lock', taskId: 'lock-task', workspacePath: '/tmp/mock-worktree' };
+        const logger = createMockLogger();
+
+        const gcExecutor = {
+          type: 'worktree',
+          start: vi.fn(async () => handle),
+          onOutput: () => () => {},
+          onComplete: vi.fn((_h: unknown, cb: (response: WorkResponse) => void) => {
+            completeCallback = cb;
+            return () => {};
+          }),
+          onHeartbeat: vi.fn((_h: unknown, cb: (taskId: string) => void) => {
+            heartbeatCallbacks.push(cb);
+            return () => {};
+          }),
+        };
+
+        const executor = new TaskRunner({
+          orchestrator: { getTask: () => undefined, handleWorkerResponse: vi.fn() } as any,
+          persistence: {
+            updateAttempt: vi.fn(() => {
+              throw new Error('database is locked');
+            }),
+            updateTask: vi.fn(),
+          } as any,
+          executorRegistry: {
+            getDefault: () => gcExecutor,
+            get: () => gcExecutor,
+            getAll: () => [gcExecutor],
+          } as any,
+          cwd: '/tmp',
+          callbacks: {
+            onHeartbeat: (taskId: string) => {
+              receivedHeartbeats.push(taskId);
+            },
+          },
+          logger,
+        });
+
+        const task = makeTask({
+          id: 'lock-task',
+          status: 'running',
+          config: { command: 'echo test' },
+          execution: { selectedAttemptId: 'attempt-lock' },
+        });
+        const done = executor.executeTask(task);
+
+        await vi.runAllTimersAsync();
+        expect(gcExecutor.onHeartbeat).toHaveBeenCalled();
+
+        expect(() => {
+          heartbeatCallbacks.forEach(cb => cb('lock-task'));
+        }).not.toThrow();
+        expect(receivedHeartbeats).toContain('lock-task');
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('failed to persist heartbeat'),
+          { err: 'database is locked' },
+        );
+
+        completeCallback?.({
+          requestId: 'req-lock',
+          actionId: 'lock-task',
+          status: 'completed',
+          outputs: { exitCode: 0 },
+        });
+        await vi.runAllTimersAsync();
+        await done;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('completionChain serialization', () => {

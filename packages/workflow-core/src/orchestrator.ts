@@ -4148,6 +4148,7 @@ export class Orchestrator {
     const queuedTasks = this.stateMachine
       .getReadyTasks()
       .filter((task) => task.status === 'pending')
+      .filter((task) => !this.isTaskExecutionActive(task, this.getSelectedAttempt(task), now))
       .filter((task) => this.getExternalDependencyBlocker(task) === undefined)
       .map((task) => {
         const attempt = task.execution.selectedAttemptId
@@ -4608,9 +4609,8 @@ export class Orchestrator {
     // still carrying a stale selectedAttemptId from an older run. Only skip
     // re-enqueue when the task is actually active.
     if (
-      (task.status === 'running' || task.status === 'fixing_with_ai') &&
       task.execution.selectedAttemptId === attemptId &&
-      this.isAttemptLeaseActive(currentAttempt)
+      this.isTaskExecutionActive(task, currentAttempt)
     ) {
       return;
     }

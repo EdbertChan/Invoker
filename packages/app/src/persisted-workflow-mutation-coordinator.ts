@@ -33,6 +33,10 @@ function envMs(name: string, fallback: number): number {
   return parsed;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 class WorkflowMutationInvalidatedError extends Error {
   constructor(message: string) {
     super(message);
@@ -199,12 +203,12 @@ export class PersistedWorkflowMutationCoordinator {
             queueWaitMs: waitMs,
           });
         this.trace(`drain-start workflow=${workflowId} intent=${intent.id} channel=${intent.channel} queueWaitMs=${waitMs}`);
-        this.persistence.renewWorkflowMutationLease(workflowId, this.ownerId, {
+        this.renewWorkflowMutationLeaseSafely(workflowId, {
           activeIntentId: intent.id,
           activeMutationKind: intent.channel,
           minHeartbeatIntervalMs: this.leaseRenewMinIntervalMs,
           minExpiryLeadMs: this.leaseRenewMinExpiryLeadMs,
-        });
+        }, `claim intent ${intent.id}`);
         await this.executeIntent(workflowId, intent);
         this.trace(`drain-finished workflow=${workflowId} intent=${intent.id} channel=${intent.channel}`);
         intent = this.persistence.claimNextWorkflowMutationIntent(workflowId, this.ownerId);
@@ -221,12 +225,12 @@ export class PersistedWorkflowMutationCoordinator {
     const timing = this.createTiming(workflowId, intent.channel, intent.id, intent.args);
     const intentStartedAtMs = Date.now();
     const leaseHeartbeat = setInterval(() => {
-      this.persistence.renewWorkflowMutationLease(workflowId, this.ownerId, {
+      this.renewWorkflowMutationLeaseSafely(workflowId, {
         activeIntentId: intent.id,
         activeMutationKind: intent.channel,
         minHeartbeatIntervalMs: this.leaseRenewMinIntervalMs,
         minExpiryLeadMs: this.leaseRenewMinExpiryLeadMs,
-      });
+      }, `heartbeat intent ${intent.id}`);
     }, this.leaseHeartbeatMs);
     try {
       this.evictQueuedWorkflowIntentsForFence(workflowId, intent);
@@ -249,20 +253,32 @@ export class PersistedWorkflowMutationCoordinator {
         dispatchPromise,
         invalidation.promise,
       ]);
-      const latestIntent = this.persistence.loadWorkflowMutationIntent(intent.id);
-      if (latestIntent?.status === 'running') {
-        this.persistence.completeWorkflowMutationIntent(intent.id);
-      }
+      await this.persistTerminalIntentState(
+        intent.id,
+        'completed',
+        () => {
+          const latestIntent = this.persistence.loadWorkflowMutationIntent(intent.id);
+          if (latestIntent?.status === 'running') {
+            this.persistence.completeWorkflowMutationIntent(intent.id);
+          }
+        },
+      );
       timing.mark('PersistedWorkflowMutationCoordinator.executeIntent', 'completed', {
         durationMs: Date.now() - intentStartedAtMs,
       });
       deferred?.resolve(result);
     } catch (error) {
       const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
-      const latestIntent = this.persistence.loadWorkflowMutationIntent(intent.id);
-      if (latestIntent?.status === 'running') {
-        this.persistence.failWorkflowMutationIntent(intent.id, message);
-      }
+      await this.persistTerminalIntentState(
+        intent.id,
+        'failed',
+        () => {
+          const latestIntent = this.persistence.loadWorkflowMutationIntent(intent.id);
+          if (latestIntent?.status === 'running') {
+            this.persistence.failWorkflowMutationIntent(intent.id, message);
+          }
+        },
+      );
       timing.mark('PersistedWorkflowMutationCoordinator.executeIntent', 'failed', {
         durationMs: Date.now() - intentStartedAtMs,
         error: error instanceof Error ? error.message : String(error),
@@ -272,10 +288,10 @@ export class PersistedWorkflowMutationCoordinator {
       clearInterval(leaseHeartbeat);
       invalidation.abortController.abort();
       this.runningIntentInvalidations.delete(intent.id);
-      this.persistence.renewWorkflowMutationLease(workflowId, this.ownerId, {
+      this.renewWorkflowMutationLeaseSafely(workflowId, {
         minHeartbeatIntervalMs: this.leaseRenewMinIntervalMs,
         minExpiryLeadMs: this.leaseRenewMinExpiryLeadMs,
-      });
+      }, `settle intent ${intent.id}`);
       this.inFlightPromises.delete(intent.id);
       this.enqueueStartedAtMs.delete(intent.id);
     }
@@ -287,6 +303,45 @@ export class PersistedWorkflowMutationCoordinator {
       return -1;
     }
     return Date.now() - startedAt;
+  }
+
+  private async persistTerminalIntentState(
+    intentId: number,
+    status: 'completed' | 'failed',
+    write: () => void,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        write();
+        return;
+      } catch (error) {
+        lastError = error;
+        await sleep(25 * (attempt + 1));
+      }
+    }
+    const message = lastError instanceof Error ? lastError.message : String(lastError);
+    this.options?.logger?.error(
+      `Failed to persist workflow mutation intent ${intentId} as ${status}: ${message}`,
+      { module: 'workflow-mutation-coordinator' },
+    );
+    throw lastError;
+  }
+
+  private renewWorkflowMutationLeaseSafely(
+    workflowId: string,
+    options: Parameters<SQLiteAdapter['renewWorkflowMutationLease']>[2],
+    context: string,
+  ): void {
+    try {
+      this.persistence.renewWorkflowMutationLease(workflowId, this.ownerId, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.options?.logger?.warn(
+        `Failed to renew workflow mutation lease for ${workflowId} (${context}): ${message}`,
+        { module: 'workflow-mutation-coordinator' },
+      );
+    }
   }
 
   private trace(message: string): void {

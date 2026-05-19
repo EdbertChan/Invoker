@@ -6889,6 +6889,45 @@ describe('Orchestrator', () => {
       expect(queueStatus.running[0]?.attemptId).toBe(selectedAttemptId);
     });
 
+    it('does not requeue a pending launching task with an active selected attempt lease', () => {
+      const claimedOrchestrator = new Orchestrator({
+        persistence,
+        messageBus: bus,
+        maxConcurrency: 1,
+        logger: consoleLogger,
+      });
+      claimedOrchestrator.loadPlan({
+        name: 'queue-active-pending-test',
+        tasks: [
+          { id: 't1', description: 'Task 1' },
+        ],
+      });
+      const [started] = claimedOrchestrator.startExecution();
+      const taskId = started!.id;
+      const selectedAttemptId = claimedOrchestrator.getTask(taskId)?.execution.selectedAttemptId;
+      expect(selectedAttemptId).toBeTruthy();
+
+      persistence.updateTask(taskId, {
+        status: 'pending',
+        execution: {
+          phase: 'launching',
+          startedAt: undefined,
+          lastHeartbeatAt: new Date(),
+        },
+      });
+      persistence.updateAttempt(selectedAttemptId!, {
+        status: 'claimed',
+        leaseExpiresAt: new Date(Date.now() + 60_000),
+      });
+
+      expect(claimedOrchestrator.startExecution()).toEqual([]);
+
+      const queueStatus = claimedOrchestrator.getQueueStatus();
+      expect(queueStatus.runningCount).toBe(1);
+      expect(queueStatus.running[0]?.taskId).toBe(taskId);
+      expect(queueStatus.queued).toEqual([]);
+    });
+
     it('restartTask supersedes a claimed selected attempt before relaunching', () => {
       orchestrator.loadPlan({
         name: 'restart-claimed-test',

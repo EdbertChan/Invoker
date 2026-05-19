@@ -248,6 +248,32 @@ export class TaskRunner {
   private poolSelectionLocks = new Map<string, Promise<void>>();
   private freshBaseCommits = new Map<string, FreshBaseCommit>();
 
+  private persistExecutionHeartbeat(
+    taskId: string,
+    attemptId: string,
+    now: Date,
+    options?: { remoteWorkload?: boolean },
+  ): void {
+    try {
+      this.persistence.updateAttempt?.(attemptId, {
+        lastHeartbeatAt: now,
+        leaseExpiresAt: nextLeaseExpiry(now),
+      } as any);
+      this.persistence.updateTask(taskId, {
+        execution: {
+          lastHeartbeatAt: now,
+          ...(options?.remoteWorkload
+            ? { remoteHeartbeatAt: now, heartbeatSource: 'remote_workload' as const }
+            : { heartbeatSource: 'executor' as const }),
+        },
+      } as any);
+    } catch (error) {
+      this.logger.warn(`[TaskRunner] failed to persist heartbeat for task=${taskId} attempt=${attemptId}`, {
+        err: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /** In-flight executions keyed by attemptId (with taskId retained for external kill resolution). */
   private activeExecutions = new Map<string, ActiveExecutionEntry>();
   private launchingAttemptIds = new Set<string>();
@@ -760,10 +786,7 @@ export class TaskRunner {
       const startTimeoutMs = getExecutorStartTimeoutMs();
       const preStartHeartbeatTimer = setInterval(() => {
         const now = new Date();
-        this.persistence.updateAttempt?.(attemptId, {
-          lastHeartbeatAt: now,
-          leaseExpiresAt: nextLeaseExpiry(now),
-        } as any);
+        this.persistExecutionHeartbeat(task.id, attemptId, now);
         this.callbacks.onHeartbeat?.(task.id);
       }, PRE_START_HEARTBEAT_INTERVAL_MS);
       let preStartTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -994,18 +1017,9 @@ export class TaskRunner {
             `at=${now.toISOString()}`,
         );
       }
-      this.persistence.updateAttempt?.(attemptId, {
-        lastHeartbeatAt: now,
-        leaseExpiresAt: nextLeaseExpiry(now),
-      } as any);
-      this.persistence.updateTask(task.id, {
-        execution: {
-          lastHeartbeatAt: now,
-          ...(isRemoteWorkloadHeartbeat
-            ? { remoteHeartbeatAt: now, heartbeatSource: 'remote_workload' as const }
-            : { heartbeatSource: 'executor' as const }),
-        },
-      } as any);
+      this.persistExecutionHeartbeat(task.id, attemptId, now, {
+        remoteWorkload: isRemoteWorkloadHeartbeat,
+      });
       this.callbacks.onHeartbeat?.(task.id);
     });
 
@@ -2019,10 +2033,7 @@ export class TaskRunner {
 
     const heartbeat = () => {
       const now = new Date();
-      this.persistence.updateAttempt?.(attemptId, {
-        lastHeartbeatAt: now,
-        leaseExpiresAt: nextLeaseExpiry(now),
-      } as any);
+      this.persistExecutionHeartbeat(taskId, attemptId, now);
       this.callbacks.onHeartbeat?.(taskId);
     };
 

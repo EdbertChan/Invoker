@@ -856,7 +856,11 @@ export async function fixWithAgentAction(
     const msg = err instanceof Error ? err.message : String(err);
     const errorLabel = options.failureOutputLabel
       ?? (recoveryRoute.kind === 'resolveConflict' ? 'Resolve Conflict' : `Fix with ${options.agentName ?? 'Claude'}`);
-    persistence.appendTaskOutput(taskId, `\n[${errorLabel}] Failed: ${msg}`);
+    try {
+      persistence.appendTaskOutput(taskId, `\n[${errorLabel}] Failed: ${msg}`);
+    } catch {
+      // Preserve the rollback path even if the output spool is temporarily locked.
+    }
     try {
       assertLineageCurrent(lineage, orchestrator, options.signal);
     } catch {

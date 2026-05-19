@@ -21,6 +21,24 @@ const WATCHDOG_PLAN = {
   ],
 };
 
+const FAILED_WORKFLOW_WATCHDOG_PLAN = {
+  name: 'Failed workflow watchdog',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'failed-task',
+      description: 'task that makes the workflow roll up failed',
+      command: 'exit 1',
+    },
+    {
+      id: 'stale-running-task',
+      description: 'stale running task that must still be watched',
+      command: 'echo stale',
+    },
+  ],
+};
+
 function launchArgs(): string[] {
   return [
     ...(process.platform === 'linux'
@@ -227,6 +245,103 @@ base.describe('Launch stall watchdog', () => {
         await page.waitForTimeout(250);
       }
       expect(sawExecutingStallLog).toBe(true);
+
+      await app.close();
+    } finally {
+      if (process.env.INVOKER_E2E_KEEP_TMP !== '1') {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  base('fails stale running task even when another task makes workflow failed', async () => {
+    const testDir = mkdtempSync(path.join(tmpdir(), 'invoker-e2e-failed-workflow-watchdog-'));
+    const configPath = path.join(testDir, 'e2e-config.json');
+    writeFileSync(configPath, JSON.stringify({ autoFixRetries: 0, disableAutoRunOnStartup: true }), 'utf8');
+
+    try {
+      const app = await electron.launch({
+        args: launchArgs(),
+        env: {
+          ...process.env,
+          NODE_ENV: 'test',
+          INVOKER_DB_DIR: testDir,
+          INVOKER_ALLOW_DELETE_ALL: '1',
+          INVOKER_REPO_CONFIG_PATH: configPath,
+          INVOKER_EXECUTING_STALL_TIMEOUT_MS: '3000',
+          INVOKER_STARTUP_POLL_DELAY_MS: '0',
+        },
+      });
+      const page = await app.firstWindow();
+      await waitForInvoker(page);
+      await page.evaluate(() => window.invoker.reportUiPerf?.('startup_graph_visible', {}));
+
+      await page.evaluate(async () => {
+        await window.invoker.clear();
+        await window.invoker.deleteAllWorkflows();
+      });
+      await page.evaluate((planYaml) => window.invoker.loadPlan(planYaml), yamlStringify(FAILED_WORKFLOW_WATCHDOG_PLAN));
+
+      const initial = await page.evaluate(() => window.invoker.getTasks(true));
+      const initialTasks = Array.isArray(initial) ? initial : initial.tasks;
+      const failed = findTask(initialTasks, 'failed-task');
+      const staleRunning = findTask(initialTasks, 'stale-running-task');
+      expect(failed).toBeDefined();
+      expect(staleRunning).toBeDefined();
+
+      const staleTs = new Date(Date.now() - 30_000).toISOString();
+      await injectTaskStates(page, [
+        {
+          taskId: failed!.id,
+          changes: {
+            status: 'failed',
+            execution: {
+              generation: 0,
+              exitCode: 1,
+              error: 'synthetic failure to force workflow rollup failed',
+              completedAt: new Date().toISOString(),
+            },
+          },
+        },
+        {
+          taskId: staleRunning!.id,
+          changes: {
+            status: 'running',
+            execution: {
+              phase: 'executing',
+              generation: 0,
+              startedAt: staleTs,
+              lastHeartbeatAt: staleTs,
+              selectedAttemptId: `${staleRunning!.id}-attempt`,
+            },
+          },
+        },
+      ]);
+
+      const workflowSnapshot = await page.evaluate(() => window.invoker.listWorkflows());
+      const workflow = workflowSnapshot.find((wf: any) => wf.name === 'Failed workflow watchdog');
+      expect(workflow?.status).toBe('failed');
+
+      const deadline = Date.now() + 15_000;
+      let stalledTask: any | undefined;
+      while (Date.now() < deadline) {
+        const snapshot = await page.evaluate(() => window.invoker.getTasks(true));
+        const tasks = Array.isArray(snapshot) ? snapshot : snapshot.tasks;
+        stalledTask = findTask(tasks, 'stale-running-task');
+        if (
+          stalledTask?.status === 'failed'
+          && /^Execution stalled: task remained in running\/executing for \d+s without a live execution handle and no completion signal from executor \(.+\)\.$/.test(stalledTask.execution?.error ?? '')
+        ) {
+          break;
+        }
+        await page.waitForTimeout(250);
+      }
+
+      expect(stalledTask, 'stale running task should remain visible in task list').toBeDefined();
+      expect(stalledTask?.status).toBe('failed');
+      expect(stalledTask?.execution?.error ?? '').toMatch(
+        /^Execution stalled: task remained in running\/executing for \d+s without a live execution handle and no completion signal from executor \(.+\)\.$/,
+      );
 
       await app.close();
     } finally {

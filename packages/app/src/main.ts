@@ -2431,7 +2431,7 @@ function createEmbeddedTerminalBackendFromConfig(
             }
 
             for (const wf of workflows) {
-              if (wf.status === 'completed' || wf.status === 'failed') continue;
+              if (wf.status === 'completed') continue;
               const tasks = persistence.loadTasks(wf.id);
               for (const loadedTask of tasks) {
                 let task = loadedTask;
