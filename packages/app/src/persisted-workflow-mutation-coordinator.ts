@@ -22,6 +22,8 @@ export type WorkflowMutationContext = {
   signal: AbortSignal;
   intentId: number;
   workflowId: string;
+  channel: string;
+  args: unknown[];
   mutationTiming?: WorkflowMutationTiming;
 };
 
@@ -237,6 +239,8 @@ export class PersistedWorkflowMutationCoordinator {
         signal: invalidation.abortController.signal,
         intentId: intent.id,
         workflowId,
+        channel: intent.channel,
+        args: intent.args,
         mutationTiming: timing,
       };
       const dispatchPromise = timing.span(
@@ -337,6 +341,7 @@ export class PersistedWorkflowMutationCoordinator {
     const promise = new Promise<never>((_, r) => {
       reject = r;
     });
+    void promise.catch(() => {});
     const abortController = new AbortController();
     const entry: InvalidationSignal = {
       reject,
@@ -375,9 +380,10 @@ export class PersistedWorkflowMutationCoordinator {
         channel,
         reason,
       });
-    const invalidation = this.runningIntentInvalidations.get(activeIntentId);
-    invalidation?.abortController.abort(new WorkflowMutationInvalidatedError(reason));
-    invalidation?.reject(new WorkflowMutationInvalidatedError(reason));
+    const invalidation = this.createRunningIntentInvalidation(activeIntentId);
+    const error = new WorkflowMutationInvalidatedError(reason);
+    invalidation.abortController.abort(error);
+    invalidation.reject(error);
     process.stderr.write(
       `[workflow-mutation-coordinator] invalidated running intent ${activeIntentId} for ${workflowId} via ${fenceKind}#${newIntentId}\n`,
     );

@@ -284,6 +284,67 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     ]);
   });
 
+  it('aborts superseded fix work when internal recreate-task is enqueued', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const fixStarted = deferred();
+    const sideEffects: string[] = [];
+    const contexts: WorkflowMutationContext[] = [];
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, args, context) => {
+        contexts.push(context);
+        if (channel !== 'invoker:fix-with-agent') {
+          sideEffects.push(`${channel}:${String(args[0])}`);
+          return;
+        }
+        expect(context.intentId).toBe(1);
+        expect(context.workflowId).toBe('wf-1');
+        expect(context.channel).toBe('invoker:fix-with-agent');
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener('abort', () => resolve(), { once: true });
+          fixStarted.resolve();
+        });
+        sideEffects.push(context.signal.aborted ? 'fix-aborted' : 'stale-fix-write');
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await fixStarted.promise;
+
+    const recreateTask = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:recreate-task',
+      ['wf-1/target-task'],
+    );
+
+    await recreateTask;
+    await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
+    await waitFor(() => sideEffects.includes('fix-aborted'));
+
+    expect(sideEffects).toContain('invoker:recreate-task:wf-1/target-task');
+    expect(sideEffects).toContain('fix-aborted');
+    expect(sideEffects).not.toContain('stale-fix-write');
+    expect(contexts[0]?.signal.aborted).toBe(true);
+    expect(contexts[0]?.signal.reason).toBeInstanceOf(Error);
+  });
+
   it('invalidates an older running workflow intent when headless recreate-task is enqueued', async () => {
     const adapter = await SQLiteAdapter.create(':memory:');
     adapters.push(adapter);
@@ -881,6 +942,62 @@ describe('PersistedWorkflowMutationCoordinator', () => {
       'invoker:fix-with-agent:wf-1/blocker-task',
       'invoker:delete-workflow:wf-1',
     ]);
+  });
+
+  it('aborts superseded fix work when internal delete-workflow is enqueued', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const fixStarted = deferred();
+    const sideEffects: string[] = [];
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, args, context) => {
+        if (channel !== 'invoker:fix-with-agent') {
+          sideEffects.push(`${channel}:${String(args[0])}`);
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener('abort', () => resolve(), { once: true });
+          fixStarted.resolve();
+        });
+        sideEffects.push(context.signal.aborted ? 'fix-aborted' : 'stale-fix-write');
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await fixStarted.promise;
+
+    const deleteWf = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:delete-workflow',
+      ['wf-1'],
+    );
+
+    await deleteWf;
+    await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
+    await waitFor(() => sideEffects.includes('fix-aborted'));
+
+    expect(sideEffects).toContain('invoker:delete-workflow:wf-1');
+    expect(sideEffects).toContain('fix-aborted');
+    expect(sideEffects).not.toContain('stale-fix-write');
+    expect(adapter.listWorkflowMutationIntents('wf-1').find((intent) => intent.id === 1)?.error)
+      .toContain('Superseded by delete intent #2');
   });
 
   it('evicts older queued workflow intents when internal delete-workflow fence starts', async () => {

@@ -56,5 +56,20 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('passes mutation context to jobs and aborts the signal after completion', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-context';
+    let seenSignal: AbortSignal | undefined;
+
+    await c.enqueue(wf, 'high', async (context) => {
+      expect(context.workflowId).toBe(wf);
+      expect(context.priority).toBe('high');
+      expect(context.signal.aborted).toBe(false);
+      seenSignal = context.signal;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seenSignal?.aborted).toBe(true);
+  });
+});
