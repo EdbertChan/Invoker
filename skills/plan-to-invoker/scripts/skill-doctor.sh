@@ -2,6 +2,11 @@
 # skill-doctor.sh: Deterministic orchestrator for plan validation scripts
 # Usage: bash skill-doctor.sh [OPTIONS] <plan-file>
 #
+# INV-63 contract:
+#   docs/context/inv-63/experiment-brief.md selects this script as the primary
+#   validation boundary. Helper scripts remain debugging fallbacks after this
+#   command reports the first failed step.
+#
 # OPTIONS:
 #   --help              Show this help message
 #   --skip-assumptions  Skip assumption extraction (also skips verify plan generation)
@@ -11,7 +16,7 @@
 #   --coverage-map FILE Validate row-to-workflow traceability for policy-matrix inputs
 #   --stack-manifest FILE Validate coverage-map workflow labels against a real authored stack manifest
 #   --verbose           Show detailed output from each sub-check
-#   --warn-delegation  Pass through to atomicity lint (prints advisory delegation-hint warnings)
+#   --warn-delegation   Pass through to atomicity lint (prints advisory delegation-hint warnings)
 #
 # Exit codes:
 #   0 = all checks passed
@@ -38,7 +43,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      sed -n '2,26p' "$0" | sed -E 's/^# ?//'
       exit 0
       ;;
     --skip-assumptions)

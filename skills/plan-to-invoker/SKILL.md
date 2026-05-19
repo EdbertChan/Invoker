@@ -21,6 +21,8 @@ Minimal controller skill. Keep policy short here; use deterministic scripts and 
 
 Grep-only checks are Phase 1a only; behavioral claims require executed Phase 1b evidence.
 
+**INV-63 experiment-backed validation boundary:** `docs/context/inv-63/experiment-brief.md` accepted mirrored skill policy plus one deterministic `skill-doctor.sh` command surface as the reviewable proof boundary. Consume that artifact by treating `skill-doctor.sh` as the primary validation command for authored plans; use individual helper scripts only as debugging fallbacks after the doctor reports the first failed step. The rejected alternative was asking authors or reviewers to reconstruct the validation contract from separate helper commands.
+
 **Policy-matrix documents:** When the source is an architecture or policy document with a decision table, exception rules, or cross-cutting invariants, you must preserve row-level coverage before authoring workflows. Do not stop at files/functions/packages; every required policy row must map to a workflow step or an explicit waiver.
 
 **Delegated task hints (hard requirement for implementation plans):** For plans with `onFinish != none`, every prompt task must include `Files:`, `Change types:`, and `Acceptance criteria:` sections in `description`. Prompt text must be zero-context executable: assume no prior chat knowledge, include deterministic pass/fail expectations, and keep instructions self-contained. Verify-only plans (`onFinish: none`) keep delegation hints advisory.
@@ -67,6 +69,7 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 
 This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
 For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`. When validating a plan against a separate policy source, pass `--source-file`, `--coverage-map`, and `--stack-manifest`; policy-matrix inputs now fail without a coverage map and a real authored stack manifest.
+This is the INV-63 selected design from `docs/context/inv-63/experiment-brief.md`: one ordered JSON-producing command with stable exit codes, stable `firstFailedStep` reporting, and helper scripts retained only for diagnosis.
 
 ### Fallback commands (for debugging individual checks)
 
