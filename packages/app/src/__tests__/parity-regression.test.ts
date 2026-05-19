@@ -360,8 +360,6 @@ describe('Parity: API endpoints wire to facade methods', () => {
       persistence: mocks.persistence as any,
       executorRegistry: mocks.executorRegistry as any,
       mutations: facade,
-      deleteWorkflow: mocks.deleteWorkflow,
-      detachWorkflow: mocks.detachWorkflow,
     });
     await new Promise<void>((resolve) => {
       if (api.server.listening) resolve();
@@ -397,6 +395,8 @@ describe('Parity: API endpoints wire to facade methods', () => {
     mocks.orchestrator.startExecution.mockReturnValue([]);
     mocks.orchestrator.cancelTask.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
     mocks.orchestrator.cancelWorkflow.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
+    mocks.orchestrator.deleteWorkflow.mockReturnValue(undefined);
+    mocks.orchestrator.detachWorkflow.mockReturnValue(undefined);
     mocks.orchestrator.getTask.mockReturnValue(makeTask());
     mocks.orchestrator.recreateWorkflow.mockReturnValue([makeTask()]);
     mocks.persistence.loadWorkflow.mockReturnValue({ id: 'wf-1', generation: 1 });
