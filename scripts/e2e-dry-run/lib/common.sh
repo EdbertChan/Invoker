@@ -76,6 +76,35 @@ invoker_e2e_init() {
   export INVOKER_GITHUB_TARGET_REPO="${INVOKER_GITHUB_TARGET_REPO:-Neko-Catpital-Labs/Invoker}"
   # Isolate each e2e run from other local Invoker instances/tests to avoid API port collisions.
   export INVOKER_API_PORT="${INVOKER_API_PORT:-$((4300 + (RANDOM % 1000)))}"
+  # Dry-run cases create many short-lived worktrees. The repository under test has
+  # already been bootstrapped before this suite runs, so link that dependency tree
+  # into each e2e worktree and keep the dependency coverage assertion explicit.
+  export INVOKER_WORKTREE_PROVISION_COMMAND='if [ ! -f package.json ] && [ ! -f pnpm-workspace.yaml ]; then
+    echo "[provision] No package.json/pnpm-workspace.yaml found; skipping dependency link";
+    exit 0;
+  fi;
+  if [ -z "${INVOKER_E2E_REPO_ROOT:-}" ] || [ ! -d "$INVOKER_E2E_REPO_ROOT/node_modules/.pnpm" ]; then
+    NODE_ENV=development pnpm install --frozen-lockfile;
+  else
+    ln -sfn "$INVOKER_E2E_REPO_ROOT/node_modules" node_modules;
+    if [ -d packages ]; then
+      for pkg in packages/*; do
+        [ -d "$pkg" ] || continue;
+        src="$INVOKER_E2E_REPO_ROOT/$pkg/node_modules";
+        [ -e "$src" ] && ln -sfn "$src" "$pkg/node_modules";
+      done;
+    fi;
+    echo "[provision] linked e2e dependency tree from $INVOKER_E2E_REPO_ROOT";
+  fi;
+  if [ -f pnpm-workspace.yaml ]; then
+    echo "[provision] pnpm config production (debug): $(pnpm config get production 2>/dev/null || echo unknown)";
+    if [ -f packages/transport/node_modules/@types/node/package.json ]; then
+      echo "[provision] @types/node linked under packages/transport";
+    else
+      echo "[provision] Missing @types/node after dependency link";
+      exit 1;
+    fi;
+  fi'
   export INVOKER_DB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/invoker-e2e-db.XXXXXX")"
   export INVOKER_IPC_SOCKET="${INVOKER_IPC_SOCKET:-$INVOKER_DB_DIR/ipc-transport.sock}"
   export INVOKER_E2E_MARKER_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/invoker-e2e-marker.XXXXXX")"

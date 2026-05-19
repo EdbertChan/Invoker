@@ -46,6 +46,11 @@ export interface WorktreeExecutorConfig {
 
 const DEFAULT_WORKTREE_PROVISION_TIMEOUT_MS = 15 * 60 * 1000;
 
+function resolveWorktreeProvisionCommand(): string {
+  const override = process.env.INVOKER_WORKTREE_PROVISION_COMMAND?.trim();
+  return override || DEFAULT_WORKTREE_PROVISION_COMMAND;
+}
+
 function resolveWorktreeProvisionTimeoutMs(): number {
   const raw = process.env.INVOKER_WORKTREE_PROVISION_TIMEOUT_MS?.trim();
   if (!raw) return DEFAULT_WORKTREE_PROVISION_TIMEOUT_MS;
@@ -729,7 +734,7 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
   private provisionWorktree(dir: string, executionId?: string): { child: ChildProcess; completion: Promise<void> } {
     traceExecution(`[WorktreeExecutor] provisionWorktree begin dir=${dir}`);
     const t0 = Date.now();
-    const cmd = `set -euo pipefail; ${DEFAULT_WORKTREE_PROVISION_COMMAND}`;
+    const cmd = `set -euo pipefail; ${resolveWorktreeProvisionCommand()}`;
     const child = spawn('/bin/bash', ['-c', cmd], {
       cwd: dir,
       env: cleanElectronEnv(),
