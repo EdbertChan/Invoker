@@ -38,7 +38,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      sed -n '2,20p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     --skip-assumptions)
@@ -222,6 +222,10 @@ run_check() {
 
   return 0
 }
+
+# INV-63 selected proof contract: keep these checks orchestrated as one JSON
+# summary. validate-plan.sh alone is only a schema comparator and must not be
+# treated as sufficient proof for generated implementation plans.
 
 # Check 1: Extract assumptions (if not skipped)
 ASSUMPTIONS_FILE="$TEMP_DIR/assumptions.json"

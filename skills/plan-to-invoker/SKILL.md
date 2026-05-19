@@ -21,6 +21,8 @@ Minimal controller skill. Keep policy short here; use deterministic scripts and 
 
 Grep-only checks are Phase 1a only; behavioral claims require executed Phase 1b evidence.
 
+**INV-63 selected proof contract:** Use `skill-doctor.sh` as the primary deterministic validation orchestrator. The accepted evidence is one JSON summary with stable step IDs for assumption extraction, verify-plan generation, policy coverage, YAML validation, atomicity linting, and parse-results smoke coverage. Schema-only validation and manually run checklist fragments are rejected as sufficient proof because they can pass plans that fail stricter zero-context, acceptance-criteria, and atomicity gates.
+
 **Policy-matrix documents:** When the source is an architecture or policy document with a decision table, exception rules, or cross-cutting invariants, you must preserve row-level coverage before authoring workflows. Do not stop at files/functions/packages; every required policy row must map to a workflow step or an explicit waiver.
 
 **Delegated task hints (hard requirement for implementation plans):** For plans with `onFinish != none`, every prompt task must include `Files:`, `Change types:`, and `Acceptance criteria:` sections in `description`. Prompt text must be zero-context executable: assume no prior chat knowledge, include deterministic pass/fail expectations, and keep instructions self-contained. Verify-only plans (`onFinish: none`) keep delegation hints advisory.
@@ -66,6 +68,7 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 - `--help` — show usage information
 
 This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
+Do not replace this gate with `validate-plan.sh` alone; schema validation is only one comparator inside the orchestrated proof surface and does not cover zero-context prompt quality or atomic task structure.
 For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`. When validating a plan against a separate policy source, pass `--source-file`, `--coverage-map`, and `--stack-manifest`; policy-matrix inputs now fail without a coverage map and a real authored stack manifest.
 
 ### Fallback commands (for debugging individual checks)
