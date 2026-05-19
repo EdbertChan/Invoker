@@ -819,7 +819,9 @@ export class Orchestrator {
   /**
    * Refresh the in-memory graph from the database.
    * Called at the start of every public mutation to ensure
-   * we see any external changes before proceeding.
+   * we see any external changes before proceeding. INV-130 relies on this
+   * helper, paired with writeAndSync(), as the durable-state authority behind
+   * the API facade boundary.
    */
   private refreshFromDb(): void {
     if (this.activeWorkflowIds.size === 0) return;
@@ -842,7 +844,8 @@ export class Orchestrator {
 
   /**
    * Write field changes to the DB, then update the in-memory cache
-   * to match. Returns the updated task state.
+   * to match. Returns the updated task state. Keep the persistence write
+   * before graph restore; API callers must not reimplement this ordering.
    */
   private writeAndSync(
     taskId: string,

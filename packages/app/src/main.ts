@@ -2387,7 +2387,6 @@ function createEmbeddedTerminalBackendFromConfig(
         logger,
         orchestrator,
         persistence,
-        executorRegistry,
         mutations: new WorkflowMutationFacade({
           logger,
           orchestrator,

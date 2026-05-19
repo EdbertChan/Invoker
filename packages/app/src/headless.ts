@@ -1285,7 +1285,6 @@ async function headlessRun(
     logger: deps.logger,
     orchestrator,
     persistence: deps.persistence,
-    executorRegistry: deps.executorRegistry,
     ...buildHeadlessApiServerDeps(deps, taskExecutor),
   });
 
@@ -1350,7 +1349,6 @@ async function headlessResume(
     logger: deps.logger,
     orchestrator,
     persistence: deps.persistence,
-    executorRegistry: deps.executorRegistry,
     ...buildHeadlessApiServerDeps(deps, taskExecutor),
   });
 
@@ -2698,7 +2696,6 @@ async function headlessSlack(deps: HeadlessDeps): Promise<void> {
     logger: deps.logger,
     orchestrator,
     persistence,
-    executorRegistry: deps.executorRegistry,
     ...buildHeadlessApiServerDeps(deps, taskExecutor),
   });
 
