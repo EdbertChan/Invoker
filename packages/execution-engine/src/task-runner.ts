@@ -515,7 +515,7 @@ export class TaskRunner {
         requestId: `err-${task.id}`,
         actionId: task.id,
         attemptId,
-        executionGeneration: task.execution.generation ?? 0,
+        executionGeneration: startGeneration,
         status: 'failed',
         outputs: {
           exitCode: 1,
@@ -1001,7 +1001,11 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
+          const normalizedResponse: WorkResponse = {
+            ...response,
+            attemptId: response.attemptId ?? attemptId,
+            executionGeneration: response.executionGeneration ?? request.executionGeneration,
+          };
           this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
           this.logger.info(
             `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
