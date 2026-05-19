@@ -99,6 +99,7 @@ jobs:
         run: ${{ matrix.command }}
 
   required-fast:
+    # INV-117 selected the split artifact-reuse design and rejected a monolithic gate.
     needs: build-artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -114,6 +115,8 @@ jobs:
               bash scripts/test-suites/required/50-verify-executor-routing.sh
           - name: Vitest Workspace
             command: bash scripts/test-suites/required/10-vitest-workspace.sh
+          - name: Electron Preprovision Repro
+            command: bash scripts/test-suites/required/08-electron-preprovision-repro.sh
           - name: Submit Workflow Chain
             command: bash scripts/test-suites/required/15-submit-workflow-chain.sh
           - name: Branch Carry Forward
@@ -124,6 +127,8 @@ jobs:
             command: bash scripts/test-suites/required/18-start-running-mece-repros.sh
           - name: Task New Attempt Reset Repro
             command: bash scripts/test-suites/required/19-task-new-attempt-reset-repro.sh
+          - name: Start Running Follow-up MECE Repros
+            command: bash scripts/test-suites/required/24-start-running-mece-repros.sh
 
     name: required-fast / ${{ matrix.name }}
 

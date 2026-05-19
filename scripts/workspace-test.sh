@@ -12,6 +12,8 @@ else
   CONCURRENCY=4
 fi
 
+# INV-117 keeps workspace package tests deterministic in CI while allowing
+# explicit local override for the experiment proof command.
 if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || [ "$CONCURRENCY" -lt 1 ]; then
   echo "ERROR: INVOKER_WORKSPACE_TEST_CONCURRENCY must be a positive integer" >&2
   exit 2
