@@ -741,6 +741,25 @@ describe('Orchestrator', () => {
       expect(persistence.loadAttempt(fixAttemptId!)?.status).toBe('needs_input');
     });
 
+    it('rejects stale lineage for fix approval and conflict revert mutations', () => {
+      orchestrator.beginConflictResolution('f2');
+      const fixing = orchestrator.getTask('f2')!;
+      const staleLineage = {
+        selectedAttemptId: 'stale-attempt',
+        generation: (fixing.execution.generation ?? 0) - 1,
+      };
+
+      expect(() => {
+        orchestrator.setFixAwaitingApproval('f2', 'test failed: expected 1 to be 2', staleLineage);
+      }).toThrow(/lineage is stale/);
+      expect(orchestrator.getTask('f2')!.status).toBe('fixing_with_ai');
+
+      expect(() => {
+        orchestrator.revertConflictResolution('f2', 'test failed: expected 1 to be 2', 'fix failed', staleLineage);
+      }).toThrow(/lineage is stale/);
+      expect(orchestrator.getTask('f2')!.status).toBe('fixing_with_ai');
+    });
+
     it('setFixAwaitingApproval delta includes agentSessionId from DB', () => {
       orchestrator.beginConflictResolution('f2');
       // Simulate conflict-resolver persisting sessionId directly to DB

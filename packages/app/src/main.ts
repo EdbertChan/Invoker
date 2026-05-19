@@ -137,6 +137,7 @@ import {
   selectFailureRecoveryRoute,
   selectExperiments as sharedSelectExperiments,
   setWorkflowMergeMode,
+  StaleLineageError,
 } from './workflow-actions.js';
 import { spawn, execSync } from 'node:child_process';
 import { resolveTaskTerminalSpec } from './open-terminal-for-task.js';
@@ -1484,23 +1485,31 @@ function createEmbeddedTerminalBackendFromConfig(
       });
       logAutoFixDebug(taskId, 'dispatch-attempt-bumped', { attemptsBefore, attemptsAfter });
     }
-    const result = await fixWithAgentAction(
-      taskId,
-      {
-        orchestrator,
-        persistence,
-        taskExecutor: requireTaskExecutor(),
-        autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
-      },
-      {
-        agentName,
-        recoveryRoute,
-        recreateOutputLabel: source === 'auto-fix' ? 'Auto-fix' : 'Fix with AI',
-        failureOutputLabel: source === 'auto-fix' ? 'Auto-fix' : `Fix with ${agentName ?? 'Claude'}`,
-        signal: activeMutationContext?.signal,
-      },
-    );
-    return result.started;
+    try {
+      const result = await fixWithAgentAction(
+        taskId,
+        {
+          orchestrator,
+          persistence,
+          taskExecutor: requireTaskExecutor(),
+          autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
+        },
+        {
+          agentName,
+          recoveryRoute,
+          recreateOutputLabel: source === 'auto-fix' ? 'Auto-fix' : 'Fix with AI',
+          failureOutputLabel: source === 'auto-fix' ? 'Auto-fix' : `Fix with ${agentName ?? 'Claude'}`,
+          signal: activeMutationContext?.signal,
+        },
+      );
+      return result.started;
+    } catch (err) {
+      if (err instanceof StaleLineageError) {
+        logger.info(`fix-with-agent discarded stale result for "${taskId}": ${err.message}`, { module: 'ipc' });
+        return [];
+      }
+      throw err;
+    }
   };
 
   const scheduleAutoFix = (taskId: string): void => {
@@ -3588,6 +3597,10 @@ function createEmbeddedTerminalBackendFromConfig(
           scopedTaskIds: [taskId],
         });
       } catch (err) {
+        if (err instanceof StaleLineageError) {
+          logger.info(`resolve-conflict discarded stale result for "${taskId}": ${err.message}`, { module: 'ipc' });
+          return;
+        }
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
