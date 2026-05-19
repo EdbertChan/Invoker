@@ -1373,6 +1373,8 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(capturedContext!.signal.aborted).toBe(false);
     expect(capturedContext!.workflowId).toBe('wf-1');
     expect(capturedContext!.intentId).toBe(1);
+    expect(capturedContext!.channel).toBe('invoker:fix-with-agent');
+    expect(capturedContext!.args).toEqual(['wf-1/blocker-task', null]);
 
     const recreateTask = coordinator.enqueue<void>(
       'wf-1',
@@ -1545,7 +1547,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     void olderRunning.catch(() => {});
     await waitFor(() => capturedContext !== undefined);
 
-    coordinator.enqueue<void>(
+    const deleteAll = coordinator.enqueue<void>(
       'wf-1',
       'high',
       'invoker:delete-all-workflows-bulk',
@@ -1553,10 +1555,56 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     );
 
     await waitFor(() => capturedContext!.signal.aborted);
+    await deleteAll;
     const reason = capturedContext!.signal.reason;
     expect(reason).toBeInstanceOf(Error);
     expect((reason as Error).name).toBe('WorkflowMutationInvalidatedError');
     expect((reason as Error).message).toContain('Superseded by delete');
+  });
+
+  it('aborts the dispatch AbortSignal when headless delete preempts a running fix mutation', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const gate = deferred();
+    let capturedContext: WorkflowMutationContext | undefined;
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, _args, context) => {
+        if (channel === 'invoker:fix-with-agent') {
+          capturedContext = context;
+          await gate.promise;
+        }
+      },
+    );
+
+    const olderRunning = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void olderRunning.catch(() => {});
+    await waitFor(() => capturedContext !== undefined);
+
+    const deleteFence = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'headless.exec',
+      [{ args: ['delete', 'wf-1'] }],
+    );
+    await deleteFence;
+
+    expect(capturedContext!.signal.aborted).toBe(true);
+    await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
   });
 
   it('dispatch handler can observe abort during long-running work and stop early', async () => {

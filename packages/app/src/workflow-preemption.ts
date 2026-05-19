@@ -1,12 +1,27 @@
 import type { Logger } from '@invoker/contracts';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
 
+export type WorkflowMutationCancellationContext = {
+  signal: AbortSignal;
+  intentId?: number;
+  workflowId: string;
+  channel: string;
+  args: unknown[];
+};
+
 export type WorkflowCancelResult = {
   cancelled: string[];
   runningCancelled: string[];
 };
 
 type PreemptWorkflowExecution = (workflowId: string) => Promise<WorkflowCancelResult | void>;
+
+export class WorkflowMutationInvalidatedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowMutationInvalidatedError';
+  }
+}
 
 export async function preemptWorkflowBeforeMutation(
   workflowId: string,
@@ -15,8 +30,10 @@ export async function preemptWorkflowBeforeMutation(
     logger?: Logger;
     context: string;
     mutationTiming?: WorkflowMutationTiming;
+    signal?: AbortSignal;
   },
 ): Promise<WorkflowCancelResult> {
+  deps.signal?.throwIfAborted();
   deps.logger?.info(`preempt begin context="${deps.context}" workflow="${workflowId}"`, { module: 'preempt' });
   const raw = deps.mutationTiming
     ? await deps.mutationTiming.span(
@@ -25,6 +42,7 @@ export async function preemptWorkflowBeforeMutation(
       () => deps.preemptWorkflowExecution(workflowId),
     )
     : await deps.preemptWorkflowExecution(workflowId);
+  deps.signal?.throwIfAborted();
   const result: WorkflowCancelResult = raw ?? { cancelled: [], runningCancelled: [] };
   deps.mutationTiming?.mark('preemptWorkflowBeforeMutation.result', 'completed', {
     context: deps.context,

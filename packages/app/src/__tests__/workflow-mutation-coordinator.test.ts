@@ -56,5 +56,24 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('passes cancellation metadata into running jobs without changing queue order', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-context';
+    const order: string[] = [];
+    const signals: boolean[] = [];
+
+    await c.enqueue(
+      wf,
+      'normal',
+      async (context) => {
+        order.push(`${context.workflowId}:${context.channel}:${String(context.args?.[0])}`);
+        signals.push(context.signal.aborted);
+      },
+      { channel: 'invoker:fix-with-agent', args: ['wf-context/task-a'] },
+    );
+
+    expect(order).toEqual(['wf-context:invoker:fix-with-agent:wf-context/task-a']);
+    expect(signals).toEqual([false]);
+  });
+});
