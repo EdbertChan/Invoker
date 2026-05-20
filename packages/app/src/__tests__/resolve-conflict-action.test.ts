@@ -51,7 +51,7 @@ describe('resolveConflictAction', () => {
 
     expect(orchestrator.beginConflictResolution).toHaveBeenCalledWith('task-a');
     expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', 'saved-err', undefined);
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-err');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-err', expect.any(Object));
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
     expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
   });
@@ -77,8 +77,8 @@ describe('resolveConflictAction', () => {
       autoApproveAIFixes: true,
     });
 
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-err');
-    expect(approve).toHaveBeenCalledWith('task-a');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-err', expect.any(Object));
+    expect(approve).toHaveBeenCalledWith('task-a', expect.any(Object));
     expect(taskExecutorWithApprove.executeTasks).not.toHaveBeenCalled();
     expect(taskExecutorWithApprove.publishAfterFix).not.toHaveBeenCalled();
   });
@@ -102,6 +102,7 @@ describe('resolveConflictAction', () => {
       'task-a',
       'saved-err',
       'claude failed',
+      expect.any(Object),
     );
     expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
   });
