@@ -7,6 +7,7 @@ cd "$ROOT"
 if [ -n "${INVOKER_WORKSPACE_TEST_CONCURRENCY:-}" ]; then
   CONCURRENCY="$INVOKER_WORKSPACE_TEST_CONCURRENCY"
 elif [ -n "${CI:-}" ]; then
+  # INV-117: CI package-test concurrency is part of the deterministic proof contract.
   CONCURRENCY=1
 else
   CONCURRENCY=4
