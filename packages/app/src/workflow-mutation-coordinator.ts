@@ -1,9 +1,16 @@
 export type WorkflowMutationPriority = 'high' | 'normal';
 
+export type WorkflowMutationContext = {
+  signal: AbortSignal;
+  workflowId: string;
+  priority: WorkflowMutationPriority;
+};
+
 type Job<T> = {
-  run: () => Promise<T>;
+  run: (context: WorkflowMutationContext) => Promise<T>;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
+  context: WorkflowMutationContext;
 };
 
 type WorkflowQueues = {
@@ -24,12 +31,22 @@ export class WorkflowMutationCoordinator {
   enqueue<T>(
     workflowId: string,
     priority: WorkflowMutationPriority,
-    run: () => Promise<T>,
+    run: (context: WorkflowMutationContext) => Promise<T>,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const state = this.queues.get(workflowId) ?? { running: false, high: [], normal: [] };
       this.queues.set(workflowId, state);
-      const job: Job<T> = { run, resolve, reject };
+      const abortController = new AbortController();
+      const job: Job<T> = {
+        run,
+        resolve,
+        reject,
+        context: {
+          signal: abortController.signal,
+          workflowId,
+          priority,
+        },
+      };
       if (priority === 'high') {
         state.high.push(job as Job<unknown>);
       } else {
@@ -50,7 +67,7 @@ export class WorkflowMutationCoordinator {
     }
 
     state.running = true;
-    void next.run()
+    void next.run(next.context)
       .then((value) => next.resolve(value))
       .catch((err) => next.reject(err))
       .finally(() => {
@@ -61,4 +78,3 @@ export class WorkflowMutationCoordinator {
       });
   }
 }
-
