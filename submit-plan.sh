@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Submit a plan YAML to Invoker and execute it (headless mode).
 # Uses the same Electron binary as the GUI to avoid ABI mismatches.
+# INV-143 keeps this as the shell compatibility entry point for initial
+# plan submission; ownership-sensitive headless mutations are delegated by
+# the app headless client to the shared owner process.
 #
 # Usage: ./submit-plan.sh <plan.yaml>
 set -e
@@ -13,6 +16,8 @@ fi
 PLAN_FILE="$1"
 CALLER_PWD="$(pwd)"
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+readonly CALLER_PWD
+readonly REPO_ROOT
 cd "$REPO_ROOT"
 
 # Resolve plan path relative to caller's pwd if not absolute

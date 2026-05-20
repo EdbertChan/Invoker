@@ -2,6 +2,8 @@
  * Priority queue with simple maxConcurrency limit for task scheduling.
  *
  * No I/O, no Docker, no Git — just a sorted queue and concurrency tracking.
+ * INV-143 relies on this class remaining pure domain logic; shared owner
+ * process coordination belongs in the headless app layer, not here.
  * Higher priority numbers are dequeued first.
  */
 
@@ -69,7 +71,7 @@ export class TaskScheduler {
     }
 
     let removed = 0;
-    for (const attemptId of attemptIds) {
+    for (const attemptId of [...attemptIds]) {
       if (this.removeRunningAttempt(attemptId)) {
         removed += 1;
       }
