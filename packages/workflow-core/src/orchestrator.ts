@@ -2038,6 +2038,11 @@ export class Orchestrator {
    * (per the chart's "Behavior Today" column); this method introduces
    * one.
    *
+   * INV-130: HTTP handlers must reach this write path through
+   * `WorkflowMutationFacade.selectExperiment(s)` so transport concerns
+   * stay outside the orchestrator-owned mutation sequence documented at
+   * the top of this file.
+   *
    * NOTE: `recreateTask`'s lineage-discarding reset shape is
    * deliberately NOT used here. Downstream tasks may still hold valid
    * workspace lineage (their own branch, their own workspacePath) that
@@ -2118,7 +2123,7 @@ export class Orchestrator {
     return started;
   }
 
-    selectExperiments(
+  selectExperiments(
     taskId: string,
     experimentIds: string[],
     combinedBranch?: string,

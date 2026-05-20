@@ -100,6 +100,8 @@ function createMocks() {
       editTaskType: vi.fn(() => [makeTask()]),
       editTaskAgent: vi.fn(() => [makeTask()]),
       setTaskExternalGatePolicies: vi.fn(() => [makeTask()]),
+      selectExperiment: vi.fn(() => [makeTask()]),
+      selectExperiments: vi.fn(() => [makeTask()]),
       cancelTask: vi.fn(() => ({ cancelled: ['task-1'], runningCancelled: ['task-1'] })),
       forkWorkflow: vi.fn((workflowId: string) => ({
         sourceWorkflowId: workflowId,
@@ -134,6 +136,7 @@ function createMocks() {
       resolveConflict: vi.fn().mockResolvedValue(undefined),
       fixWithAgent: vi.fn().mockResolvedValue(undefined),
       commitApprovedFix: vi.fn().mockResolvedValue(undefined),
+      mergeExperimentBranches: vi.fn().mockResolvedValue({ branch: 'experiment/merged', commit: 'abc123' }),
     },
     killRunningTask: vi.fn().mockResolvedValue(undefined),
     deleteWorkflow: vi.fn().mockResolvedValue(undefined),
@@ -202,6 +205,8 @@ beforeEach(() => {
   mocks.orchestrator.editTaskPrompt.mockReturnValue([makeTask()]);
   mocks.orchestrator.editTaskType.mockReturnValue([makeTask()]);
   mocks.orchestrator.setTaskExternalGatePolicies.mockReturnValue([makeTask()]);
+  mocks.orchestrator.selectExperiment.mockReturnValue([makeTask()]);
+  mocks.orchestrator.selectExperiments.mockReturnValue([makeTask()]);
   mocks.orchestrator.cancelTask.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
   mocks.orchestrator.cancelWorkflow.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
   mocks.orchestrator.getQueueStatus.mockReturnValue({
@@ -220,6 +225,7 @@ beforeEach(() => {
   mocks.taskExecutor.resolveConflict.mockResolvedValue(undefined);
   mocks.taskExecutor.fixWithAgent.mockResolvedValue(undefined);
   mocks.taskExecutor.commitApprovedFix.mockResolvedValue(undefined);
+  mocks.taskExecutor.mergeExperimentBranches.mockResolvedValue({ branch: 'experiment/merged', commit: 'abc123' });
 });
 
 // ── Read endpoints ───────────────────────────────────────────
@@ -719,6 +725,47 @@ describe('POST /api/tasks/:id/gate-policy', () => {
     expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
     expect(mocks.orchestrator.cancelTask).not.toHaveBeenCalled();
     expect(mocks.orchestrator.cancelWorkflow).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/tasks/:id/select-experiment', () => {
+  it('selects one experiment via facade', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/select-experiment', {
+      experimentId: 'task-1-exp-a',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('experiment_selected');
+    expect(res.body.selectedExperimentIds).toEqual(['task-1-exp-a']);
+    expect(mocks.orchestrator.selectExperiment).toHaveBeenCalledWith('task-1', 'task-1-exp-a');
+    expect(mocks.orchestrator.selectExperiments).not.toHaveBeenCalled();
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
+  });
+
+  it('selects multiple experiments via facade', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/select-experiment', {
+      experimentIds: ['task-1-exp-a', 'task-1-exp-b'],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('experiments_selected');
+    expect(res.body.selectedExperimentIds).toEqual(['task-1-exp-a', 'task-1-exp-b']);
+    expect(mocks.orchestrator.selectExperiments).toHaveBeenCalledWith(
+      'task-1',
+      ['task-1-exp-a', 'task-1-exp-b'],
+      'experiment/merged',
+      'abc123',
+    );
+    expect(mocks.orchestrator.selectExperiment).not.toHaveBeenCalled();
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
+  });
+
+  it('returns 400 when experiment selection is missing', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/select-experiment', {});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Missing "experimentId"');
+    expect(mocks.orchestrator.selectExperiment).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.selectExperiments).not.toHaveBeenCalled();
   });
 });
 
