@@ -1001,7 +1001,11 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
+          const normalizedResponse: WorkResponse = {
+            ...response,
+            attemptId: response.attemptId ?? attemptId,
+            executionGeneration: response.executionGeneration ?? task.execution.generation ?? 0,
+          };
           this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
           this.logger.info(
             `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
@@ -1011,7 +1015,7 @@ export class TaskRunner {
           try {
             traceExecution(
               `[task-runner] onComplete taskId=${task.id} responseStatus=${response.status} ` +
-                `responseAttemptId=${normalizedResponse.attemptId ?? attemptId} responseGeneration=${response.executionGeneration} executionId=${handle.executionId}`,
+                `responseAttemptId=${normalizedResponse.attemptId ?? attemptId} responseGeneration=${normalizedResponse.executionGeneration} executionId=${handle.executionId}`,
             );
             traceExecution(
               `${RESTART_TO_BRANCH_TRACE} resolvePromise | task.config.isMergeNode = ${task.config.isMergeNode}`,

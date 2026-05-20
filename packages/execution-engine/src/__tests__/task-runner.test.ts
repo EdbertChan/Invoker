@@ -183,6 +183,72 @@ describe('TaskRunner', () => {
     );
   });
 
+  it('normalizes missing completion identity back to the launch attempt and generation', async () => {
+    const handleWorkerResponse = vi.fn(() => []);
+    let seenRequest: any;
+    let completeCallback: ((response: WorkResponse) => void) | undefined;
+    const executorImpl = {
+      type: 'worktree',
+      start: vi.fn().mockImplementation(async (request: any) => {
+        seenRequest = request;
+        return {
+          executionId: `exec-${request.actionId}`,
+          taskId: request.actionId,
+          workspacePath: '/tmp/mock-worktree',
+          branch: `experiment/${request.actionId}-mock`,
+        };
+      }),
+      onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
+        completeCallback = cb;
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => undefined,
+        handleWorkerResponse,
+      } as any,
+      persistence: { updateTask: vi.fn() } as any,
+      executorRegistry: {
+        getDefault: () => executorImpl,
+        get: () => executorImpl,
+        getAll: () => [executorImpl],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    const task = makeTask({
+      id: 'normalize-task',
+      status: 'running',
+      config: { command: 'echo hi' },
+      execution: { generation: 4, selectedAttemptId: 'normalize-task-a1' },
+    });
+
+    const done = runner.executeTask(task);
+    await vi.waitFor(() => expect(seenRequest).toBeDefined());
+    completeCallback?.({
+      requestId: seenRequest.requestId,
+      actionId: task.id,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    } as unknown as WorkResponse);
+    await done;
+
+    expect(handleWorkerResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actionId: task.id,
+        attemptId: 'normalize-task-a1',
+        executionGeneration: 4,
+        status: 'completed',
+      }),
+    );
+  });
+
   it('dispatches newly ready tasks after executor startup failure', async () => {
     const failedTask = makeTask({
       id: 'docker-no-image',
