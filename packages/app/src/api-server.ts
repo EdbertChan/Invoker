@@ -29,6 +29,7 @@
  *   POST   /api/tasks/:id/edit-type    body: { runnerKind, poolMemberId? }
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
+ *   POST   /api/tasks/:id/select-experiment  body: { experimentId } | { experimentIds: string[] }
  *   POST   /api/workflows/:id/detach  body: { upstreamWorkflowId }
  *   POST   /api/workflows/:id/restart
  *   POST   /api/workflows/:id/rebase-retry
@@ -563,6 +564,39 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           }
           const result = await mutations.setTaskExternalGatePolicies(taskId, updates);
           json(res, 200, { ok: true, taskId, action: 'gate_policy_updated', tasksStarted: result.runnable.length });
+        } catch (err) {
+          json(res, httpStatusForError(err), { error: errorMessage(err) });
+        }
+        return;
+      }
+
+      // POST /api/tasks/:id/select-experiment
+      const selectExperimentMatch = path.match(/^\/api\/tasks\/([^/]+)\/select-experiment$/);
+      if (method === 'POST' && selectExperimentMatch) {
+        const taskId = decodeURIComponent(selectExperimentMatch[1]);
+        try {
+          const body = await readBody(req);
+          const parsed = JSON.parse(body);
+          const experimentIds = Array.isArray(parsed?.experimentIds)
+            ? parsed.experimentIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+            : undefined;
+          const experimentId = typeof parsed?.experimentId === 'string' && parsed.experimentId.length > 0
+            ? parsed.experimentId
+            : undefined;
+          if (!experimentId && (!experimentIds || experimentIds.length === 0)) {
+            json(res, 400, { error: 'Missing "experimentId" or non-empty "experimentIds" in request body' });
+            return;
+          }
+          const result = experimentIds
+            ? await mutations.selectExperiments(taskId, experimentIds)
+            : await mutations.selectExperiment(taskId, experimentId!);
+          json(res, 200, {
+            ok: true,
+            taskId,
+            action: experimentIds ? 'experiments_selected' : 'experiment_selected',
+            selectedExperimentIds: experimentIds ?? [experimentId],
+            tasksStarted: result.runnable.length,
+          });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }
