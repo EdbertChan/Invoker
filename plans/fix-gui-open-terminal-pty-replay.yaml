@@ -1,0 +1,280 @@
+name: "Fix GUI open-terminal PTY replay"
+description: |
+  Fixes the GUI Open Terminal path for embedded PTY sessions that emit output immediately after spawn. Phase 1 static analysis found that `packages/app/src/main.ts` opens an embedded terminal through `EmbeddedTerminalManager.openOrReuse()`, while `packages/ui/src/components/TerminalDrawer.tsx` only subscribes to `invoker:terminal-output` after React mounts the terminal pane. The repro script `scripts/repro-gui-open-terminal-pty-race.sh` proves the root cause: PTY output emitted before the renderer pane subscribes is not replayed, so the GUI can show a blank terminal even though the PTY session started.
+
+  The implementation should add bounded output replay at the embedded terminal session boundary and seed the renderer terminal from that replay snapshot. This keeps live streaming intact while making early PTY output deterministic for newly opened panes and reloaded GUI sessions. Because this targets Invoker itself, keep `onFinish: pull_request` with the external review PR gate; after the resulting branch stack is ready, publish/update it with `mergify stack push`.
+onFinish: pull_request
+mergeMode: external_review
+repoUrl: git@github.com:Neko-Catpital-Labs/Invoker.git
+baseBranch: master
+featureBranch: plan/fix-gui-open-terminal-pty-replay
+
+tasks:
+  - id: implement-embedded-terminal-replay-buffer
+    description: |
+      Goal:
+      Preserve early embedded PTY output so GUI terminal panes can replay it after React subscribes.
+      Motivation:
+      `EmbeddedTerminalManager` emits terminal output immediately, but the renderer terminal pane subscribes only after `openTerminal` returns a session descriptor and React mounts the pane. Output emitted during that gap is currently lost.
+      Alternative considerations:
+      A renderer-only global listener would reduce the common race, but it would not help `terminalList()` reloads or any renderer listener that attaches late. A bounded app-bridge replay snapshot makes the session descriptor itself authoritative.
+      Implementation details:
+      Add a bounded per-session output replay buffer in `packages/app/src/embedded-terminal-manager.ts`, include that snapshot on `TerminalSessionDescriptor` in `packages/contracts/src/ipc-channels.ts`, and make synchronous backend output/exit during spawn safe. Keep the buffer small and bounded, for example the most recent 64 KiB per session.
+      Layer: app_bridge
+      Feature state: active
+      Files:
+      - packages/app/src/embedded-terminal-manager.ts
+      - packages/contracts/src/ipc-channels.ts
+      Change types:
+      - packages/app/src/embedded-terminal-manager.ts -- modify
+      - packages/contracts/src/ipc-channels.ts -- modify
+      Acceptance criteria:
+      - Output emitted before `openOrReuse()` returns is included in the returned session descriptor.
+      - `terminalList()` descriptors include the same bounded replay snapshot for live sessions.
+      - Synchronous backend output and synchronous backend exit do not throw because of uninitialized session state.
+      - The replay buffer is bounded and does not grow without limit.
+    prompt: |
+      Goal:
+      Preserve early embedded PTY output so GUI terminal panes can replay it after React subscribes.
+      Motivation:
+      `EmbeddedTerminalManager.openOrReuse()` can emit terminal output before the renderer has mounted `TerminalDrawer`/`TerminalSessionPane` and subscribed to `invoker:terminal-output`, causing a blank GUI terminal for fast PTY startup output.
+      Alternative considerations:
+      Do not solve this only with a renderer-side global listener. The app bridge should expose a bounded replay snapshot so `openTerminal()` and `terminalList()` are deterministic even for late subscribers.
+      Implementation details:
+      Zero-context execution: assume no prior context. Modify `packages/app/src/embedded-terminal-manager.ts` and `packages/contracts/src/ipc-channels.ts`.
+      Add an optional replay field to `TerminalSessionDescriptor`, such as `outputSnapshot?: string`, documented as a bounded recent terminal output snapshot used by the renderer to seed newly mounted panes.
+      In `EmbeddedTerminalManager`, maintain a bounded per-session output buffer initialized before backend spawn starts. Append in `emitOutput()` before emitting the live `output` event. Trim to a fixed maximum, for example 64 KiB, so memory is bounded.
+      Ensure output emitted synchronously during backend spawn is captured before `openOrReuse()` returns. Also make synchronous backend exit safe; avoid closures that call `finalizeSession(state, ...)` before `state` has been assigned. If needed, create placeholder bookkeeping before spawn and finalize after state assignment.
+      Include the replay snapshot in `describeSession()` for both `openOrReuse()` responses and `list()` responses.
+      Acceptance criteria:
+      - Output emitted before `openOrReuse()` returns is included in the returned session descriptor.
+      - `terminalList()` descriptors include the same bounded replay snapshot for live sessions.
+      - Synchronous backend output and synchronous backend exit do not throw because of uninitialized session state.
+      - The replay buffer is bounded and does not grow without limit.
+      - Deterministic pass/fail expectation: `cd packages/app && pnpm test -- src/__tests__/embedded-terminal-manager.test.ts` must exit code 0 after tests are updated.
+    dependencies: []
+
+  - id: implement-terminal-drawer-replay-seeding
+    description: |
+      Goal:
+      Seed xterm.js panes with the embedded terminal replay snapshot before live streaming continues.
+      Motivation:
+      The app bridge can preserve early output, but the GUI must write that snapshot into the xterm instance when the terminal pane mounts or when sessions are restored from `terminalList()`.
+      Alternative considerations:
+      Replaying only the latest preview line would not restore the actual terminal buffer. The terminal pane should write the bounded snapshot to xterm and continue writing live events.
+      Implementation details:
+      Update `packages/ui/src/components/TerminalDrawer.tsx`, `packages/ui/src/App.tsx` if needed, and related UI types/tests so an `outputSnapshot` from the session descriptor is rendered exactly once per pane before live output is appended.
+      Layer: ui_activation
+      Feature state: active
+      Files:
+      - packages/ui/src/components/TerminalDrawer.tsx
+      - packages/ui/src/App.tsx
+      - packages/ui/src/types.ts
+      - packages/ui/src/__tests__/terminal-drawer.test.tsx
+      - packages/ui/src/__tests__/helpers/mock-invoker.ts
+      Change types:
+      - packages/ui/src/components/TerminalDrawer.tsx -- modify
+      - packages/ui/src/App.tsx -- modify
+      - packages/ui/src/types.ts -- modify
+      - packages/ui/src/__tests__/terminal-drawer.test.tsx -- modify
+      - packages/ui/src/__tests__/helpers/mock-invoker.ts -- modify
+      Acceptance criteria:
+      - A newly mounted terminal pane writes the session replay snapshot into xterm before live output.
+      - The snapshot is not repeatedly duplicated on re-render.
+      - Existing live `invoker:terminal-output` streaming, terminal input, resize, close, tab selection, and output preview behavior continue to work.
+      - UI tests cover replay seeding without requiring a real PTY.
+    prompt: |
+      Goal:
+      Seed xterm.js panes with the embedded terminal replay snapshot before live streaming continues.
+      Motivation:
+      The app bridge will expose early PTY output on the session descriptor, but the renderer must write that snapshot into xterm so users see output that arrived before the pane subscribed to live output events.
+      Alternative considerations:
+      Do not replace live IPC streaming with polling. Keep the current event stream for new output and use the snapshot only as initial replay data.
+      Implementation details:
+      Zero-context execution: assume no prior context. Modify `packages/ui/src/components/TerminalDrawer.tsx`, `packages/ui/src/App.tsx` if the parent session state needs adjustment, `packages/ui/src/types.ts` if global typing needs the new descriptor field surfaced, and tests under `packages/ui/src/__tests__`.
+      In `TerminalSessionPane`, after xterm is opened and before or alongside live event subscription, write `session.outputSnapshot` when present. Guard against duplicate writes when React re-renders the same session by tracking which session/snapshot has already been seeded.
+      Preserve input routing through `window.invoker.terminalWrite`, resize routing through `terminalResize`, and close behavior through `terminalClose`.
+      Update `terminal-drawer.test.tsx` and `helpers/mock-invoker.ts` so replay seeding is covered in jsdom using the existing xterm mock pattern.
+      Acceptance criteria:
+      - A newly mounted terminal pane writes the session replay snapshot into xterm before live output.
+      - The snapshot is not repeatedly duplicated on re-render.
+      - Existing live output, input, resize, close, tab selection, and output preview behavior remain covered.
+      - Deterministic pass/fail expectation: `cd packages/ui && pnpm test -- src/__tests__/terminal-drawer.test.tsx` must exit code 0.
+    dependencies: [implement-embedded-terminal-replay-buffer]
+
+  - id: add-pty-race-repro-and-regression
+    description: |
+      Goal:
+      Convert the proven PTY output race into deterministic regression coverage.
+      Motivation:
+      Existing E2E coverage sleeps before printing, which masks the broken timing. The fix needs a fast-output regression that fails on the old behavior and passes after replay buffering lands.
+      Alternative considerations:
+      Full Electron E2E can remain focused on real PTY behavior; the precise race is cheaper and more deterministic as an app package manager test with a fake backend.
+      Implementation details:
+      Add or update `scripts/repro-gui-open-terminal-pty-race.sh` and permanent tests in `packages/app/src/__tests__/embedded-terminal-manager.test.ts` so early output replay is asserted directly.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - scripts/repro-gui-open-terminal-pty-race.sh
+      - packages/app/src/__tests__/embedded-terminal-manager.test.ts
+      Change types:
+      - scripts/repro-gui-open-terminal-pty-race.sh -- create
+      - packages/app/src/__tests__/embedded-terminal-manager.test.ts -- modify
+      Acceptance criteria:
+      - The repro script is non-interactive and exits non-zero on the broken baseline behavior.
+      - After the fix, the same repro script exits 0.
+      - Permanent app tests assert replay of output emitted before `openOrReuse()` returns.
+      - Permanent app tests assert synchronous backend exit does not throw.
+    prompt: |
+      Goal:
+      Convert the proven PTY output race into deterministic regression coverage.
+      Motivation:
+      The current tests in `packages/app/e2e/embedded-terminal-pty.spec.ts` use stub CLIs that sleep before output, which avoids the race. The regression needs immediate output before the renderer-style subscriber attaches.
+      Alternative considerations:
+      Do not rely only on Playwright timing sleeps for this race. Use a fake embedded terminal backend in unit tests to deterministically emit output during spawn.
+      Implementation details:
+      Zero-context execution: assume no prior context. Add or update `scripts/repro-gui-open-terminal-pty-race.sh` and `packages/app/src/__tests__/embedded-terminal-manager.test.ts`.
+      The script should generate or run a focused test that expects replayed first-frame PTY output and exits non-zero on the old behavior. After the implementation, `bash scripts/repro-gui-open-terminal-pty-race.sh` must exit 0.
+      In `embedded-terminal-manager.test.ts`, add permanent tests with a fake backend that emits `FIRST_FRAME_FROM_PTY\n` synchronously during spawn. Assert the returned descriptor includes the bounded replay snapshot and a late consumer can seed from it. Add a separate test for synchronous backend exit safety if the implementation changes exit handling.
+      Acceptance criteria:
+      - The repro script is non-interactive and exits non-zero on the broken baseline behavior.
+      - After the fix, the same repro script exits 0.
+      - Permanent app tests assert replay of output emitted before `openOrReuse()` returns.
+      - Permanent app tests assert synchronous backend exit does not throw.
+      - Deterministic pass/fail expectation: `bash scripts/repro-gui-open-terminal-pty-race.sh` must exit code 0 after the fix.
+    dependencies: [implement-embedded-terminal-replay-buffer]
+
+  - id: verify-repro-terminal-replay
+    description: |
+      Goal:
+      Run the focused repro script for the terminal replay fix.
+      Motivation:
+      The repro script is the deterministic proof for the originally reported GUI Open Terminal race.
+      Alternative considerations:
+      App and UI package tests run in separate tasks so each command stays atomic and failures localize cleanly.
+      Implementation details:
+      Run the repro script from the repo root.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - scripts/repro-gui-open-terminal-pty-race.sh
+      Change types:
+      - none
+      Acceptance criteria:
+      - `bash scripts/repro-gui-open-terminal-pty-race.sh` exits 0.
+    command: "bash scripts/repro-gui-open-terminal-pty-race.sh"
+    dependencies: [implement-terminal-drawer-replay-seeding, add-pty-race-repro-and-regression]
+
+  - id: verify-app-terminal-manager-tests
+    description: |
+      Goal:
+      Run focused app package tests for embedded terminal replay.
+      Motivation:
+      The manager owns app-bridge session descriptors, buffering, synchronous spawn output, and synchronous exit handling.
+      Alternative considerations:
+      The repro script proves the old failure mode; this package test task proves the permanent app regression tests.
+      Implementation details:
+      Run the embedded terminal manager Vitest file from inside `packages/app`.
+      Layer: app_regression
+      Feature state: active
+      Files:
+      - packages/app/src/__tests__/embedded-terminal-manager.test.ts
+      Change types:
+      - none
+      Acceptance criteria:
+      - `cd packages/app && pnpm test -- src/__tests__/embedded-terminal-manager.test.ts` exits 0.
+    command: "cd packages/app && pnpm test -- src/__tests__/embedded-terminal-manager.test.ts"
+    dependencies: [implement-embedded-terminal-replay-buffer, add-pty-race-repro-and-regression]
+
+  - id: verify-ui-terminal-drawer-tests
+    description: |
+      Goal:
+      Run focused UI package tests for terminal drawer replay seeding.
+      Motivation:
+      The renderer must write the descriptor replay snapshot into xterm exactly once and keep live terminal behavior intact.
+      Alternative considerations:
+      Full UI tests are covered by the final regression gate; this task targets the terminal drawer behavior changed by the fix.
+      Implementation details:
+      Run the terminal drawer Vitest file from inside `packages/ui`.
+      Layer: ui
+      Feature state: active
+      Files:
+      - packages/ui/src/__tests__/terminal-drawer.test.tsx
+      Change types:
+      - none
+      Acceptance criteria:
+      - `cd packages/ui && pnpm test -- src/__tests__/terminal-drawer.test.tsx` exits 0.
+    command: "cd packages/ui && pnpm test -- src/__tests__/terminal-drawer.test.tsx"
+    dependencies: [implement-terminal-drawer-replay-seeding]
+
+  - id: build-embedded-terminal-e2e
+    description: |
+      Goal:
+      Build the UI and app packages before Electron embedded PTY E2E verification.
+      Motivation:
+      The Playwright Electron fixture launches built app artifacts from `packages/app/dist`, so focused E2E should run against fresh build outputs.
+      Alternative considerations:
+      Build and E2E run are split into separate tasks to keep command tasks atomic.
+      Implementation details:
+      Build the renderer and Electron app packages from the repo root.
+      Layer: e2e_regression
+      Layer exception: allowed
+      This e2e preparation task depends on app bridge and UI activation work so it builds the integrated GUI behavior after those changes exist.
+      Feature state: active
+      Files:
+      - packages/ui/src/components/TerminalDrawer.tsx
+      - packages/app/src/embedded-terminal-manager.ts
+      Change types:
+      - none
+      Acceptance criteria:
+      - The command exits 0.
+    command: "pnpm --filter @invoker/ui build && pnpm --filter @invoker/app build"
+    dependencies: [implement-terminal-drawer-replay-seeding, add-pty-race-repro-and-regression]
+
+  - id: verify-embedded-terminal-e2e
+    description: |
+      Goal:
+      Run the existing Electron embedded PTY E2E coverage after the replay fix.
+      Motivation:
+      The unit tests prove the race, while the Electron E2E test proves the PTY backend still creates a real TTY in the GUI drawer.
+      Alternative considerations:
+      This does not replace final `test:all`; it is a focused integration gate for the user-facing Open Terminal workflow.
+      Implementation details:
+      Run the existing embedded terminal PTY Playwright spec after the build task has produced fresh artifacts.
+      Layer: e2e_regression
+      Layer exception: allowed
+      This e2e regression task depends on app bridge and UI activation work so it validates the integrated GUI behavior after those higher-level changes exist.
+      Feature state: active
+      Files:
+      - packages/app/e2e/embedded-terminal-pty.spec.ts
+      - packages/app/e2e/fixtures/electron-app.ts
+      Change types:
+      - none
+      Acceptance criteria:
+      - The command exits 0.
+      - The existing Codex and Claude embedded PTY resume tests still show TTY output in the drawer.
+    command: "cd packages/app && pnpm exec playwright test e2e/embedded-terminal-pty.spec.ts"
+    dependencies: [build-embedded-terminal-e2e]
+
+  - id: final-regression
+    description: |
+      Goal:
+      Run the full repository regression suite as the terminal gate.
+      Motivation:
+      The fix changes a shared IPC contract, Electron app bridge behavior, and renderer terminal mounting, so the final workflow gate should catch cross-package regressions before PR review.
+      Alternative considerations:
+      Focused app, UI, and E2E checks run earlier for faster failure localization; this full suite remains the required terminal implementation gate.
+      Implementation details:
+      Run the repository's canonical full test command from the repo root after every implementation and focused verification task completes.
+      Layer: e2e_regression
+      Layer exception: allowed
+      This terminal regression gate intentionally depends on all implementation and verification tasks so the full repository suite validates the completed feature.
+      Feature state: active
+      Files:
+      - none
+      Change types:
+      - none
+      Acceptance criteria:
+      - `pnpm run test:all` exits 0.
+    command: "pnpm run test:all"
+    dependencies: [implement-embedded-terminal-replay-buffer, implement-terminal-drawer-replay-seeding, add-pty-race-repro-and-regression, verify-repro-terminal-replay, verify-app-terminal-manager-tests, verify-ui-terminal-drawer-tests, build-embedded-terminal-e2e, verify-embedded-terminal-e2e]
