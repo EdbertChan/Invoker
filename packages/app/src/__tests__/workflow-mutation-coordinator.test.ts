@@ -56,5 +56,58 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('aborts running mutation context when a recreate fence is enqueued', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-recreate-abort';
+    const runningGate = deferred();
+    let observedSignal: AbortSignal | undefined;
+
+    const running = c.enqueue(wf, 'normal', async (context) => {
+      observedSignal = context.signal;
+      await runningGate.promise;
+    }, { channel: 'invoker:fix-with-agent', args: [`${wf}/task-1`, null] });
+
+    await Promise.resolve();
+    expect(observedSignal?.aborted).toBe(false);
+
+    const recreate = c.enqueue(wf, 'high', async () => {}, {
+      channel: 'invoker:recreate-task',
+      args: [`${wf}/task-2`],
+    });
+
+    expect(observedSignal?.aborted).toBe(true);
+    runningGate.resolve();
+    await running;
+    await recreate;
+  });
+
+  it('aborts running mutation context when a delete fence is enqueued but keeps serialized settlement', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-delete-abort';
+    const runningGate = deferred();
+    const order: string[] = [];
+    let observedSignal: AbortSignal | undefined;
+
+    const running = c.enqueue(wf, 'normal', async (context) => {
+      observedSignal = context.signal;
+      order.push('running-started');
+      await runningGate.promise;
+      order.push('running-finished');
+    }, { channel: 'invoker:fix-with-agent', args: [`${wf}/task-1`, null] });
+
+    await Promise.resolve();
+    const deleteFence = c.enqueue(wf, 'high', async () => {
+      order.push('delete-fence');
+    }, { channel: 'invoker:delete-workflow', args: [wf] });
+
+    expect(observedSignal?.aborted).toBe(true);
+    await Promise.resolve();
+    expect(order).toEqual(['running-started']);
+
+    runningGate.resolve();
+    await running;
+    await deleteFence;
+    expect(order).toEqual(['running-started', 'running-finished', 'delete-fence']);
+  });
+});

@@ -8,6 +8,47 @@ export type WorkflowCancelResult = {
 
 type PreemptWorkflowExecution = (workflowId: string) => Promise<WorkflowCancelResult | void>;
 
+export function workflowMutationHardPreemptFenceKind(channel: string, args: unknown[]): 'recreate' | 'delete' | null {
+  if (
+    channel === 'invoker:recreate-workflow'
+    || channel === 'invoker:recreate-task'
+    || channel === 'invoker:rebase-recreate'
+  ) {
+    return 'recreate';
+  }
+  if (
+    channel === 'invoker:delete-workflow'
+    || channel === 'invoker:delete-all-workflows'
+    || channel === 'invoker:delete-all-workflows-bulk'
+  ) {
+    return 'delete';
+  }
+  if (channel !== 'headless.exec') {
+    return null;
+  }
+  const payload = args[0] as { args?: unknown[] } | undefined;
+  const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
+  if (rawArgs[0] === 'recreate' || rawArgs[0] === 'recreate-task' || rawArgs[0] === 'rebase-recreate') {
+    return 'recreate';
+  }
+  if (rawArgs[0] === 'delete' || rawArgs[0] === 'delete-workflow' || rawArgs[0] === 'delete-all') {
+    return 'delete';
+  }
+  return null;
+}
+
+export function isFixLikeWorkflowMutation(channel: string, args: unknown[]): boolean {
+  if (channel === 'invoker:fix-with-agent' || channel === 'invoker:resolve-conflict') {
+    return true;
+  }
+  if (channel !== 'headless.exec') {
+    return false;
+  }
+  const payload = args[0] as { args?: unknown[] } | undefined;
+  const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
+  return rawArgs[0] === 'fix' || rawArgs[0] === 'resolve-conflict';
+}
+
 export async function preemptWorkflowBeforeMutation(
   workflowId: string,
   deps: {

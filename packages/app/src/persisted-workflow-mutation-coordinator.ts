@@ -6,6 +6,7 @@ import {
 } from '@invoker/data-store';
 import type { Logger } from '@invoker/contracts';
 import { createWorkflowMutationTiming, type WorkflowMutationTiming } from './workflow-mutation-timing.js';
+import { workflowMutationHardPreemptFenceKind } from './workflow-preemption.js';
 
 type Deferred<T> = {
   resolve: (value: T) => void;
@@ -353,7 +354,7 @@ export class PersistedWorkflowMutationCoordinator {
     channel: string,
     args: unknown[],
   ): void {
-    const fenceKind = this.hardPreemptFenceKind(channel, args);
+    const fenceKind = workflowMutationHardPreemptFenceKind(channel, args);
     if (!fenceKind) {
       return;
     }
@@ -381,31 +382,6 @@ export class PersistedWorkflowMutationCoordinator {
     process.stderr.write(
       `[workflow-mutation-coordinator] invalidated running intent ${activeIntentId} for ${workflowId} via ${fenceKind}#${newIntentId}\n`,
     );
-  }
-
-  private hardPreemptFenceKind(channel: string, args: unknown[]): string | null {
-    if (
-      channel === 'invoker:recreate-workflow'
-      || channel === 'invoker:recreate-task'
-      || channel === 'invoker:rebase-recreate'
-    ) {
-      return 'recreate';
-    }
-    if (channel === 'invoker:delete-workflow' || channel === 'invoker:delete-all-workflows' || channel === 'invoker:delete-all-workflows-bulk') {
-      return 'delete';
-    }
-    if (channel !== 'headless.exec') {
-      return null;
-    }
-    const payload = args[0] as { args?: unknown[] } | undefined;
-    const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
-    if (rawArgs[0] === 'recreate' || rawArgs[0] === 'recreate-task' || rawArgs[0] === 'rebase-recreate') {
-      return 'recreate';
-    }
-    if (rawArgs[0] === 'delete' || rawArgs[0] === 'delete-workflow' || rawArgs[0] === 'delete-all') {
-      return 'delete';
-    }
-    return null;
   }
 
   private isWorkflowQueueFenceIntent(intent: WorkflowMutationIntent): boolean {
