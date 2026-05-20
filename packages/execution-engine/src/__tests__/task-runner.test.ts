@@ -183,6 +183,74 @@ describe('TaskRunner', () => {
     );
   });
 
+  it('normalizes completion responses to the INV-113 launch lineage', async () => {
+    const handleWorkerResponse = vi.fn();
+    let seenRequest: any;
+    let completeCallback: ((response: WorkResponse) => void) | undefined;
+    const executorImpl = {
+      type: 'worktree',
+      start: vi.fn().mockImplementation(async (request: any) => {
+        seenRequest = request;
+        return {
+          executionId: `exec-${request.actionId}`,
+          taskId: request.actionId,
+          workspacePath: '/tmp/mock-worktree',
+          branch: `experiment/${request.actionId}-mock`,
+        };
+      }),
+      onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
+        completeCallback = cb;
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => undefined,
+        handleWorkerResponse,
+      } as any,
+      persistence: { updateTask: vi.fn() } as any,
+      executorRegistry: {
+        getDefault: () => executorImpl,
+        get: () => executorImpl,
+        getAll: () => [executorImpl],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    const task = makeTask({
+      id: 'lineage-normalized-task',
+      status: 'running',
+      config: { command: 'echo hi' },
+      execution: { generation: 4, selectedAttemptId: 'lineage-normalized-task-a1' },
+    });
+
+    const done = runner.executeTask(task);
+    await vi.waitFor(() => expect(seenRequest).toBeDefined());
+    completeCallback?.({
+      requestId: seenRequest.requestId,
+      actionId: task.id,
+      attemptId: 'stale-attempt',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    await done;
+
+    expect(handleWorkerResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actionId: task.id,
+        attemptId: 'lineage-normalized-task-a1',
+        executionGeneration: 4,
+        status: 'completed',
+      }),
+    );
+  });
+
   it('dispatches newly ready tasks after executor startup failure', async () => {
     const failedTask = makeTask({
       id: 'docker-no-image',

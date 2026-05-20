@@ -434,6 +434,28 @@ export class TaskRunner {
     return false;
   }
 
+  private normalizeCompletionResponse(
+    response: WorkResponse,
+    taskId: string,
+    attemptId: string,
+    executionGeneration: number,
+  ): WorkResponse {
+    if (response.attemptId !== undefined && response.attemptId !== attemptId) {
+      this.logger.warn(
+        `[TaskRunner] overriding executor completion attemptId for task=${taskId} ` +
+          `responseAttemptId=${response.attemptId} launchAttemptId=${attemptId}`,
+      );
+    }
+    if (response.executionGeneration !== executionGeneration) {
+      this.logger.warn(
+        `[TaskRunner] overriding executor completion generation for task=${taskId} ` +
+          `responseGeneration=${response.executionGeneration} launchGeneration=${executionGeneration}`,
+      );
+    }
+
+    return { ...response, attemptId, executionGeneration };
+  }
+
   async executeTask(task: TaskState): Promise<void> {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
@@ -1001,8 +1023,16 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
-          this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
+          // INV-113 selected attempt-scoped in-memory coordination: the launch
+          // context owns orchestration lineage even if an executor reports
+          // incomplete or stale identity fields.
+          const normalizedResponse = this.normalizeCompletionResponse(
+            response,
+            task.id,
+            attemptId,
+            task.execution.generation ?? 0,
+          );
+          this.activeExecutions.delete(attemptId);
           this.logger.info(
             `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
               `status=${normalizedResponse.status} exitCode=${normalizedResponse.outputs.exitCode ?? 'none'} ` +
@@ -1011,7 +1041,7 @@ export class TaskRunner {
           try {
             traceExecution(
               `[task-runner] onComplete taskId=${task.id} responseStatus=${response.status} ` +
-                `responseAttemptId=${normalizedResponse.attemptId ?? attemptId} responseGeneration=${response.executionGeneration} executionId=${handle.executionId}`,
+                `responseAttemptId=${normalizedResponse.attemptId ?? attemptId} responseGeneration=${normalizedResponse.executionGeneration} executionId=${handle.executionId}`,
             );
             traceExecution(
               `${RESTART_TO_BRANCH_TRACE} resolvePromise | task.config.isMergeNode = ${task.config.isMergeNode}`,

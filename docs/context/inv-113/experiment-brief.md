@@ -41,17 +41,17 @@ pnpm exec vitest run src/__tests__/task-runner.test.ts
 Expected output threshold:
 
 - `Test Files  1 passed (1)`
-- `Tests  123 passed (123)`
+- `Tests  124 passed (124)`
 - Exit code `0`
 
 Observed output on 2026-05-20:
 
 ```text
-✓ src/__tests__/task-runner.test.ts (123 tests) 1597ms
+✓ src/__tests__/task-runner.test.ts (124 tests) 2186ms
 
  Test Files  1 passed (1)
-      Tests  123 passed (123)
-   Duration  4.61s
+      Tests  124 passed (124)
+   Duration  5.70s
 ```
 
 Broader package sanity command also completed successfully during the experiment:
@@ -65,15 +65,15 @@ Note: because the package script forwards arguments after an extra `--`, this ra
 Expected output threshold:
 
 - `Test Files  48 passed (48)`
-- `Tests  971 passed (971)`
+- `Tests  972 passed (972)`
 - Exit code `0`
 
 Observed output on 2026-05-20:
 
 ```text
  Test Files  48 passed (48)
-      Tests  971 passed (971)
-   Duration  139.56s
+      Tests  972 passed (972)
+   Duration  273.77s
 ```
 
 ## Proof matrix
@@ -81,15 +81,16 @@ Observed output on 2026-05-20:
 | Claim | Deterministic proof | Pass threshold | Verdict |
 | --- | --- | --- | --- |
 | Attempt lineage is preserved through executor request and completion response. | `sends attemptId and executionGeneration in work requests and preserves them in responses` in `packages/execution-engine/src/__tests__/task-runner.test.ts:115`. | Request includes selected attempt and generation; `handleWorkerResponse` receives the same values. | Pass |
-| Concurrent duplicate launch calls are suppressed. | `deduplicates concurrent launches for the same attempt` in `packages/execution-engine/src/__tests__/task-runner.test.ts:244`. | Two concurrent `executeTask` calls cause exactly one executor `start`. | Pass |
-| Startup failure can dispatch newly ready tasks. | `dispatches newly ready tasks after executor startup failure` in `packages/execution-engine/src/__tests__/task-runner.test.ts:186`. | Failed response is emitted and returned newly-ready task list is passed to `executeTasks`. | Pass |
-| Kill routing chooses the selected live attempt, not an older active attempt for the same task. | `kills the selected attempt when an older attempt for the same task is still active` in `packages/execution-engine/src/__tests__/task-runner.test.ts:369`. | `kill` is called once with `attemptId: kill-selected-task-a2`. | Pass |
-| Kill routing does not kill stale active attempts when the selected attempt has no live execution. | `does not kill an older active attempt when the selected attempt has no live execution` in `packages/execution-engine/src/__tests__/task-runner.test.ts:456`. | `kill` is not called. | Pass |
-| Recreate-style executions force fresh workspaces, while restart-style executions can reuse branch/workspace state. | Tests beginning at `packages/execution-engine/src/__tests__/task-runner.test.ts:520`, `:581`, and `:642`. | Recreate requests set `freshWorkspace: true`; restart with branch and workspace sets `freshWorkspace: false`. | Pass |
-| Stale startup failures cannot clobber newer lineage. | `stale startup-failure lineage guard` tests beginning at `packages/execution-engine/src/__tests__/task-runner.test.ts:1135`. | No stale metadata write and no failed response when selected attempt or generation has advanced. | Pass |
+| Completion callbacks consume the selected attempt-scoped design instead of trusting stale executor identity. | `normalizes completion responses to the INV-113 launch lineage` in `packages/execution-engine/src/__tests__/task-runner.test.ts:186`. | A completion with stale `attemptId` and generation `0` is delivered to orchestration with the launch attempt and generation. | Pass |
+| Concurrent duplicate launch calls are suppressed. | `deduplicates concurrent launches for the same attempt` in `packages/execution-engine/src/__tests__/task-runner.test.ts:312`. | Two concurrent `executeTask` calls cause exactly one executor `start`. | Pass |
+| Startup failure can dispatch newly ready tasks. | `dispatches newly ready tasks after executor startup failure` in `packages/execution-engine/src/__tests__/task-runner.test.ts:254`. | Failed response is emitted and returned newly-ready task list is passed to `executeTasks`. | Pass |
+| Kill routing chooses the selected live attempt, not an older active attempt for the same task. | `kills the selected attempt when an older attempt for the same task is still active` in `packages/execution-engine/src/__tests__/task-runner.test.ts:437`. | `kill` is called once with `attemptId: kill-selected-task-a2`. | Pass |
+| Kill routing does not kill stale active attempts when the selected attempt has no live execution. | `does not kill an older active attempt when the selected attempt has no live execution` in `packages/execution-engine/src/__tests__/task-runner.test.ts:524`. | `kill` is not called. | Pass |
+| Recreate-style executions force fresh workspaces, while restart-style executions can reuse branch/workspace state. | Tests beginning at `packages/execution-engine/src/__tests__/task-runner.test.ts:588`, `:649`, and `:710`. | Recreate requests set `freshWorkspace: true`; restart with branch and workspace sets `freshWorkspace: false`. | Pass |
+| Stale startup failures cannot clobber newer lineage. | `stale startup-failure lineage guard` tests beginning at `packages/execution-engine/src/__tests__/task-runner.test.ts:1202`. | No stale metadata write and no failed response when selected attempt or generation has advanced. | Pass |
 
 ## Verdict
 
 Selected architecture is accepted for `INV-113`.
 
-Minimum acceptance threshold is the targeted deterministic command passing with all `123` `task-runner.test.ts` tests green. The observed run met that threshold, and the broader execution-engine suite also passed. The competing persistence-only coordination design remains viable for cross-process recovery, but it is not the selected same-process executor coordination model for this proof.
+Minimum acceptance threshold is the targeted deterministic command passing with all `124` `task-runner.test.ts` tests green. The observed run met that threshold, and the broader execution-engine suite also passed. The competing persistence-only coordination design remains viable for cross-process recovery, but it is not the selected same-process executor coordination model for this proof.
