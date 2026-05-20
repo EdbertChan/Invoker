@@ -35,21 +35,15 @@
 import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
+import {
+  configureElectronAppIdentity,
+  configureElectronStartup,
+  startAppBootstrap,
+} from './bootstrap/app-bootstrap.js';
+import { createIpcRegistration } from './ipc/ipc-registration.js';
 
 const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
-
-// Prevent desktop-wide freezes on Linux (Chromium GPU + X11/Wayland compositors).
-// Defense-in-depth: API-level disable, command-line flags, and env var (LIBGL_ALWAYS_SOFTWARE).
-if (process.platform === 'linux' && !enableTestCompositor) {
-  app.disableHardwareAcceleration();
-  app.commandLine.appendSwitch('no-sandbox');
-  app.commandLine.appendSwitch('no-zygote');
-  app.commandLine.appendSwitch('disable-dev-shm-usage');
-  app.commandLine.appendSwitch('disable-gpu');
-  app.commandLine.appendSwitch('disable-gpu-compositing');
-  app.commandLine.appendSwitch('disable-gpu-sandbox');
-  app.commandLine.appendSwitch('disable-software-rasterizer');
-}
+configureElectronStartup({ enableTestCompositor });
 
 import { Orchestrator, CommandService, OrchestratorErrorCode } from '@invoker/workflow-core';
 import type {
@@ -63,7 +57,7 @@ import { makeEnvelope, CommandError } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
-import { IpcBus, Channels, TransportError, TransportErrorCode } from '@invoker/transport';
+import { IpcBus, Channels } from '@invoker/transport';
 import {
   WorkspaceProbeAdapter,
   ContainerProbeAdapter,
@@ -214,13 +208,7 @@ if (noTrack) {
   cliArgs = [...cliArgs.slice(0, noTrackIndex), ...cliArgs.slice(noTrackIndex + 1)];
 }
 
-// Set app name early so Electron uses "invoker" as WM_CLASS (X11) and app_id (Wayland).
-// --class tells Chromium to set WM_CLASS explicitly, preventing GNOME from
-// grouping Invoker with other Electron apps (e.g. Slack).
-app.name = 'invoker';
-if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('class', 'invoker');
-}
+configureElectronAppIdentity();
 
 // ── Shared state ─────────────────────────────────────────────
 
@@ -607,8 +595,7 @@ const RED = '\x1b[31m';
 // HEADLESS MODE
 // ══════════════════════════════════════════════════════════════
 
-if (isHeadless) {
-  app.whenReady().then(async () => {
+async function runHeadlessMode(): Promise<void> {
     const agentRegistry = registerBuiltinAgents();
     const command = cliArgs[0];
     const readOnlyMode = isHeadlessReadOnlyCommand(cliArgs);
@@ -1159,26 +1146,18 @@ if (isHeadless) {
       if (writerLock) writerLock.release();
       if (messageBus) messageBus.disconnect();
     }
-    process.exit(exitCode);
-  }).catch((err) => {
+  process.exit(exitCode);
+}
+
+startAppBootstrap({
+  isHeadless,
+  runHeadless: runHeadlessMode,
+  setupGuiMode,
+  onFatalError: (err) => {
     process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
-  });
-} else {
-  // ══════════════════════════════════════════════════════════════
-  // GUI MODE
-  // ══════════════════════════════════════════════════════════════
-  if (process.env.NODE_ENV !== 'test') {
-    const gotTheLock = app.requestSingleInstanceLock();
-    if (!gotTheLock) {
-      app.quit();
-    } else {
-      setupGuiMode();
-    }
-  } else {
-    setupGuiMode();
-  }
-}
+  },
+});
 
 // ══════════════════════════════════════════════════════════════
 // GUI MODE
@@ -1191,7 +1170,7 @@ function createEmbeddedTerminalBackendFromConfig(
   return createPtyTerminalBackend();
 }
 
-  function setupGuiMode(): void {
+function setupGuiMode(): void {
   const agentRegistry = registerBuiltinAgents();
   let mainWindow: BrowserWindow | null = null;
   let taskExecutor: TaskRunner | null = null;
@@ -2113,42 +2092,18 @@ function createEmbeddedTerminalBackendFromConfig(
     });
   }
 
-  function registerGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    guiMutationHandlers.set(channel, handler as (...args: unknown[]) => Promise<unknown>);
-    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
-      if (ownerMode) {
-        return handler(...args);
-      }
-      const translated = translateGuiMutationToHeadless({ channel, args });
-      if (!translated) {
-        throw new Error(`No owner delegation route is available for ${channel}`);
-      }
-      try {
-        return await messageBus.request<typeof translated.request, TResult>(translated.channel, translated.request);
-      } catch (err) {
-        if (err instanceof TransportError && err.code === TransportErrorCode.NO_HANDLER) {
-          throw new Error('No mutation owner is available');
-        }
-        throw err;
-      }
-    });
-  }
-
-  function registerWorkflowScopedGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    resolveWorkflowId: (...args: unknown[]) => string | undefined,
-    priority: WorkflowMutationPriority,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    workflowMutationDispatcher.set(channel, (...args: unknown[]) => handler(...args));
-    registerGuiMutationHandler(channel, async (...args: unknown[]) => {
-      const workflowId = resolveWorkflowId(...args);
-      return runWorkflowMutation(workflowId, priority, channel, args, () => handler(...args));
-    });
-  }
+  const {
+    registerGuiMutationHandler,
+    registerWorkflowScopedGuiMutationHandler,
+  } = createIpcRegistration({
+    ipcMain,
+    getMessageBus: () => messageBus,
+    guiMutationHandlers,
+    workflowMutationDispatcher,
+    getOwnerMode: () => ownerMode,
+    translateGuiMutationToHeadless,
+    runWorkflowMutation,
+  });
 
   function createWindow(): void {
     recordStartupMark('createWindow.begin');
