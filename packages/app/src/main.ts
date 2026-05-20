@@ -3191,6 +3191,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.cancel-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         await finalizeMutationWithGlobalTopup({
           orchestrator,
@@ -3277,6 +3278,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.recreate-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = activeMutationContext?.mutationTiming
           ? await activeMutationContext.mutationTiming.span(
@@ -3365,6 +3367,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.retry-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
         const result = activeMutationContext?.mutationTiming
@@ -3413,6 +3416,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.rebase-retry',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = await rebaseRetry(target, {
           orchestrator,
@@ -3455,6 +3459,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.rebase-recreate',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = await rebaseRecreate(target, {
           orchestrator,
