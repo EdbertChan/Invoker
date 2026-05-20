@@ -239,6 +239,12 @@ export class PersistedWorkflowMutationCoordinator {
         workflowId,
         mutationTiming: timing,
       };
+      const latestBeforeDispatch = this.persistence.loadWorkflowMutationIntent(intent.id);
+      if (latestBeforeDispatch?.status !== 'running') {
+        const reason = latestBeforeDispatch?.error
+          ?? `Workflow mutation intent ${intent.id} is no longer running`;
+        throw new WorkflowMutationInvalidatedError(reason);
+      }
       const dispatchPromise = timing.span(
         'PersistedWorkflowMutationCoordinator.dispatch',
         undefined,
