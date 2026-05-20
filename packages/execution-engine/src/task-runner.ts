@@ -378,6 +378,21 @@ export class TaskRunner {
     return undefined;
   }
 
+  private normalizeCompletionResponseForLaunch(
+    response: WorkResponse,
+    launchAttemptId: string,
+    launchGeneration: number,
+  ): WorkResponse {
+    return {
+      ...response,
+      // INV-113: the launched attempt is authoritative. A completion callback
+      // must not be able to delete/report a sibling attempt by echoing stale or
+      // malformed identity metadata.
+      attemptId: launchAttemptId,
+      executionGeneration: launchGeneration,
+    };
+  }
+
   private createExecuteTaskBench(taskId: string, attemptId: string): (phase: string, metadata?: Record<string, unknown>) => void {
     return createExecutionBench({
       module: 'execute-task-bench',
@@ -1001,8 +1016,12 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
-          this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
+          const normalizedResponse = this.normalizeCompletionResponseForLaunch(
+            response,
+            attemptId,
+            request.executionGeneration,
+          );
+          this.activeExecutions.delete(attemptId);
           this.logger.info(
             `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
               `status=${normalizedResponse.status} exitCode=${normalizedResponse.outputs.exitCode ?? 'none'} ` +
