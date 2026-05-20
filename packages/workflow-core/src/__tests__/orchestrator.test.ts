@@ -1643,6 +1643,101 @@ describe('Orchestrator', () => {
   // ── startExecution ──────────────────────────────────────
 
   describe('startExecution', () => {
+    it('preserves public orchestrator method signatures after domain extraction', () => {
+      expect(Orchestrator.prototype.startExecution).toHaveLength(0);
+      expect(Orchestrator.prototype.handleWorkerResponse).toHaveLength(1);
+      expect(Orchestrator.prototype.autoStartExternallyUnblockedReadyTasks).toHaveLength(0);
+      expect(Orchestrator.prototype.markTaskRunningAfterLaunch).toHaveLength(2);
+    });
+
+    it('preserves ready-task scheduling, dispatch deltas, and attempt claims', () => {
+      const singleSlot = new Orchestrator({
+        persistence,
+        messageBus: bus,
+        maxConcurrency: 1,
+        logger: consoleLogger,
+      });
+      singleSlot.loadPlan({
+        name: 'scheduler-extraction-regression',
+        tasks: [
+          { id: 'root-a', description: 'Root A' },
+          { id: 'root-b', description: 'Root B' },
+        ],
+      });
+      publishedDeltas = [];
+
+      const firstStarted = singleSlot.startExecution();
+
+      expect(firstStarted.map((task) => task.id)).toEqual([sid(singleSlot, 0, 'root-a')]);
+      expect(firstStarted[0]!.status).toBe('running');
+      const firstAttemptId = firstStarted[0]!.execution.selectedAttemptId!;
+      expect(persistence.loadAttempt(firstAttemptId)?.status).toBe('running');
+      expect(persistence.events.at(-1)).toMatchObject({
+        taskId: sid(singleSlot, 0, 'root-a'),
+        eventType: 'task.running',
+      });
+      expect(publishedDeltas.at(-1)).toMatchObject({
+        type: 'updated',
+        taskId: sid(singleSlot, 0, 'root-a'),
+        changes: { status: 'running' },
+      });
+
+      const secondStarted = singleSlot.handleWorkerResponse(
+        makeResponse({ actionId: sid(singleSlot, 0, 'root-a'), status: 'completed' }),
+      );
+
+      expect(secondStarted.map((task) => task.id)).toEqual([sid(singleSlot, 0, 'root-b')]);
+      expect(singleSlot.getTask(sid(singleSlot, 0, 'root-b'))!.status).toBe('running');
+      const secondAttemptId = secondStarted[0]!.execution.selectedAttemptId!;
+      expect(persistence.loadAttempt(secondAttemptId)?.status).toBe('running');
+    });
+
+    it('preserves deferred launch transition semantics', () => {
+      const launchDeferred = new Orchestrator({
+        persistence,
+        messageBus: bus,
+        maxConcurrency: 1,
+        logger: consoleLogger,
+        deferRunningUntilLaunch: true,
+      });
+      launchDeferred.loadPlan({
+        name: 'transition-extraction-regression',
+        tasks: [{ id: 't1', description: 'Task 1' }],
+      });
+      publishedDeltas = [];
+
+      const [claimed] = launchDeferred.startExecution();
+      const taskId = sid(launchDeferred, 0, 't1');
+      const attemptId = claimed!.execution.selectedAttemptId!;
+
+      expect(claimed!.id).toBe(taskId);
+      expect(claimed!.status).toBe('pending');
+      expect(claimed!.execution.phase).toBe('launching');
+      expect(persistence.loadAttempt(attemptId)?.status).toBe('claimed');
+      expect(persistence.events.at(-1)).toMatchObject({
+        taskId,
+        eventType: 'task.launch_claimed',
+      });
+
+      const launchedAt = new Date('2026-05-20T03:00:00.000Z');
+      expect(launchDeferred.markTaskRunningAfterLaunch(taskId, attemptId, launchedAt)).toBe(true);
+
+      const running = launchDeferred.getTask(taskId)!;
+      expect(running.status).toBe('running');
+      expect(running.execution.phase).toBe('executing');
+      expect(running.execution.launchCompletedAt).toEqual(launchedAt);
+      expect(persistence.loadAttempt(attemptId)?.status).toBe('running');
+      expect(persistence.events.at(-1)).toMatchObject({
+        taskId,
+        eventType: 'task.running',
+      });
+      expect(publishedDeltas.at(-1)).toMatchObject({
+        type: 'updated',
+        taskId,
+        changes: { status: 'running' },
+      });
+    });
+
     it('starts ready tasks up to concurrency limit', () => {
       orchestrator.loadPlan({
         name: 'test-plan',
