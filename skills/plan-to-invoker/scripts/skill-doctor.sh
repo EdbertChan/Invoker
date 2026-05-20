@@ -13,6 +13,10 @@
 #   --verbose           Show detailed output from each sub-check
 #   --warn-delegation  Pass through to atomicity lint (prints advisory delegation-hint warnings)
 #
+# INV-63 selected architecture:
+#   Primary deterministic validation surface. Individual scripts remain fallback
+#   diagnostics; schema-only/manual validation is not sufficient for submission.
+#
 # Exit codes:
 #   0 = all checks passed
 #   1 = one or more checks failed
@@ -22,6 +26,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELECTED_DESIGN="INV-63 selected skill-doctor.sh as the primary deterministic validation surface; individual scripts are fallback diagnostics."
+EXPERIMENT_ARTIFACT="docs/context/inv-63/experiment-brief.md"
 
 # Default mode flags
 SKIP_ASSUMPTIONS=false
@@ -38,7 +44,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
       exit 0
       ;;
     --skip-assumptions)
@@ -337,10 +343,14 @@ if command -v jq &>/dev/null; then
   SUMMARY=$(jq -n \
     --argjson checks "$(cat "$CHECKS_FILE")" \
     --arg planFile "$PLAN_FILE" \
+    --arg selectedDesign "$SELECTED_DESIGN" \
+    --arg experimentArtifact "$EXPERIMENT_ARTIFACT" \
     --argjson allPassed "$(if [[ "$OVERALL_FAILED" == "false" ]]; then echo true; else echo false; fi)" \
     --arg firstFailedStep "${FIRST_FAILED_STEP:-null}" \
     '{
       planFile: $planFile,
+      selectedDesign: $selectedDesign,
+      experimentArtifact: $experimentArtifact,
       allPassed: $allPassed,
       firstFailedStep: ($firstFailedStep | if . == "null" then null else . end),
       checks: $checks

@@ -45,6 +45,8 @@ Use these as concrete skill steps. Every step should run a command and produce p
 
 ### Primary validation surface
 
+INV-63 selected this design in `docs/context/inv-63/experiment-brief.md`: `skill-doctor.sh` is the primary deterministic validation surface, while the individual scripts remain fallback diagnostics. Treat that artifact's rejected alternative as binding guidance: do not replace the doctor path with schema-only or informal/manual validation when deciding whether a plan is ready to submit.
+
 **Run all plan validation checks in one command:**
 
 ```bash
@@ -65,7 +67,7 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 - `--verbose` — show detailed output from each sub-check
 - `--help` — show usage information
 
-This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
+This single command runs: assumption extraction, verify plan generation, policy coverage projection, YAML validation, strict atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
 For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`. When validating a plan against a separate policy source, pass `--source-file`, `--coverage-map`, and `--stack-manifest`; policy-matrix inputs now fail without a coverage map and a real authored stack manifest.
 
 ### Fallback commands (for debugging individual checks)
