@@ -782,7 +782,11 @@ export async function resolveConflictAction(
   const { savedError } = orchestrator.beginConflictResolution(taskId);
   const lineage = captureTaskLineage(taskId, orchestrator);
   try {
-    await taskExecutor.resolveConflict(taskId, savedError, agentName);
+    if (signal) {
+      await taskExecutor.resolveConflict(taskId, savedError, agentName, signal);
+    } else {
+      await taskExecutor.resolveConflict(taskId, savedError, agentName);
+    }
     assertLineageCurrent(lineage, orchestrator, signal);
     return await finalizeAppliedFix(taskId, savedError, deps, signal);
   } catch (err) {
@@ -839,10 +843,18 @@ export async function fixWithAgentAction(
   const lineage = captureTaskLineage(taskId, orchestrator);
   try {
     if (recoveryRoute.kind === 'resolveConflict') {
-      await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName);
+      if (options.signal) {
+        await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName, options.signal);
+      } else {
+        await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName);
+      }
     } else {
       const output = persistence.getTaskOutput(taskId);
-      await taskExecutor.fixWithAgent(taskId, output, options.agentName, persistedSavedError);
+      if (options.signal) {
+        await taskExecutor.fixWithAgent(taskId, output, options.agentName, persistedSavedError, undefined, options.signal);
+      } else {
+        await taskExecutor.fixWithAgent(taskId, output, options.agentName, persistedSavedError);
+      }
     }
     assertLineageCurrent(lineage, orchestrator, options.signal);
     const result = await finalizeAppliedFix(taskId, persistedSavedError, deps, options.signal);
@@ -1155,10 +1167,18 @@ export async function autoFixOnFailure(
       savedErrorLength: persistedSavedError.length,
     });
     if (recoveryRoute.kind === 'resolveConflict') {
-      await taskExecutor.resolveConflict(taskId, persistedSavedError, agentSelection.selectedAgent);
+      if (deps.signal) {
+        await taskExecutor.resolveConflict(taskId, persistedSavedError, agentSelection.selectedAgent, deps.signal);
+      } else {
+        await taskExecutor.resolveConflict(taskId, persistedSavedError, agentSelection.selectedAgent);
+      }
     } else {
       const output = persistence.getTaskOutput(taskId);
-      await taskExecutor.fixWithAgent(taskId, output, agentSelection.selectedAgent, persistedSavedError);
+      if (deps.signal) {
+        await taskExecutor.fixWithAgent(taskId, output, agentSelection.selectedAgent, persistedSavedError, undefined, deps.signal);
+      } else {
+        await taskExecutor.fixWithAgent(taskId, output, agentSelection.selectedAgent, persistedSavedError);
+      }
     }
     assertLineageCurrent(lineage, orchestrator, deps.signal);
     const postRouteStrategy = selectAutoFixPostRouteStrategy(task);
@@ -1334,13 +1354,24 @@ export async function autoFixOnReviewGateFailure(
       selectedAgent: agentSelection.selectedAgent,
     });
     const output = persistence.getTaskOutput(trigger.taskId);
-    await taskExecutor.fixWithAgent(
-      trigger.taskId,
-      output,
-      agentSelection.selectedAgent,
-      persistedSavedError,
-      fixContext,
-    );
+    if (deps.signal) {
+      await taskExecutor.fixWithAgent(
+        trigger.taskId,
+        output,
+        agentSelection.selectedAgent,
+        persistedSavedError,
+        fixContext,
+        deps.signal,
+      );
+    } else {
+      await taskExecutor.fixWithAgent(
+        trigger.taskId,
+        output,
+        agentSelection.selectedAgent,
+        persistedSavedError,
+        fixContext,
+      );
+    }
     assertLineageCurrent(lineage, orchestrator, deps.signal);
     const latest = orchestrator.getTask(trigger.taskId);
     if (!latest) throw new StaleLineageError(`Review-gate CI auto-fix task ${trigger.taskId} disappeared`);
