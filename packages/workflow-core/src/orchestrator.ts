@@ -718,6 +718,11 @@ export interface OrchestratorConfig {
   deferRunningUntilLaunch?: boolean;
 }
 
+export interface TaskLineageExpectation {
+  selectedAttemptId?: string;
+  generation: number;
+}
+
 // ── Orchestrator ────────────────────────────────────────────
 
 export class Orchestrator {
@@ -1798,10 +1803,28 @@ export class Orchestrator {
     this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', additionalChanges);
   }
 
-  setFixAwaitingApproval(taskId: string, originalError: string): void {
+  private isTaskLineageCurrent(taskId: string, expectedLineage?: TaskLineageExpectation): boolean {
+    if (!expectedLineage) return true;
+    const task = this.stateGetTask(taskId);
+    if (!task) return false;
+    return task.execution.selectedAttemptId === expectedLineage.selectedAttemptId
+      && (task.execution.generation ?? 0) === expectedLineage.generation;
+  }
+
+  setFixAwaitingApproval(taskId: string, originalError: string, expectedLineage?: TaskLineageExpectation): boolean {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    if (!this.isTaskLineageCurrent(taskId, expectedLineage)) {
+      this.logger.warn('[setFixAwaitingApproval] stale lineage rejected', {
+        taskId,
+        expectedAttemptId: expectedLineage?.selectedAttemptId ?? 'none',
+        expectedGeneration: expectedLineage?.generation,
+        currentAttemptId: task.execution.selectedAttemptId ?? 'none',
+        currentGeneration: task.execution.generation ?? 0,
+      });
+      return false;
+    }
     const tid = task.id;
     if (task.status !== 'running' && task.status !== 'fixing_with_ai') {
       throw new Error(`Task ${tid} is not running or fixing with AI (status: ${task.status})`);
@@ -1845,6 +1868,7 @@ export class Orchestrator {
     const delta: TaskDelta = this.buildUpdateDelta(task, updated, changes);
     this.persistence.logEvent?.(tid, 'task.awaiting_approval', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    return true;
   }
 
   setBeforeApproveHook(fn: (task: TaskState) => Promise<void>): void {
@@ -1855,7 +1879,7 @@ export class Orchestrator {
    * Approve a task awaiting approval. Fires beforeApproveHook (if set)
    * before transitioning state, so merge nodes get git-merged automatically.
    */
-  async approve(taskId: string): Promise<TaskState[]> {
+  async approve(taskId: string, expectedLineage?: TaskLineageExpectation): Promise<TaskState[]> {
     mergeTrace('APPROVE_ENTER', { taskId });
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
@@ -1875,6 +1899,16 @@ export class Orchestrator {
       });
       return [];
     }
+    if (!this.isTaskLineageCurrent(taskId, expectedLineage)) {
+      this.logger.warn('[orchestrator.approve] stale lineage rejected', {
+        taskId,
+        expectedAttemptId: expectedLineage?.selectedAttemptId ?? 'none',
+        expectedGeneration: expectedLineage?.generation,
+        currentAttemptId: task.execution.selectedAttemptId ?? 'none',
+        currentGeneration: task.execution.generation ?? 0,
+      });
+      return [];
+    }
 
     if (this.beforeApproveHook) {
       mergeTrace('APPROVE_HOOK_FIRING', { taskId, workflowId: task.config.workflowId });
@@ -1882,6 +1916,18 @@ export class Orchestrator {
       mergeTrace('APPROVE_HOOK_DONE', { taskId });
     } else {
       mergeTrace('APPROVE_NO_HOOK', { taskId });
+    }
+    this.refreshFromDb();
+    if (!this.isTaskLineageCurrent(taskId, expectedLineage)) {
+      const latest = this.stateGetTask(taskId);
+      this.logger.warn('[orchestrator.approve] stale lineage rejected after hook', {
+        taskId,
+        expectedAttemptId: expectedLineage?.selectedAttemptId ?? 'none',
+        expectedGeneration: expectedLineage?.generation,
+        currentAttemptId: latest?.execution.selectedAttemptId ?? 'none',
+        currentGeneration: latest?.execution.generation ?? 0,
+      });
+      return [];
     }
 
     const changes: TaskStateChanges = {
@@ -1924,11 +1970,21 @@ export class Orchestrator {
     return started;
   }
 
-  async resumeTaskAfterFixApproval(taskId: string): Promise<TaskState[]> {
+  async resumeTaskAfterFixApproval(taskId: string, expectedLineage?: TaskLineageExpectation): Promise<TaskState[]> {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     const isApprovalState = task?.status === 'awaiting_approval' || task?.status === 'review_ready';
     if (!task || !isApprovalState || task.execution.pendingFixError === undefined) {
+      return [];
+    }
+    if (!this.isTaskLineageCurrent(taskId, expectedLineage)) {
+      this.logger.warn('[resumeTaskAfterFixApproval] stale lineage rejected', {
+        taskId,
+        expectedAttemptId: expectedLineage?.selectedAttemptId ?? 'none',
+        expectedGeneration: expectedLineage?.generation,
+        currentAttemptId: task.execution.selectedAttemptId ?? 'none',
+        currentGeneration: task.execution.generation ?? 0,
+      });
       return [];
     }
 
@@ -2831,11 +2887,26 @@ export class Orchestrator {
    * Revert a conflict resolution attempt: restore the task to failed
    * with its original error and re-parsed mergeConflict field.
    */
-  revertConflictResolution(taskId: string, savedError: string, fixError?: string): void {
+  revertConflictResolution(
+    taskId: string,
+    savedError: string,
+    fixError?: string,
+    expectedLineage?: TaskLineageExpectation,
+  ): boolean {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) {
       throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    }
+    if (!this.isTaskLineageCurrent(taskId, expectedLineage)) {
+      this.logger.warn('[revertConflictResolution] stale lineage rejected', {
+        taskId,
+        expectedAttemptId: expectedLineage?.selectedAttemptId ?? 'none',
+        expectedGeneration: expectedLineage?.generation,
+        currentAttemptId: task.execution.selectedAttemptId ?? 'none',
+        currentGeneration: task.execution.generation ?? 0,
+      });
+      return false;
     }
     const id = task.id;
 
@@ -2865,6 +2936,7 @@ export class Orchestrator {
     const delta: TaskDelta = this.buildUpdateDelta(task, revertUpdated, changes);
     this.persistence.logEvent?.(id, 'task.failed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    return true;
   }
 
   editTaskCommand(taskId: string, newCommand: string): TaskState[] {

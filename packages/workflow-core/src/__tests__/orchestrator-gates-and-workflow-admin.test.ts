@@ -657,6 +657,45 @@ describe('Orchestrator', () => {
       expect(task.execution.error).toContain('[Fix with Agent failed] startup failed');
     });
 
+    it('setFixAwaitingApproval no-ops when expected lineage is stale', () => {
+      orchestrator.beginConflictResolution('t2');
+      const before = orchestrator.getTask('t2')!;
+      publishedDeltas = [];
+
+      const applied = orchestrator.setFixAwaitingApproval('t2', mergeConflictError, {
+        selectedAttemptId: 'superseded-attempt',
+        generation: (before.execution.generation ?? 0) - 1,
+      });
+
+      const after = orchestrator.getTask('t2')!;
+      expect(applied).toBe(false);
+      expect(after.status).toBe('fixing_with_ai');
+      expect(after.execution.pendingFixError).toBeUndefined();
+      expect(after.execution.selectedAttemptId).toBe(before.execution.selectedAttemptId);
+      expect(after.execution.generation).toBe(before.execution.generation);
+      expect(publishedDeltas).toHaveLength(0);
+    });
+
+    it('revertConflictResolution no-ops when expected lineage is stale', () => {
+      const { savedError } = orchestrator.beginConflictResolution('t2');
+      const before = orchestrator.getTask('t2')!;
+      publishedDeltas = [];
+
+      const applied = orchestrator.revertConflictResolution('t2', savedError, 'late failure', {
+        selectedAttemptId: 'superseded-attempt',
+        generation: (before.execution.generation ?? 0) - 1,
+      });
+
+      const after = orchestrator.getTask('t2')!;
+      expect(applied).toBe(false);
+      expect(after.status).toBe('fixing_with_ai');
+      expect(after.execution.error).toBeUndefined();
+      expect(after.execution.mergeConflict).toBeUndefined();
+      expect(after.execution.selectedAttemptId).toBe(before.execution.selectedAttemptId);
+      expect(after.execution.generation).toBe(before.execution.generation);
+      expect(publishedDeltas).toHaveLength(0);
+    });
+
     it('revertConflictResolution does not duplicate an existing fix failure wrapper', () => {
       const wrappedSavedError =
         '[Fix with Claude failed] first attempt failed\n\n' + mergeConflictError;
