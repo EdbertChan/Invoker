@@ -530,7 +530,11 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     mergeCwd: string,
     setupBranchExplicitBase?: string,
   ): Promise<void> {
-    const upstreams = request.inputs.upstreamBranches ?? [];
+    let upstreams = request.inputs.upstreamBranches ?? [];
+    const requestBase = request.inputs.baseBranch?.trim();
+    if (setupBranchExplicitBase && requestBase && upstreams[0] === requestBase) {
+      upstreams = upstreams.slice(1);
+    }
     const baseFromUpstream = !setupBranchExplicitBase && upstreams.length > 0;
     const upstreamsToMerge = baseFromUpstream ? upstreams.slice(1) : upstreams;
     traceExecution(
