@@ -3297,10 +3297,12 @@ export class Orchestrator {
    * Update gate policy on one or more external dependencies for a task, then
    * immediately re-evaluate ready tasks that were blocked by external deps.
    *
-   * Step 15 lock-in (`docs/architecture/task-invalidation-roadmap.md`,
-   * chart row "Change external gate policy"): this is the engine's
-   * ONLY intentionally non-invalidating execution-spec-adjacent
-   * mutation. Per `MUTATION_POLICIES.externalGatePolicy`
+   * INV-90 consumes the selected verdict from
+   * `docs/context/inv-90/experiment-brief.md`: external gate policy
+   * edits are `scheduleOnly`, not retry/recreate. This is the
+   * engine's ONLY intentionally non-invalidating
+   * execution-spec-adjacent mutation. Per
+   * `MUTATION_POLICIES.externalGatePolicy`
    * (`invalidatesExecutionSpec: false`, `invalidateIfActive: false`,
    * `action: 'scheduleOnly'`):
    *
@@ -3337,6 +3339,9 @@ export class Orchestrator {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    // Record the INV-90 selected design in the deterministic
+    // invalidation plan before any persistence write: gate-policy
+    // edits only schedule an unblock pass and never reset execution.
     this.lastInvalidationPlan = planInvalidation({
       action: 'scheduleOnly',
       targetId: task.id,

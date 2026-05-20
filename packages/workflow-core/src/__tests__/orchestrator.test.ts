@@ -6,6 +6,7 @@ import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } 
 import { computeWorkflowRollup } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
 import type { Logger, WorkResponse } from '@invoker/contracts';
+import { MUTATION_POLICIES } from '../invalidation-policy.js';
 
 // ── In-Memory Persistence Mock ──────────────────────────────
 
@@ -1920,14 +1921,40 @@ describe('Orchestrator', () => {
       orchestrator.setTaskAwaitingApproval(prereqMergeId);
 
       expect(orchestrator.getTask(leafId)!.status).toBe('pending');
+      const beforeGeneration = orchestrator.getTask(leafId)!.execution.generation ?? 0;
+
+      const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
+      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       const started = orchestrator.setTaskExternalGatePolicies(leafId, [
         { workflowId: prereqWfId, gatePolicy: 'review_ready' },
       ]);
 
+      const policy = MUTATION_POLICIES.externalGatePolicy;
+      expect(policy).toMatchObject({
+        action: 'scheduleOnly',
+        invalidatesExecutionSpec: false,
+        invalidateIfActive: false,
+      });
+      expect(orchestrator.getLastInvalidationPlan()).toMatchObject({
+        action: 'scheduleOnly',
+        scope: 'task',
+        mode: 'scheduleOnly',
+        affectedTaskIds: [leafId],
+        schedulerEnqueueCandidates: [{ taskId: leafId }],
+      });
       expect(orchestrator.getTask(leafId)!.config.externalDependencies?.[0]?.gatePolicy).toBe('review_ready');
       expect(started.map((t) => t.id)).toContain(leafId);
       expect(orchestrator.getTask(leafId)!.status).toBe('running');
+      expect(orchestrator.getTask(leafId)!.execution.generation ?? 0).toBe(beforeGeneration);
+      expect(cancelSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
+      expect(recreateSpy).not.toHaveBeenCalled();
+
+      cancelSpy.mockRestore();
+      retrySpy.mockRestore();
+      recreateSpy.mockRestore();
     });
 
     it('setTaskExternalGatePolicies applies targeted updates only', () => {

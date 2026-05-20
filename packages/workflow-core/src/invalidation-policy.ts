@@ -53,15 +53,15 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   mergeMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   fixContext:            { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   rebaseAndRetry:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateWorkflowFromFreshBase' as const },
-  // Step 15 (`docs/architecture/task-invalidation-roadmap.md`): the
-  // chart's Decision Table row "Change external gate policy" is the
-  // intentional non-invalidating outlier — it's a scheduling policy
-  // edit, not an execution-spec edit. Action is now the explicit
-  // `'scheduleOnly'` (was `'none'` in Step 1) so the lock-in is
-  // encoded in the policy table itself: `applyInvalidation` skips
-  // `cancelInFlight` for this action and routes to a `scheduleOnly`
-  // dep that triggers an unblock-pass (e.g.
-  // `Orchestrator.autoStartExternallyUnblockedReadyTasks`). Per chart:
+  // INV-90 (`docs/context/inv-90/experiment-brief.md`) selected the
+  // chart's Decision Table row "Change external gate policy" as the
+  // intentional non-invalidating outlier: it's a scheduling policy
+  // edit, not an execution-spec edit. Action is the explicit
+  // `'scheduleOnly'` so the selected verdict is encoded in the policy
+  // table itself: `applyInvalidation` skips `cancelInFlight` for this
+  // action and routes to a `scheduleOnly` dep that triggers an
+  // unblock-pass (e.g. `Orchestrator.autoStartExternallyUnblockedReadyTasks`).
+  // Per the experiment thresholds:
   //   - `invalidatesExecutionSpec: false` (no ABI change)
   //   - `invalidateIfActive: false`       (in-flight work survives)
   externalGatePolicy:    { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'scheduleOnly' as const },
