@@ -1373,6 +1373,9 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(capturedContext!.signal.aborted).toBe(false);
     expect(capturedContext!.workflowId).toBe('wf-1');
     expect(capturedContext!.intentId).toBe(1);
+    expect(capturedContext!.channel).toBe('invoker:fix-with-agent');
+    expect(capturedContext!.args).toEqual(['wf-1/blocker-task', null]);
+    expect(capturedContext!.priority).toBe('normal');
 
     const recreateTask = coordinator.enqueue<void>(
       'wf-1',
@@ -1545,7 +1548,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     void olderRunning.catch(() => {});
     await waitFor(() => capturedContext !== undefined);
 
-    coordinator.enqueue<void>(
+    const deleteAll = coordinator.enqueue<void>(
       'wf-1',
       'high',
       'invoker:delete-all-workflows-bulk',
@@ -1553,6 +1556,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     );
 
     await waitFor(() => capturedContext!.signal.aborted);
+    await deleteAll;
     const reason = capturedContext!.signal.reason;
     expect(reason).toBeInstanceOf(Error);
     expect((reason as Error).name).toBe('WorkflowMutationInvalidatedError');

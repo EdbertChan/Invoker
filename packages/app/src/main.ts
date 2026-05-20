@@ -3190,6 +3190,7 @@ function createEmbeddedTerminalBackendFromConfig(
           preemptWorkflowExecution,
           logger,
           context: 'ipc.cancel-workflow',
+          signal: activeMutationContext?.signal,
           mutationTiming: activeMutationContext?.mutationTiming,
         });
         await finalizeMutationWithGlobalTopup({
@@ -3276,6 +3277,7 @@ function createEmbeddedTerminalBackendFromConfig(
           preemptWorkflowExecution,
           logger,
           context: 'ipc.recreate-workflow',
+          signal: activeMutationContext?.signal,
           mutationTiming: activeMutationContext?.mutationTiming,
         });
         const started = activeMutationContext?.mutationTiming
@@ -3364,6 +3366,7 @@ function createEmbeddedTerminalBackendFromConfig(
           preemptWorkflowExecution,
           logger,
           context: 'ipc.retry-workflow',
+          signal: activeMutationContext?.signal,
           mutationTiming: activeMutationContext?.mutationTiming,
         });
         const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
@@ -3412,6 +3415,7 @@ function createEmbeddedTerminalBackendFromConfig(
           preemptWorkflowExecution,
           logger,
           context: 'ipc.rebase-retry',
+          signal: activeMutationContext?.signal,
           mutationTiming: activeMutationContext?.mutationTiming,
         });
         const started = await rebaseRetry(target, {
@@ -3454,6 +3458,7 @@ function createEmbeddedTerminalBackendFromConfig(
           preemptWorkflowExecution,
           logger,
           context: 'ipc.rebase-recreate',
+          signal: activeMutationContext?.signal,
           mutationTiming: activeMutationContext?.mutationTiming,
         });
         const started = await rebaseRecreate(target, {
