@@ -843,6 +843,9 @@ export class Orchestrator {
   /**
    * Write field changes to the DB, then update the in-memory cache
    * to match. Returns the updated task state.
+   *
+   * INV-130 relies on this as the shared DB-first mutation path behind
+   * facade-driven API writes.
    */
   private writeAndSync(
     taskId: string,

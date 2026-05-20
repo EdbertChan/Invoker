@@ -160,6 +160,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       const method = req.method ?? 'GET';
       const { path, query } = parseRoute(req.url ?? '/');
 
+      // INV-130: keep this layer as a route adapter. Write routes below call
+      // WorkflowMutationFacade so dispatch/top-up semantics stay centralized.
+
       // GET /api/health
       if (method === 'GET' && path === '/api/health') {
         json(res, 200, { ok: true, uptime: process.uptime() });
