@@ -100,6 +100,8 @@ function createMocks() {
       editTaskType: vi.fn(() => [makeTask()]),
       editTaskAgent: vi.fn(() => [makeTask()]),
       setTaskExternalGatePolicies: vi.fn(() => [makeTask()]),
+      selectExperiment: vi.fn(() => [makeTask()]),
+      selectExperiments: vi.fn(() => [makeTask()]),
       cancelTask: vi.fn(() => ({ cancelled: ['task-1'], runningCancelled: ['task-1'] })),
       forkWorkflow: vi.fn((workflowId: string) => ({
         sourceWorkflowId: workflowId,
@@ -134,6 +136,7 @@ function createMocks() {
       resolveConflict: vi.fn().mockResolvedValue(undefined),
       fixWithAgent: vi.fn().mockResolvedValue(undefined),
       commitApprovedFix: vi.fn().mockResolvedValue(undefined),
+      mergeExperimentBranches: vi.fn().mockResolvedValue({ branch: 'combined-branch', commit: 'combined-commit' }),
     },
     killRunningTask: vi.fn().mockResolvedValue(undefined),
     deleteWorkflow: vi.fn().mockResolvedValue(undefined),
@@ -202,6 +205,8 @@ beforeEach(() => {
   mocks.orchestrator.editTaskPrompt.mockReturnValue([makeTask()]);
   mocks.orchestrator.editTaskType.mockReturnValue([makeTask()]);
   mocks.orchestrator.setTaskExternalGatePolicies.mockReturnValue([makeTask()]);
+  mocks.orchestrator.selectExperiment.mockReturnValue([makeTask()]);
+  mocks.orchestrator.selectExperiments.mockReturnValue([makeTask()]);
   mocks.orchestrator.cancelTask.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
   mocks.orchestrator.cancelWorkflow.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
   mocks.orchestrator.getQueueStatus.mockReturnValue({
@@ -220,6 +225,7 @@ beforeEach(() => {
   mocks.taskExecutor.resolveConflict.mockResolvedValue(undefined);
   mocks.taskExecutor.fixWithAgent.mockResolvedValue(undefined);
   mocks.taskExecutor.commitApprovedFix.mockResolvedValue(undefined);
+  mocks.taskExecutor.mergeExperimentBranches.mockResolvedValue({ branch: 'combined-branch', commit: 'combined-commit' });
 });
 
 // ── Read endpoints ───────────────────────────────────────────
@@ -719,6 +725,53 @@ describe('POST /api/tasks/:id/gate-policy', () => {
     expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
     expect(mocks.orchestrator.cancelTask).not.toHaveBeenCalled();
     expect(mocks.orchestrator.cancelWorkflow).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/tasks/:id/select-experiment', () => {
+  it('selects one experiment via facade', async () => {
+    const res = await request(port, 'POST', '/api/tasks/recon-1/select-experiment', {
+      experimentId: 'exp-v1',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('experiment_selected');
+    expect(res.body.experimentId).toBe('exp-v1');
+    expect(mocks.orchestrator.selectExperiment).toHaveBeenCalledWith('recon-1', 'exp-v1');
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
+    expect(mocks.taskExecutor.mergeExperimentBranches).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when experimentId is missing', async () => {
+    const res = await request(port, 'POST', '/api/tasks/recon-1/select-experiment', {});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Missing "experimentId"');
+  });
+});
+
+describe('POST /api/tasks/:id/select-experiments', () => {
+  it('selects multiple experiments via facade and merge runner', async () => {
+    const res = await request(port, 'POST', '/api/tasks/recon-1/select-experiments', {
+      experimentIds: ['exp-v1', 'exp-v2'],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('experiments_selected');
+    expect(res.body.experimentIds).toEqual(['exp-v1', 'exp-v2']);
+    expect(mocks.taskExecutor.mergeExperimentBranches).toHaveBeenCalledWith('recon-1', ['exp-v1', 'exp-v2']);
+    expect(mocks.orchestrator.selectExperiments).toHaveBeenCalledWith(
+      'recon-1',
+      ['exp-v1', 'exp-v2'],
+      'combined-branch',
+      'combined-commit',
+    );
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenCalled();
+  });
+
+  it('returns 400 when experimentIds are missing', async () => {
+    const res = await request(port, 'POST', '/api/tasks/recon-1/select-experiments', {});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Missing non-empty "experimentIds"');
   });
 });
 

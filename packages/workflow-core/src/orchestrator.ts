@@ -2118,7 +2118,14 @@ export class Orchestrator {
     return started;
   }
 
-    selectExperiments(
+  /**
+   * Multi-select experiment reconciliation.
+   *
+   * INV-130 keeps this as the domain mutation owner: API callers delegate
+   * through WorkflowMutationFacade, while this method refreshes DB state,
+   * persists the selected experiment set, and unblocks downstream work.
+   */
+  selectExperiments(
     taskId: string,
     experimentIds: string[],
     combinedBranch?: string,

@@ -29,6 +29,8 @@
  *   POST   /api/tasks/:id/edit-type    body: { runnerKind, poolMemberId? }
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
+ *   POST   /api/tasks/:id/select-experiment   body: { experimentId }
+ *   POST   /api/tasks/:id/select-experiments  body: { experimentIds: string[] }
  *   POST   /api/workflows/:id/detach  body: { upstreamWorkflowId }
  *   POST   /api/workflows/:id/restart
  *   POST   /api/workflows/:id/rebase-retry
@@ -563,6 +565,57 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
           }
           const result = await mutations.setTaskExternalGatePolicies(taskId, updates);
           json(res, 200, { ok: true, taskId, action: 'gate_policy_updated', tasksStarted: result.runnable.length });
+        } catch (err) {
+          json(res, httpStatusForError(err), { error: errorMessage(err) });
+        }
+        return;
+      }
+
+      // POST /api/tasks/:id/select-experiment
+      const selectExperimentMatch = path.match(/^\/api\/tasks\/([^/]+)\/select-experiment$/);
+      if (method === 'POST' && selectExperimentMatch) {
+        const taskId = decodeURIComponent(selectExperimentMatch[1]);
+        try {
+          const body = await readBody(req);
+          const { experimentId } = JSON.parse(body);
+          if (!experimentId) {
+            json(res, 400, { error: 'Missing "experimentId" in request body' });
+            return;
+          }
+          const result = await mutations.selectExperiment(taskId, String(experimentId));
+          json(res, 200, {
+            ok: true,
+            taskId,
+            action: 'experiment_selected',
+            experimentId: String(experimentId),
+            tasksStarted: result.runnable.length,
+          });
+        } catch (err) {
+          json(res, httpStatusForError(err), { error: errorMessage(err) });
+        }
+        return;
+      }
+
+      // POST /api/tasks/:id/select-experiments
+      const selectExperimentsMatch = path.match(/^\/api\/tasks\/([^/]+)\/select-experiments$/);
+      if (method === 'POST' && selectExperimentsMatch) {
+        const taskId = decodeURIComponent(selectExperimentsMatch[1]);
+        try {
+          const body = await readBody(req);
+          const { experimentIds } = JSON.parse(body);
+          if (!Array.isArray(experimentIds) || experimentIds.length === 0) {
+            json(res, 400, { error: 'Missing non-empty "experimentIds" array in request body' });
+            return;
+          }
+          const ids = experimentIds.map(String);
+          const result = await mutations.selectExperiments(taskId, ids);
+          json(res, 200, {
+            ok: true,
+            taskId,
+            action: 'experiments_selected',
+            experimentIds: ids,
+            tasksStarted: result.runnable.length,
+          });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }
