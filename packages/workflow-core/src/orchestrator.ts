@@ -740,6 +740,9 @@ export class Orchestrator {
   private activeWorkflowIds = new Set<string>();
   private deferredTaskIds = new Set<string>();
   private beforeApproveHook?: (task: TaskState) => Promise<void>;
+  // INV-90 experiment-selected design records the last centralized
+  // invalidation decision so orchestrator paths can prove they follow
+  // the policy-router verdicts instead of drifting into inline rules.
   private lastInvalidationPlan?: InvalidationPlan;
 
   /**

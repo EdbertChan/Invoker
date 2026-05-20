@@ -42,6 +42,10 @@ export type MutationKey =
   | 'fixReject'
   | 'topology';
 
+// INV-90 consumes `docs/context/inv-90/experiment-brief.md` by keeping
+// the selected centralized router as the only reviewable policy surface.
+// The rejected inline-editor alternative stays out of the public mutation
+// methods; those methods delegate to the lifecycle actions encoded here.
 export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>> = Object.freeze({
   command:               { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   prompt:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },

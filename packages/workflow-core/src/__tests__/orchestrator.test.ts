@@ -6481,6 +6481,10 @@ describe('Orchestrator', () => {
 
   // ── Step 12: workflow-scope paths (retryWorkflow / recreateWorkflow / recreateWorkflowFromFreshBase) ────
   //
+  // INV-90's experiment brief selected these deterministic assertions
+  // as the proof that workflow-scope implementation consumes the
+  // centralized policy-router design rather than inline editor logic.
+  //
   // Pins the chart's three-way distinction
   // (`docs/architecture/task-invalidation-chart.md` rows
   // "Retry workflow", "Recreate workflow", "Rebase and retry") +
