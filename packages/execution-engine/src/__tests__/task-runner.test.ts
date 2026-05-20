@@ -112,7 +112,7 @@ afterEach(() => {
 });
 
 describe('TaskRunner', () => {
-  it('sends attemptId and executionGeneration in work requests and preserves them in responses', async () => {
+  it('sends attemptId and executionGeneration in work requests and normalizes them in responses', async () => {
     const handleWorkerResponse = vi.fn();
     let seenRequest: any;
     let completeCallback: ((response: WorkResponse) => void) | undefined;
@@ -166,11 +166,9 @@ describe('TaskRunner', () => {
     completeCallback?.({
       requestId: seenRequest.requestId,
       actionId: task.id,
-      attemptId: seenRequest.attemptId,
-      executionGeneration: seenRequest.executionGeneration,
       status: 'completed',
       outputs: { exitCode: 0 },
-    });
+    } as WorkResponse);
     await done;
 
     expect(handleWorkerResponse).toHaveBeenCalledWith(
