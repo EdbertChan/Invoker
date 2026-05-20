@@ -2896,6 +2896,93 @@ describe('TaskRunner', () => {
       );
     });
 
+    it('does not attach stale SSH startup failure metadata or response after selected attempt advances', async () => {
+      let rejectStart!: (reason?: unknown) => void;
+      const startPromise = new Promise<never>((_resolve, reject) => {
+        rejectStart = reject;
+      });
+      const staleFailure = Object.assign(new Error('SSH setup failed after recreate'), {
+        workspacePath: '~/.invoker/worktrees/ci/task-stale-a1',
+        branch: 'experiment/task-stale-a1',
+        agentSessionId: 'session-stale-a1',
+      });
+      const failingExecutor = {
+        type: 'ssh',
+        start: vi.fn(() => startPromise),
+        onComplete: vi.fn(),
+        onOutput: vi.fn(),
+        onHeartbeat: vi.fn(),
+        kill: vi.fn(),
+        destroyAll: vi.fn(),
+      };
+      const attempt1 = makeTask({
+        id: 'task-stale-startup',
+        status: 'running',
+        config: { command: 'echo test', runnerKind: 'ssh' },
+        execution: { selectedAttemptId: 'attempt-1', generation: 0 },
+      });
+      const attempt2 = makeTask({
+        id: 'task-stale-startup',
+        status: 'pending',
+        config: { command: 'echo test', runnerKind: 'ssh' },
+        execution: { selectedAttemptId: 'attempt-2', generation: 1 },
+      });
+      let currentTask = attempt1;
+      const updateTask = vi.fn();
+      const appendTaskOutput = vi.fn();
+      const logEvent = vi.fn();
+      const handleWorkerResponse = vi.fn();
+      const onComplete = vi.fn();
+
+      const runner = new TaskRunner({
+        orchestrator: {
+          getTask: () => currentTask,
+          getAllTasks: () => [currentTask],
+          handleWorkerResponse,
+        } as any,
+        persistence: { updateTask, appendTaskOutput, logEvent } as any,
+        executorRegistry: {
+          getDefault: () => failingExecutor,
+          get: () => failingExecutor,
+          getAll: () => [failingExecutor],
+        } as any,
+        cwd: '/tmp',
+        callbacks: { onComplete },
+      });
+
+      const done = runner.executeTask(attempt1);
+      await vi.waitFor(() => expect(failingExecutor.start).toHaveBeenCalled());
+      currentTask = attempt2;
+      rejectStart(staleFailure);
+      await done;
+
+      expect(updateTask).not.toHaveBeenCalledWith(
+        'task-stale-startup',
+        expect.objectContaining({
+          execution: expect.objectContaining({
+            workspacePath: '~/.invoker/worktrees/ci/task-stale-a1',
+            branch: 'experiment/task-stale-a1',
+          }),
+        }),
+      );
+      expect(handleWorkerResponse).not.toHaveBeenCalled();
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(appendTaskOutput).toHaveBeenCalledWith(
+        'task-stale-startup',
+        expect.stringContaining('Executor startup failed (ssh): SSH setup failed after recreate'),
+      );
+      expect(logEvent).toHaveBeenCalledWith('task-stale-startup', 'task.executor.startup-failure-stale', expect.objectContaining({
+        attemptId: 'attempt-1',
+        currentAttemptId: 'attempt-2',
+        currentGeneration: 1,
+        metadata: expect.objectContaining({
+          workspacePath: '~/.invoker/worktrees/ci/task-stale-a1',
+          branch: 'experiment/task-stale-a1',
+          agentSessionId: 'session-stale-a1',
+        }),
+      }));
+    });
+
     it('persists pool-routed SSH target on error path when executor.start throws', async () => {
       const failingExecutor = {
         type: 'ssh',

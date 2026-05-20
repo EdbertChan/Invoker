@@ -765,6 +765,7 @@ export class TaskRunner {
         break;
       } catch (err) {
         const meta = err as StartupFailureMetadata;
+        const launchIsStale = this.isLaunchStale(task.id, attemptId, startGeneration);
         if (
           executor.type === 'ssh'
           && poolSelectionForStart?.member.type === 'ssh'
@@ -811,7 +812,7 @@ export class TaskRunner {
         // would corrupt the live attempt's state.
         if (
           (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-          && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
+          && !launchIsStale
         ) {
           const execution: Record<string, string> = {};
           if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
@@ -831,6 +832,22 @@ export class TaskRunner {
               ...(selectedSshTargetId ? { poolMemberId: selectedSshTargetId } : {}),
             },
             execution: execution as any,
+          });
+        } else if (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId) {
+          const current = this.orchestrator.getTask(task.id);
+          this.persistence.logEvent?.(task.id, 'task.executor.startup-failure-stale', {
+            runnerKind: executor.type,
+            attemptId,
+            startGeneration,
+            currentAttemptId: current?.execution.selectedAttemptId,
+            currentGeneration: current?.execution.generation ?? 0,
+            error: err instanceof Error ? err.message : String(err),
+            metadata: {
+              workspacePath: meta.workspacePath,
+              branch: meta.branch,
+              agentSessionId: meta.agentSessionId,
+              containerId: meta.containerId,
+            },
           });
         }
         this.pendingPoolSelections.delete(task.id);
