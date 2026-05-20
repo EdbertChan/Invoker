@@ -22,6 +22,9 @@ export type WorkflowMutationContext = {
   signal: AbortSignal;
   intentId: number;
   workflowId: string;
+  channel: string;
+  args: unknown[];
+  priority: WorkflowMutationPriority;
   mutationTiming?: WorkflowMutationTiming;
 };
 
@@ -237,6 +240,9 @@ export class PersistedWorkflowMutationCoordinator {
         signal: invalidation.abortController.signal,
         intentId: intent.id,
         workflowId,
+        channel: intent.channel,
+        args: intent.args,
+        priority: intent.priority,
         mutationTiming: timing,
       };
       const dispatchPromise = timing.span(

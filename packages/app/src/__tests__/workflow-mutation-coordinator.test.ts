@@ -56,5 +56,27 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('passes an AbortSignal to running work and aborts it on request', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-cancel';
+    let observedWorkflowId = '';
+    let observedPriority = '';
+    const aborted = deferred();
+
+    const running = c.enqueue(wf, 'normal', async (context) => {
+      observedWorkflowId = context.workflowId;
+      observedPriority = context.priority;
+      context.signal.addEventListener('abort', () => aborted.resolve(), { once: true });
+      await aborted.promise;
+    });
+
+    await Promise.resolve();
+    expect(c.abortRunning(wf, new Error('preempted'))).toBe(true);
+    await running;
+
+    expect(observedWorkflowId).toBe(wf);
+    expect(observedPriority).toBe('normal');
+    expect(c.abortRunning(wf)).toBe(false);
+  });
+});
