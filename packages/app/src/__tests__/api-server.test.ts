@@ -150,6 +150,31 @@ function buildFacade(m: typeof mocks) {
   });
 }
 
+function createFacadeSpies() {
+  return {
+    cancelTask: vi.fn().mockResolvedValue({
+      cancelled: ['task-1'],
+      runningCancelled: ['task-1'],
+      topup: [],
+    }),
+    retryTask: vi.fn().mockResolvedValue({ started: [], runnable: [], topup: [] }),
+    recreateTask: vi.fn().mockResolvedValue({ started: [], runnable: [], topup: [] }),
+    approveTask: vi.fn().mockResolvedValue({
+      started: [],
+      runnable: [],
+      topup: [],
+      fixedTask: false,
+    }),
+    rejectTask: vi.fn(),
+    editTaskPrompt: vi.fn().mockResolvedValue({ started: [], runnable: [], topup: [] }),
+    setTaskExternalGatePolicies: vi.fn().mockResolvedValue({
+      started: [],
+      runnable: [],
+      topup: [],
+    }),
+  };
+}
+
 beforeAll(async () => {
   mocks = createMocks();
   // Use port 0 for ephemeral port assignment
@@ -318,6 +343,108 @@ describe('GET /api/tasks/:id/output', () => {
 });
 
 // ── Write endpoints ──────────────────────────────────────────
+
+describe('INV-130 write route boundary', () => {
+  const cases = [
+    {
+      name: 'task cancel',
+      path: '/api/tasks/task-1/cancel',
+      facadeMethod: 'cancelTask',
+      body: undefined,
+      args: ['task-1'],
+    },
+    {
+      name: 'task retry',
+      path: '/api/tasks/task-1/retry',
+      facadeMethod: 'retryTask',
+      body: undefined,
+      args: ['task-1'],
+    },
+    {
+      name: 'task recreate',
+      path: '/api/tasks/task-1/recreate',
+      facadeMethod: 'recreateTask',
+      body: undefined,
+      args: ['task-1'],
+    },
+    {
+      name: 'task approve',
+      path: '/api/tasks/task-1/approve',
+      facadeMethod: 'approveTask',
+      body: undefined,
+      args: ['task-1'],
+    },
+    {
+      name: 'task reject',
+      path: '/api/tasks/task-1/reject',
+      facadeMethod: 'rejectTask',
+      body: { reason: 'not ready' },
+      args: ['task-1', 'not ready'],
+    },
+    {
+      name: 'edit prompt',
+      path: '/api/tasks/task-1/edit-prompt',
+      facadeMethod: 'editTaskPrompt',
+      body: { prompt: 'revise prompt' },
+      args: ['task-1', 'revise prompt'],
+    },
+    {
+      name: 'gate policy',
+      path: '/api/tasks/task-1/gate-policy',
+      facadeMethod: 'setTaskExternalGatePolicies',
+      body: {
+        updates: [{ workflowId: 'wf-upstream', taskId: '__merge__', gatePolicy: 'review_ready' }],
+      },
+      args: ['task-1', [{ workflowId: 'wf-upstream', taskId: '__merge__', gatePolicy: 'review_ready' }]],
+    },
+  ] as const;
+
+  it.each(cases)('$name delegates to WorkflowMutationFacade', async ({ path, facadeMethod, body, args }) => {
+    const localMocks = createMocks();
+    Object.assign(localMocks.orchestrator, {
+      cancelTask: vi.fn(),
+      retryTask: vi.fn(),
+      recreateTask: vi.fn(),
+      approve: vi.fn(),
+      reject: vi.fn(),
+      editTaskPrompt: vi.fn(),
+      setTaskExternalGatePolicies: vi.fn(),
+      startExecution: vi.fn(),
+    });
+    const mutationSpies = createFacadeSpies();
+    const boundaryApi = startApiServer({
+      orchestrator: localMocks.orchestrator as any,
+      persistence: localMocks.persistence as any,
+      executorRegistry: localMocks.executorRegistry as any,
+      mutations: mutationSpies as any,
+      deleteWorkflow: localMocks.deleteWorkflow,
+      detachWorkflow: localMocks.detachWorkflow,
+    });
+    await new Promise<void>((resolve) => {
+      if (boundaryApi.server.listening) resolve();
+      else boundaryApi.server.on('listening', resolve);
+    });
+    const addr = boundaryApi.server.address();
+    const boundaryPort = typeof addr === 'object' && addr ? addr.port : boundaryApi.port;
+
+    try {
+      const res = await request(boundaryPort, 'POST', path, body);
+
+      expect(res.status).toBe(200);
+      expect(mutationSpies[facadeMethod]).toHaveBeenCalledWith(...args);
+      expect(localMocks.orchestrator.cancelTask).not.toHaveBeenCalled();
+      expect(localMocks.orchestrator.retryTask).not.toHaveBeenCalled();
+      expect(localMocks.orchestrator.recreateTask).not.toHaveBeenCalled();
+      expect(localMocks.orchestrator.approve).not.toHaveBeenCalled();
+      expect(localMocks.orchestrator.reject).not.toHaveBeenCalled();
+      expect(localMocks.orchestrator.editTaskPrompt).not.toHaveBeenCalled();
+      expect(localMocks.orchestrator.setTaskExternalGatePolicies).not.toHaveBeenCalled();
+      expect(localMocks.orchestrator.startExecution).not.toHaveBeenCalled();
+    } finally {
+      await boundaryApi.close();
+    }
+  });
+});
 
 describe('POST /api/tasks/:id/cancel', () => {
   it('cancels task via facade', async () => {

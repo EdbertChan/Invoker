@@ -815,6 +815,8 @@ export class Orchestrator {
   }
 
   // ── DB Sync Helpers ────────────────────────────────────────
+  // INV-130 depends on these helpers as the public mutation contract:
+  // refresh from persistence, write through the repository, then publish.
 
   /**
    * Refresh the in-memory graph from the database.

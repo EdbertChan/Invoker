@@ -4,8 +4,8 @@
  * Binds to 127.0.0.1 only (no external access). Default port 4100,
  * configurable via INVOKER_API_PORT env var.
  *
- * All write endpoints delegate to a WorkflowMutationFacade instance
- * which encapsulates the mutation → dispatch → topup lifecycle.
+ * INV-130 selected this boundary explicitly: write endpoints delegate to a
+ * WorkflowMutationFacade instance, which encapsulates mutation, dispatch, and topup.
  *
  * Read endpoints:
  *   GET  /api/health
@@ -58,7 +58,7 @@ export interface ApiServerDeps {
   orchestrator: Orchestrator;
   persistence: SQLiteAdapter;
   executorRegistry: ExecutorRegistry;
-  /** All write endpoints delegate to the facade for mutation + dispatch + topup. */
+  /** INV-130: write endpoints delegate to the facade for mutation + dispatch + topup. */
   mutations: WorkflowMutationFacade;
   queueWorkflowMutation?: (
     workflowId: string,
