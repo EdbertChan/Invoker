@@ -167,11 +167,9 @@ describe('TaskRunner', () => {
     completeCallback?.({
       requestId: seenRequest.requestId,
       actionId: task.id,
-      attemptId: seenRequest.attemptId,
-      executionGeneration: seenRequest.executionGeneration,
       status: 'completed',
       outputs: { exitCode: 0 },
-    });
+    } as WorkResponse);
     await done;
 
     expect(handleWorkerResponse).toHaveBeenCalledWith(
@@ -189,7 +187,7 @@ describe('TaskRunner', () => {
       id: 'docker-no-image',
       status: 'running',
       config: { command: 'echo never', runnerKind: 'docker' },
-      execution: { selectedAttemptId: 'docker-no-image-a1' },
+      execution: { selectedAttemptId: 'docker-no-image-a1', generation: 4 },
     });
     const newlyReady = makeTask({
       id: 'docker-concurrent-b',
@@ -236,6 +234,8 @@ describe('TaskRunner', () => {
     expect(handleWorkerResponse).toHaveBeenCalledWith(
       expect.objectContaining({
         actionId: 'docker-no-image',
+        attemptId: 'docker-no-image-a1',
+        executionGeneration: 4,
         status: 'failed',
       }),
     );
