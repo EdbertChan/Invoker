@@ -53,17 +53,13 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   mergeMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   fixContext:            { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   rebaseAndRetry:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateWorkflowFromFreshBase' as const },
-  // Step 15 (`docs/architecture/task-invalidation-roadmap.md`): the
-  // chart's Decision Table row "Change external gate policy" is the
-  // intentional non-invalidating outlier — it's a scheduling policy
-  // edit, not an execution-spec edit. Action is now the explicit
-  // `'scheduleOnly'` (was `'none'` in Step 1) so the lock-in is
-  // encoded in the policy table itself: `applyInvalidation` skips
-  // `cancelInFlight` for this action and routes to a `scheduleOnly`
-  // dep that triggers an unblock-pass (e.g.
-  // `Orchestrator.autoStartExternallyUnblockedReadyTasks`). Per chart:
-  //   - `invalidatesExecutionSpec: false` (no ABI change)
-  //   - `invalidateIfActive: false`       (in-flight work survives)
+  // INV-90 (`docs/context/inv-90/experiment-brief.md`) selected the
+  // scheduling-only route for external gate policy edits: the gate
+  // controls when an externally dependent task may start, not its
+  // command/prompt/agent/runner/topology execution ABI. The explicit
+  // `'scheduleOnly'` action lets `applyInvalidation` skip
+  // `cancelInFlight` and route to a scheduler unblock pass without
+  // retrying, recreating, or forking task lineage.
   externalGatePolicy:    { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'scheduleOnly' as const },
   fixApprove:            { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'fixApprove' as const },
   fixReject:             { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'fixReject' as const },
@@ -99,10 +95,9 @@ export interface InvalidationDeps {
    */
   workflowFork?: (workflowId: string) => TaskState[] | Promise<TaskState[]>;
   /**
-   * Step 15 (`docs/architecture/task-invalidation-roadmap.md`):
-   * scheduling-only unblock pass for the chart's "Change external
-   * gate policy" row. Production callers wire this to a scheduler
-   * entrypoint (e.g.
+   * INV-90 (`docs/context/inv-90/experiment-brief.md`):
+   * scheduling-only unblock pass for external gate policy edits.
+   * Production callers wire this to a scheduler entrypoint (e.g.
    * `Orchestrator.autoStartExternallyUnblockedReadyTasks`) via
    * `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`).
    * Unlike retry/recreate deps, this is invoked WITHOUT a
@@ -147,7 +142,7 @@ export async function applyInvalidation(
       );
     }
     if (!deps.scheduleOnly) {
-      // Step 15: production callers wire this dep via
+      // INV-90: production callers wire this dep via
       // `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`)
       // to `Orchestrator.autoStartExternallyUnblockedReadyTasks`. This
       // branch is reachable only from focused unit tests that build a
@@ -159,9 +154,8 @@ export async function applyInvalidation(
           'deps.scheduleOnly to use this action.',
       );
     }
-    // Per chart's "Change external gate policy" row: scheduling
-    // edits do NOT cancel active work and do NOT bump generation.
-    // We deliberately skip `deps.cancelInFlight` here.
+    // INV-90 selected schedule-only semantics: scheduling edits do not
+    // cancel active work and do not bump generation.
     return await deps.scheduleOnly(id);
   }
 

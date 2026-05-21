@@ -3297,10 +3297,10 @@ export class Orchestrator {
    * Update gate policy on one or more external dependencies for a task, then
    * immediately re-evaluate ready tasks that were blocked by external deps.
    *
-   * Step 15 lock-in (`docs/architecture/task-invalidation-roadmap.md`,
-   * chart row "Change external gate policy"): this is the engine's
-   * ONLY intentionally non-invalidating execution-spec-adjacent
-   * mutation. Per `MUTATION_POLICIES.externalGatePolicy`
+   * INV-90 lock-in (`docs/context/inv-90/experiment-brief.md`): this
+   * is the engine's intentionally non-invalidating
+   * execution-spec-adjacent mutation for external gate policies. Per
+   * `MUTATION_POLICIES.externalGatePolicy`
    * (`invalidatesExecutionSpec: false`, `invalidateIfActive: false`,
    * `action: 'scheduleOnly'`):
    *
@@ -4628,9 +4628,8 @@ export class Orchestrator {
   }
 
   /**
-   * Step 15 (`docs/architecture/task-invalidation-roadmap.md`,
-   * chart row "Change external gate policy"): public scheduler
-   * entrypoint that re-evaluates every task whose external
+   * INV-90 (`docs/context/inv-90/experiment-brief.md`): public
+   * scheduler entrypoint that re-evaluates every task whose external
    * dependency blocker has cleared and enqueues any newly-runnable
    * tasks. Called internally by `setTaskExternalGatePolicies`
    * AFTER the gate-policy field is persisted; also wired to the

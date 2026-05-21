@@ -1925,6 +1925,14 @@ describe('Orchestrator', () => {
         { workflowId: prereqWfId, gatePolicy: 'review_ready' },
       ]);
 
+      expect(orchestrator.getLastInvalidationPlan()).toMatchObject({
+        action: 'scheduleOnly',
+        scope: 'task',
+        mode: 'scheduleOnly',
+        reason: 'externalGatePolicy',
+        affectedTaskIds: [leafId],
+        schedulerEnqueueCandidates: [{ taskId: leafId }],
+      });
       expect(orchestrator.getTask(leafId)!.config.externalDependencies?.[0]?.gatePolicy).toBe('review_ready');
       expect(started.map((t) => t.id)).toContain(leafId);
       expect(orchestrator.getTask(leafId)!.status).toBe('running');
