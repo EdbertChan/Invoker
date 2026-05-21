@@ -10,6 +10,11 @@
  *   2. validate / compute using read-only queries
  *   3. writeAndSync()   — persist changes to DB, update graph cache
  *   4. publish delta    — notify UI
+ *
+ * INV-130 relies on this boundary: API entrypoints should consume these
+ * public mutations through WorkflowMutationFacade, keeping dispatch/topup
+ * policy outside HTTP route handlers while this class remains the DB-first
+ * state mutation authority.
  */
 
 import { appendFileSync, mkdirSync } from 'node:fs';
