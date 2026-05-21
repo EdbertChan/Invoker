@@ -56,5 +56,18 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('provides a non-aborted run context during queued mutation execution', async () => {
+    const c = new WorkflowMutationCoordinator();
+    let observedWorkflowId = '';
+    let abortedDuringRun = true;
+
+    await c.enqueue('wf-context', 'normal', async (context) => {
+      observedWorkflowId = context.workflowId;
+      abortedDuringRun = context.signal.aborted;
+    });
+
+    expect(observedWorkflowId).toBe('wf-context');
+    expect(abortedDuringRun).toBe(false);
+  });
+});

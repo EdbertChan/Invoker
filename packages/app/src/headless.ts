@@ -1651,6 +1651,7 @@ async function headlessRebaseRetry(target: string, deps: HeadlessDeps): Promise<
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.rebase-retry',
+    signal: deps.signal,
     mutationTiming: deps.mutationTiming,
   });
 
@@ -1695,6 +1696,7 @@ async function headlessRebaseRecreate(workflowTarget: string, deps: HeadlessDeps
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.rebase-recreate',
+    signal: deps.signal,
     mutationTiming: deps.mutationTiming,
   });
 
@@ -1740,6 +1742,7 @@ async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps):
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.recreate-workflow',
+    signal: deps.signal,
     mutationTiming: deps.mutationTiming,
   });
   const started = deps.mutationTiming
@@ -1889,6 +1892,7 @@ async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDeps): Pr
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.retry-workflow',
+    signal: deps.signal,
     mutationTiming: deps.mutationTiming,
   });
   const envelope = makeEnvelope('retry-workflow', 'headless', 'workflow', { workflowId });
