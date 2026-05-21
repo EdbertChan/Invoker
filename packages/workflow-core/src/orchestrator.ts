@@ -1,6 +1,7 @@
 /**
  * Orchestrator — Single coordinator for all task state mutations.
  *
+ * INV-130 selected design: this remains the mutation consistency boundary.
  * ALL writes go through the persistence layer (DB) first. The in-memory
  * graph (via TaskStateMachine) is a read-only cache that is refreshed
  * from the DB. This ensures the DB is always the single source of truth.

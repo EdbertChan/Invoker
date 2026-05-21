@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
 import { startApiServer, type ApiServer } from '../api-server.js';
 import { WorkflowMutationFacade } from '../workflow-mutation-facade.js';
 import { OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
@@ -238,6 +239,84 @@ beforeEach(() => {
   mocks.taskExecutor.resolveConflict.mockResolvedValue(undefined);
   mocks.taskExecutor.fixWithAgent.mockResolvedValue(undefined);
   mocks.taskExecutor.commitApprovedFix.mockResolvedValue(undefined);
+});
+
+describe('INV-130 selected design source invariant', () => {
+  it('keeps HTTP writes at the facade boundary and orchestrator writes DB-first', () => {
+    const apiSource = readFileSync(new URL('../api-server.ts', import.meta.url), 'utf8');
+    const orchestratorSource = readFileSync(
+      new URL('../../../workflow-core/src/orchestrator.ts', import.meta.url),
+      'utf8',
+    );
+
+    expect(apiSource).toContain('INV-130 selected design');
+    expect(apiSource).toContain('mutations: WorkflowMutationFacade');
+    expect(apiSource).toContain('httpStatusForError');
+    expect(orchestratorSource).toContain('INV-130 selected design');
+    expect(orchestratorSource).toContain('refreshFromDb');
+    expect(orchestratorSource).toContain('writeAndSync');
+    expect(orchestratorSource).toContain('messageBus.publish(TASK_DELTA_CHANNEL');
+
+    const persistenceWriteIndex = orchestratorSource.indexOf('this.taskRepository.updateTask(id, changes)');
+    const cacheRestoreIndex = orchestratorSource.indexOf('this.stateMachine.restoreTask(updated)');
+    expect(persistenceWriteIndex).toBeGreaterThan(-1);
+    expect(cacheRestoreIndex).toBeGreaterThan(persistenceWriteIndex);
+
+    const requiredDelegations = [
+      'mutations.cancelTask',
+      'mutations.retryTask',
+      'mutations.recreateTask',
+      'mutations.resolveConflict',
+      'mutations.approveTask',
+      'mutations.rejectTask',
+      'mutations.recreateWorkflow',
+      'mutations.retryWorkflow',
+      'mutations.rebaseRetry',
+      'mutations.rebaseRecreate',
+      'mutations.forkWorkflow',
+      'mutations.cancelWorkflow',
+      'mutations.provideInput',
+      'mutations.editTaskCommand',
+      'mutations.editTaskPrompt',
+      'mutations.editTaskType',
+      'mutations.editTaskAgent',
+      'mutations.setTaskExternalGatePolicies',
+      'mutations.setTaskMetadata',
+      'mutations.setWorkflowMergeMode',
+      'mutations.setWorkflowMetadata',
+      'deleteWorkflow(workflowId)',
+      'detachWorkflow(workflowId, String(upstreamWorkflowId))',
+      'deps.queueWorkflowMutation',
+    ];
+
+    for (const delegation of requiredDelegations) {
+      expect(apiSource, delegation).toContain(delegation);
+    }
+
+    const forbiddenRouteLocalMutationCalls = [
+      'orchestrator.retryTask',
+      'orchestrator.recreateTask',
+      'orchestrator.approve',
+      'orchestrator.reject',
+      'orchestrator.provideInput',
+      'orchestrator.editTaskCommand',
+      'orchestrator.editTaskPrompt',
+      'orchestrator.editTaskType',
+      'orchestrator.editTaskAgent',
+      'orchestrator.setTaskExternalGatePolicies',
+      'orchestrator.cancelTask',
+      'orchestrator.cancelWorkflow',
+      'orchestrator.recreateWorkflow',
+      'orchestrator.retryWorkflow',
+      'persistence.updateTask',
+      'persistence.updateWorkflow',
+      'taskExecutor.executeTasks',
+    ];
+
+    for (const call of forbiddenRouteLocalMutationCalls) {
+      expect(apiSource, call).not.toContain(call);
+    }
+  });
 });
 
 // ── Read endpoints ───────────────────────────────────────────

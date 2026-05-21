@@ -4,8 +4,9 @@
  * Binds to 127.0.0.1 only (no external access). Default port 4100,
  * configurable via INVOKER_API_PORT env var.
  *
- * All write endpoints delegate to a WorkflowMutationFacade instance
- * which encapsulates the mutation → dispatch → topup lifecycle.
+ * INV-130 selected design: keep this file transport-only. Write endpoints
+ * delegate to WorkflowMutationFacade (or workflow-admin callbacks for delete
+ * and detach) so mutation semantics remain outside the HTTP route handlers.
  *
  * Read endpoints:
  *   GET  /api/health
