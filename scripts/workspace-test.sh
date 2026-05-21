@@ -6,10 +6,13 @@ cd "$ROOT"
 
 if [ -n "${INVOKER_WORKSPACE_TEST_CONCURRENCY:-}" ]; then
   CONCURRENCY="$INVOKER_WORKSPACE_TEST_CONCURRENCY"
+  CONCURRENCY_SOURCE="INVOKER_WORKSPACE_TEST_CONCURRENCY"
 elif [ -n "${CI:-}" ]; then
   CONCURRENCY=1
+  CONCURRENCY_SOURCE="CI"
 else
   CONCURRENCY=4
+  CONCURRENCY_SOURCE="local-default"
 fi
 
 if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || [ "$CONCURRENCY" -lt 1 ]; then
@@ -18,6 +21,7 @@ if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || [ "$CONCURRENCY" -lt 1 ]; then
 fi
 
 echo "==> Running package workspace tests (concurrency=$CONCURRENCY)"
+echo "==> Workspace concurrency source: $CONCURRENCY_SOURCE"
 pnpm -r --workspace-concurrency="$CONCURRENCY" test
 echo "==> Running required package builds"
 bash "$ROOT/scripts/required-builds.sh"
