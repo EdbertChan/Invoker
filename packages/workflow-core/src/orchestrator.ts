@@ -1163,13 +1163,7 @@ export class Orchestrator {
   }
 
   private countActivePersistedAttempts(now: number = Date.now()): number {
-    let count = 0;
-    for (const task of this.stateMachine.getAllTasks()) {
-      if (this.isTaskExecutionActive(task, this.getSelectedAttempt(task), now)) {
-        count += 1;
-      }
-    }
-    return count;
+    return this.getPersistedExecutionEntries(now).filter((entry) => entry.active).length;
   }
 
   private clearQueuedSchedulerEntries(taskId: string, attemptId?: string): void {
@@ -1181,12 +1175,33 @@ export class Orchestrator {
 
   getPersistedActiveTaskIds(now: number = Date.now()): Set<string> {
     const active = new Set<string>();
-    for (const task of this.stateMachine.getAllTasks()) {
-      if (this.isTaskExecutionActive(task, this.getSelectedAttempt(task), now)) {
-        active.add(task.id);
+    for (const entry of this.getPersistedExecutionEntries(now)) {
+      if (entry.active) {
+        active.add(entry.task.id);
       }
     }
     return active;
+  }
+
+  private getPersistedExecutionEntries(now: number = Date.now()): Array<{
+    task: TaskState;
+    attemptId?: string;
+    attempt?: Attempt;
+    active: boolean;
+  }> {
+    // INV-88: queue occupancy is derived from the DB-backed task plus
+    // selected-attempt snapshot. Scheduler running slots are delivery
+    // hints only, so stale in-memory slots cannot outrank persisted state.
+    return this.stateMachine.getAllTasks().map((task) => {
+      const attemptId = task.execution.selectedAttemptId;
+      const attempt = this.loadAttemptById(attemptId);
+      return {
+        task,
+        attemptId,
+        attempt,
+        active: this.isTaskExecutionActive(task, attempt, now),
+      };
+    });
   }
 
   private ensureCurrentPendingAttempt(task: TaskState): string {
@@ -4134,15 +4149,9 @@ export class Orchestrator {
     queued: Array<{ taskId: string; priority: number; description: string }>;
   } {
     this.refreshFromDb();
-    const tasks = this.stateMachine.getAllTasks();
     const now = Date.now();
-    const activeAttempts = tasks
-      .map((task) => {
-        const attemptId = task.execution.selectedAttemptId;
-        const attempt = this.loadAttemptById(attemptId);
-        return { task, attemptId, attempt };
-      })
-      .filter(({ task, attempt }) => this.isTaskExecutionActive(task, attempt, now));
+    const executionEntries = this.getPersistedExecutionEntries(now);
+    const activeAttempts = executionEntries.filter((entry) => entry.active);
     const queuedTasks = this.stateMachine
       .getReadyTasks()
       .filter((task) => task.status === 'pending')
