@@ -50,7 +50,12 @@ export interface ConflictResolverHost {
   execGitIn(args: string[], dir: string): Promise<string>;
   createMergeWorktree(ref: string, label: string, repoUrl?: string): Promise<string>;
   removeMergeWorktree(dir: string): Promise<void>;
-  spawnAgentFix(prompt: string, cwd: string, agentName?: string): Promise<{ stdout: string; sessionId: string }>;
+  spawnAgentFix(
+    prompt: string,
+    cwd: string,
+    agentName?: string,
+    signal?: AbortSignal,
+  ): Promise<{ stdout: string; sessionId: string }>;
   getRemoteTargetConfig?(targetId: string): RemoteTargetConfig | undefined;
 }
 
@@ -62,6 +67,19 @@ const MAX_INLINE_PROMPT_BYTES = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_INLINE_PROMPT_BYTES;
 })();
 const DEBUG_IO_TAIL_CHARS = 2000;
+
+function agentFixAbortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) {
+    return signal.reason;
+  }
+  return new Error(`Agent fix aborted: ${String(signal.reason ?? 'abort signal fired')}`);
+}
+
+function throwIfAgentFixAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw agentFixAbortError(signal);
+  }
+}
 
 function tailText(value: unknown, maxChars: number = DEBUG_IO_TAIL_CHARS): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -170,6 +188,7 @@ export async function resolveConflictImpl(
   taskId: string,
   savedError?: string,
   agentName?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'resolve-conflict-start',
@@ -275,7 +294,7 @@ export async function resolveConflictImpl(
         `5. Completing the merge with 'git commit --no-edit'`,
       ].join('\n');
 
-      await host.spawnAgentFix(prompt, cwd, agentName);
+      await host.spawnAgentFix(prompt, cwd, agentName, signal);
     }
 
     console.log(`[resolveConflict] Successfully resolved conflict for ${taskId}`);
@@ -466,7 +485,9 @@ export async function fixWithAgentImpl(
   agentName?: string,
   savedError?: string,
   fixContext?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAgentFixAborted(signal);
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'fix-with-agent-start',
     agent: agentName ?? 'claude',
@@ -521,7 +542,9 @@ export async function fixWithAgentImpl(
       target,
       agentName,
       host.agentRegistry,
+      signal,
     );
+    throwIfAgentFixAborted(signal);
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${remoteAgentBin} (remote)] Output:\n${output}`);
     }
@@ -569,7 +592,8 @@ export async function fixWithAgentImpl(
       workspacePath: cwd,
       agent: agentLabel,
     });
-    const { stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName);
+    const { stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName, signal);
+    throwIfAgentFixAborted(signal);
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${agentLabel}] Output:\n${output}`);
     }
@@ -627,7 +651,9 @@ export function spawnRemoteAgentFixImpl(
   target: RemoteTargetConfig,
   agentName?: string,
   agentRegistry?: AgentRegistry,
+  signal?: AbortSignal,
 ): Promise<{ stdout: string; sessionId: string }> {
+  throwIfAgentFixAborted(signal);
   const promptTransport = materializeRemotePrompt(prompt);
   const { shellCommand: agentCmd, sessionId } = buildRemoteAgentCommand(
     promptTransport.effectivePrompt,
@@ -670,6 +696,7 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
     const child = spawn('ssh', sshArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
+      signal,
     });
     child.stdin?.write(script);
     child.stdin?.end();
@@ -679,6 +706,11 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
     child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
     child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
     child.on('close', (code) => {
+      if (signal?.aborted) {
+        promptTransport.cleanup();
+        reject(agentFixAbortError(signal));
+        return;
+      }
       // Replace local UUID with real backend session/thread ID for resume
       const driver = agentRegistry?.getSessionDriver(agentName ?? 'claude');
       const realId = driver?.extractSessionId?.(stdout);
@@ -689,7 +721,10 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
       if (code === 0) resolve({ stdout, sessionId: effectiveSessionId });
       else reject(createSshRemoteScriptError(code, stdout, stderr, 'remote_agent_fix'));
     });
-    child.on('error', (err) => reject(err));
+    child.on('error', (err) => {
+      promptTransport.cleanup();
+      reject(signal?.aborted ? agentFixAbortError(signal) : err);
+    });
   });
 }
 
@@ -704,7 +739,9 @@ export function spawnAgentFixViaRegistry(
   cwd: string,
   agent: ExecutionAgent,
   driver?: SessionDriver,
+  signal?: AbortSignal,
 ): Promise<{ stdout: string; sessionId: string }> {
+  throwIfAgentFixAborted(signal);
   const promptTransport = materializeLocalPrompt(prompt);
   const spec = agent.buildFixCommand?.(promptTransport.effectivePrompt);
   if (!spec) {
@@ -720,12 +757,18 @@ export function spawnAgentFixViaRegistry(
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
+      signal,
     });
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
     child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
     child.on('close', (code) => {
+      if (signal?.aborted) {
+        promptTransport.cleanup();
+        reject(agentFixAbortError(signal));
+        return;
+      }
       // Extract real backend session/thread ID BEFORE writing the file,
       // so processOutput stores under the real ID (not the local UUID).
       const realId = driver?.extractSessionId?.(stdout);
@@ -752,6 +795,10 @@ export function spawnAgentFixViaRegistry(
     });
     child.on('error', (err: any) => {
       promptTransport.cleanup();
+      if (signal?.aborted) {
+        reject(agentFixAbortError(signal));
+        return;
+      }
       reject(Object.assign(err, {
         cmd: spec.cmd,
         args: spec.args,

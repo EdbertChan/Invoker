@@ -1966,8 +1966,13 @@ export class TaskRunner {
    * Resolve a merge conflict by re-creating the merge state and spawning an agent to fix it.
    * After resolution, the task is restarted so it can proceed normally.
    */
-  async resolveConflict(taskId: string, savedError?: string, agentName?: string): Promise<void> {
-    return this.withAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName));
+  async resolveConflict(
+    taskId: string,
+    savedError?: string,
+    agentName?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.withAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName, signal));
   }
 
   /**
@@ -1980,10 +1985,11 @@ export class TaskRunner {
     agentName?: string,
     savedError?: string,
     fixContext?: string,
+    signal?: AbortSignal,
   ): Promise<void> {
     return this.withAttemptHeartbeat(
       taskId,
-      () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError, fixContext),
+      () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError, fixContext, signal),
     );
   }
 
@@ -2170,6 +2176,7 @@ export class TaskRunner {
     prompt: string,
     cwd: string,
     agentName: string = DEFAULT_EXECUTION_AGENT,
+    signal?: AbortSignal,
   ): Promise<{ stdout: string; sessionId: string }> {
     if (!this.executionAgentRegistry) {
       throw new Error('executionAgentRegistry is required for spawnAgentFix');
@@ -2179,7 +2186,7 @@ export class TaskRunner {
       throw new Error(`Agent "${agentName}" does not support fix commands`);
     }
     const driver = this.executionAgentRegistry.getSessionDriver(agentName);
-    return spawnAgentFixViaRegistry(prompt, cwd, agent, driver);
+    return spawnAgentFixViaRegistry(prompt, cwd, agent, driver, signal);
   }
 
   async authorPrBodyWithSkill(args: {

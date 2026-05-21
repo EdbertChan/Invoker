@@ -782,7 +782,7 @@ export async function resolveConflictAction(
   const { savedError } = orchestrator.beginConflictResolution(taskId);
   const lineage = captureTaskLineage(taskId, orchestrator);
   try {
-    await taskExecutor.resolveConflict(taskId, savedError, agentName);
+    await taskExecutor.resolveConflict(taskId, savedError, agentName, signal);
     assertLineageCurrent(lineage, orchestrator, signal);
     return await finalizeAppliedFix(taskId, savedError, deps, signal);
   } catch (err) {
@@ -839,10 +839,10 @@ export async function fixWithAgentAction(
   const lineage = captureTaskLineage(taskId, orchestrator);
   try {
     if (recoveryRoute.kind === 'resolveConflict') {
-      await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName);
+      await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName, options.signal);
     } else {
       const output = persistence.getTaskOutput(taskId);
-      await taskExecutor.fixWithAgent(taskId, output, options.agentName, persistedSavedError);
+      await taskExecutor.fixWithAgent(taskId, output, options.agentName, persistedSavedError, undefined, options.signal);
     }
     assertLineageCurrent(lineage, orchestrator, options.signal);
     const result = await finalizeAppliedFix(taskId, persistedSavedError, deps, options.signal);
@@ -1155,10 +1155,10 @@ export async function autoFixOnFailure(
       savedErrorLength: persistedSavedError.length,
     });
     if (recoveryRoute.kind === 'resolveConflict') {
-      await taskExecutor.resolveConflict(taskId, persistedSavedError, agentSelection.selectedAgent);
+      await taskExecutor.resolveConflict(taskId, persistedSavedError, agentSelection.selectedAgent, deps.signal);
     } else {
       const output = persistence.getTaskOutput(taskId);
-      await taskExecutor.fixWithAgent(taskId, output, agentSelection.selectedAgent, persistedSavedError);
+      await taskExecutor.fixWithAgent(taskId, output, agentSelection.selectedAgent, persistedSavedError, undefined, deps.signal);
     }
     assertLineageCurrent(lineage, orchestrator, deps.signal);
     const postRouteStrategy = selectAutoFixPostRouteStrategy(task);
@@ -1340,6 +1340,7 @@ export async function autoFixOnReviewGateFailure(
       agentSelection.selectedAgent,
       persistedSavedError,
       fixContext,
+      deps.signal,
     );
     assertLineageCurrent(lineage, orchestrator, deps.signal);
     const latest = orchestrator.getTask(trigger.taskId);

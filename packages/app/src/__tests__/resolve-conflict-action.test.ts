@@ -50,7 +50,7 @@ describe('resolveConflictAction', () => {
     });
 
     expect(orchestrator.beginConflictResolution).toHaveBeenCalledWith('task-a');
-    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', 'saved-err', undefined);
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', 'saved-err', undefined, undefined);
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-err');
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
     expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
