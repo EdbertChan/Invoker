@@ -19,7 +19,9 @@
  *
  * Write endpoints:
  *   POST   /api/tasks/:id/cancel
- *   POST   /api/tasks/:id/restart
+ *   POST   /api/tasks/:id/retry
+ *   POST   /api/tasks/:id/recreate
+ *   POST   /api/tasks/:id/restart     legacy compatibility alias for retry
  *   POST   /api/tasks/:id/resolve-conflict  body: { agent? }
  *   POST   /api/tasks/:id/approve
  *   POST   /api/tasks/:id/reject       body: { reason? }
@@ -30,7 +32,9 @@
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
  *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
  *   POST   /api/workflows/:id/detach  body: { upstreamWorkflowId }
- *   POST   /api/workflows/:id/restart
+ *   POST   /api/workflows/:id/retry
+ *   POST   /api/workflows/:id/recreate
+ *   POST   /api/workflows/:id/restart  legacy compatibility alias for recreate
  *   POST   /api/workflows/:id/rebase-retry
  *   POST   /api/workflows/:id/rebase-recreate
  *   POST   /api/workflows/:id/cancel

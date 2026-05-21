@@ -145,11 +145,13 @@ export class WorkflowMutationFacade {
   }
 
   async retryTask(taskId: string): Promise<MutationResult> {
+    // INV-155: retry preserves task lineage and stays distinct from recreate.
     const started = sharedRetryTask(taskId, { orchestrator: this.deps.orchestrator });
     return this.finalizeWithTopup(started, 'facade.retry-task', { scopedTaskIds: [taskId] });
   }
 
   async recreateTask(taskId: string): Promise<MutationResult> {
+    // INV-155: recreate discards the task execution branch/workspace state.
     const started = sharedRecreateTask(taskId, {
       orchestrator: this.deps.orchestrator,
       persistence: this.deps.persistence,
@@ -231,6 +233,7 @@ export class WorkflowMutationFacade {
   // ── Workflow-scoped mutations ────────────────────────────
 
   async retryWorkflow(workflowId: string): Promise<MutationResult> {
+    // INV-155 keeps workflow retry separate from recreate at this boundary.
     const started = sharedRetryWorkflow(workflowId, {
       orchestrator: this.deps.orchestrator,
     });
@@ -238,6 +241,7 @@ export class WorkflowMutationFacade {
   }
 
   async recreateWorkflow(workflowId: string): Promise<MutationResult> {
+    // INV-155 keeps plain recreate separate from rebase-recreate/fresh-base flows.
     const started = sharedRecreateWorkflow(workflowId, {
       logger: this.deps.logger,
       persistence: this.deps.persistence,

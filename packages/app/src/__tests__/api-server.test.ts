@@ -33,7 +33,7 @@ function request(
   method: string,
   path: string,
   body?: unknown,
-): Promise<{ status: number; body: any }> {
+): Promise<{ status: number; body: any; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : undefined;
     const req = http.request(
@@ -57,7 +57,7 @@ function request(
           } catch {
             parsed = raw;
           }
-          resolve({ status: res.statusCode!, body: parsed });
+          resolve({ status: res.statusCode!, body: parsed, headers: res.headers });
         });
       },
     );
@@ -95,6 +95,9 @@ function createMocks() {
       beginConflictResolution: vi.fn(() => ({ savedError: 'saved-error' })),
       setFixAwaitingApproval: vi.fn(),
       retryTask: vi.fn(() => [makeTask()]),
+      recreateTask: vi.fn(() => [makeTask()]),
+      retryWorkflow: vi.fn(() => [makeTask()]),
+      recreateWorkflow: vi.fn(() => [makeTask()]),
       editTaskCommand: vi.fn(() => [makeTask()]),
       editTaskPrompt: vi.fn(() => [makeTask()]),
       editTaskType: vi.fn(() => [makeTask()]),
@@ -197,6 +200,9 @@ beforeEach(() => {
   mocks.orchestrator.getTask.mockImplementation((id: string) => (id === 'task-1' ? makeTask() : undefined));
   mocks.orchestrator.approve.mockResolvedValue([]);
   mocks.orchestrator.retryTask.mockReturnValue([makeTask()]);
+  mocks.orchestrator.recreateTask.mockReturnValue([makeTask()]);
+  mocks.orchestrator.retryWorkflow.mockReturnValue([makeTask()]);
+  mocks.orchestrator.recreateWorkflow.mockReturnValue([makeTask()]);
   mocks.orchestrator.beginConflictResolution.mockReturnValue({ savedError: 'saved-error' });
   mocks.orchestrator.editTaskCommand.mockReturnValue([makeTask()]);
   mocks.orchestrator.editTaskPrompt.mockReturnValue([makeTask()]);
@@ -339,13 +345,39 @@ describe('POST /api/workflows/:id/cancel', () => {
   });
 });
 
+describe('POST /api/tasks/:id/retry and /recreate', () => {
+  it('retries task via facade retryTask', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/retry');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('retried');
+    expect(res.body.deprecated).toBeUndefined();
+    expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
+    expect(mocks.orchestrator.recreateTask).not.toHaveBeenCalled();
+  });
+
+  it('recreates task via facade recreateTask', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('recreated');
+    expect(res.body.deprecated).toBeUndefined();
+    expect(mocks.orchestrator.recreateTask).toHaveBeenCalledWith('task-1');
+    expect(mocks.orchestrator.retryTask).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /api/tasks/:id/restart', () => {
-  it('restarts task via facade retryTask', async () => {
+  it('keeps legacy restart as a deprecated retry alias', async () => {
     const res = await request(port, 'POST', '/api/tasks/task-1/restart');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('restarted');
+    expect(res.body.deprecated).toBe(true);
+    expect(res.body.replacement).toBe('/api/tasks/:id/retry');
+    expect(res.headers.deprecation).toContain('/api/tasks/:id/retry');
     expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
+    expect(mocks.orchestrator.recreateTask).not.toHaveBeenCalled();
   });
 
   it('returns 400 on error', async () => {
@@ -723,14 +755,18 @@ describe('POST /api/tasks/:id/gate-policy', () => {
 });
 
 describe('POST /api/workflows/:id/restart', () => {
-  it('restarts workflow via facade recreateWorkflow', async () => {
+  it('keeps legacy restart as a deprecated recreate alias', async () => {
     mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
     const res = await request(port, 'POST', '/api/workflows/wf-1/restart');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('restarted');
+    expect(res.body.deprecated).toBe(true);
+    expect(res.body.replacement).toBe('/api/workflows/:id/recreate');
+    expect(res.headers.deprecation).toContain('/api/workflows/:id/recreate');
     expect(mocks.persistence.loadWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.persistence.updateWorkflow).toHaveBeenCalled();
+    expect(mocks.orchestrator.retryWorkflow).not.toHaveBeenCalled();
   });
 
   it('handles concurrent restart requests independently', async () => {
@@ -779,6 +815,38 @@ describe('POST /api/workflows/:id/restart', () => {
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledTimes(2);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [topup]);
+  });
+});
+
+describe('POST /api/workflows/:id/retry and /recreate', () => {
+  it('retries workflow via facade retryWorkflow', async () => {
+    mocks.orchestrator.retryWorkflow = vi.fn(() => [makeTask()]);
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
+
+    const res = await request(port, 'POST', '/api/workflows/wf-1/retry');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('retried');
+    expect(res.body.deprecated).toBeUndefined();
+    expect(mocks.orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('recreates workflow via facade recreateWorkflow', async () => {
+    mocks.orchestrator.retryWorkflow = vi.fn(() => [makeTask()]);
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
+
+    const res = await request(port, 'POST', '/api/workflows/wf-1/recreate');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('recreated');
+    expect(res.body.deprecated).toBeUndefined();
+    expect(mocks.persistence.loadWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.persistence.updateWorkflow).toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.orchestrator.retryWorkflow).not.toHaveBeenCalled();
   });
 });
 

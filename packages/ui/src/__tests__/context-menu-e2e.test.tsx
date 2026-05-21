@@ -101,6 +101,7 @@ describe('Context menu (component)', () => {
       expect(screen.getByText('Restart Task')).toBeInTheDocument();
     });
     expect(screen.queryByText('Retry Workflow')).not.toBeInTheDocument();
+    expect(screen.queryByText('Recreate Workflow')).not.toBeInTheDocument();
     expect(screen.queryByText('Cancel Workflow')).not.toBeInTheDocument();
     expect(screen.queryByText('Delete Workflow')).not.toBeInTheDocument();
   });
