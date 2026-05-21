@@ -13,6 +13,7 @@
 import { useEffect, useRef, useState, useLayoutEffect } from 'react';
 import type { TaskState } from '../types.js';
 import { getMenuItems, type MenuItem } from '../lib/context-menu-items.js';
+import { cycleEnabledIndex, findFirstEnabledIndex } from '../lib/menu-keyboard.js';
 import { EXPERIMENT_SPAWN_PIVOT_OPEN_TERMINAL_MESSAGE } from '../isExperimentSpawnPivot.js';
 
 interface ContextMenuProps {
@@ -27,6 +28,17 @@ interface ContextMenuProps {
   onCancel?: (taskId: string) => void;
   onClose: () => void;
 }
+
+interface MoreEntry {
+  id: '__more__';
+  isMoreButton: true;
+  enabled: true;
+  label: 'More';
+  variant?: undefined;
+  separator?: undefined;
+}
+
+type Entry = MenuItem | MoreEntry;
 
 export function ContextMenu({
   x,
@@ -45,10 +57,8 @@ export function ContextMenu({
   const [position, setPosition] = useState({ left: x, top: y });
   const [showMore, setShowMore] = useState(false);
 
-  // Generate menu items
   const items = getMenuItems(task, { agents: ['claude', 'codex'] });
 
-  // Filter items based on available handlers
   const availableItems = items.filter((item) => {
     if (item.action === 'onRecreateTask' && !onRecreateTask) return false;
     if (item.action === 'onFix' && !onFix) return false;
@@ -59,19 +69,24 @@ export function ContextMenu({
   const safeItems = availableItems.filter((item) => item.variant !== 'danger');
   const dangerItems = availableItems.filter((item) => item.variant === 'danger');
   const hasMoreButton = dangerItems.length > 0 && !showMore;
-  const renderedItems: MenuItem[] = showMore ? [...safeItems, ...dangerItems] : safeItems;
 
-  // Find first enabled item index
-  const firstEnabledIndex = renderedItems.findIndex((item) => item.enabled);
+  const entries: Entry[] = showMore ? [...safeItems, ...dangerItems] : [...safeItems];
+  if (hasMoreButton) {
+    entries.push({ id: '__more__', isMoreButton: true, enabled: true, label: 'More' });
+  }
 
-  // Auto-focus first enabled item on mount
+  const firstEnabledIndex = findFirstEnabledIndex(entries);
+
   useEffect(() => {
-    if (firstEnabledIndex >= 0) {
-      setFocusedIndex(firstEnabledIndex);
-    }
+    setFocusedIndex(firstEnabledIndex);
   }, [firstEnabledIndex]);
 
-  // Viewport clamping: flip if menu overflows bottom or right
+  // Focus the menu itself so keydown events fire on it (preventScroll keeps
+  // the viewport from jumping when the right-click was below the fold).
+  useEffect(() => {
+    menuRef.current?.focus({ preventScroll: true });
+  }, []);
+
   useLayoutEffect(() => {
     if (!menuRef.current) return;
 
@@ -82,25 +97,20 @@ export function ContextMenu({
     let left = x;
     let top = y;
 
-    // Flip horizontally if overflows right
     if (rect.right > viewportWidth) {
       left = x - rect.width;
     }
 
-    // Flip vertically if overflows bottom
     if (rect.bottom > viewportHeight) {
       top = y - rect.height;
     }
 
-    // Ensure menu stays within viewport (clamp to edges)
     left = Math.max(0, Math.min(left, viewportWidth - rect.width));
     top = Math.max(0, Math.min(top, viewportHeight - rect.height));
 
     setPosition({ left, top });
-  }, [x, y]);
+  }, [x, y, showMore]);
 
-  // Capture-phase outside dismissal stays reliable even if graph layers stop
-  // bubbling on mouse/pointer events before they reach document listeners.
   useEffect(() => {
     const dismissFromOutsideTarget = (target: EventTarget | null, button?: number) => {
       if (button !== undefined && button !== 0) return;
@@ -133,32 +143,35 @@ export function ContextMenu({
     };
   }, [onClose]);
 
-  // Keyboard navigation
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    const enabledIndices = renderedItems
-      .map((item, idx) => (item.enabled ? idx : -1))
-      .filter((idx) => idx >= 0);
+  const activateEntry = (entry: Entry) => {
+    if (!entry.enabled) return;
+    if ('isMoreButton' in entry && entry.isMoreButton) {
+      setShowMore(true);
+      // After expansion, deterministically focus the first newly revealed
+      // danger item (sits right after the existing safe items).
+      setFocusedIndex(safeItems.length);
+      return;
+    }
+    handleItemClick(entry as MenuItem);
+  };
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      const currentPos = enabledIndices.indexOf(focusedIndex);
-      const nextPos = (currentPos + 1) % enabledIndices.length;
-      setFocusedIndex(enabledIndices[nextPos]);
+      e.stopPropagation();
+      setFocusedIndex((current) => cycleEnabledIndex(entries, current, 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      const currentPos = enabledIndices.indexOf(focusedIndex);
-      const prevPos = (currentPos - 1 + enabledIndices.length) % enabledIndices.length;
-      setFocusedIndex(enabledIndices[prevPos]);
+      e.stopPropagation();
+      setFocusedIndex((current) => cycleEnabledIndex(entries, current, -1));
     } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      const item = renderedItems[focusedIndex];
-      if (item?.enabled) {
-        handleItemClick(item);
-      }
+      e.stopPropagation();
+      const entry = entries[focusedIndex];
+      if (entry) activateEntry(entry);
     }
   };
 
-  // Handle menu item click
   const handleItemClick = (item: MenuItem) => {
     if (!item.enabled) return;
 
@@ -187,7 +200,6 @@ export function ContextMenu({
     onClose();
   };
 
-  // Get variant styles
   const getVariantClasses = (variant?: MenuItem['variant'], enabled?: boolean) => {
     if (!enabled) {
       return 'text-gray-500 cursor-not-allowed';
@@ -205,7 +217,6 @@ export function ContextMenu({
     }
   };
 
-  // Render separator
   const renderSeparator = (label: string) => (
     <div className="border-t border-gray-600 my-1">
       <div className="text-xs text-gray-500 text-center py-1">{label}</div>
@@ -216,18 +227,33 @@ export function ContextMenu({
     <div
       ref={menuRef}
       role="menu"
-      className="fixed z-50 bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 min-w-[160px]"
+      className="fixed z-50 bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 min-w-[160px] outline-none"
       style={{ left: position.left, top: position.top }}
       onKeyDown={handleKeyDown}
       onClick={(event) => event.stopPropagation()}
       tabIndex={-1}
     >
-      {renderedItems.map((item, idx) => {
+      {entries.map((entry, idx) => {
         const isFocused = idx === focusedIndex;
+        if ('isMoreButton' in entry && entry.isMoreButton) {
+          return (
+            <div key={entry.id}>
+              <div className="border-t border-gray-600 my-1" />
+              <button
+                role="menuitem"
+                className={`w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-700 ${isFocused ? 'bg-gray-700' : ''}`}
+                onClick={() => activateEntry(entry)}
+                onMouseEnter={() => setFocusedIndex(idx)}
+              >
+                More
+              </button>
+            </div>
+          );
+        }
+        const item = entry as MenuItem;
         const tooltip = !item.enabled && item.id === 'open-terminal'
           ? EXPERIMENT_SPAWN_PIVOT_OPEN_TERMINAL_MESSAGE
           : undefined;
-
         return (
           <div key={item.id}>
             {item.separator === 'task' && renderSeparator('Task')}
@@ -237,10 +263,12 @@ export function ContextMenu({
               aria-disabled={!item.enabled}
               className={`w-full text-left px-3 py-1.5 text-sm ${getVariantClasses(
                 item.variant,
-                item.enabled
-              )} ${isFocused ? 'bg-gray-700' : ''}`}
+                item.enabled,
+              )} ${isFocused && item.enabled ? 'bg-gray-700' : ''}`}
               onClick={() => handleItemClick(item)}
-              onMouseEnter={() => setFocusedIndex(idx)}
+              onMouseEnter={() => {
+                if (item.enabled) setFocusedIndex(idx);
+              }}
               disabled={!item.enabled}
               title={tooltip}
             >
@@ -249,18 +277,6 @@ export function ContextMenu({
           </div>
         );
       })}
-      {hasMoreButton && (
-        <div>
-          <div className="border-t border-gray-600 my-1" />
-          <button
-            role="menuitem"
-            className="w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-700"
-            onClick={() => setShowMore(true)}
-          >
-            More
-          </button>
-        </div>
-      )}
     </div>
   );
 }
