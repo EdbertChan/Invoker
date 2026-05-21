@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { reconciliationNeedsInputWorkResponse } from './reconciliation-needs-input-shim.js';
 import { rid, sid } from './scoped-test-helpers.js';
-import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
+import { Orchestrator, OrchestratorErrorCode, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
 import { computeWorkflowRollup } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
@@ -2335,6 +2335,66 @@ describe('Orchestrator', () => {
 
       expect(orchestrator.getTask('t1')!.status).toBe('failed');
       expect(orchestrator.getTask('t2')!.status).toBe('pending');
+    });
+  });
+
+  describe('fix lineage guards', () => {
+    function failSingleTask(): string {
+      orchestrator.loadPlan({
+        name: 'fix-lineage-guard-test',
+        tasks: [
+          { id: 'a1', description: 'Task' },
+        ],
+      });
+      orchestrator.startExecution();
+      orchestrator.handleWorkerResponse(
+        makeResponse({ actionId: 'a1', status: 'failed', outputs: { exitCode: 1, error: 'some error' } }),
+      );
+      const taskId = sid(orchestrator, 0, 'a1');
+      expect(orchestrator.getTask(taskId)!.status).toBe('failed');
+      return taskId;
+    }
+
+    it('refuses to begin conflict resolution for stale entry lineage', () => {
+      const taskId = failSingleTask();
+      const failed = orchestrator.getTask(taskId)!;
+      const expected = {
+        selectedAttemptId: failed.execution.selectedAttemptId,
+        generation: failed.execution.generation ?? 0,
+      };
+
+      orchestrator.recreateTask(taskId);
+      const statusBeforeLateBegin = orchestrator.getTask(taskId)!.status;
+
+      expect(() => orchestrator.beginConflictResolution(taskId, expected)).toThrowError(
+        expect.objectContaining({ code: OrchestratorErrorCode.STALE_TASK_LINEAGE }),
+      );
+      expect(orchestrator.getTask(taskId)!.status).toBe(statusBeforeLateBegin);
+    });
+
+    it('refuses awaiting-approval and revert cleanup for stale fix lineage', () => {
+      const taskId = failSingleTask();
+      const failed = orchestrator.getTask(taskId)!;
+      orchestrator.beginConflictResolution(taskId, {
+        selectedAttemptId: failed.execution.selectedAttemptId,
+        generation: failed.execution.generation ?? 0,
+      });
+      const fixing = orchestrator.getTask(taskId)!;
+      const expected = {
+        selectedAttemptId: fixing.execution.selectedAttemptId,
+        generation: fixing.execution.generation ?? 0,
+      };
+
+      orchestrator.recreateTask(taskId);
+      const statusBeforeLateCleanup = orchestrator.getTask(taskId)!.status;
+
+      expect(() => orchestrator.setFixAwaitingApproval(taskId, 'some error', expected)).toThrowError(
+        expect.objectContaining({ code: OrchestratorErrorCode.STALE_TASK_LINEAGE }),
+      );
+      expect(() => orchestrator.revertConflictResolution(taskId, 'some error', 'agent failed', expected)).toThrowError(
+        expect.objectContaining({ code: OrchestratorErrorCode.STALE_TASK_LINEAGE }),
+      );
+      expect(orchestrator.getTask(taskId)!.status).toBe(statusBeforeLateCleanup);
     });
   });
 
