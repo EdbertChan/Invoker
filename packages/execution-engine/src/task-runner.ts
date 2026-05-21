@@ -402,6 +402,10 @@ export class TaskRunner {
     });
   }
 
+  private normalizeCompletionResponse(response: WorkResponse, attemptId: string): WorkResponse {
+    return response.attemptId ? response : { ...response, attemptId };
+  }
+
   /**
    * Execute multiple tasks concurrently.
    */
@@ -1014,7 +1018,7 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
+          const normalizedResponse = this.normalizeCompletionResponse(response, attemptId);
           this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
           this.logger.info(
             `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
