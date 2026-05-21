@@ -106,11 +106,22 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGETS_FILE="$(mktemp -t invoker-ssh-targets.XXXXXX)"
+LOCK_DIR="${TMPDIR:-/tmp}/invoker-cleanup-ssh-sync-creds-rebase-recreate-all.lock"
 
 cleanup() {
   rm -f "$TARGETS_FILE" >/dev/null 2>&1 || true
+  if [[ "${LOCK_ACQUIRED:-false}" = true ]]; then
+    rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
+
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  LOCK_ACQUIRED=true
+else
+  echo "Another cleanup/sync/rebase-recreate run is already active: $LOCK_DIR" >&2
+  exit 75
+fi
 
 require_command() {
   local command_name="$1"
@@ -247,7 +258,22 @@ case "$INVOKER_HOME" in
 esac
 mkdir -p "$INVOKER_HOME"
 chmod 700 "$INVOKER_HOME"
+tmp_pids="$(mktemp -t invoker-remote-cleanup-pids.XXXXXX)"
+ps -eo pid=,args= \
+  | awk -v home="$INVOKER_HOME" -v self="$$" -v parent="$PPID" '
+      $1 != self && $1 != parent && index($0, home) > 0 { print $1 }
+    ' > "$tmp_pids" || true
+if [[ -s "$tmp_pids" ]]; then
+  xargs -r kill -TERM < "$tmp_pids" 2>/dev/null || true
+  sleep 2
+  xargs -r kill -KILL < "$tmp_pids" 2>/dev/null || true
+fi
+rm -f "$tmp_pids"
 rm -rf "$INVOKER_HOME/runtime" "$INVOKER_HOME/repos" "$INVOKER_HOME/worktrees"
+if [[ -e "$INVOKER_HOME/runtime" || -e "$INVOKER_HOME/repos" || -e "$INVOKER_HOME/worktrees" ]]; then
+  find "$INVOKER_HOME/runtime" "$INVOKER_HOME/repos" "$INVOKER_HOME/worktrees" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+  rm -rf "$INVOKER_HOME/runtime" "$INVOKER_HOME/repos" "$INVOKER_HOME/worktrees" 2>/dev/null || true
+fi
 mkdir -p "$INVOKER_HOME/runtime" "$INVOKER_HOME/repos" "$INVOKER_HOME/worktrees"
 chmod 700 "$INVOKER_HOME/runtime" "$INVOKER_HOME/repos" "$INVOKER_HOME/worktrees"
 `);
