@@ -1928,6 +1928,7 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(leafId)!.config.externalDependencies?.[0]?.gatePolicy).toBe('review_ready');
       expect(started.map((t) => t.id)).toContain(leafId);
       expect(orchestrator.getTask(leafId)!.status).toBe('running');
+      expect(orchestrator.getLastInvalidationPlan()?.action).toBe('scheduleOnly');
     });
 
     it('setTaskExternalGatePolicies applies targeted updates only', () => {
@@ -3377,6 +3378,7 @@ describe('Orchestrator', () => {
       const task = orchestrator.getTask('t1');
       expect(task?.config.command).toBe('echo new');
       expect(task?.status).toBe('running');
+      expect(orchestrator.getLastInvalidationPlan()?.action).toBe('recreateTask');
       expect(started).toHaveLength(1);
       expect(started[0].id).toBe(sid(orchestrator, 0, 't1'));
     });
@@ -6598,6 +6600,7 @@ describe('Orchestrator', () => {
 
         // Fresh-base distinction:
         expect(o.getKnownFreshBaseCommit(wfId)).toBe('fresh-upstream-sha');
+        expect(o.getLastInvalidationPlan()?.action).toBe('recreateWorkflowFromFreshBase');
       });
 
       it('runs refreshBase BEFORE the reset (chart: "refresh repo/base state first, then recreate the workflow")', async () => {

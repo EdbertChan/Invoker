@@ -1,6 +1,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  actionForMutation,
   applyInvalidation,
   MUTATION_POLICIES,
   type InvalidationDeps,
@@ -85,6 +86,12 @@ describe('MUTATION_POLICIES', () => {
       ([, p]) => p.action === 'scheduleOnly',
     );
     expect(scheduleOnlyEntries.map(([k]) => k)).toEqual(['externalGatePolicy']);
+  });
+
+  it('exposes the selected mutation action for orchestrator consumers', () => {
+    expect(actionForMutation('command')).toBe('recreateTask');
+    expect(actionForMutation('rebaseAndRetry')).toBe('recreateWorkflowFromFreshBase');
+    expect(actionForMutation('externalGatePolicy')).toBe('scheduleOnly');
   });
 
   it('is frozen — the policy table is a constant, not a mutable map', () => {

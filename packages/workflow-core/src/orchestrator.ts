@@ -82,6 +82,11 @@ import {
   isDiscardedAttempt,
   isOutcomeTerminalAttempt,
 } from './attempt-policy.js';
+import {
+  actionForMutation,
+  type InvalidationAction,
+  type MutationKey,
+} from './invalidation-policy.js';
 
 // ── Channel Constants ───────────────────────────────────────
 
@@ -148,6 +153,16 @@ function parseMergeConflictError(
 
 function nextLeaseExpiry(from: Date): Date {
   return new Date(from.getTime() + ATTEMPT_LEASE_MS);
+}
+
+function selectedMutationAction(key: MutationKey, expected: InvalidationAction): InvalidationAction {
+  const action = actionForMutation(key);
+  if (action !== expected) {
+    throw new Error(
+      `INV-90 selected policy drift: mutation '${key}' expected action '${expected}' but got '${action}'`,
+    );
+  }
+  return action;
 }
 
 // ── Errors ──────────────────────────────────────────────────
@@ -2685,6 +2700,7 @@ export class Orchestrator {
       ) => Promise<{ commit?: string; branch?: string } | undefined | void>;
     },
   ): Promise<TaskState[]> {
+    const action = selectedMutationAction('rebaseAndRetry', 'recreateWorkflowFromFreshBase');
     if (options?.refreshBase) {
       const fresh = await options.refreshBase(workflowId);
       if (fresh && typeof fresh === 'object') {
@@ -2704,7 +2720,16 @@ export class Orchestrator {
         }
       }
     }
-    return this.recreateWorkflow(workflowId);
+    const started = this.recreateWorkflow(workflowId);
+    this.lastInvalidationPlan = withSchedulerEnqueueCandidates(
+      planInvalidation({
+        action,
+        targetId: workflowId,
+        tasks: this.stateMachine.getAllTasks(),
+      }),
+      started.map((task) => task.id),
+    );
+    return started;
   }
 
   /**
@@ -2884,7 +2909,12 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', cmdChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, cmdDelta);
 
-    return this.recreateTask(taskId);
+    switch (selectedMutationAction('command', 'recreateTask')) {
+      case 'recreateTask':
+        return this.recreateTask(taskId);
+      default:
+        throw new Error('INV-90 selected command policy must route to recreateTask');
+    }
   }
 
     editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
@@ -3338,7 +3368,7 @@ export class Orchestrator {
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     this.lastInvalidationPlan = planInvalidation({
-      action: 'scheduleOnly',
+      action: selectedMutationAction('externalGatePolicy', 'scheduleOnly'),
       targetId: task.id,
       tasks: this.stateMachine.getAllTasks(),
     });

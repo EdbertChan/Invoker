@@ -76,6 +76,10 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   topology:              { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'workflowFork' as const },
 });
 
+export function actionForMutation(key: MutationKey): InvalidationAction {
+  return MUTATION_POLICIES[key].action;
+}
+
 export type CancelInFlightFn = (
   scope: InvalidationScope,
   id: string,
