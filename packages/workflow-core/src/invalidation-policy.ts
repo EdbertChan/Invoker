@@ -42,6 +42,13 @@ export type MutationKey =
   | 'fixReject'
   | 'topology';
 
+/**
+ * INV-90 selected the centralized policy table plus narrow router from
+ * `docs/context/inv-90/experiment-brief.md`. Keep lifecycle
+ * classification here instead of inlining per-mutator special cases:
+ * tests can then prove the policy matrix, scope validation, and
+ * cancel-first behavior independently.
+ */
 export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>> = Object.freeze({
   command:               { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   prompt:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },

@@ -1920,12 +1920,14 @@ describe('Orchestrator', () => {
       orchestrator.setTaskAwaitingApproval(prereqMergeId);
 
       expect(orchestrator.getTask(leafId)!.status).toBe('pending');
+      const generationBeforePolicyEdit = orchestrator.getTask(leafId)!.execution.generation ?? 0;
 
       const started = orchestrator.setTaskExternalGatePolicies(leafId, [
         { workflowId: prereqWfId, gatePolicy: 'review_ready' },
       ]);
 
       expect(orchestrator.getTask(leafId)!.config.externalDependencies?.[0]?.gatePolicy).toBe('review_ready');
+      expect(orchestrator.getTask(leafId)!.execution.generation ?? 0).toBe(generationBeforePolicyEdit);
       expect(started.map((t) => t.id)).toContain(leafId);
       expect(orchestrator.getTask(leafId)!.status).toBe('running');
     });
@@ -6481,7 +6483,8 @@ describe('Orchestrator', () => {
 
   // ── Step 12: workflow-scope paths (retryWorkflow / recreateWorkflow / recreateWorkflowFromFreshBase) ────
   //
-  // Pins the chart's three-way distinction
+  // INV-90 consumes the experiment brief's supported design by pinning
+  // the chart's three-way distinction
   // (`docs/architecture/task-invalidation-chart.md` rows
   // "Retry workflow", "Recreate workflow", "Rebase and retry") +
   // closes the Step 11 "not yet wired (Step 12)" hole on

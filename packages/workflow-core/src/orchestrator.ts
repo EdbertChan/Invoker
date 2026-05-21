@@ -2622,6 +2622,11 @@ export class Orchestrator {
    * row "Rebase and retry" + "Repo/base invalidation inconsistency"
    * in `docs/architecture/task-invalidation-chart.md`).
    *
+   * INV-90 (`docs/context/inv-90/experiment-brief.md`) keeps this
+   * as the selected `rebaseAndRetry` implementation: refresh and
+   * record fresh base metadata first, then delegate the reset to
+   * `recreateWorkflow`.
+   *
    * This is strictly stronger than `recreateWorkflow`:
    *
    *   recreateWorkflow                 — full reset; preserves the
@@ -3296,6 +3301,12 @@ export class Orchestrator {
   /**
    * Update gate policy on one or more external dependencies for a task, then
    * immediately re-evaluate ready tasks that were blocked by external deps.
+   *
+   * INV-90 consumes the experiment-selected `scheduleOnly` verdict
+   * from `docs/context/inv-90/experiment-brief.md` here: external
+   * gate policy edits persist scheduler policy and run an unblock
+   * pass, but they do not recreate, retry, cancel, or bump execution
+   * lineage.
    *
    * Step 15 lock-in (`docs/architecture/task-invalidation-roadmap.md`,
    * chart row "Change external gate policy"): this is the engine's
