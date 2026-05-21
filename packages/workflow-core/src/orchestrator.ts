@@ -3305,7 +3305,9 @@ export class Orchestrator {
    * `action: 'scheduleOnly'`):
    *
    *   - We do NOT bump `task.execution.generation`. Active and
-   *     pending lineage survives the edit untouched.
+   *     pending lineage survives the edit untouched. INV-90's
+   *     experiment brief (`docs/context/inv-90/experiment-brief.md`)
+   *     selected this behavior over retry/recreate invalidation.
    *   - We do NOT call `cancelTask` / `retryTask` / `recreateTask` /
    *     `applyInvalidation` with any retry/recreate route. Tasks
    *     that are running keep running on their existing execution
@@ -3342,10 +3344,6 @@ export class Orchestrator {
       targetId: task.id,
       tasks: this.stateMachine.getAllTasks(),
     });
-    if (task.status === 'running' || task.status === 'fixing_with_ai') {
-      throw new Error(`Cannot edit running task ${taskId}`);
-    }
-
     const deps = task.config.externalDependencies;
     if (!deps || deps.length === 0) {
       throw new Error(`Task ${taskId} has no external dependencies`);

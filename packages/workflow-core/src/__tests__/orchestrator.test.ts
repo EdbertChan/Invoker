@@ -1930,6 +1930,59 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(leafId)!.status).toBe('running');
     });
 
+    it('setTaskExternalGatePolicies preserves active task lineage without retry/recreate', () => {
+      orchestrator.loadPlan({
+        name: 'prereq-workflow',
+        tasks: [{ id: 'verify-control-plane-regression', description: 'Prereq task' }],
+      });
+      const prereqTaskId = sid(orchestrator, 0, 'verify-control-plane-regression');
+      const prereqWfId = prereqTaskId.split('/')[0]!;
+      const prereqMergeId = `__merge__${prereqWfId}`;
+
+      orchestrator.loadPlan({
+        name: 'workflow-gated-running',
+        tasks: [
+          {
+            id: 'leaf-a',
+            description: 'leaf waits for upstream merge gate review readiness',
+            externalDependencies: [{ workflowId: prereqWfId, gatePolicy: 'review_ready' }],
+          },
+        ],
+      });
+      const leafId = sid(orchestrator, 1, 'leaf-a');
+
+      orchestrator.startExecution();
+      orchestrator.handleWorkerResponse(makeResponse({ actionId: prereqTaskId, status: 'completed' }));
+      orchestrator.setTaskAwaitingApproval(prereqMergeId);
+      orchestrator.startExecution();
+
+      const leaf = orchestrator.getTask(leafId)!;
+      expect(leaf.status).toBe('running');
+      const beforeGeneration = leaf.execution.generation ?? 0;
+
+      const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
+      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+
+      const started = orchestrator.setTaskExternalGatePolicies(leafId, [
+        { workflowId: prereqWfId, gatePolicy: 'completed' },
+      ]);
+
+      expect(started).toEqual([]);
+      expect(cancelSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
+      expect(recreateSpy).not.toHaveBeenCalled();
+
+      const after = orchestrator.getTask(leafId)!;
+      expect(after.status).toBe('running');
+      expect(after.execution.generation ?? 0).toBe(beforeGeneration);
+      expect(after.config.externalDependencies?.[0]?.gatePolicy).toBe('completed');
+
+      cancelSpy.mockRestore();
+      retrySpy.mockRestore();
+      recreateSpy.mockRestore();
+    });
+
     it('setTaskExternalGatePolicies applies targeted updates only', () => {
       orchestrator.loadPlan({
         name: 'upstream-a',
