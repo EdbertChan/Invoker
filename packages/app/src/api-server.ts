@@ -68,8 +68,18 @@ export interface ApiServerDeps {
     args: unknown[],
     options?: { deferDrain?: boolean },
   ) => number;
-  deleteWorkflow: (workflowId: string) => Promise<void>;
-  detachWorkflow: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
+  /**
+   * @deprecated INV-130 routes workflow writes through `mutations`.
+   * Kept temporarily so existing composition sites can pass their current
+   * object shape while the API server ignores these callbacks.
+   */
+  deleteWorkflow?: (workflowId: string) => Promise<void>;
+  /**
+   * @deprecated INV-130 routes workflow writes through `mutations`.
+   * Kept temporarily so existing composition sites can pass their current
+   * object shape while the API server ignores these callbacks.
+   */
+  detachWorkflow?: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
 }
 
 export interface ApiServer {
@@ -159,8 +169,6 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
     orchestrator,
     persistence,
     mutations,
-    deleteWorkflow,
-    detachWorkflow,
   } = deps;
   const port = parseInt(process.env.INVOKER_API_PORT ?? '4100', 10);
 
@@ -610,7 +618,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       if (method === 'DELETE' && wfDeleteMatch) {
         const workflowId = decodeURIComponent(wfDeleteMatch[1]);
         try {
-          await deleteWorkflow(workflowId);
+          await mutations.deleteWorkflow(workflowId);
           json(res, 200, { ok: true, workflowId, action: 'deleted' });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
@@ -629,7 +637,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             json(res, 400, { error: 'Missing "upstreamWorkflowId" in request body' });
             return;
           }
-          await detachWorkflow(workflowId, String(upstreamWorkflowId));
+          await mutations.detachWorkflow(workflowId, String(upstreamWorkflowId));
           json(res, 200, {
             ok: true,
             workflowId,
