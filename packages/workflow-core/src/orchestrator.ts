@@ -3098,6 +3098,8 @@ export class Orchestrator {
     taskId: string,
     mergeMode: 'manual' | 'automatic' | 'external_review',
   ): TaskState[] {
+    // INV-130: API callers reach merge-mode mutation through the facade, but
+    // this method remains the DB-first coordinator boundary for the state change.
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);

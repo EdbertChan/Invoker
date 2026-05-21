@@ -101,6 +101,7 @@ function createMocks() {
       editTaskPrompt: vi.fn(() => [makeTask()]),
       editTaskType: vi.fn(() => [makeTask()]),
       editTaskAgent: vi.fn(() => [makeTask()]),
+      editTaskMergeMode: vi.fn(() => [makeTask({ id: '__merge__wf-1', status: 'running', config: { workflowId: 'wf-1', isMergeNode: true } })]),
       setTaskExternalGatePolicies: vi.fn(() => [makeTask()]),
       cancelTask: vi.fn(() => ({ cancelled: ['task-1'], runningCancelled: ['task-1'] })),
       forkWorkflow: vi.fn((workflowId: string) => ({
@@ -214,6 +215,9 @@ beforeEach(() => {
   mocks.orchestrator.editTaskCommand.mockReturnValue([makeTask()]);
   mocks.orchestrator.editTaskPrompt.mockReturnValue([makeTask()]);
   mocks.orchestrator.editTaskType.mockReturnValue([makeTask()]);
+  mocks.orchestrator.editTaskMergeMode.mockReturnValue([
+    makeTask({ id: '__merge__wf-1', status: 'running', config: { workflowId: 'wf-1', isMergeNode: true } }),
+  ]);
   mocks.orchestrator.setTaskExternalGatePolicies.mockReturnValue([makeTask()]);
   mocks.orchestrator.cancelTask.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
   mocks.orchestrator.cancelWorkflow.mockReturnValue({ cancelled: ['task-1'], runningCancelled: ['task-1'] });
@@ -964,12 +968,23 @@ describe('POST /api/workflows/:id/detach', () => {
 
 describe('POST /api/workflows/:id/merge-mode', () => {
   it('sets merge mode', async () => {
+    mocks.persistence.loadTasks.mockReturnValue([
+      makeTask({ id: '__merge__wf-1', config: { workflowId: 'wf-1', isMergeNode: true } }),
+    ]);
+
     const res = await request(port, 'POST', '/api/workflows/wf-1/merge-mode', { mode: 'automatic' });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('merge_mode_set');
     expect(res.body.mode).toBe('automatic');
-    expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { mergeMode: 'automatic' });
+    expect(mocks.persistence.loadTasks).toHaveBeenCalledWith('wf-1');
+    expect(mocks.orchestrator.editTaskMergeMode).toHaveBeenCalledWith('__merge__wf-1', 'automatic');
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledWith([
+      expect.objectContaining({ id: '__merge__wf-1' }),
+    ]);
+    expect(mocks.orchestrator.retryTask).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.recreateTask).not.toHaveBeenCalled();
+    expect(mocks.persistence.updateWorkflow).not.toHaveBeenCalled();
   });
 
   it('returns 400 when mode is missing', async () => {

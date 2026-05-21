@@ -653,6 +653,8 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             json(res, 400, { error: 'Missing "mode" in request body' });
             return;
           }
+          // INV-130: keep the HTTP layer as request parsing and response formatting only.
+          // The facade owns the mutation dispatch lifecycle; the orchestrator owns DB-first mutation ordering.
           await mutations.setWorkflowMergeMode(workflowId, mode);
           json(res, 200, { ok: true, workflowId, action: 'merge_mode_set', mode });
         } catch (err) {
