@@ -35,21 +35,20 @@
 import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
 import * as path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
+import {
+  bootstrapGuiMode,
+  configureAppIdentityBootstrap,
+  configureEarlyAppBootstrap,
+} from './bootstrap/app-bootstrap.js';
+import { registerOwnerIpcHandlers } from './ipc/ipc-registration.js';
 
 const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
 
-// Prevent desktop-wide freezes on Linux (Chromium GPU + X11/Wayland compositors).
-// Defense-in-depth: API-level disable, command-line flags, and env var (LIBGL_ALWAYS_SOFTWARE).
-if (process.platform === 'linux' && !enableTestCompositor) {
-  app.disableHardwareAcceleration();
-  app.commandLine.appendSwitch('no-sandbox');
-  app.commandLine.appendSwitch('no-zygote');
-  app.commandLine.appendSwitch('disable-dev-shm-usage');
-  app.commandLine.appendSwitch('disable-gpu');
-  app.commandLine.appendSwitch('disable-gpu-compositing');
-  app.commandLine.appendSwitch('disable-gpu-sandbox');
-  app.commandLine.appendSwitch('disable-software-rasterizer');
-}
+configureEarlyAppBootstrap({
+  app,
+  platform: process.platform,
+  enableTestCompositor,
+});
 
 import { Orchestrator, CommandService, OrchestratorErrorCode } from '@invoker/workflow-core';
 import type {
@@ -217,13 +216,11 @@ if (noTrack) {
   cliArgs = [...cliArgs.slice(0, noTrackIndex), ...cliArgs.slice(noTrackIndex + 1)];
 }
 
-// Set app name early so Electron uses "invoker" as WM_CLASS (X11) and app_id (Wayland).
-// --class tells Chromium to set WM_CLASS explicitly, preventing GNOME from
-// grouping Invoker with other Electron apps (e.g. Slack).
-app.name = 'invoker';
-if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('class', 'invoker');
-}
+configureAppIdentityBootstrap({
+  app,
+  platform: process.platform,
+  appName: 'invoker',
+});
 
 // ── Shared state ─────────────────────────────────────────────
 
@@ -1093,86 +1090,91 @@ if (isHeadless) {
           return { workflowId, tasks };
         };
 
-        messageBus.onRequest('headless.run', async (req: unknown) => {
-          noteStandaloneOwnerActivity();
-          const { planPath, traceId } = req as { planPath: string; traceId?: string };
-          logger.info(
-            `headless.run received trace=${traceId ?? '<none>'} planPath="${planPath}" ownerId=${workflowMutationOwnerId} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          const result = await executeStandaloneHeadlessRun({ planPath });
-          logger.info(
-            `headless.run accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          return result;
-        });
-        messageBus.onRequest('headless.owner-ping', async () => {
-          noteStandaloneOwnerActivity();
-          return {
-            ok: true,
-            ownerId: workflowMutationOwnerId,
-            mode: 'standalone',
-          };
-        });
-        messageBus.onRequest('headless.query', async (req: unknown) => {
-          noteStandaloneOwnerActivity();
-          const { kind, reset } = req as { kind?: string; reset?: boolean };
-          if (kind === 'ui-perf') {
-            if (reset) {
-              headlessDeps.resetUiPerfStats?.();
-            }
-            return {
-              ownerMode: 'standalone',
-              ...(headlessDeps.getUiPerfStats?.() ?? {}),
-            };
-          }
-          if (kind === 'queue') {
-            return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
-          }
-          throw new Error(`Unsupported headless query: ${String(kind)}`);
-        });
-        messageBus.onRequest('headless.resume', async (req: unknown) => {
-          noteStandaloneOwnerActivity();
-          const { workflowId, traceId } = req as { workflowId: string; traceId?: string };
-          logger.info(
-            `headless.resume received trace=${traceId ?? '<none>'} workflowId="${workflowId}" ownerId=${workflowMutationOwnerId} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          const result = await executeStandaloneHeadlessResume({ workflowId });
-          logger.info(
-            `headless.resume accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=standalone`,
-            { module: 'ipc-delegate' },
-          );
-          return result;
-        });
-        messageBus.onRequest('headless.exec', async (req: unknown) => {
-          noteStandaloneOwnerActivity();
-          const { args, waitForApproval: delegatedWait, noTrack: delegatedNoTrack, traceId } =
-            req as { args: string[]; waitForApproval?: boolean; noTrack?: boolean; traceId?: string };
-          if (!Array.isArray(args) || args.length === 0) {
-            throw new Error('Missing delegated headless command arguments');
-          }
-          const payload: HeadlessExecMutationPayload = {
-            args,
-            waitForApproval: delegatedWait,
-            noTrack: delegatedNoTrack,
-            traceId,
-          };
-          logHeadlessExecReceived(payload, 'standalone');
-          const { workflowId, priority } = classifyStandaloneHeadlessExecMutation(payload);
-          const acknowledgement = acknowledgeNoTrackHeadlessExec(payload, workflowId, priority, 'standalone');
-          if (acknowledgement) return acknowledgement;
-          await runStandaloneWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => {
-            await runHeadless(args, {
-              ...headlessDeps,
-              waitForApproval: delegatedWait,
-              noTrack: delegatedNoTrack,
-              signal: activeMutationContext?.signal,
-              mutationTiming: activeMutationContext?.mutationTiming,
-            });
-          });
-          return { ok: true };
+        registerOwnerIpcHandlers({
+          messageBus,
+          handlers: {
+            run: async (req: unknown) => {
+              noteStandaloneOwnerActivity();
+              const { planPath, traceId } = req as { planPath: string; traceId?: string };
+              logger.info(
+                `headless.run received trace=${traceId ?? '<none>'} planPath="${planPath}" ownerId=${workflowMutationOwnerId} mode=standalone`,
+                { module: 'ipc-delegate' },
+              );
+              const result = await executeStandaloneHeadlessRun({ planPath });
+              logger.info(
+                `headless.run accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=standalone`,
+                { module: 'ipc-delegate' },
+              );
+              return result;
+            },
+            ownerPing: async () => {
+              noteStandaloneOwnerActivity();
+              return {
+                ok: true,
+                ownerId: workflowMutationOwnerId,
+                mode: 'standalone',
+              };
+            },
+            query: async (req: unknown) => {
+              noteStandaloneOwnerActivity();
+              const { kind, reset } = req as { kind?: string; reset?: boolean };
+              if (kind === 'ui-perf') {
+                if (reset) {
+                  headlessDeps.resetUiPerfStats?.();
+                }
+                return {
+                  ownerMode: 'standalone',
+                  ...(headlessDeps.getUiPerfStats?.() ?? {}),
+                };
+              }
+              if (kind === 'queue') {
+                return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
+              }
+              throw new Error(`Unsupported headless query: ${String(kind)}`);
+            },
+            resume: async (req: unknown) => {
+              noteStandaloneOwnerActivity();
+              const { workflowId, traceId } = req as { workflowId: string; traceId?: string };
+              logger.info(
+                `headless.resume received trace=${traceId ?? '<none>'} workflowId="${workflowId}" ownerId=${workflowMutationOwnerId} mode=standalone`,
+                { module: 'ipc-delegate' },
+              );
+              const result = await executeStandaloneHeadlessResume({ workflowId });
+              logger.info(
+                `headless.resume accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=standalone`,
+                { module: 'ipc-delegate' },
+              );
+              return result;
+            },
+            exec: async (req: unknown) => {
+              noteStandaloneOwnerActivity();
+              const { args, waitForApproval: delegatedWait, noTrack: delegatedNoTrack, traceId } =
+                req as { args: string[]; waitForApproval?: boolean; noTrack?: boolean; traceId?: string };
+              if (!Array.isArray(args) || args.length === 0) {
+                throw new Error('Missing delegated headless command arguments');
+              }
+              const payload: HeadlessExecMutationPayload = {
+                args,
+                waitForApproval: delegatedWait,
+                noTrack: delegatedNoTrack,
+                traceId,
+              };
+              logHeadlessExecReceived(payload, 'standalone');
+              const { workflowId, priority } = classifyStandaloneHeadlessExecMutation(payload);
+              const acknowledgement = acknowledgeNoTrackHeadlessExec(payload, workflowId, priority, 'standalone');
+              if (acknowledgement) return acknowledgement;
+              await runStandaloneWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => {
+                await runHeadless(args, {
+                  ...headlessDeps,
+                  waitForApproval: delegatedWait,
+                  noTrack: delegatedNoTrack,
+                  signal: activeMutationContext?.signal,
+                  mutationTiming: activeMutationContext?.mutationTiming,
+                });
+              });
+              return { ok: true };
+            },
+          },
         });
 
         reviewGateStatusWorker = startReviewGateStatusWorker({
@@ -1219,16 +1221,11 @@ if (isHeadless) {
   // ══════════════════════════════════════════════════════════════
   // GUI MODE
   // ══════════════════════════════════════════════════════════════
-  if (process.env.NODE_ENV !== 'test') {
-    const gotTheLock = app.requestSingleInstanceLock();
-    if (!gotTheLock) {
-      app.quit();
-    } else {
-      setupGuiMode();
-    }
-  } else {
-    setupGuiMode();
-  }
+  bootstrapGuiMode({
+    app,
+    nodeEnv: process.env.NODE_ENV,
+    setupGuiMode,
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2755,75 +2752,80 @@ function createEmbeddedTerminalBackendFromConfig(
       workflowMutationDispatcher.set('surface:approve-task', async (taskIdArg: unknown) => {
         await performSharedApproveTask(String(taskIdArg), 'surface');
       });
-      messageBus.onRequest('headless.owner-ping', async () => ({
-        ok: true,
-        ownerId: workflowMutationOwnerId,
-        mode: 'gui',
-      }));
-      messageBus.onRequest('headless.query', async (req: unknown) => {
-        const { kind, reset } = req as { kind?: string; reset?: boolean };
-        if (kind === 'ui-perf') {
-          if (reset) {
-            resetUiPerfStats();
-          }
-          return {
-            ownerMode: 'gui',
-            ...getUiPerfStats(),
-          };
-        }
-        if (kind === 'queue') {
-          return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
-        }
-        throw new Error(`Unsupported headless query: ${String(kind)}`);
+      registerOwnerIpcHandlers({
+        messageBus,
+        handlers: {
+          ownerPing: async () => ({
+            ok: true,
+            ownerId: workflowMutationOwnerId,
+            mode: 'gui',
+          }),
+          query: async (req: unknown) => {
+            const { kind, reset } = req as { kind?: string; reset?: boolean };
+            if (kind === 'ui-perf') {
+              if (reset) {
+                resetUiPerfStats();
+              }
+              return {
+                ownerMode: 'gui',
+                ...getUiPerfStats(),
+              };
+            }
+            if (kind === 'queue') {
+              return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
+            }
+            throw new Error(`Unsupported headless query: ${String(kind)}`);
+          },
+          run: async (req: unknown) => {
+            const { planPath, traceId } = req as { planPath: string; traceId?: string };
+            logger.info(
+              `headless.run received trace=${traceId ?? '<none>'} planPath="${planPath}" ownerId=${workflowMutationOwnerId} mode=gui`,
+              { module: 'ipc-delegate' },
+            );
+            const result = await executeHeadlessRun({ planPath });
+            logger.info(
+              `headless.run accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=gui`,
+              { module: 'ipc-delegate' },
+            );
+            return result;
+          },
+          resume: async (req: unknown) => {
+            const { workflowId, traceId } = req as { workflowId: string; traceId?: string };
+            logger.info(
+              `headless.resume received trace=${traceId ?? '<none>'} workflowId="${workflowId}" ownerId=${workflowMutationOwnerId} mode=gui`,
+              { module: 'ipc-delegate' },
+            );
+            const result = await executeHeadlessResume({ workflowId });
+            logger.info(
+              `headless.resume accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=gui`,
+              { module: 'ipc-delegate' },
+            );
+            return result;
+          },
+          exec: async (req: unknown) => {
+            const { args, waitForApproval: delegatedWait, noTrack: delegatedNoTrack, traceId } =
+              req as { args: string[]; waitForApproval?: boolean; noTrack?: boolean; traceId?: string };
+            if (!Array.isArray(args) || args.length === 0) {
+              throw new Error('Missing delegated headless command arguments');
+            }
+            const payload: HeadlessExecMutationPayload = {
+              args,
+              waitForApproval: delegatedWait,
+              noTrack: delegatedNoTrack,
+              traceId,
+            };
+            logHeadlessExecReceived(payload, 'gui');
+            const { workflowId, priority } = classifyHeadlessExecMutation(payload);
+            const acknowledgement = acknowledgeNoTrackHeadlessExec(payload, workflowId, priority, 'gui');
+            if (acknowledgement) return acknowledgement;
+            return runWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => executeHeadlessExec(payload));
+          },
+        },
+        onReady: () => {
+          logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
+          recordStartupMark('owner-ipc-ready');
+        },
       });
-      messageBus.onRequest('headless.run', async (req: unknown) => {
-        const { planPath, traceId } = req as { planPath: string; traceId?: string };
-        logger.info(
-          `headless.run received trace=${traceId ?? '<none>'} planPath="${planPath}" ownerId=${workflowMutationOwnerId} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        const result = await executeHeadlessRun({ planPath });
-        logger.info(
-          `headless.run accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        return result;
-      });
-
-      messageBus.onRequest('headless.resume', async (req: unknown) => {
-        const { workflowId, traceId } = req as { workflowId: string; traceId?: string };
-        logger.info(
-          `headless.resume received trace=${traceId ?? '<none>'} workflowId="${workflowId}" ownerId=${workflowMutationOwnerId} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        const result = await executeHeadlessResume({ workflowId });
-        logger.info(
-          `headless.resume accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        return result;
-      });
-
-      messageBus.onRequest('headless.exec', async (req: unknown) => {
-        const { args, waitForApproval: delegatedWait, noTrack: delegatedNoTrack, traceId } =
-          req as { args: string[]; waitForApproval?: boolean; noTrack?: boolean; traceId?: string };
-        if (!Array.isArray(args) || args.length === 0) {
-          throw new Error('Missing delegated headless command arguments');
-        }
-        const payload: HeadlessExecMutationPayload = {
-          args,
-          waitForApproval: delegatedWait,
-          noTrack: delegatedNoTrack,
-          traceId,
-        };
-        logHeadlessExecReceived(payload, 'gui');
-        const { workflowId, priority } = classifyHeadlessExecMutation(payload);
-        const acknowledgement = acknowledgeNoTrackHeadlessExec(payload, workflowId, priority, 'gui');
-        if (acknowledgement) return acknowledgement;
-        return runWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => executeHeadlessExec(payload));
-      });
-      logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
-      recordStartupMark('owner-ipc-ready');
     }
 
     bootstrapInitialWorkflowState();
