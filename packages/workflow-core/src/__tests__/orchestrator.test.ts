@@ -6842,6 +6842,49 @@ describe('Orchestrator', () => {
       expect(queueStatus.queued[0]?.taskId).toBe(sid(orchestrator, 0, 't1'));
     });
 
+    it('getQueueStatus ignores stale scheduler running slots when persisted state is queued', () => {
+      orchestrator.loadPlan({
+        name: 'queue-truth-stale-running-slot-test',
+        tasks: [
+          { id: 't1', description: 'Task 1' },
+        ],
+      });
+      const [started] = orchestrator.startExecution();
+      const taskId = started!.id;
+      const selectedAttemptId = orchestrator.getTask(taskId)?.execution.selectedAttemptId;
+      expect(selectedAttemptId).toBeTruthy();
+
+      // INV-88 selected the DB-first design: mutate persistence to the
+      // recovered queued state, then leave a stale in-memory scheduler
+      // running slot behind. Queue status must follow persistence.
+      persistence.updateTask(taskId, {
+        status: 'pending',
+        execution: { startedAt: undefined, lastHeartbeatAt: undefined },
+      });
+      persistence.updateAttempt(selectedAttemptId!, {
+        status: 'claimed',
+        leaseExpiresAt: new Date(Date.now() - 60_000),
+      });
+
+      const scheduler = (orchestrator as unknown as {
+        scheduler: {
+          enqueue(job: { taskId: string; attemptId?: string; priority: number }): void;
+          dequeue(): { taskId: string; attemptId?: string; priority: number } | null;
+          getStatus(): { runningCount: number };
+        };
+      }).scheduler;
+      scheduler.enqueue({ taskId, attemptId: `${selectedAttemptId}-stale-scheduler-slot`, priority: 99 });
+      expect(scheduler.dequeue()?.taskId).toBe(taskId);
+      expect(scheduler.getStatus().runningCount).toBe(1);
+
+      const queueStatus = orchestrator.getQueueStatus();
+      expect(queueStatus.runningCount).toBe(0);
+      expect(queueStatus.running).toEqual([]);
+      expect(queueStatus.queued).toEqual([
+        expect.objectContaining({ taskId }),
+      ]);
+    });
+
     it('getQueueStatus counts claimed selected attempts as active before launch completes', () => {
       orchestrator.loadPlan({
         name: 'queue-claimed-test',
