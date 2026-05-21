@@ -39,19 +39,19 @@ pnpm --filter @invoker/execution-engine exec vitest run src/__tests__/task-runne
 Expected terminal summary:
 
 ```text
-✓ src/__tests__/task-runner.test.ts (125 tests)
+✓ src/__tests__/task-runner.test.ts (126 tests)
 
 Test Files  1 passed (1)
-     Tests  125 passed (125)
+     Tests  126 passed (126)
 ```
 
 Observed on 2026-05-21 UTC:
 
 ```text
-✓ src/__tests__/task-runner.test.ts (125 tests) 3199ms
+✓ src/__tests__/task-runner.test.ts (126 tests) 4250ms
 
 Test Files  1 passed (1)
-     Tests  125 passed (125)
+     Tests  126 passed (126)
 ```
 
 Optional broader package check:
@@ -60,11 +60,11 @@ Optional broader package check:
 pnpm --filter @invoker/execution-engine test
 ```
 
-Observed on 2026-05-21 UTC: `task-runner.test.ts` passed `125 tests`, but the broader suite failed one unrelated `repo-pool.test.ts` timeout:
+Observed on 2026-05-21 UTC: `task-runner.test.ts` passed `126 tests`, but the broader suite failed one unrelated `repo-pool.test.ts` timeout:
 
 ```text
-Test Files  1 failed | 48 passed (49)
-     Tests  1 failed | 975 passed (976)
+Test Files  1 failed | 49 passed (50)
+     Tests  1 failed | 980 passed (981)
 ```
 
 This broader result is not the INV-113 acceptance gate because the failing file is outside the requested files under test.
@@ -78,12 +78,13 @@ This broader result is not the INV-113 acceptance gate because the failing file 
 | Concurrent launches for one attempt are de-duplicated. | `task-runner.test.ts:245-303` calls `executeTask` twice and expects executor `start` once. | `start` call count must equal `1`. | Pass |
 | Cancellation targets the active selected attempt. | `task-runner.test.ts:305-455` proves normal kill and selected-attempt kill when an older attempt is also active. | Kill called once with the selected attempt handle. | Pass |
 | Cancellation does not kill stale attempts when the selected attempt is absent. | `task-runner.test.ts:457-519` asserts `kill` is not called. | Kill call count must equal `0`. | Pass |
+| Completion cleanup is bounded by the launched attempt. | `task-runner.test.ts` includes a mismatched response attempt regression where the old attempt completes while reporting the selected attempt id. | The orchestrator receives the launched attempt id, and subsequent cancellation still kills the selected attempt handle. | Pass |
 | Lifecycle tags remain deterministic across generations and attempts. | `task-runner.test.ts:2060-2107` expects `g3.t5.aattempt-abc`. | Exact lifecycle tag equality. | Pass |
 
 ## Acceptance Thresholds
 
 - Required targeted command exits `0`.
-- Required targeted command reports `1 passed` test file and `125 passed` tests.
+- Required targeted command reports `1 passed` test file and `126 passed` tests.
 - No snapshot, time, network, or external service dependency is required for the targeted command.
 - Any future architecture change for INV-113 must preserve the evidence matrix above or update this brief with a new competing-design comparison and deterministic command output.
 

@@ -518,6 +518,98 @@ describe('TaskRunner', () => {
     await staleExecution;
   });
 
+  it('uses the launched attempt boundary when completion reports a different attempt', async () => {
+    const completeCallbacks = new Map<string, (response: WorkResponse) => void>();
+    const kill = vi.fn();
+    const executorImpl = {
+      type: 'worktree',
+      start: vi.fn().mockImplementation(async (request: any) => ({
+        executionId: `exec-${request.attemptId}`,
+        taskId: request.actionId,
+        workspacePath: `/tmp/mock-worktree-${request.attemptId}`,
+        branch: `experiment/${request.attemptId}-mock`,
+      })),
+      onComplete: vi.fn().mockImplementation((handle: any, cb: any) => {
+        completeCallbacks.set(handle.executionId.replace(/^exec-/, ''), cb);
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill,
+      destroyAll: vi.fn(),
+    };
+    const registry = {
+      getDefault: () => executorImpl,
+      get: () => executorImpl,
+      getAll: () => [executorImpl],
+    };
+    const currentTask = makeTask({
+      id: 'completion-boundary-task',
+      status: 'running',
+      config: { command: 'echo current' },
+      execution: { selectedAttemptId: 'completion-boundary-task-a2' },
+    });
+    const handleWorkerResponse = vi.fn(() => []);
+    const orchestrator = {
+      getTask: (id: string) => id === currentTask.id ? currentTask : undefined,
+      handleWorkerResponse,
+    };
+    const runner = new TaskRunner({
+      orchestrator: orchestrator as any,
+      persistence: { updateTask: vi.fn() } as any,
+      executorRegistry: registry as any,
+      cwd: '/tmp',
+    });
+
+    const oldExecution = runner.executeTask(makeTask({
+      id: currentTask.id,
+      status: 'running',
+      config: { command: 'echo old' },
+      execution: { selectedAttemptId: 'completion-boundary-task-a1' },
+    }));
+    const selectedExecution = runner.executeTask(makeTask({
+      id: currentTask.id,
+      status: 'running',
+      config: { command: 'echo current' },
+      execution: { selectedAttemptId: 'completion-boundary-task-a2' },
+    }));
+    await vi.waitFor(() => expect(executorImpl.start).toHaveBeenCalledTimes(2));
+
+    completeCallbacks.get('completion-boundary-task-a1')?.({
+      requestId: 'req-completion-old',
+      actionId: currentTask.id,
+      attemptId: 'completion-boundary-task-a2',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    await oldExecution;
+
+    expect(handleWorkerResponse).toHaveBeenCalledWith(expect.objectContaining({
+      actionId: currentTask.id,
+      attemptId: 'completion-boundary-task-a1',
+      status: 'completed',
+    }));
+
+    await runner.killActiveExecution(currentTask.id);
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledWith(expect.objectContaining({
+      executionId: 'exec-completion-boundary-task-a2',
+      taskId: currentTask.id,
+      attemptId: 'completion-boundary-task-a2',
+    }));
+
+    completeCallbacks.get('completion-boundary-task-a2')?.({
+      requestId: 'req-completion-selected',
+      actionId: currentTask.id,
+      attemptId: 'completion-boundary-task-a2',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    await selectedExecution;
+  });
+
   it('marks recreateTask-style executions as requiring a fresh workspace', async () => {
     let seenRequest: any;
     let completeCallback: ((response: WorkResponse) => void) | undefined;

@@ -1040,14 +1040,18 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
-          const activeExecution = this.activeExecutions.get(normalizedResponse.attemptId ?? attemptId);
+          const responseAttemptId = response.attemptId;
+          const completionAttemptId = responseAttemptId === attemptId ? responseAttemptId : attemptId;
+          const normalizedResponse = completionAttemptId === responseAttemptId
+            ? response
+            : { ...response, attemptId: completionAttemptId };
+          const activeExecution = this.activeExecutions.get(completionAttemptId);
           if (activeExecution?.leaseResourceKey && activeExecution.leaseHolderId) {
             this.persistence.releaseExecutionResourceLease?.(activeExecution.leaseResourceKey, activeExecution.leaseHolderId);
           }
-          this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
+          this.activeExecutions.delete(completionAttemptId);
           this.logger.info(
-            `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
+            `[TaskRunner] completion callback task=${task.id} attempt=${completionAttemptId} ` +
               `status=${normalizedResponse.status} exitCode=${normalizedResponse.outputs.exitCode ?? 'none'} ` +
               `executionId=${handle.executionId} activeExecutions=${this.activeExecutions.size}`,
           );
