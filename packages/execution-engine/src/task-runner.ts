@@ -373,6 +373,9 @@ export class TaskRunner {
     if (selectedAttemptId) {
       const entry = this.activeExecutions.get(selectedAttemptId);
       if (entry) return { attemptId: selectedAttemptId, entry };
+      // INV-113 experiment decision: once the orchestrator has selected an
+      // attempt, kill routing must not fall back to an older active attempt for
+      // the same task. That older work is stale lineage, not the cancellable run.
       return undefined;
     }
 

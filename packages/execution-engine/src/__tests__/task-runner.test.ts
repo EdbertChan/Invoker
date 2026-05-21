@@ -491,7 +491,10 @@ describe('TaskRunner', () => {
     };
     const runner = new TaskRunner({
       orchestrator: orchestrator as any,
-      persistence: { updateTask: vi.fn() } as any,
+      persistence: {
+        updateTask: vi.fn(),
+        loadAttempts: vi.fn(() => [{ id: 'stale-active-task-a1' }]),
+      } as any,
       executorRegistry: registry as any,
       cwd: '/tmp',
     });
