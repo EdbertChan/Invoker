@@ -820,6 +820,10 @@ export class Orchestrator {
    * Refresh the in-memory graph from the database.
    * Called at the start of every public mutation to ensure
    * we see any external changes before proceeding.
+   *
+   * INV-130 consumes this as the selected API boundary: HTTP write routes
+   * delegate to the facade, while Orchestrator remains responsible for the
+   * DB-first mutation snapshot used by task state transitions.
    */
   private refreshFromDb(): void {
     if (this.activeWorkflowIds.size === 0) return;
@@ -843,6 +847,9 @@ export class Orchestrator {
   /**
    * Write field changes to the DB, then update the in-memory cache
    * to match. Returns the updated task state.
+   *
+   * Keep this as the single persistence-sync point for public mutations
+   * instead of duplicating route-specific state writes in the API layer.
    */
   private writeAndSync(
     taskId: string,
