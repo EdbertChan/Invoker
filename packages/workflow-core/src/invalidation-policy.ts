@@ -53,26 +53,28 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   mergeMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   fixContext:            { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   rebaseAndRetry:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateWorkflowFromFreshBase' as const },
-  // Step 15 (`docs/architecture/task-invalidation-roadmap.md`): the
-  // chart's Decision Table row "Change external gate policy" is the
-  // intentional non-invalidating outlier — it's a scheduling policy
-  // edit, not an execution-spec edit. Action is now the explicit
-  // `'scheduleOnly'` (was `'none'` in Step 1) so the lock-in is
-  // encoded in the policy table itself: `applyInvalidation` skips
-  // `cancelInFlight` for this action and routes to a `scheduleOnly`
-  // dep that triggers an unblock-pass (e.g.
-  // `Orchestrator.autoStartExternallyUnblockedReadyTasks`). Per chart:
+  // INV-90 experiment-selected design
+  // (`docs/context/inv-90/experiment-brief.md`): the chart's Decision
+  // Table row "Change external gate policy" is the intentional
+  // non-invalidating outlier — it's a scheduling policy edit, not an
+  // execution-spec edit. Action is now the explicit `'scheduleOnly'`
+  // (was `'none'` in Step 1) so the lock-in is encoded in the policy
+  // table itself: `applyInvalidation` skips `cancelInFlight` for this
+  // action and routes to a `scheduleOnly` dep that triggers an
+  // unblock-pass (e.g. `Orchestrator.autoStartExternallyUnblockedReadyTasks`).
+  // Per chart:
   //   - `invalidatesExecutionSpec: false` (no ABI change)
   //   - `invalidateIfActive: false`       (in-flight work survives)
   externalGatePolicy:    { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'scheduleOnly' as const },
   fixApprove:            { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'fixApprove' as const },
   fixReject:             { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'fixReject' as const },
-  // Step 11 (`docs/architecture/task-invalidation-roadmap.md`): graph
-  // topology mutations (e.g. `replaceTask`, `addTask` that changes
-  // parent edges) are fork-class / workflow scope. They must NOT
-  // mutate a live workflow in place; they fork a new workflow rooted
-  // from the relevant node/result. Step 12 wires the matching
-  // `forkWorkflow*` lifecycle dep on `applyInvalidation`.
+  // INV-90 experiment-selected design
+  // (`docs/context/inv-90/experiment-brief.md`): graph topology
+  // mutations (e.g. `replaceTask`, `addTask` that changes parent
+  // edges) are fork-class / workflow scope. They must NOT mutate a
+  // live workflow in place; they fork a new workflow rooted from the
+  // relevant node/result. Step 12 wires the matching `forkWorkflow*`
+  // lifecycle dep on `applyInvalidation`.
   topology:              { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'workflowFork' as const },
 });
 

@@ -1930,6 +1930,48 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(leafId)!.status).toBe('running');
     });
 
+    it('setTaskExternalGatePolicies preserves active execution lineage per INV-90 scheduleOnly policy', () => {
+      orchestrator.loadPlan({
+        name: 'active-gate-prereq',
+        tasks: [{ id: 'upstream', description: 'Prereq task' }],
+      });
+      const upstreamWfId = sid(orchestrator, 0, 'upstream').split('/')[0]!;
+
+      orchestrator.loadPlan({
+        name: 'active-gated-workflow',
+        tasks: [
+          {
+            id: 'leaf-a',
+            description: 'running leaf keeps its execution lineage',
+            externalDependencies: [{ workflowId: upstreamWfId, gatePolicy: 'completed' }],
+          },
+        ],
+      });
+      const leafId = sid(orchestrator, 1, 'leaf-a');
+      persistence.updateTask(leafId, {
+        status: 'running',
+        execution: { generation: 7 },
+      });
+      orchestrator.syncAllFromDb();
+
+      const cancelTask = vi.spyOn(orchestrator, 'cancelTask');
+      const retryTask = vi.spyOn(orchestrator, 'retryTask');
+      const recreateTask = vi.spyOn(orchestrator, 'recreateTask');
+
+      const started = orchestrator.setTaskExternalGatePolicies(leafId, [
+        { workflowId: upstreamWfId, gatePolicy: 'review_ready' },
+      ]);
+
+      const task = orchestrator.getTask(leafId)!;
+      expect(started).toEqual([]);
+      expect(task.status).toBe('running');
+      expect(task.execution.generation).toBe(7);
+      expect(task.config.externalDependencies?.[0]?.gatePolicy).toBe('review_ready');
+      expect(cancelTask).not.toHaveBeenCalled();
+      expect(retryTask).not.toHaveBeenCalled();
+      expect(recreateTask).not.toHaveBeenCalled();
+    });
+
     it('setTaskExternalGatePolicies applies targeted updates only', () => {
       orchestrator.loadPlan({
         name: 'upstream-a',

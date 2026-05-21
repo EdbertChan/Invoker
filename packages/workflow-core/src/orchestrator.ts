@@ -3297,10 +3297,11 @@ export class Orchestrator {
    * Update gate policy on one or more external dependencies for a task, then
    * immediately re-evaluate ready tasks that were blocked by external deps.
    *
-   * Step 15 lock-in (`docs/architecture/task-invalidation-roadmap.md`,
-   * chart row "Change external gate policy"): this is the engine's
-   * ONLY intentionally non-invalidating execution-spec-adjacent
-   * mutation. Per `MUTATION_POLICIES.externalGatePolicy`
+   * INV-90 experiment-selected design
+   * (`docs/context/inv-90/experiment-brief.md`, "Selected Design"):
+   * this is the engine's ONLY intentionally non-invalidating
+   * execution-spec-adjacent mutation. Per
+   * `MUTATION_POLICIES.externalGatePolicy`
    * (`invalidatesExecutionSpec: false`, `invalidateIfActive: false`,
    * `action: 'scheduleOnly'`):
    *
@@ -3342,9 +3343,6 @@ export class Orchestrator {
       targetId: task.id,
       tasks: this.stateMachine.getAllTasks(),
     });
-    if (task.status === 'running' || task.status === 'fixing_with_ai') {
-      throw new Error(`Cannot edit running task ${taskId}`);
-    }
 
     const deps = task.config.externalDependencies;
     if (!deps || deps.length === 0) {
