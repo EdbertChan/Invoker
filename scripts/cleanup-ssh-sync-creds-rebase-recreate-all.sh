@@ -292,7 +292,22 @@ if [[ -s "$tmp_pids" ]]; then
   xargs -r kill -KILL < "$tmp_pids" 2>/dev/null || true
 fi
 rm -f "$tmp_pids"
-rm -rf "$INVOKER_HOME/runtime" "$INVOKER_HOME/repos" "$INVOKER_HOME/worktrees"
+remove_invoker_path() {
+  local path="$1"
+  local attempt
+  for attempt in 1 2 3; do
+    rm -rf "$path" 2>/dev/null || true
+    [[ ! -e "$path" ]] && return 0
+    find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+    rm -rf "$path" 2>/dev/null || true
+    [[ ! -e "$path" ]] && return 0
+    sleep "$attempt"
+  done
+  rm -rf "$path"
+}
+remove_invoker_path "$INVOKER_HOME/runtime"
+remove_invoker_path "$INVOKER_HOME/repos"
+remove_invoker_path "$INVOKER_HOME/worktrees"
 if [[ -e "$INVOKER_HOME/runtime" || -e "$INVOKER_HOME/repos" || -e "$INVOKER_HOME/worktrees" ]]; then
   find "$INVOKER_HOME/runtime" "$INVOKER_HOME/repos" "$INVOKER_HOME/worktrees" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
   rm -rf "$INVOKER_HOME/runtime" "$INVOKER_HOME/repos" "$INVOKER_HOME/worktrees" 2>/dev/null || true
