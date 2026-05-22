@@ -820,6 +820,9 @@ export class Orchestrator {
    * Refresh the in-memory graph from the database.
    * Called at the start of every public mutation to ensure
    * we see any external changes before proceeding.
+   * INV-130 depends on this DB-first boundary: API routes delegate
+   * writes to the facade, and orchestrator mutations refresh here
+   * before deriving runnable work from the graph.
    */
   private refreshFromDb(): void {
     if (this.activeWorkflowIds.size === 0) return;
