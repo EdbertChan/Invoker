@@ -1373,6 +1373,8 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(capturedContext!.signal.aborted).toBe(false);
     expect(capturedContext!.workflowId).toBe('wf-1');
     expect(capturedContext!.intentId).toBe(1);
+    expect(capturedContext!.channel).toBe('invoker:fix-with-agent');
+    expect(capturedContext!.args).toEqual(['wf-1/blocker-task', null]);
 
     const recreateTask = coordinator.enqueue<void>(
       'wf-1',
@@ -1545,7 +1547,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     void olderRunning.catch(() => {});
     await waitFor(() => capturedContext !== undefined);
 
-    coordinator.enqueue<void>(
+    const deleteAll = coordinator.enqueue<void>(
       'wf-1',
       'high',
       'invoker:delete-all-workflows-bulk',
@@ -1557,6 +1559,8 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(reason).toBeInstanceOf(Error);
     expect((reason as Error).name).toBe('WorkflowMutationInvalidatedError');
     expect((reason as Error).message).toContain('Superseded by delete');
+    await deleteAll;
+    await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
   });
 
   it('dispatch handler can observe abort during long-running work and stop early', async () => {
