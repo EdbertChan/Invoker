@@ -4,8 +4,9 @@
  * Binds to 127.0.0.1 only (no external access). Default port 4100,
  * configurable via INVOKER_API_PORT env var.
  *
- * All write endpoints delegate to a WorkflowMutationFacade instance
- * which encapsulates the mutation → dispatch → topup lifecycle.
+ * INV-130 selected this layer as an HTTP shell: write endpoints delegate to a
+ * WorkflowMutationFacade instance which encapsulates the mutation → dispatch →
+ * topup lifecycle.
  *
  * Read endpoints:
  *   GET  /api/health
@@ -129,7 +130,7 @@ function serializeTask(task: any): any {
   return obj;
 }
 
-/** Map domain errors to HTTP status codes. Falls back to 400. */
+/** Map facade/orchestrator domain errors to HTTP status codes. Falls back to 400. */
 const notFoundCodes: ReadonlySet<string> = new Set([
   OrchestratorErrorCode.TASK_NOT_FOUND,
   OrchestratorErrorCode.WORKFLOW_NOT_FOUND,
