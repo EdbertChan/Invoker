@@ -2254,10 +2254,11 @@ describe('fixWithAgentAction lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('agent crashed');
+    })).rejects.toThrow(StaleLineageError);
 
     // revertConflictResolution must NOT be called when lineage is stale
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
   });
 
   it('proceeds normally when lineage is current', async () => {
@@ -2371,9 +2372,10 @@ describe('resolveConflictAction lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('resolution failed');
+    })).rejects.toThrow(StaleLineageError);
 
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
   });
 });
 
@@ -2528,6 +2530,69 @@ describe('autoFixOnFailure lineage guard', () => {
 
     expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
     expect(orchestrator.retryTask).not.toHaveBeenCalled();
+  });
+
+  it('does not record fixed integration metadata when lineage changes during anchor cleanup', async () => {
+    let getTaskCallCount = 0;
+    const orchestrator = {
+      shouldAutoFix: vi.fn(() => true),
+      getTask: vi.fn(() => {
+        getTaskCallCount++;
+        if (getTaskCallCount <= 3) {
+          return makeTask({
+            id: 'merge-a',
+            status: 'failed',
+            config: { workflowId: 'wf-1', isMergeNode: true },
+            execution: {
+              autoFixAttempts: 0,
+              error: 'boom',
+              selectedAttemptId: 'att-1',
+              generation: 5,
+              workspacePath: '/tmp/merge-a',
+            },
+          });
+        }
+        return makeTask({
+          id: 'merge-a',
+          status: 'pending',
+          config: { workflowId: 'wf-1', isMergeNode: true },
+          execution: { selectedAttemptId: 'att-2', generation: 6 },
+        });
+      }),
+      getAutoFixRetryBudget: vi.fn(() => 3),
+      beginConflictResolution: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      updateTask: vi.fn(),
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+      logEvent: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockResolvedValue(undefined),
+      resolveConflict: vi.fn(),
+      execGitIn: vi.fn().mockResolvedValue('fixed-sha\n'),
+    };
+
+    await expect(autoFixOnFailure('merge-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+      getAutoApproveAIFixes: () => false,
+    })).rejects.toThrow(StaleLineageError);
+
+    expect(persistence.updateTask).toHaveBeenCalledWith('merge-a', {
+      execution: { autoFixAttempts: 1 },
+    });
+    expect(persistence.updateTask).not.toHaveBeenCalledWith(
+      'merge-a',
+      expect.objectContaining({
+        execution: expect.objectContaining({ fixedIntegrationSha: 'fixed-sha' }),
+      }),
+    );
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
   });
 });
 

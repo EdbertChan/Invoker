@@ -1798,10 +1798,23 @@ export class Orchestrator {
     this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', additionalChanges);
   }
 
-  setFixAwaitingApproval(taskId: string, originalError: string): void {
+  setFixAwaitingApproval(
+    taskId: string,
+    originalError: string,
+    expectedLineage?: { selectedAttemptId: string | undefined; generation: number },
+  ): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    if (
+      expectedLineage &&
+      (
+        task.execution.selectedAttemptId !== expectedLineage.selectedAttemptId ||
+        (task.execution.generation ?? 0) !== expectedLineage.generation
+      )
+    ) {
+      throw new Error(`Task ${taskId} lineage is stale for fix approval transition`);
+    }
     const tid = task.id;
     if (task.status !== 'running' && task.status !== 'fixing_with_ai') {
       throw new Error(`Task ${tid} is not running or fixing with AI (status: ${task.status})`);
@@ -2728,10 +2741,22 @@ export class Orchestrator {
    * Clears terminal failure fields on the row so SQLite does not show stale error/exit/completed.
    * Returns the saved error string so the caller can revert on failure.
    */
-  beginConflictResolution(taskId: string): { savedError: string } {
+  beginConflictResolution(
+    taskId: string,
+    expectedLineage?: { selectedAttemptId: string | undefined; generation: number },
+  ): { savedError: string } {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    if (
+      expectedLineage &&
+      (
+        task.execution.selectedAttemptId !== expectedLineage.selectedAttemptId ||
+        (task.execution.generation ?? 0) !== expectedLineage.generation
+      )
+    ) {
+      throw new Error(`Task ${taskId} lineage is stale for conflict resolution start`);
+    }
     if (task.status !== 'failed') throw new Error(`Task ${taskId} is not failed (status: ${task.status})`);
 
     const savedError = task.execution.error ?? '';
@@ -2831,11 +2856,25 @@ export class Orchestrator {
    * Revert a conflict resolution attempt: restore the task to failed
    * with its original error and re-parsed mergeConflict field.
    */
-  revertConflictResolution(taskId: string, savedError: string, fixError?: string): void {
+  revertConflictResolution(
+    taskId: string,
+    savedError: string,
+    fixError?: string,
+    expectedLineage?: { selectedAttemptId: string | undefined; generation: number },
+  ): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) {
       throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    }
+    if (
+      expectedLineage &&
+      (
+        task.execution.selectedAttemptId !== expectedLineage.selectedAttemptId ||
+        (task.execution.generation ?? 0) !== expectedLineage.generation
+      )
+    ) {
+      throw new Error(`Task ${taskId} lineage is stale for conflict resolution revert`);
     }
     const id = task.id;
 
