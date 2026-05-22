@@ -1040,7 +1040,11 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
+          const normalizedResponse: WorkResponse = {
+            ...response,
+            attemptId: response.attemptId ?? attemptId,
+            executionGeneration: response.executionGeneration ?? request.executionGeneration,
+          };
           const activeExecution = this.activeExecutions.get(normalizedResponse.attemptId ?? attemptId);
           if (activeExecution?.leaseResourceKey && activeExecution.leaseHolderId) {
             this.persistence.releaseExecutionResourceLease?.(activeExecution.leaseResourceKey, activeExecution.leaseHolderId);
