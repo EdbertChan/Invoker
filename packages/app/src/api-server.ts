@@ -39,7 +39,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import type { Logger } from '@invoker/contracts';
+import { CommandError, type Logger } from '@invoker/contracts';
 import {
   OrchestratorError,
   OrchestratorErrorCode,
@@ -59,7 +59,7 @@ export interface ApiServerDeps {
   orchestrator: Orchestrator;
   persistence: SQLiteAdapter;
   executorRegistry: ExecutorRegistry;
-  /** All write endpoints delegate to the facade for mutation + dispatch + topup. */
+  /** INV-130: all write endpoints delegate to this facade for mutation + dispatch + topup. */
   mutations: WorkflowMutationFacade;
   queueWorkflowMutation?: (
     workflowId: string,
@@ -68,8 +68,6 @@ export interface ApiServerDeps {
     args: unknown[],
     options?: { deferDrain?: boolean },
   ) => number;
-  deleteWorkflow: (workflowId: string) => Promise<void>;
-  detachWorkflow: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
 }
 
 export interface ApiServer {
@@ -144,6 +142,10 @@ function httpStatusForError(err: unknown): number {
     if (notFoundCodes.has(err.code)) return 404;
     if (conflictCodes.has(err.code)) return 409;
   }
+  if (err instanceof CommandError) {
+    if (notFoundCodes.has(err.code)) return 404;
+    if (conflictCodes.has(err.code)) return 409;
+  }
   if (err instanceof PlanConflictError) return 409;
   if (err instanceof TopologyForkRequired) return 409;
   return 400;
@@ -159,8 +161,6 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
     orchestrator,
     persistence,
     mutations,
-    deleteWorkflow,
-    detachWorkflow,
   } = deps;
   const port = parseInt(process.env.INVOKER_API_PORT ?? '4100', 10);
 
@@ -610,7 +610,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       if (method === 'DELETE' && wfDeleteMatch) {
         const workflowId = decodeURIComponent(wfDeleteMatch[1]);
         try {
-          await deleteWorkflow(workflowId);
+          await mutations.deleteWorkflow(workflowId);
           json(res, 200, { ok: true, workflowId, action: 'deleted' });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
@@ -629,7 +629,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             json(res, 400, { error: 'Missing "upstreamWorkflowId" in request body' });
             return;
           }
-          await detachWorkflow(workflowId, String(upstreamWorkflowId));
+          await mutations.detachWorkflow(workflowId, String(upstreamWorkflowId));
           json(res, 200, {
             ok: true,
             workflowId,

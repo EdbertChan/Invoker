@@ -15,7 +15,7 @@
  * remain in the entrypoint layer.
  */
 
-import type { Logger } from '@invoker/contracts';
+import { CommandError, makeEnvelope, type Logger } from '@invoker/contracts';
 import type { CommandService, Orchestrator, ExternalGatePolicyUpdate, TaskState } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { TaskRunner } from '@invoker/execution-engine';
@@ -310,6 +310,13 @@ export class WorkflowMutationFacade {
       }
     }
     await this.deps.taskExecutor?.closeWorkflowReview?.(workflowId);
+    if (this.deps.commandService) {
+      const result = await this.deps.commandService.deleteWorkflow(
+        makeEnvelope('delete-workflow', 'surface', 'workflow', { workflowId }),
+      );
+      if (!result.ok) throw CommandError.fromResult(result.error);
+      return;
+    }
     this.deps.orchestrator.deleteWorkflow(workflowId);
   }
 
@@ -322,6 +329,13 @@ export class WorkflowMutationFacade {
   }
 
   async detachWorkflow(workflowId: string, upstreamWorkflowId: string): Promise<void> {
+    if (this.deps.commandService) {
+      const result = await this.deps.commandService.detachWorkflow(
+        makeEnvelope('detach-workflow', 'surface', 'workflow', { workflowId, upstreamWorkflowId }),
+      );
+      if (!result.ok) throw CommandError.fromResult(result.error);
+      return;
+    }
     this.deps.orchestrator.detachWorkflow(workflowId, upstreamWorkflowId);
   }
 
