@@ -6985,6 +6985,23 @@ describe('Orchestrator', () => {
       expect(staleGenerationResult).toEqual([]);
       expect(orchestrator.getTask(taskId)?.execution.selectedAttemptId).toBe(activeAttemptId);
       expect(orchestrator.getTask(taskId)?.status).toBe('running');
+
+      const activeGeneration = orchestrator.getTask(taskId)?.execution.generation ?? 0;
+      persistence.updateTask(taskId, { execution: { generation: activeGeneration + 1 } });
+      orchestrator.syncAllFromDb();
+
+      const staleGenerationWithActiveAttemptResult = orchestrator.handleWorkerResponse(
+        makeResponse({
+          actionId: taskId,
+          attemptId: activeAttemptId,
+          executionGeneration: activeGeneration,
+          status: 'completed',
+          outputs: { exitCode: 0 },
+        }),
+      );
+      expect(staleGenerationWithActiveAttemptResult).toEqual([]);
+      expect(orchestrator.getTask(taskId)?.execution.selectedAttemptId).toBe(activeAttemptId);
+      expect(orchestrator.getTask(taskId)?.status).toBe('running');
     });
 
     it('recreateWorkflow selects a fresh persisted attempt for recreated tasks', () => {
