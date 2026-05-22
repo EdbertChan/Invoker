@@ -167,11 +167,9 @@ describe('TaskRunner', () => {
     completeCallback?.({
       requestId: seenRequest.requestId,
       actionId: task.id,
-      attemptId: seenRequest.attemptId,
-      executionGeneration: seenRequest.executionGeneration,
       status: 'completed',
       outputs: { exitCode: 0 },
-    });
+    } as WorkResponse);
     await done;
 
     expect(handleWorkerResponse).toHaveBeenCalledWith(
