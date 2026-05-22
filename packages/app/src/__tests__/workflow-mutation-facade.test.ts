@@ -318,4 +318,60 @@ describe('WorkflowMutationFacade', () => {
       expect(deps.taskExecutor.executeTasks).toHaveBeenCalled();
     });
   });
+
+  describe('rebaseRetry', () => {
+    it('resolves the target workflow and dispatches through the facade lifecycle', async () => {
+      const scoped = makeRunningTask({
+        id: 'wf-1/task-a',
+        config: { workflowId: 'wf-1' },
+        execution: { selectedAttemptId: 'attempt-a' },
+      });
+      const crossWorkflow = makeRunningTask({
+        id: 'wf-2/task-b',
+        config: { workflowId: 'wf-2' },
+        execution: { selectedAttemptId: 'attempt-b' },
+      });
+      (deps.orchestrator.retryWorkflow as ReturnType<typeof vi.fn>).mockReturnValue([scoped, crossWorkflow]);
+
+      const result = await facade.rebaseRetry('wf-1');
+
+      expect(deps.persistence.loadWorkflow).toHaveBeenCalledWith('wf-1');
+      expect(deps.orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+      expect(result.started).toEqual([scoped, crossWorkflow]);
+      expect(result.runnable).toEqual([scoped]);
+      expect(result.topup).toEqual([crossWorkflow]);
+      expect(deps.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
+      expect(deps.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [crossWorkflow]);
+    });
+  });
+
+  describe('rebaseRecreate', () => {
+    it('resolves the target workflow and dispatches through the facade lifecycle', async () => {
+      const scoped = makeRunningTask({
+        id: 'wf-1/task-a',
+        config: { workflowId: 'wf-1' },
+        execution: { selectedAttemptId: 'attempt-a' },
+      });
+      const crossWorkflow = makeRunningTask({
+        id: 'wf-2/task-b',
+        config: { workflowId: 'wf-2' },
+        execution: { selectedAttemptId: 'attempt-b' },
+      });
+      (deps.orchestrator.recreateWorkflow as ReturnType<typeof vi.fn>).mockReturnValue([
+        scoped,
+        crossWorkflow,
+      ]);
+
+      const result = await facade.rebaseRecreate('wf-1');
+
+      expect(deps.persistence.loadWorkflow).toHaveBeenCalledWith('wf-1');
+      expect(deps.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { generation: 2 });
+      expect(deps.orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
+      expect(result.started).toEqual([scoped, crossWorkflow]);
+      expect(result.runnable).toEqual([scoped]);
+      expect(result.topup).toEqual([crossWorkflow]);
+      expect(deps.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
+      expect(deps.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [crossWorkflow]);
+    });
+  });
 });

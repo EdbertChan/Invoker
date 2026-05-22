@@ -780,6 +780,34 @@ describe('POST /api/workflows/:id/restart', () => {
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [topup]);
   });
+
+  it('reports the facade scoped runnable count, not raw started workflow tasks', async () => {
+    const scoped = makeTask({
+      id: 'wf-1/task-1',
+      config: { workflowId: 'wf-1' },
+      execution: { selectedAttemptId: 'attempt-wf1' },
+    });
+    const pending = makeTask({
+      id: 'wf-1/task-2',
+      status: 'pending',
+      config: { workflowId: 'wf-1' },
+      execution: {},
+    });
+    const crossWorkflow = makeTask({
+      id: 'wf-2/task-1',
+      config: { workflowId: 'wf-2' },
+      execution: { selectedAttemptId: 'attempt-wf2' },
+    });
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => [scoped, pending, crossWorkflow]);
+    mocks.orchestrator.startExecution.mockReturnValue([]);
+
+    const res = await request(port, 'POST', '/api/workflows/wf-1/restart');
+
+    expect(res.status).toBe(200);
+    expect(res.body.tasksStarted).toBe(1);
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
+    expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [crossWorkflow]);
+  });
 });
 
 describe('POST /api/workflows/:id/rebase-retry', () => {
@@ -856,6 +884,7 @@ describe('POST /api/workflows/:id/rebase-recreate', () => {
     const res = await request(port, 'POST', '/api/workflows/wf-1/rebase-recreate');
 
     expect(res.status).toBe(200);
+    expect(res.body.tasksStarted).toBe(1);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledTimes(2);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(1, [scoped]);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [crossWorkflow]);

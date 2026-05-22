@@ -230,6 +230,10 @@ export class WorkflowMutationFacade {
 
   // ── Workflow-scoped mutations ────────────────────────────
 
+  /**
+   * INV-155: workflow API mutations use this facade as the lifecycle boundary.
+   * API routes may format HTTP responses, but dispatch/topup stays here.
+   */
   async retryWorkflow(workflowId: string): Promise<MutationResult> {
     const started = sharedRetryWorkflow(workflowId, {
       orchestrator: this.deps.orchestrator,

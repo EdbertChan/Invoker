@@ -118,6 +118,7 @@ describe('Context menu (component)', () => {
     fireEvent.click(await screen.findByText('More'));
     fireEvent.click(await screen.findByText('Recreate Workflow'));
     await waitFor(() => expect(mock.api.recreateWorkflow).toHaveBeenCalledWith('wf-1'));
+    expect(mock.api.recreateTask).not.toHaveBeenCalled();
   });
 
   it('workflow context menu retries workflow with rebase', async () => {
@@ -142,6 +143,7 @@ describe('Context menu (component)', () => {
     fireEvent.click(await screen.findByText('More'));
     fireEvent.click(await screen.findByText('Cancel Workflow'));
     await waitFor(() => expect(mock.api.cancelWorkflow).toHaveBeenCalledWith('wf-1'));
+    expect(mock.api.cancelTask).not.toHaveBeenCalled();
   });
 
   it('workflow context menu deletes workflow', async () => {
