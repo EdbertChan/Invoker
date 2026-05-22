@@ -246,9 +246,10 @@ export class CommandService {
    * invalidation route per Step 9 of the task-invalidation roadmap
    * (chart Decision Table row "Change merge mode";
    * `MUTATION_POLICIES.mergeMode` → `retryTask` / task scope, scoped
-   * to the merge node). Mirrors the Step 5/7/8 retry-class seams
-   * (`editTaskType` / `selectExperiment` / `selectExperiments`) rather
-   * than the recreate-class `editTaskCommand` / `editTaskPrompt` /
+   * to the merge node). Mirrors the other retry-class seams such as
+   * `editTaskType` and `editTaskFixContext`, rather than the
+   * recreate-class `selectExperiment` / `selectExperiments` /
+   * `editTaskCommand` / `editTaskPrompt` /
    * `editTaskAgent` seams: a merge-mode flip changes the merge
    * execution policy but preserves the merge node's branch /
    * workspacePath lineage.
@@ -288,10 +289,10 @@ export class CommandService {
    * invalidation route per Step 10 of the task-invalidation roadmap
    * (chart Decision Table row "Change fix prompt or fix context while
    * `fixing_with_ai`"; `MUTATION_POLICIES.fixContext` → `retryTask` /
-   * task scope, scoped to the failed/fixing task). Mirrors the Step
-   * 5/7/8/9 retry-class seams (`editTaskType` / `selectExperiment` /
-   * `selectExperiments` / `editTaskMergeMode`) rather than the
-   * recreate-class `editTaskCommand` / `editTaskPrompt` /
+   * task scope, scoped to the failed/fixing task). Mirrors the
+   * retry-class seams (`editTaskType` / `editTaskMergeMode`) rather
+   * than the recreate-class `selectExperiment` /
+   * `selectExperiments` / `editTaskCommand` / `editTaskPrompt` /
    * `editTaskAgent` seams: a fix prompt/context edit redirects the
    * AI fix attempt without changing the task's execution-defining
    * spec, so the failed task's branch / workspacePath lineage is
