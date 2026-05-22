@@ -21,3 +21,4 @@ echo "==> Running package workspace tests (concurrency=$CONCURRENCY)"
 pnpm -r --workspace-concurrency="$CONCURRENCY" test
 echo "==> Running required package builds"
 bash "$ROOT/scripts/required-builds.sh"
+echo "==> Package workspace check complete; run scripts/run-all-tests.sh with INVOKER_TEST_ALL_PROOF=1 for INV-117 proof thresholds"

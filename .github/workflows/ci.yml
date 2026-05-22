@@ -110,6 +110,7 @@ jobs:
             command: |
               bash scripts/test-suites/required/05-delete-all-prod-db-guard.sh
               bash scripts/test-suites/required/07-invalid-config-json.sh
+              bash scripts/test-suites/required/08-electron-preprovision-repro.sh
               bash scripts/test-suites/required/15-owner-boundary-policy.sh
               bash scripts/test-suites/required/50-verify-executor-routing.sh
           - name: Vitest Workspace
@@ -124,6 +125,8 @@ jobs:
             command: bash scripts/test-suites/required/18-start-running-mece-repros.sh
           - name: Task New Attempt Reset Repro
             command: bash scripts/test-suites/required/19-task-new-attempt-reset-repro.sh
+          - name: Start Running MECE Follow-up Repros
+            command: bash scripts/test-suites/required/24-start-running-mece-repros.sh
 
     name: required-fast / ${{ matrix.name }}
 
@@ -377,8 +380,12 @@ jobs:
             suite: scripts/test-suites/optional/30-e2e-ssh.sh
           - name: shard-31
             suite: scripts/test-suites/optional/31-e2e-ssh-merge.sh
+          - name: chaos-matrix
+            suite: scripts/test-suites/optional/32-e2e-chaos.sh
+          - name: chaos-overload
+            suite: scripts/test-suites/optional/33-e2e-chaos-overload.sh
 
-    name: ssh / ${{ matrix.name }}
+    name: extended-e2e / ${{ matrix.name }}
 
     steps:
       - name: Checkout
@@ -437,7 +444,7 @@ jobs:
             $SUDO /usr/sbin/sshd
           fi
 
-      - name: Run SSH shard
+      - name: Run extended E2E shard
         run: bash ${{ matrix.suite }}
 
   optional-other:
