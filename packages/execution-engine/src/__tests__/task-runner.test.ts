@@ -242,6 +242,122 @@ describe('TaskRunner', () => {
     expect(executeTasksSpy).toHaveBeenCalledWith([newlyReady]);
   });
 
+  it('reports attemptId and executionGeneration on executor startup failure responses', async () => {
+    const handleWorkerResponse = vi.fn(() => []);
+    const failingExecutor = {
+      type: 'worktree',
+      start: vi.fn(async () => {
+        throw new Error('startup exploded');
+      }),
+      onComplete: vi.fn(),
+      onOutput: vi.fn(),
+      onHeartbeat: vi.fn(),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => undefined,
+        handleWorkerResponse,
+      } as any,
+      persistence: {
+        updateTask: vi.fn(),
+        appendTaskOutput: vi.fn(),
+      } as any,
+      executorRegistry: {
+        getDefault: () => failingExecutor,
+        get: () => failingExecutor,
+        getAll: () => [failingExecutor],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    const task = makeTask({
+      id: 'startup-identity',
+      status: 'running',
+      config: { command: 'echo never' },
+      execution: { generation: 4, selectedAttemptId: 'startup-identity-a1' },
+    });
+
+    await runner.executeTask(task);
+
+    expect(handleWorkerResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actionId: 'startup-identity',
+        attemptId: 'startup-identity-a1',
+        executionGeneration: 4,
+        status: 'failed',
+      }),
+    );
+  });
+
+  it('normalizes missing executor response identity to the launched attempt and generation', async () => {
+    const handleWorkerResponse = vi.fn(() => []);
+    let seenRequest: any;
+    let completeCallback: ((response: WorkResponse) => void) | undefined;
+    const executorImpl = {
+      type: 'worktree',
+      start: vi.fn().mockImplementation(async (request: any) => {
+        seenRequest = request;
+        return {
+          executionId: `exec-${request.actionId}`,
+          taskId: request.actionId,
+          workspacePath: '/tmp/mock-worktree',
+          branch: `experiment/${request.actionId}-mock`,
+        };
+      }),
+      onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
+        completeCallback = cb;
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => undefined,
+        handleWorkerResponse,
+      } as any,
+      persistence: { updateTask: vi.fn() } as any,
+      executorRegistry: {
+        getDefault: () => executorImpl,
+        get: () => executorImpl,
+        getAll: () => [executorImpl],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    const task = makeTask({
+      id: 'callback-identity',
+      status: 'running',
+      config: { command: 'echo hi' },
+      execution: { generation: 9, selectedAttemptId: 'callback-identity-a1' },
+    });
+
+    const done = runner.executeTask(task);
+    await vi.waitFor(() => expect(seenRequest).toBeDefined());
+    completeCallback?.({
+      requestId: seenRequest.requestId,
+      actionId: task.id,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    } as WorkResponse);
+    await done;
+
+    expect(handleWorkerResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actionId: task.id,
+        attemptId: 'callback-identity-a1',
+        executionGeneration: 9,
+        status: 'completed',
+      }),
+    );
+  });
+
   it('deduplicates concurrent launches for the same attempt', async () => {
     let completeCallback: ((response: WorkResponse) => void) | undefined;
     const start = vi.fn().mockImplementation(async (request: any) => ({

@@ -1040,7 +1040,13 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
+          // INV-113 selected attempt-scoped identity: executor callbacks are
+          // normalized to the launch identity before orchestrator handoff.
+          const normalizedResponse: WorkResponse = {
+            ...response,
+            attemptId: response.attemptId ?? attemptId,
+            executionGeneration: response.executionGeneration ?? task.execution.generation ?? 0,
+          };
           const activeExecution = this.activeExecutions.get(normalizedResponse.attemptId ?? attemptId);
           if (activeExecution?.leaseResourceKey && activeExecution.leaseHolderId) {
             this.persistence.releaseExecutionResourceLease?.(activeExecution.leaseResourceKey, activeExecution.leaseHolderId);

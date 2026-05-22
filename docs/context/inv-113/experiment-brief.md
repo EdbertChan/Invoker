@@ -41,21 +41,23 @@ Expected output threshold:
 
 - Exit code must be `0`.
 - Output must include `Test Files  1 passed (1)`.
-- Output must include `Tests  125 passed (125)`.
+- Output must include `Tests  127 passed (127)`.
 - Output must include the deterministic tests named:
   - `sends attemptId and executionGeneration in work requests and preserves them in responses`
   - `dispatches newly ready tasks after executor startup failure`
+  - `reports attemptId and executionGeneration on executor startup failure responses`
+  - `normalizes missing executor response identity to the launched attempt and generation`
   - `deduplicates concurrent launches for the same attempt`
 
 Observed output on 2026-05-22:
 
 ```text
 Test Files  1 passed (1)
-Tests  125 passed (125)
-Duration  2.10s
+Tests  127 passed (127)
+Duration  2.33s
 ```
 
-Verdict: pass. The selected attempt-scoped design is covered by deterministic unit tests for request/response identity preservation, startup-failure scheduling, and duplicate launch suppression.
+Verdict: pass. The selected attempt-scoped design is covered by deterministic unit tests for request/response identity preservation, startup-failure scheduling, startup-failure response provenance, completion response normalization, and duplicate launch suppression.
 
 ### E2: Package-Level Regression Sweep
 
@@ -71,14 +73,14 @@ Expected output threshold:
 
 - Exit code must be `0`.
 - Output must include `Test Files  50 passed (50)`.
-- Output must include `Tests  980 passed (980)`.
+- Output must include `Tests  982 passed (982)`.
 
 Observed output on 2026-05-22:
 
 ```text
 Test Files  50 passed (50)
-Tests  980 passed (980)
-Duration  85.98s
+Tests  982 passed (982)
+Duration  99.92s
 ```
 
 Verdict: pass. The TaskRunner proof is compatible with the broader execution-engine suite.
