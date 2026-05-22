@@ -3854,6 +3854,11 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Detach one upstream dependency from a workflow. API callers reach this
+   * through WorkflowMutationFacade; the orchestrator keeps the DB-first
+   * mutation and graph-cache refresh contract.
+   */
   detachWorkflow(workflowId: string, upstreamWorkflowId: string): void {
     this.syncAllFromDb();
     this.detachWorkflowInternal(workflowId, upstreamWorkflowId, {
