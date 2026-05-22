@@ -53,7 +53,9 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   mergeMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   fixContext:            { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   rebaseAndRetry:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateWorkflowFromFreshBase' as const },
-  // Step 15 (`docs/architecture/task-invalidation-roadmap.md`): the
+  // INV-90 (`docs/context/inv-90/experiment-brief.md`) selected the
+  // scheduling-only design for external gate-policy edits. Step 15
+  // (`docs/architecture/task-invalidation-roadmap.md`): the
   // chart's Decision Table row "Change external gate policy" is the
   // intentional non-invalidating outlier — it's a scheduling policy
   // edit, not an execution-spec edit. Action is now the explicit

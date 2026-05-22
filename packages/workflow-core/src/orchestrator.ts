@@ -77,6 +77,7 @@ import {
   withSchedulerEnqueueCandidates,
   type InvalidationPlan,
 } from './invalidation-plan.js';
+import { MUTATION_POLICIES } from './invalidation-policy.js';
 import {
   isActiveAttempt,
   isDiscardedAttempt,
@@ -3337,8 +3338,18 @@ export class Orchestrator {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    const gatePolicyMutation = MUTATION_POLICIES.externalGatePolicy;
+    if (
+      gatePolicyMutation.invalidatesExecutionSpec ||
+      gatePolicyMutation.invalidateIfActive ||
+      gatePolicyMutation.action !== 'scheduleOnly'
+    ) {
+      throw new Error(
+        'setTaskExternalGatePolicies requires externalGatePolicy to remain scheduleOnly/non-invalidating per docs/context/inv-90/experiment-brief.md',
+      );
+    }
     this.lastInvalidationPlan = planInvalidation({
-      action: 'scheduleOnly',
+      action: gatePolicyMutation.action,
       targetId: task.id,
       tasks: this.stateMachine.getAllTasks(),
     });

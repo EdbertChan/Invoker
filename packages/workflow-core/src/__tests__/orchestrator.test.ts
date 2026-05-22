@@ -1921,6 +1921,11 @@ describe('Orchestrator', () => {
 
       expect(orchestrator.getTask(leafId)!.status).toBe('pending');
 
+      const generationBefore = orchestrator.getTask(leafId)!.execution.generation ?? 0;
+      const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const retrySpy = vi.spyOn(orchestrator, 'retryTask');
+      const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
+
       const started = orchestrator.setTaskExternalGatePolicies(leafId, [
         { workflowId: prereqWfId, gatePolicy: 'review_ready' },
       ]);
@@ -1928,6 +1933,14 @@ describe('Orchestrator', () => {
       expect(orchestrator.getTask(leafId)!.config.externalDependencies?.[0]?.gatePolicy).toBe('review_ready');
       expect(started.map((t) => t.id)).toContain(leafId);
       expect(orchestrator.getTask(leafId)!.status).toBe('running');
+      expect(orchestrator.getTask(leafId)!.execution.generation ?? 0).toBe(generationBefore);
+      expect(cancelSpy).not.toHaveBeenCalled();
+      expect(retrySpy).not.toHaveBeenCalled();
+      expect(recreateSpy).not.toHaveBeenCalled();
+
+      cancelSpy.mockRestore();
+      retrySpy.mockRestore();
+      recreateSpy.mockRestore();
     });
 
     it('setTaskExternalGatePolicies applies targeted updates only', () => {
