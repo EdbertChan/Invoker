@@ -43,6 +43,8 @@ import type {
   ActivityLogEntry,
   Conversation,
   ConversationMessage,
+  SearchOptions,
+  SearchResultItem,
 } from './adapter.js';
 
 type NativeSqlite = typeof import('node:sqlite');
@@ -1123,6 +1125,68 @@ export class SQLiteAdapter implements PersistenceAdapter {
     const workflowIds = rows.map((row: any) => String(row.id));
     const rollups = this.loadWorkflowRollups(workflowIds);
     return rows.map((row: any) => this.rowToWorkflow(row, rollups.get(String(row.id))));
+  }
+
+  searchWorkflowsAndTasks(options: SearchOptions): SearchResultItem[] {
+    const { query, type = 'all', limit = 20, offset = 0 } = options;
+    const pattern = `%${query.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`;
+
+    const results: SearchResultItem[] = [];
+
+    if (type === 'workflows' || type === 'all') {
+      const rows = this.queryAll(
+        `SELECT id, name, description, created_at
+           FROM workflows
+          WHERE name LIKE ? ESCAPE '\\'
+             OR description LIKE ? ESCAPE '\\'
+          ORDER BY created_at DESC`,
+        [pattern, pattern],
+      ) as any[];
+      const ids = rows.map((r) => String(r.id));
+      const rollups = ids.length > 0 ? this.loadWorkflowRollups(ids) : new Map();
+      for (const row of rows) {
+        const rollup = rollups.get(String(row.id));
+        results.push({
+          kind: 'workflow',
+          id: String(row.id),
+          name: String(row.name),
+          description: row.description ? String(row.description) : undefined,
+          status: rollup?.status ?? 'pending',
+          createdAt: String(row.created_at),
+        });
+      }
+    }
+
+    if (type === 'tasks' || type === 'all') {
+      const rows = this.queryAll(
+        `SELECT id, workflow_id, description, status, command, prompt, created_at
+           FROM tasks
+          WHERE description LIKE ? ESCAPE '\\'
+             OR command LIKE ? ESCAPE '\\'
+             OR prompt LIKE ? ESCAPE '\\'
+          ORDER BY created_at DESC`,
+        [pattern, pattern, pattern],
+      ) as any[];
+      for (const row of rows) {
+        results.push({
+          kind: 'task',
+          id: String(row.id),
+          workflowId: row.workflow_id ? String(row.workflow_id) : undefined,
+          name: String(row.description ?? row.id),
+          description: row.command
+            ? String(row.command)
+            : row.prompt
+              ? String(row.prompt).slice(0, 120)
+              : undefined,
+          status: String(row.status),
+          createdAt: String(row.created_at),
+        });
+      }
+    }
+
+    // Sort combined results by createdAt descending, then paginate
+    results.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+    return results.slice(offset, offset + limit);
   }
 
   loadWorkflowTaskSnapshot(): WorkflowTaskSnapshot {

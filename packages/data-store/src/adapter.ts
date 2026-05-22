@@ -135,6 +135,31 @@ export interface PersistenceAdapter {
   /** Read the configured execution agent name for a task (e.g. 'claude', 'codex'). */
   getExecutionAgent?(taskId: string): string | null;
 
+  // Search
+  searchWorkflowsAndTasks?(options: SearchOptions): SearchResultItem[];
+
   // Lifecycle
   close(): void;
+}
+
+// ── Search Types ────────────────────────────────────────────
+
+export type SearchResultKind = 'workflow' | 'task';
+
+export interface SearchResultItem {
+  kind: SearchResultKind;
+  id: string;
+  workflowId?: string;
+  name: string;
+  description?: string;
+  status: string;
+  createdAt: string;
+}
+
+export interface SearchOptions {
+  query: string;
+  /** Filter by entity type. Defaults to 'all'. */
+  type?: 'workflows' | 'tasks' | 'all';
+  limit?: number;
+  offset?: number;
 }

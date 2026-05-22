@@ -188,6 +188,24 @@ export interface ResumeWorkflowResult {
   startedCount: number;
 }
 
+export interface SearchResultItem {
+  kind: 'workflow' | 'task';
+  id: string;
+  workflowId?: string;
+  name: string;
+  description?: string;
+  status: string;
+  createdAt: string;
+}
+
+export interface SearchResponse {
+  query: string;
+  type: string;
+  limit: number;
+  offset: number;
+  results: SearchResultItem[];
+}
+
 export interface WorkflowListEntry {
   id: string;
   name: string;
@@ -580,6 +598,12 @@ export const IpcChannels = {
   'invoker:install-bundled-skills': {} as {
     request: [mode?: BundledSkillsInstallMode];
     response: BundledSkillsStatus;
+  },
+
+  // Search
+  'invoker:search': {} as {
+    request: [query: string, options?: { type?: 'workflows' | 'tasks' | 'all'; limit?: number; offset?: number }];
+    response: SearchResponse;
   },
 
 } as const;

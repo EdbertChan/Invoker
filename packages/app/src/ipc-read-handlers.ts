@@ -121,6 +121,23 @@ export function registerReadOnlyIpcHandlers(context: RegisterReadOnlyIpcHandlers
   ipcMain.handle('invoker:get-output-tail', (_event, taskId: string) => persistence.getOutputTail(taskId));
   ipcMain.handle('invoker:get-all-completed-tasks', () => persistence.loadAllCompletedTasks());
 
+  ipcMain.handle('invoker:search', (_event, query: string, options?: { type?: 'workflows' | 'tasks' | 'all'; limit?: number; offset?: number }) => {
+    const q = (query ?? '').trim();
+    if (!q) return { query: q, type: options?.type ?? 'all', limit: options?.limit ?? 20, offset: options?.offset ?? 0, results: [] };
+    return {
+      query: q,
+      type: options?.type ?? 'all',
+      limit: options?.limit ?? 20,
+      offset: options?.offset ?? 0,
+      results: persistence.searchWorkflowsAndTasks({
+        query: q,
+        type: options?.type ?? 'all',
+        limit: options?.limit ?? 20,
+        offset: options?.offset ?? 0,
+      }),
+    };
+  });
+
   ipcMain.handle('invoker:get-claude-session', async (_event, sessionId: string) => {
     logger.info(`get-claude-session: "${sessionId}"`, { module: 'ipc' });
     try {

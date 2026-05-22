@@ -16,6 +16,7 @@
  *   GET  /api/tasks/:id/output     Captured stdout/stderr
  *   GET  /api/workflows            List all workflows
  *   GET  /api/queue                Scheduler queue status
+ *   GET  /api/search               Search workflows and tasks by name/description/command/prompt
  *
  * Write endpoints:
  *   POST   /api/tasks/:id/cancel
@@ -673,6 +674,21 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }
+        return;
+      }
+
+      // GET /api/search?q=<term>[&type=workflows|tasks|all][&limit=<n>][&offset=<n>]
+      if (method === 'GET' && path === '/api/search') {
+        const q = query.q?.trim() ?? '';
+        if (!q) {
+          json(res, 400, { error: 'Missing required query parameter "q"' });
+          return;
+        }
+        const type = (query.type === 'workflows' || query.type === 'tasks') ? query.type : 'all';
+        const limit = Math.min(Math.max(parseInt(query.limit ?? '20', 10) || 20, 1), 100);
+        const offset = Math.max(parseInt(query.offset ?? '0', 10) || 0, 0);
+        const results = persistence.searchWorkflowsAndTasks({ query: q, type, limit, offset });
+        json(res, 200, { query: q, type, limit, offset, results });
         return;
       }
 
