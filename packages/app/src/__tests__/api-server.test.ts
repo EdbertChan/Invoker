@@ -366,13 +366,20 @@ describe('POST /api/tasks/:id/restart', () => {
     expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
   });
 
-  it('returns 400 on error', async () => {
-    mocks.orchestrator.retryTask.mockImplementation(() => {
-      throw new Error('task not restartable');
+  it('maps typed task mutation errors through the selected HTTP status contract', async () => {
+    mocks.orchestrator.retryTask.mockImplementationOnce(() => {
+      throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, 'Task missing not found');
     });
     const res = await request(port, 'POST', '/api/tasks/task-1/restart');
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('task not restartable');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Task missing not found');
+
+    mocks.orchestrator.retryTask.mockImplementationOnce(() => {
+      throw new OrchestratorError(OrchestratorErrorCode.TASK_ALREADY_TERMINAL, 'Task already completed');
+    });
+    const conflict = await request(port, 'POST', '/api/tasks/task-1/restart');
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.error).toBe('Task already completed');
   });
 
   it('tops up globally ready tasks after scoped restart launch', async () => {

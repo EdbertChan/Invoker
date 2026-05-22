@@ -3967,11 +3967,16 @@ export class Orchestrator {
     this.refreshFromDb();
 
     const task = this.stateGetTask(taskId);
-    if (!task) throw new OrchestratorError('TASK_NOT_FOUND', `Task "${taskId}" not found`);
+    if (!task) {
+      throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task "${taskId}" not found`);
+    }
 
     const terminal = new Set(['completed', 'closed', 'stale']);
     if (terminal.has(task.status)) {
-      throw new OrchestratorError('TASK_ALREADY_TERMINAL', `Task "${taskId}" is already ${task.status}`);
+      throw new OrchestratorError(
+        OrchestratorErrorCode.TASK_ALREADY_TERMINAL,
+        `Task "${taskId}" is already ${task.status}`,
+      );
     }
 
     // Find all transitive dependents, skipping completed/stale
@@ -4043,7 +4048,10 @@ export class Orchestrator {
       (t) => t.config.workflowId === workflowId,
     );
     if (allTasks.length === 0) {
-      throw new OrchestratorError('WORKFLOW_NOT_FOUND', `No tasks found for workflow ${workflowId}`);
+      throw new OrchestratorError(
+        OrchestratorErrorCode.WORKFLOW_NOT_FOUND,
+        `No tasks found for workflow ${workflowId}`,
+      );
     }
 
     const cancellable = new Set([
