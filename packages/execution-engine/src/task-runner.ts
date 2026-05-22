@@ -1117,6 +1117,9 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
+          // INV-113 selected the attempt-scoped design: legacy executors may
+          // still omit attemptId, so bind completion back to the launch attempt
+          // before orchestrator handoff.
           const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
           const activeExecution = this.activeExecutions.get(normalizedResponse.attemptId ?? attemptId);
           if (activeExecution?.leaseResourceKey && activeExecution.leaseHolderId) {
