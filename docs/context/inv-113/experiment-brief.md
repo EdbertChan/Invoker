@@ -45,7 +45,7 @@ Expected stable output tail:
 
 ```text
 Test Files  1 passed (1)
-     Tests  125 passed (125)
+     Tests  126 passed (126)
 ```
 
 Observed on 2026-05-22:
@@ -56,10 +56,18 @@ Test Files  1 passed (1)
 Duration  5.87s
 ```
 
+Observed after implementation on 2026-05-22:
+
+```text
+Test Files  1 passed (1)
+     Tests  126 passed (126)
+Duration  4.66s
+```
+
 Acceptance threshold:
 
 - `Test Files` must be `1 passed (1)`.
-- `Tests` must be `125 passed (125)`.
+- `Tests` must be `126 passed (126)`.
 - No failed, skipped, or todo tests are acceptable for this proof.
 
 ### Package Proof
@@ -72,7 +80,7 @@ Expected stable output tail:
 
 ```text
 Test Files  50 passed (50)
-     Tests  980 passed (980)
+     Tests  981 passed (981)
 ```
 
 Observed on 2026-05-22:
@@ -83,10 +91,18 @@ Test Files  50 passed (50)
 Duration  200.90s
 ```
 
+Observed after implementation on 2026-05-22:
+
+```text
+Test Files  50 passed (50)
+     Tests  981 passed (981)
+Duration  153.23s
+```
+
 Acceptance threshold:
 
 - `Test Files` must be `50 passed (50)`.
-- `Tests` must be `980 passed (980)`.
+- `Tests` must be `981 passed (981)`.
 - The command may emit git and merge-gate diagnostic output; diagnostics are acceptable only when the final Vitest summary is fully passing.
 
 ## Evidence Matrix
@@ -101,6 +117,15 @@ Acceptance threshold:
 | Recreate uses fresh workspace, restart can reuse | `task-runner.ts:718`, `task-runner.ts:1103`; `task-runner.test.ts:521`, `task-runner.test.ts:643` | Recreate with generation and cleared metadata sets `freshWorkspace=true`; restart with branch/workspace sets `false`. |
 | Pool selection is deterministic and capacity-aware | `task-runner.ts:1120`, `task-runner.ts:1138`, `task-runner.ts:1330` | Load is computed from pending and active executions; round-robin and least-loaded use stable order and capacity filters. |
 | Completion callbacks are serialized | `task-runner.ts:1037`, `task-runner.ts:1090` | All completion work is chained before resolving the executor completion promise. |
+
+## Implementation Consumption
+
+The implementation keeps the selected attempt-scoped architecture and tightens
+the generation propagation proof. `TaskRunner` now normalizes executor
+completion responses by filling both `attemptId` and `executionGeneration` from
+the launch-time `WorkRequest` when an executor omits either field. The added
+test proves the response path still carries the selected attempt and generation
+without depending on executor echo behavior.
 
 ## Verdict
 
