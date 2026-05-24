@@ -1,27 +1,33 @@
 #!/usr/bin/env bash
 # skill-doctor.sh: Deterministic orchestrator for plan validation scripts
-# Usage: bash skill-doctor.sh [OPTIONS] <plan-file>
-#
-# OPTIONS:
-#   --help              Show this help message
-#   --skip-assumptions  Skip assumption extraction (also skips verify plan generation)
-#   --skip-atomicity    Skip atomicity linting
-#   --skip-validation   Skip YAML plan validation
-#   --source-file FILE  Use a separate source document for assumption/coverage checks
-#   --coverage-map FILE Validate row-to-workflow traceability for policy-matrix inputs
-#   --stack-manifest FILE Validate coverage-map workflow labels against a real authored stack manifest
-#   --verbose           Show detailed output from each sub-check
-#   --warn-delegation  Pass through to atomicity lint (prints advisory delegation-hint warnings)
-#
-# Exit codes:
-#   0 = all checks passed
-#   1 = one or more checks failed
-#   2 = usage/argument error
-#
 # Output: JSON summary of all checks with pass/fail status
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+show_help() {
+  cat <<'HELP_EOF'
+Usage: bash skill-doctor.sh [OPTIONS] <plan-file>
+
+OPTIONS:
+  --help              Show this help message
+  --skip-assumptions  Skip assumption extraction (also skips verify plan generation)
+  --skip-atomicity    Skip atomicity linting
+  --skip-validation   Skip YAML plan validation
+  --source-file FILE  Use a separate source document for assumption/coverage checks
+  --coverage-map FILE Validate row-to-workflow traceability for policy-matrix inputs
+  --stack-manifest FILE Validate coverage-map workflow labels against a real authored stack manifest
+  --verbose           Show detailed output from each sub-check
+  --warn-delegation   Pass through to atomicity lint (prints advisory delegation-hint warnings)
+
+Exit codes:
+  0 = all checks passed
+  1 = one or more checks failed
+  2 = usage/argument error
+
+Output: JSON summary of all checks with pass/fail status
+HELP_EOF
+}
 
 # Default mode flags
 SKIP_ASSUMPTIONS=false
@@ -38,7 +44,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      show_help
       exit 0
       ;;
     --skip-assumptions)

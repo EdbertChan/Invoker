@@ -45,6 +45,8 @@ Use these as concrete skill steps. Every step should run a command and produce p
 
 ### Primary validation surface
 
+INV-63 consumes `docs/context/inv-63/experiment-brief.md`: the supported design is the `skill-doctor.sh` orchestrator as the primary gate, while docs-only/manual multi-command validation is rejected as the primary workflow. Keep individual commands available only as debugging fallbacks after this gate fails.
+
 **Run all plan validation checks in one command:**
 
 ```bash
