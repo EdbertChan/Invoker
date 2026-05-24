@@ -4,8 +4,7 @@ import { isDiscardedAttempt } from '../attempt-policy.js';
 import type { TaskScheduler } from '../scheduler.js';
 import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchestrator.js';
 import type { TaskRepository } from '../task-repository.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { publishTaskDelta } from './events.js';
 
 function nextLeaseExpiry(from: Date): Date {
   return new Date(from.getTime() + ATTEMPT_LEASE_MS);
@@ -198,7 +197,7 @@ export function drainScheduler(host: OrchestratorSchedulingHost): TaskState[] {
         });
       }
     }
-    host.messageBus.publish(TASK_DELTA_CHANNEL, host.buildUpdateDelta(task, updated, changes));
+    publishTaskDelta(host.messageBus, host.buildUpdateDelta(task, updated, changes));
     started.push(updated);
     host.logger.info('[orchestrator] drainScheduler: started', {
       taskId: job.taskId,

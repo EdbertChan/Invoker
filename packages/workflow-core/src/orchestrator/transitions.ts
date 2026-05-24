@@ -1,8 +1,7 @@
 import type { Logger } from '@invoker/contracts';
 import type { Attempt, TaskDelta, TaskState, TaskStateChanges } from '@invoker/workflow-graph';
 import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchestrator.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { publishTaskDelta } from './events.js';
 
 type SelectedAttemptChanges = Partial<
   Pick<
@@ -97,7 +96,7 @@ export function setTaskApprovalStatus(
   });
   const delta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(id, eventName, changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host.messageBus, delta);
 }
 
 export function setFixAwaitingApproval(
@@ -150,7 +149,7 @@ export function setFixAwaitingApproval(
   });
   const delta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(tid, 'task.awaiting_approval', changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host.messageBus, delta);
 }
 
 export function resumeTaskAfterFixApproval(
@@ -177,7 +176,7 @@ export function resumeTaskAfterFixApproval(
   });
   const delta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(taskId, 'task.running', changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host.messageBus, delta);
   return [host.stateGetTask(taskId)!];
 }
 
@@ -202,7 +201,7 @@ export function rejectApproval(
   });
   const delta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(taskId, 'task.failed', changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host.messageBus, delta);
 
   host.checkWorkflowCompletion();
 }
