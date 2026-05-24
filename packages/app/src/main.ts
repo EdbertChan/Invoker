@@ -421,6 +421,9 @@ function getBundledSkillsStatus() {
 }
 
 function installPackagedSkills(mode: import('@invoker/contracts').BundledSkillsInstallMode = 'install') {
+  // INV-86 consumes the experiment-selected app_bridge path here: the same
+  // Electron runtime that serves headless commands also owns packaged skill
+  // status/install wiring.
   return installBundledSkills({
     isPackaged: app.isPackaged,
     repoRoot,

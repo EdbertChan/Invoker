@@ -102,8 +102,16 @@ function resolveCursorTarget(): BundledSkillTargetStatus {
   };
 }
 
+const MANAGED_TARGET_RESOLVERS = [
+  resolveCodexTarget,
+  resolveClaudeTarget,
+  resolveCursorTarget,
+] as const;
+
 function resolveManagedTargets(): BundledSkillTargetStatus[] {
-  return [resolveCodexTarget(), resolveClaudeTarget(), resolveCursorTarget()];
+  // INV-86 requires packaged skill propagation to remain deterministic across
+  // every managed target rather than only the first available tool.
+  return MANAGED_TARGET_RESOLVERS.map((resolveTarget) => resolveTarget());
 }
 
 function resolveManifestPath(invokerHomeRoot: string): string {
