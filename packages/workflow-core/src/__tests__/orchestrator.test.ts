@@ -3,6 +3,7 @@ import { reconciliationNeedsInputWorkResponse } from './reconciliation-needs-inp
 import { rid, sid } from './scoped-test-helpers.js';
 import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
+import { MUTATION_POLICIES } from '../invalidation-policy.js';
 import { computeWorkflowRollup } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
 import type { Logger, WorkResponse } from '@invoker/contracts';
@@ -7594,6 +7595,8 @@ describe('Orchestrator', () => {
     it('routes through retryTask and cancels active merge work first', () => {
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
+
+      expect(MUTATION_POLICIES.mergeMode.action).toBe('retryTask');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
       const retrySpy = vi.spyOn(orchestrator, 'retryTask');

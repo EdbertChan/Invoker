@@ -384,8 +384,10 @@ async function invokePrimitive(
     case 'recreateWorkflowFromFreshBase': {
       if (!deps.recreateWorkflowFromFreshBase) {
         throw new Error(
-          "applyInvalidation: 'recreateWorkflowFromFreshBase' is not yet wired (Step 12). " +
-            'Provide deps.recreateWorkflowFromFreshBase to use this action.',
+          "applyInvalidation: 'recreateWorkflowFromFreshBase' dep is missing. " +
+            'Production callers wire this via buildInvalidationDeps or ' +
+            'buildOrchestratorOnlyInvalidationDeps; tests must supply ' +
+            'deps.recreateWorkflowFromFreshBase to use this action.',
         );
       }
       return await deps.recreateWorkflowFromFreshBase(ctx.id);
@@ -508,4 +510,3 @@ export function buildOrchestratorOnlyInvalidationDeps(
     },
   };
 }
-

@@ -90,6 +90,15 @@ describe('MUTATION_POLICIES', () => {
     expect(scheduleOnlyEntries.map(([k]) => k)).toEqual(['externalGatePolicy']);
   });
 
+  it('maps every mutation policy to a declared action spec', () => {
+    for (const [key, policy] of Object.entries(MUTATION_POLICIES)) {
+      expect(
+        ACTION_SPECS[policy.action],
+        `missing ACTION_SPECS entry for mutation policy '${key}' action '${policy.action}'`,
+      ).toBeDefined();
+    }
+  });
+
   it('is frozen — the policy table is a constant, not a mutable map', () => {
     expect(Object.isFrozen(MUTATION_POLICIES)).toBe(true);
   });
@@ -259,11 +268,11 @@ describe('applyInvalidation: scope/action mismatch', () => {
 });
 
 describe('applyInvalidation: recreateWorkflowFromFreshBase optional dep', () => {
-  it('throws an explicit "not yet wired (Step 12)" error when dep is absent', async () => {
+  it('throws an explicit missing-dep error when dep is absent', async () => {
     const deps = makeDeps();
     await expect(
       applyInvalidation('workflow', 'recreateWorkflowFromFreshBase', 'wf-1', deps),
-    ).rejects.toThrow(/not yet wired \(Step 12\)/);
+    ).rejects.toThrow(/recreateWorkflowFromFreshBase' dep is missing/);
   });
 
   it('routes to the provided dep when present', async () => {
