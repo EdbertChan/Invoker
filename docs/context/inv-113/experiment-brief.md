@@ -44,17 +44,17 @@ Expected summary:
 
 ```text
 Test Files  1 passed (1)
-Tests       125 passed (125)
+Tests       126 passed (126)
 Duration    approximately 2 seconds on local hardware
 ```
 
-Observed on 2026-05-25 in this worktree:
+Observed on 2026-05-24 in this worktree after implementation consumption:
 
 ```text
 Test Files  1 passed (1)
-Tests       125 passed (125)
-Start at    02:09:06
-Duration    2.19s
+Tests       126 passed (126)
+Start at    18:13:09
+Duration    4.54s
 ```
 
 Optional broader package confidence command:
@@ -63,12 +63,12 @@ Optional broader package confidence command:
 pnpm --filter @invoker/execution-engine test
 ```
 
-Observed on 2026-05-25 in this worktree:
+Observed on 2026-05-24 in this worktree after implementation consumption:
 
 ```text
 Test Files  51 passed (51)
-Tests       995 passed (995)
-Duration    95.49s
+Tests       996 passed (996)
+Duration    131.89s
 ```
 
 ## Thresholds
@@ -76,7 +76,7 @@ Duration    95.49s
 Pass thresholds:
 
 - Targeted file command exits `0`.
-- Targeted command reports exactly `1 passed` test file and `125 passed` tests.
+- Targeted command reports exactly `1 passed` test file and `126 passed` tests.
 - No test in `task-runner.test.ts` is skipped, failed, or marked todo.
 - The selected-lineage assertions below remain present and passing.
 
@@ -94,11 +94,12 @@ Fail thresholds:
 | Request and response lineage carry `attemptId` and `executionGeneration`. | `packages/execution-engine/src/__tests__/task-runner.test.ts:116` | Executor sees `attemptId = gen-task-a1`; orchestrator response contains `executionGeneration = 7`. |
 | Startup failures still dispatch newly ready tasks when lineage is current. | `packages/execution-engine/src/__tests__/task-runner.test.ts:187` | Failed response is emitted and `executeTasks([newlyReady])` is called. |
 | Concurrent duplicate launches for the same attempt are suppressed. | `packages/execution-engine/src/__tests__/task-runner.test.ts:245` | `executor.start` is called exactly once. |
-| Stale selected attempt suppresses startup metadata and failed response. | `packages/execution-engine/src/__tests__/task-runner.test.ts:1135` | No workspace metadata write and no `handleWorkerResponse` call. |
-| Stale generation suppresses startup metadata and failed response. | `packages/execution-engine/src/__tests__/task-runner.test.ts:1190` | No old workspace metadata write and no `handleWorkerResponse` call. |
-| Current lineage still persists metadata and emits failure response. | `packages/execution-engine/src/__tests__/task-runner.test.ts:1242` | Workspace and branch metadata are persisted, and failed response is emitted. |
-| Lifecycle tags encode workflow generation, task generation, and attempt suffix. | `packages/execution-engine/src/__tests__/task-runner.test.ts:2060` | `lifecycleTag` equals `g3.t5.aattempt-abc`. |
-| Lifecycle tags still encode attempt suffix when generations are zero. | `packages/execution-engine/src/__tests__/task-runner.test.ts:2109` | `lifecycleTag` equals `g0.t0.aattempt-xyz`. |
+| Concurrent launches for different attempts of the same task are allowed. | `packages/execution-engine/src/__tests__/task-runner.test.ts:305` | `executor.start` is called once per attempt. |
+| Stale selected attempt suppresses startup metadata and failed response. | `packages/execution-engine/src/__tests__/task-runner.test.ts:1215` | No workspace metadata write and no `handleWorkerResponse` call. |
+| Stale generation suppresses startup metadata and failed response. | `packages/execution-engine/src/__tests__/task-runner.test.ts:1269` | No old workspace metadata write and no `handleWorkerResponse` call. |
+| Current lineage still persists metadata and emits failure response. | `packages/execution-engine/src/__tests__/task-runner.test.ts:1321` | Workspace and branch metadata are persisted, and failed response is emitted. |
+| Lifecycle tags encode workflow generation, task generation, and attempt suffix. | `packages/execution-engine/src/__tests__/task-runner.test.ts:2139` | `lifecycleTag` equals `g3.t5.aattempt-abc`. |
+| Lifecycle tags still encode attempt suffix when generations are zero. | `packages/execution-engine/src/__tests__/task-runner.test.ts:2188` | `lifecycleTag` equals `g0.t0.aattempt-xyz`. |
 
 ## Verdict
 
