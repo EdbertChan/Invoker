@@ -78,8 +78,6 @@ let mocks: {
   executorRegistry: Record<string, ReturnType<typeof vi.fn>>;
   taskExecutor: Record<string, ReturnType<typeof vi.fn>>;
   killRunningTask: ReturnType<typeof vi.fn>;
-  deleteWorkflow: ReturnType<typeof vi.fn>;
-  detachWorkflow: ReturnType<typeof vi.fn>;
 };
 
 function createMocks() {
@@ -184,6 +182,31 @@ function createMocks() {
           return { ok: false, error: { code: 'RECREATE_WORKFLOW_FAILED', message: (err as Error).message } };
         }
       }),
+      deleteWorkflow: vi.fn(async (envelope: { payload: { workflowId: string } }) => {
+        try {
+          mocks.orchestrator.deleteWorkflow(envelope.payload.workflowId);
+          return { ok: true, data: undefined };
+        } catch (err) {
+          if (err instanceof OrchestratorError) {
+            return { ok: false, error: { code: err.code, message: err.message } };
+          }
+          return { ok: false, error: { code: 'DELETE_WORKFLOW_FAILED', message: (err as Error).message } };
+        }
+      }),
+      detachWorkflow: vi.fn(async (envelope: { payload: { workflowId: string; upstreamWorkflowId: string } }) => {
+        try {
+          mocks.orchestrator.detachWorkflow(
+            envelope.payload.workflowId,
+            envelope.payload.upstreamWorkflowId,
+          );
+          return { ok: true, data: undefined };
+        } catch (err) {
+          if (err instanceof OrchestratorError) {
+            return { ok: false, error: { code: err.code, message: err.message } };
+          }
+          return { ok: false, error: { code: 'DETACH_WORKFLOW_FAILED', message: (err as Error).message } };
+        }
+      }),
     },
     taskExecutor: {
       executeTasks: vi.fn().mockResolvedValue(undefined),
@@ -193,8 +216,6 @@ function createMocks() {
       commitApprovedFix: vi.fn().mockResolvedValue(undefined),
     },
     killRunningTask: vi.fn().mockResolvedValue(undefined),
-    deleteWorkflow: vi.fn().mockResolvedValue(undefined),
-    detachWorkflow: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -217,8 +238,6 @@ beforeAll(async () => {
     persistence: mocks.persistence as any,
     executorRegistry: mocks.executorRegistry as any,
     mutations: buildFacade(mocks),
-    deleteWorkflow: mocks.deleteWorkflow,
-    detachWorkflow: mocks.detachWorkflow,
   });
   // Wait for the server to start listening
   await new Promise<void>((resolve) => {
@@ -245,9 +264,6 @@ beforeEach(() => {
     }
   }
   mocks.killRunningTask.mockClear();
-  mocks.deleteWorkflow.mockClear();
-  mocks.detachWorkflow.mockClear();
-
   // Re-apply default return values after clear
   mocks.orchestrator.getWorkflowStatus.mockReturnValue({ total: 1, completed: 0, failed: 0, running: 1, pending: 0 });
   mocks.orchestrator.getAllTasks.mockReturnValue([makeTask()]);
@@ -275,10 +291,33 @@ beforeEach(() => {
     await fn();
     return { ok: true, data: undefined };
   });
+  mocks.commandService.deleteWorkflow.mockImplementation(async (envelope: { payload: { workflowId: string } }) => {
+    try {
+      mocks.orchestrator.deleteWorkflow(envelope.payload.workflowId);
+      return { ok: true, data: undefined };
+    } catch (err) {
+      if (err instanceof OrchestratorError) {
+        return { ok: false, error: { code: err.code, message: err.message } };
+      }
+      return { ok: false, error: { code: 'DELETE_WORKFLOW_FAILED', message: (err as Error).message } };
+    }
+  });
+  mocks.commandService.detachWorkflow.mockImplementation(async (
+    envelope: { payload: { workflowId: string; upstreamWorkflowId: string } },
+  ) => {
+    try {
+      mocks.orchestrator.detachWorkflow(envelope.payload.workflowId, envelope.payload.upstreamWorkflowId);
+      return { ok: true, data: undefined };
+    } catch (err) {
+      if (err instanceof OrchestratorError) {
+        return { ok: false, error: { code: err.code, message: err.message } };
+      }
+      return { ok: false, error: { code: 'DETACH_WORKFLOW_FAILED', message: (err as Error).message } };
+    }
+  });
   mocks.persistence.getEvents.mockReturnValue([{ taskId: 'task-1', eventType: 'started', timestamp: '2024-01-01' }]);
   mocks.persistence.getTaskOutput.mockReturnValue('hello world output');
   mocks.killRunningTask.mockResolvedValue(undefined);
-  mocks.deleteWorkflow.mockResolvedValue(undefined);
   mocks.taskExecutor.executeTasks.mockResolvedValue(undefined);
   mocks.taskExecutor.publishAfterFix.mockResolvedValue(undefined);
   mocks.taskExecutor.resolveConflict.mockResolvedValue(undefined);
@@ -902,8 +941,6 @@ describe('POST /api/workflows/:id/rebase-recreate', () => {
       executorRegistry: localMocks.executorRegistry as any,
       mutations: buildFacade(localMocks),
       queueWorkflowMutation,
-      deleteWorkflow: localMocks.deleteWorkflow,
-      detachWorkflow: localMocks.detachWorkflow,
     });
     await new Promise<void>((resolve) => {
       if (queuedApi.server.listening) resolve();
@@ -973,17 +1010,21 @@ describe('POST /api/workflows/:id/rebase-recreate', () => {
 });
 
 describe('DELETE /api/workflows/:id', () => {
-  it('deletes workflow via deleteWorkflow callback', async () => {
+  it('deletes workflow via facade command service path', async () => {
     const res = await request(port, 'DELETE', '/api/workflows/wf-1');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('deleted');
-    expect(mocks.deleteWorkflow).toHaveBeenCalledWith('wf-1');
-    expect(mocks.orchestrator.deleteWorkflow).not.toHaveBeenCalled();
+    expect(mocks.commandService.deleteWorkflow).toHaveBeenCalledWith(
+      expect.objectContaining({ payload: { workflowId: 'wf-1' } }),
+    );
+    expect(mocks.orchestrator.deleteWorkflow).toHaveBeenCalledWith('wf-1');
   });
 
   it('returns 404 when workflow not found', async () => {
-    mocks.deleteWorkflow.mockRejectedValue(new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, 'workflow not found'));
+    mocks.orchestrator.deleteWorkflow.mockImplementation(() => {
+      throw new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, 'workflow not found');
+    });
     const res = await request(port, 'DELETE', '/api/workflows/missing');
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('workflow not found');
@@ -998,7 +1039,12 @@ describe('POST /api/workflows/:id/detach', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('detached');
-    expect(mocks.detachWorkflow).toHaveBeenCalledWith('wf-1', 'wf-0');
+    expect(mocks.commandService.detachWorkflow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: { workflowId: 'wf-1', upstreamWorkflowId: 'wf-0' },
+      }),
+    );
+    expect(mocks.orchestrator.detachWorkflow).toHaveBeenCalledWith('wf-1', 'wf-0');
   });
 
   it('returns 400 when upstreamWorkflowId is missing', async () => {

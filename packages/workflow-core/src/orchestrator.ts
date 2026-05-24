@@ -3854,6 +3854,8 @@ export class Orchestrator {
   /**
    * Delete a single workflow: DB first, then scheduler, memory, and publish removal deltas.
    * Follows the same DB→memory→publish pattern as writeAndSync().
+   * HTTP callers reach this through WorkflowMutationFacade so route handlers
+   * do not duplicate the mutation/cleanup sequence.
    */
   deleteWorkflow(workflowId: string): void {
     this.syncAllFromDb();
@@ -3893,6 +3895,10 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Detach a workflow dependency through the same DB-first coordinator used by
+   * the facade-mediated HTTP control plane.
+   */
   detachWorkflow(workflowId: string, upstreamWorkflowId: string): void {
     this.syncAllFromDb();
     this.detachWorkflowInternal(workflowId, upstreamWorkflowId, {

@@ -2522,8 +2522,6 @@ function createEmbeddedTerminalBackendFromConfig(
           }
           return workflowMutationCoordinator.submit(workflowId, priority, channel, args, options);
         },
-        deleteWorkflow: performDeleteWorkflow,
-        detachWorkflow: performDetachWorkflow,
       });
       recordStartupMark('api-server.started');
 

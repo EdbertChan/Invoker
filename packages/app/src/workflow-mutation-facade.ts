@@ -330,7 +330,10 @@ export class WorkflowMutationFacade {
       }
     }
     await this.deps.taskExecutor?.closeWorkflowReview?.(workflowId);
-    this.deps.orchestrator.deleteWorkflow(workflowId);
+    await this.runVoidViaCommandService(
+      (cs) => cs.deleteWorkflow(makeEnvelope('facade.delete-workflow', 'surface', 'workflow', { workflowId })),
+      () => this.deps.orchestrator.deleteWorkflow(workflowId),
+    );
   }
 
   async deleteAllWorkflows(): Promise<DeleteAllResult> {
@@ -342,7 +345,13 @@ export class WorkflowMutationFacade {
   }
 
   async detachWorkflow(workflowId: string, upstreamWorkflowId: string): Promise<void> {
-    this.deps.orchestrator.detachWorkflow(workflowId, upstreamWorkflowId);
+    await this.runVoidViaCommandService(
+      (cs) => cs.detachWorkflow(makeEnvelope('facade.detach-workflow', 'surface', 'workflow', {
+        workflowId,
+        upstreamWorkflowId,
+      })),
+      () => this.deps.orchestrator.detachWorkflow(workflowId, upstreamWorkflowId),
+    );
   }
 
   async forkWorkflow(workflowId: string): Promise<ForkMutationResult> {
@@ -510,6 +519,24 @@ export class WorkflowMutationFacade {
       return result.data;
     }
     return Promise.resolve(fallback());
+  }
+
+  private async runVoidViaCommandService(
+    routed: (cs: CommandService) => Promise<{ ok: true; data: void } | { ok: false; error: { code: string; message: string } }>,
+    fallback: () => void | Promise<void>,
+  ): Promise<void> {
+    if (this.deps.commandService) {
+      const result = await routed(this.deps.commandService);
+      if (!result.ok) {
+        const known = (Object.values(OrchestratorErrorCode) as string[]).includes(result.error.code);
+        if (known) {
+          throw new OrchestratorError(result.error.code as OrchestratorErrorCode, result.error.message);
+        }
+        throw new Error(result.error.message);
+      }
+      return;
+    }
+    await fallback();
   }
 
   private async topupOnly(context: string): Promise<TaskState[]> {
