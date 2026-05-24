@@ -53,6 +53,19 @@ export class OrchestratorError extends Error {
   }
 }
 
+export interface MutationLineageGuard {
+  selectedAttemptId?: string;
+  generation: number;
+}
+
+function taskMatchesLineageGuard(task: TaskState, guard?: MutationLineageGuard): boolean {
+  if (!guard) return true;
+  return (
+    task.execution.selectedAttemptId === guard.selectedAttemptId &&
+    (task.execution.generation ?? 0) === guard.generation
+  );
+}
+
 function isActiveForInvalidation(status: TaskStatus): boolean {
   return (
     status === 'running' ||
@@ -1829,11 +1842,12 @@ export class Orchestrator {
     this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', additionalChanges);
   }
 
-  setFixAwaitingApproval(taskId: string, originalError: string): void {
+  setFixAwaitingApproval(taskId: string, originalError: string, lineage?: MutationLineageGuard): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     const tid = task.id;
+    if (!taskMatchesLineageGuard(task, lineage)) return;
     if (task.status !== 'running' && task.status !== 'fixing_with_ai') {
       throw new Error(`Task ${tid} is not running or fixing with AI (status: ${task.status})`);
     }
@@ -2862,13 +2876,19 @@ export class Orchestrator {
    * Revert a conflict resolution attempt: restore the task to failed
    * with its original error and re-parsed mergeConflict field.
    */
-  revertConflictResolution(taskId: string, savedError: string, fixError?: string): void {
+  revertConflictResolution(
+    taskId: string,
+    savedError: string,
+    fixError?: string,
+    lineage?: MutationLineageGuard,
+  ): void {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) {
       throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     }
     const id = task.id;
+    if (!taskMatchesLineageGuard(task, lineage)) return;
 
     const normalizedSavedError = stripFixFailureWrapper(savedError);
     const mergeConflict = parseMergeConflictError(normalizedSavedError);

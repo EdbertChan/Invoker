@@ -778,6 +778,22 @@ describe('Orchestrator', () => {
       expect(() => orchestrator.setFixAwaitingApproval('f2', 'error')).toThrow('not running or fixing with AI');
     });
 
+    it('setFixAwaitingApproval no-ops when the lineage guard is stale', () => {
+      orchestrator.beginConflictResolution('f2');
+      const fixTask = orchestrator.getTask('f2')!;
+      const staleLineage = {
+        selectedAttemptId: fixTask.execution.selectedAttemptId,
+        generation: fixTask.execution.generation ?? 0,
+      };
+
+      orchestrator.retryTask('f2');
+      orchestrator.setFixAwaitingApproval('f2', 'late fix', staleLineage);
+
+      const task = orchestrator.getTask('f2')!;
+      expect(task.status).not.toBe('awaiting_approval');
+      expect(task.execution.pendingFixError).toBeUndefined();
+    });
+
     it('restartTask clears the fix state', () => {
       orchestrator.beginConflictResolution('f2');
       orchestrator.setFixAwaitingApproval('f2', 'error');
@@ -794,6 +810,23 @@ describe('Orchestrator', () => {
       const task = orchestrator.getTask('f2')!;
       expect(task.status).toBe('failed');
       expect(task.execution.error).toBe('test failed: expected 1 to be 2');
+    });
+
+    it('revertConflictResolution no-ops when the lineage guard is stale', () => {
+      const { savedError } = orchestrator.beginConflictResolution('f2');
+      const fixTask = orchestrator.getTask('f2')!;
+      const staleLineage = {
+        selectedAttemptId: fixTask.execution.selectedAttemptId,
+        generation: fixTask.execution.generation ?? 0,
+      };
+
+      orchestrator.retryTask('f2');
+      const statusBeforeLateRevert = orchestrator.getTask('f2')!.status;
+      orchestrator.revertConflictResolution('f2', savedError, 'late failure', staleLineage);
+
+      const task = orchestrator.getTask('f2')!;
+      expect(task.status).toBe(statusBeforeLateRevert);
+      expect(task.execution.error ?? '').not.toContain('late failure');
     });
 
     it('non-merge merge_conflict JSON pendingFixError resume transitions failed -> fixing_with_ai -> awaiting_approval -> running and clears pendingFixError', async () => {
