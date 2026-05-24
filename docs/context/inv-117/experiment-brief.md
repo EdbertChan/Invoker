@@ -170,13 +170,17 @@ Verdict: pass only if the CI concurrency behavior and build step both appear.
 The local proof runner maps to CI as follows:
 
 - `quality-checks` maps to `pnpm run check:deps`, `pnpm run check:required-builds`, and `pnpm run check:types`.
-- `required-fast` maps to required suite wrappers under `scripts/test-suites/required/`.
+- `required-fast` maps to required suite wrappers under `scripts/test-suites/required/`, including the Electron pre-provisioning repro and start-running MECE follow-up repros.
 - `dry-run` maps to `required/20-e2e-dry-run.sh`, `required/21-e2e-dry-run-downstream.sh`, and `required/22-e2e-dry-run-github.sh`.
 - `scheduled-repros` maps to `required/23-fix-intent-repros.sh` when the workflow is scheduled or manually dispatched.
 - `playwright` maps to `optional/40-playwright-app.sh` with shard variables.
 - `ssh` maps to `optional/30-e2e-ssh.sh` and `optional/31-e2e-ssh-merge.sh`.
-- `optional-other` maps to `optional/60-worktree-provisioning.sh` and `optional/70-ui-visual-proof-validate.sh`.
+- `optional-other` maps to `optional/32-e2e-chaos.sh`, `optional/33-e2e-chaos-overload.sh`, `optional/60-worktree-provisioning.sh`, and `optional/70-ui-visual-proof-validate.sh`.
 - `docker` maps to `dangerous/10-docker-comprehensive.sh`.
+
+## Implementation Consumption
+
+The implementation should consume this brief by keeping `scripts/run-all-tests.sh` proof mode as the canonical deterministic review surface, making CI enumerate every suite discovered by required and extended proof modes, and retaining `scripts/workspace-test.sh` as the focused package workspace surface with CI concurrency defaulting to `1`.
 
 ## Reviewable Verdict
 
