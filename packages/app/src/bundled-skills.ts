@@ -149,7 +149,7 @@ function buildTargetStatus(
 }
 
 function prefixedSkillNames(skillNames: string[]): string[] {
-  return skillNames.map((name) => `${MANAGED_PREFIX}${name}`);
+  return skillNames.map((name) => `${MANAGED_PREFIX}${name}`).sort();
 }
 
 export function resolveBundledSkillsStatus(context: BundledSkillsContext): BundledSkillsStatus {

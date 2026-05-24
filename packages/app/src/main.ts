@@ -201,6 +201,8 @@ declare const __BUILD_VERSION__: string | undefined;
 // Electron passes extra args after `--` or interleaves them.
 // We look for `--headless` anywhere in process.argv.
 const headlessIndex = process.argv.indexOf('--headless');
+// INV-86 keeps direct bundled-skill installation as a thin normalization into
+// the headless command path instead of adding a second installer entrypoint.
 const directInstallSkills = process.argv.includes('--install-skills') || process.argv.slice(2).includes('install-skills');
 const isHeadless = headlessIndex !== -1 || directInstallSkills;
 

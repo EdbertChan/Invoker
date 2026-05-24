@@ -81,6 +81,7 @@ const READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 8_000;
 const POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS = 3;
 const DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS = 60_000;
+const LIVE_OWNER_QUERY_SUBCOMMANDS = new Set(['ui-perf', 'queue']);
 
 function standaloneOwnerBootstrapTimeoutMs(): number {
   const raw = process.env.INVOKER_HEADLESS_OWNER_BOOTSTRAP_TIMEOUT_MS;
@@ -134,11 +135,15 @@ async function delegateReadOnlyQuery(
   bus: MessageBus,
   refreshMessageBus?: () => Promise<MessageBus>,
 ): Promise<boolean> {
-  const isUiPerf = args[0] === 'query' && args[1] === 'ui-perf';
-  const isQueue = (args[0] === 'query' && args[1] === 'queue') || args[0] === 'queue';
-  if (!isUiPerf && !isQueue) {
+  const liveQuery = args[0] === 'query' && LIVE_OWNER_QUERY_SUBCOMMANDS.has(args[1] ?? '')
+    ? args[1]
+    : args[0] === 'queue'
+      ? 'queue'
+      : undefined;
+  if (!liveQuery) {
     return false;
   }
+  const isUiPerf = liveQuery === 'ui-perf';
 
   // Use the resolver to wait for any reachable owner
   const resolver = createOwnerResolver(
