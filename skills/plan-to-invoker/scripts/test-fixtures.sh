@@ -23,10 +23,23 @@ DOCTOR_NEGATIVE_FIXTURES=(
   "anti-pattern-i-final-regression-not-test-all.yaml"
   "anti-pattern-j-zero-context-missing-metadata.yaml"
 )
+DOCTOR_POSITIVE_FIXTURES=(
+  "07-prompt-edit-layered-split-with-dormant.yaml"
+)
 
 is_doctor_negative_fixture() {
   local fixture_name="$1"
   for candidate in "${DOCTOR_NEGATIVE_FIXTURES[@]}"; do
+    if [[ "$fixture_name" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_doctor_positive_fixture() {
+  local fixture_name="$1"
+  for candidate in "${DOCTOR_POSITIVE_FIXTURES[@]}"; do
     if [[ "$fixture_name" == "$candidate" ]]; then
       return 0
     fi
@@ -140,6 +153,22 @@ test_doctor_negative_fixture() {
   fi
 
   rm -f "$stderr_file"
+  return 0
+}
+
+test_doctor_positive_fixture() {
+  local fixture_path="$1"
+  local fixture_name="$(basename "$fixture_path")"
+  local output
+
+  output=$(bash "$REPO_ROOT/skills/plan-to-invoker/scripts/skill-doctor.sh" "$fixture_path" 2>&1)
+
+  if ! echo "$output" | jq -e '.allPassed == true and .firstFailedStep == null' &>/dev/null; then
+    echo "Expected skill-doctor to pass for $fixture_name" >&2
+    echo "Output: $output" >&2
+    return 1
+  fi
+
   return 0
 }
 
@@ -1022,7 +1051,12 @@ echo "========================================="
 # Test all positive fixtures
 for fixture in "$POSITIVE_DIR"/*.yaml; do
   if [[ -f "$fixture" ]]; then
-    run_test "Positive: $(basename "$fixture")" test_positive_fixture "$fixture"
+    fixture_name="$(basename "$fixture")"
+    if is_doctor_positive_fixture "$fixture_name"; then
+      run_test "Positive (skill-doctor): $fixture_name" test_doctor_positive_fixture "$fixture"
+    else
+      run_test "Positive: $fixture_name" test_positive_fixture "$fixture"
+    fi
   fi
 done
 

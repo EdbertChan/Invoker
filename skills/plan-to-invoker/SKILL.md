@@ -45,6 +45,8 @@ Use these as concrete skill steps. Every step should run a command and produce p
 
 ### Primary validation surface
 
+INV-63 selected the single deterministic doctor entrypoint over direct per-script validation. Consume that decision by treating `skill-doctor.sh` as the review contract: it must expose usage and exit-code semantics through `--help`, emit copyable JSON for review, pass at least one maintained positive fixture with `.allPassed == true`, and keep the strict negative fixture failure at `.firstFailedStep == "lint-task-atomicity"`. Use individual scripts only after the doctor identifies the failing step.
+
 **Run all plan validation checks in one command:**
 
 ```bash

@@ -15,7 +15,15 @@ featureBranch: plan/prompt-edit-layered-split-with-dormant
 tasks:
   - id: prompt-edit-contact-surface
     description: |
-      Define the renderer contact surface for prompt editing without activating UI behavior.
+      Goal:
+      - Define the renderer contact surface for prompt editing without activating UI behavior.
+      Motivation:
+      - Keep renderer contracts typed before app and UI layers consume them.
+      Alternative considerations:
+      - Option A (chosen): add the contact surface first as an active dependency.
+      - Option B: wire UI behavior before the bridge contract exists.
+      Implementation details:
+      - Update the preload and renderer type declaration surfaces only.
       Layer: contact_surface
       Feature state: active
       Files:
@@ -26,18 +34,30 @@ tasks:
       Acceptance criteria:
       - Ensure renderer types compile and expose a typed editTaskPrompt callback.
     prompt: |
-      Modify packages/app/src/preload.ts and packages/ui/src/types/window-invoker.d.ts.
-      Update the renderer contract so prompt tasks can call editTaskPrompt through
-      the existing window.invoker surface. Modify the preload and type declaration
-      layers to mirror existing command-edit shapes, and ensure the callback
-      signature carries workflowId, taskId, and prompt text safely. The result
-      must keep existing command-edit contracts intact and avoid enabling UI
-      activation behavior yet; this task is contract-only.
+      Goal:
+      - Define the renderer contact surface for prompt editing in packages/app/src/preload.ts and packages/ui/src/types/window-invoker.d.ts.
+      Motivation:
+      - Keep renderer contracts typed before app and UI layers consume them.
+      Alternative considerations:
+      - Option A (chosen): add the contact surface first as an active dependency.
+      - Option B: wire UI behavior before the bridge contract exists.
+      Implementation details:
+      - Assume no prior context. Update the renderer contract so prompt tasks can call editTaskPrompt through the existing window.invoker surface. Modify the preload and type declaration layers to mirror existing command-edit shapes, and ensure the callback signature carries workflowId, taskId, and prompt text safely.
+      Acceptance criteria:
+      - Pass condition: renderer type checks exit code 0 and existing command-edit contracts remain intact without enabling UI activation behavior yet.
     dependencies: []
 
   - id: app-bridge-and-owner-delegation
     description: |
-      Add app-layer IPC bridge and owner delegation routing for prompt edits.
+      Goal:
+      - Add app-layer IPC bridge and owner delegation routing for prompt edits.
+      Motivation:
+      - Keep GUI-origin prompt edits routed through the same owner-aware mutation path as command edits.
+      Alternative considerations:
+      - Option A (chosen): reuse existing app bridge and delegation patterns.
+      - Option B: introduce a separate prompt-edit mutation pathway.
+      Implementation details:
+      - Register app-layer handlers after the contact surface exists.
       Layer: app_bridge
       Feature state: active
       Files:
@@ -48,18 +68,30 @@ tasks:
       Acceptance criteria:
       - Ensure GUI-origin prompt edits route through owner-aware app handlers.
     prompt: |
-      Modify packages/app/src/main.ts and packages/app/src/headless-delegation.ts.
-      In the app layer, register IPC handlers for invoker:edit-task-prompt and
-      connect them to the existing commandService.editTaskPrompt pathway so
-      recreate semantics stay authoritative. Reuse owner delegation behavior from
-      existing mutation routes and ensure the bridge can execute when GUI owner
-      mode is active. Keep this task scoped to bridge and delegation plumbing;
-      do not activate TaskPanel inline editing behavior yet.
+      Goal:
+      - Add app-layer IPC bridge and owner delegation routing for prompt edits in packages/app/src/main.ts and packages/app/src/headless-delegation.ts.
+      Motivation:
+      - Keep GUI-origin prompt edits routed through the same owner-aware mutation path as command edits.
+      Alternative considerations:
+      - Option A (chosen): reuse existing app bridge and delegation patterns.
+      - Option B: introduce a separate prompt-edit mutation pathway.
+      Implementation details:
+      - Assume no prior context. Register IPC handlers for invoker:edit-task-prompt and connect them to the existing commandService.editTaskPrompt pathway so recreate semantics stay authoritative. Reuse owner delegation behavior from existing mutation routes and keep this scoped to bridge and delegation plumbing.
+      Acceptance criteria:
+      - Pass condition: app-layer tests for prompt-edit routing exit code 0 and TaskPanel inline editing behavior remains inactive.
     dependencies: [prompt-edit-contact-surface]
 
   - id: ui-prompt-editing-activation
     description: |
-      Prepare TaskPanel prompt editing activation behind a dormant rollout marker.
+      Goal:
+      - Prepare TaskPanel prompt editing activation behind a dormant rollout marker.
+      Motivation:
+      - Keep UI activation separated from lower-layer bridge work until regression coverage exists.
+      Alternative considerations:
+      - Option A (chosen): land dormant UI scaffolding after bridge plumbing.
+      - Option B: default-enable prompt editing in the same task as the bridge.
+      Implementation details:
+      - Wire the dormant TaskPanel path without changing default user-facing behavior.
       Layer: ui_activation
       Feature state: dormant
       Files:
@@ -69,17 +101,30 @@ tasks:
       Acceptance criteria:
       - Ensure dormant prompt-edit activation path is wired but not default-enabled.
     prompt: |
-      Modify packages/ui/src/components/TaskPanel.tsx.
-      Update TaskPanel prompt text to use the shared inline editing control path
-      in a dormant activation state. Reuse command-edit UX primitives so behavior
-      remains consistent, but keep activation gated so this workflow only lands
-      dormant scaffolding. Ensure save handlers call the prompt-edit bridge path
-      when activated later and preserve existing command task editing interactions.
+      Goal:
+      - Prepare dormant TaskPanel prompt editing activation in packages/ui/src/components/TaskPanel.tsx.
+      Motivation:
+      - Keep UI activation separated from lower-layer bridge work until regression coverage exists.
+      Alternative considerations:
+      - Option A (chosen): land dormant UI scaffolding after bridge plumbing.
+      - Option B: default-enable prompt editing in the same task as the bridge.
+      Implementation details:
+      - Assume no prior context. Update TaskPanel prompt text to use the shared inline editing control path in a dormant activation state. Reuse command-edit UX primitives, keep activation gated, and ensure save handlers call the prompt-edit bridge path when activated later.
+      Acceptance criteria:
+      - Pass condition: UI package tests exit code 0 and existing command task editing interactions remain unchanged.
     dependencies: [app-bridge-and-owner-delegation]
 
   - id: app-and-e2e-regressions
     description: |
-      Add app-level and Playwright regressions proving prompt edit flow is stable.
+      Goal:
+      - Add app-level and Playwright regressions proving prompt edit flow is stable.
+      Motivation:
+      - Verify the integrated dormant path before the final repository gate.
+      Alternative considerations:
+      - Option A (chosen): add focused app and E2E coverage for prompt edits.
+      - Option B: rely only on manual review and the full-suite gate.
+      Implementation details:
+      - Cover bridge routing, recreate semantics, and command-edit non-regression.
       Layer: e2e_regression
       Feature state: active
       Files:
@@ -91,18 +136,30 @@ tasks:
       Acceptance criteria:
       - Ensure app-level and end-to-end prompt-edit regressions pass in CI-style runs.
     prompt: |
-      Modify packages/app/src/__tests__/main.prompt-edit.test.ts and packages/app/e2e/prompt-edit.spec.ts.
-      Add regression coverage that exercises the GUI prompt-edit bridge end to end.
-      Include at least one app-layer test validating IPC-to-commandService routing,
-      and one Playwright scenario that recreates a prompt task edit through the
-      TaskPanel flow. The regression suite must validate recreate semantics and
-      confirm no command-edit regressions. Ensure test naming and setup are
-      deterministic so this workflow can be reviewed as the final proof layer.
+      Goal:
+      - Add app-level and Playwright regressions in packages/app/src/__tests__/main.prompt-edit.test.ts and packages/app/e2e/prompt-edit.spec.ts.
+      Motivation:
+      - Verify the integrated dormant path before the final repository gate.
+      Alternative considerations:
+      - Option A (chosen): add focused app and E2E coverage for prompt edits.
+      - Option B: rely only on manual review and the full-suite gate.
+      Implementation details:
+      - Assume no prior context. Add regression coverage that exercises the GUI prompt-edit bridge end to end, including one app-layer test validating IPC-to-commandService routing and one Playwright scenario that recreates a prompt task edit through the TaskPanel flow.
+      Acceptance criteria:
+      - Pass condition: app-level and Playwright prompt-edit regressions exit code 0, validate recreate semantics, and confirm no command-edit regressions.
     dependencies: [ui-prompt-editing-activation]
 
   - id: final-regression
     description: |
-      Run the full repository test suite as the terminal regression gate.
+      Goal:
+      - Run the full repository test suite as the terminal regression gate.
+      Motivation:
+      - Ensure all prompt-edit slices are validated together before pull request publication.
+      Alternative considerations:
+      - Option A (chosen): full repository regression after focused slices.
+      - Option B: stop after app and E2E focused regressions.
+      Implementation details:
+      - Execute the exact terminal command required for implementation plans.
       Layer: e2e_regression
       Feature state: active
       Files:
