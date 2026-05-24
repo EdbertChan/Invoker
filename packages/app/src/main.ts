@@ -843,38 +843,6 @@ if (isHeadless) {
         return executor;
       };
 
-      const executeStandaloneHeadlessRun = async (payload: HeadlessRunMutationPayload): Promise<unknown> => {
-        const { parsePlanFile } = await import('./plan-parser.js');
-        const plan = await parsePlanFile(payload.planPath);
-        const executor = createStandaloneTaskExecutor();
-        backupPlan(plan, undefined, logger);
-        const wfIdsBefore = new Set(orchestrator.getWorkflowIds());
-        orchestrator.loadPlan(plan, { allowGraphMutation: invokerConfig.allowGraphMutation });
-        const workflowId = orchestrator.getWorkflowIds().find((id) => !wfIdsBefore.has(id));
-        if (!workflowId) {
-          throw new Error(`Failed to resolve workflow id for delegated plan: ${payload.planPath}`);
-        }
-        const started = orchestrator.startExecution();
-        await executor.executeTasks(started);
-        logger.info(`standalone started ${started.length} tasks for workflow "${workflowId}"`, { module: 'ipc-delegate' });
-        const tasks = orchestrator.getAllTasks().filter((task) => task.config.workflowId === workflowId);
-        return { workflowId, tasks };
-      };
-
-      const executeStandaloneHeadlessResume = async (payload: HeadlessResumeMutationPayload): Promise<unknown> => {
-        const { workflowId } = payload;
-        const executor = createStandaloneTaskExecutor();
-        orchestrator.syncFromDb(workflowId);
-        // CC.2: orphan relaunch removed. orchestrator.startExecution()
-        // enqueues into the task_launch_dispatch outbox; the
-        // LaunchDispatcher's poll loop is the single recovery path.
-        const started = orchestrator.startExecution();
-        await executor.executeTasks(started);
-        logger.info(`standalone resumed ${started.length} tasks for workflow "${workflowId}"`, { module: 'ipc-delegate' });
-        const tasks = orchestrator.getAllTasks().filter((task) => task.config.workflowId === workflowId);
-        return { workflowId, tasks };
-      };
-
       const executeStandaloneGuiMutation = async (payload: GuiMutationPayload): Promise<unknown> => {
         switch (payload.channel) {
           case 'invoker:load-plan': {
