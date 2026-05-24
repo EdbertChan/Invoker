@@ -4,8 +4,7 @@ import type { Attempt, TaskDelta, TaskState, TaskStateChanges } from '@invoker/w
 import { isDiscardedAttempt } from '../attempt-policy.js';
 import type { TaskScheduler } from '../scheduler.js';
 import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchestrator.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { TASK_DELTA_CHANNEL } from './events.js';
 
 export function nextLeaseExpiry(from: Date): Date {
   return new Date(from.getTime() + ATTEMPT_LEASE_MS);

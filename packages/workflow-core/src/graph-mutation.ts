@@ -15,8 +15,7 @@ import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig } from '@invoke
 import type { GraphMutation, OrchestratorPersistence, OrchestratorMessageBus } from './orchestrator.js';
 import { createTaskState } from '@invoker/workflow-graph';
 import { findLeafTaskIds } from '@invoker/workflow-graph';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { TASK_DELTA_CHANNEL } from './orchestrator/events.js';
 
 // ── Host Interface ──────────────────────────────────────────
 

@@ -8,8 +8,7 @@ import type {
   OrchestratorMessageBus,
   OrchestratorPersistence,
 } from '../orchestrator.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { TASK_DELTA_CHANNEL } from './events.js';
 
 function tryParseJsonObject(value: string | undefined): Record<string, unknown> | undefined {
   if (!value) return undefined;
