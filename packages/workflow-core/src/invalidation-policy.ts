@@ -42,6 +42,9 @@ export type MutationKey =
   | 'fixReject'
   | 'topology';
 
+// INV-90 selected the policy table as the reviewable mutation classifier.
+// Orchestrator edit methods dispatch by `MutationKey` and consume this table
+// instead of embedding retry/recreate literals in each mutation method.
 export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>> = Object.freeze({
   command:               { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   prompt:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
@@ -508,4 +511,3 @@ export function buildOrchestratorOnlyInvalidationDeps(
     },
   };
 }
-

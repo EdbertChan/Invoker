@@ -3,6 +3,7 @@ import { reconciliationNeedsInputWorkResponse } from './reconciliation-needs-inp
 import { rid, sid } from './scoped-test-helpers.js';
 import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
+import { ACTION_SPECS, MUTATION_POLICIES } from '../invalidation-policy.js';
 import { computeWorkflowRollup } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
 import type { Logger, WorkResponse } from '@invoker/contracts';
@@ -7592,6 +7593,14 @@ describe('Orchestrator', () => {
     }
 
     it('routes through retryTask and cancels active merge work first', () => {
+      expect(MUTATION_POLICIES.mergeMode.action).toBe('retryTask');
+      expect(ACTION_SPECS[MUTATION_POLICIES.mergeMode.action].stages).toEqual([
+        'validateScope',
+        'cancelInFlight',
+        'applyPrimitive',
+        'cascadeAcrossWorkflows',
+      ]);
+
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -7769,6 +7778,14 @@ describe('Orchestrator', () => {
     }
 
     it('routes through retryTask and cancels active merge work first', () => {
+      expect(MUTATION_POLICIES.mergeMode.action).toBe('retryTask');
+      expect(ACTION_SPECS[MUTATION_POLICIES.mergeMode.action].stages).toEqual([
+        'validateScope',
+        'cancelInFlight',
+        'applyPrimitive',
+        'cascadeAcrossWorkflows',
+      ]);
+
       const { mergeId, leafId } = setupMergeWorkflow('manual');
       driveMergeNodeToRunning(mergeId, leafId);
 
@@ -7973,6 +7990,14 @@ describe('Orchestrator', () => {
     }
 
     it('routes through retryTask and cancels active fix sessions first', () => {
+      expect(MUTATION_POLICIES.fixContext.action).toBe('retryTask');
+      expect(ACTION_SPECS[MUTATION_POLICIES.fixContext.action].stages).toEqual([
+        'validateScope',
+        'cancelInFlight',
+        'applyPrimitive',
+        'cascadeAcrossWorkflows',
+      ]);
+
       const { taskId } = setupFailedTask();
       driveTaskToFixingWithAi(taskId);
 

@@ -81,6 +81,7 @@ import {
 import {
   MUTATION_POLICIES,
   type InvalidationAction,
+  type MutationKey,
 } from './invalidation-policy.js';
 import {
   isActiveAttempt,
@@ -2904,11 +2905,10 @@ export class Orchestrator {
    * Each `editTask*` method shares the same shape: validate, optional
    * cancel-first when the task is active, persist the new spec, then
    * apply the post-edit invalidation primitive (`recreateTask` or
-   * `retryTask`) selected by `MUTATION_POLICIES`. Routing the final
-   * dispatch through this helper keeps the action source-of-truth in
-   * the policy table rather than hard-coded literals at each site, so
-   * a chart change (e.g. flipping `command` from `recreateTask` to
-   * `retryTask`) propagates without touching `editTask*` bodies.
+   * `retryTask`) selected by `MUTATION_POLICIES`. INV-90's experiment
+   * selected mutation-key driven dispatch over branch-per-method action
+   * literals, so edit sites pass the domain mutation key and this helper
+   * performs the table lookup.
    *
    * Sync by design: the public `editTask*` API is sync and most
    * callers (api-server, headless, tests) consume the returned
@@ -2917,9 +2917,10 @@ export class Orchestrator {
    * facade routing where cross-workflow cascade fires.
    */
   private dispatchPostMutation(
-    action: InvalidationAction,
+    mutation: MutationKey,
     taskId: string,
   ): TaskState[] {
+    const action: InvalidationAction = MUTATION_POLICIES[mutation].action;
     switch (action) {
       case 'recreateTask':
         return this.recreateTask(taskId);
@@ -2927,7 +2928,7 @@ export class Orchestrator {
         return this.retryTask(taskId);
       default:
         throw new Error(
-          `dispatchPostMutation: unsupported action '${action}' for orchestrator edit primitives`,
+          `dispatchPostMutation: unsupported action '${action}' for mutation '${mutation}'`,
         );
     }
   }
@@ -2949,7 +2950,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', cmdChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, cmdDelta);
 
-    return this.dispatchPostMutation(MUTATION_POLICIES.command.action, taskId);
+    return this.dispatchPostMutation('command', taskId);
   }
 
     editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
@@ -2969,7 +2970,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', promptChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, promptDelta);
 
-    return this.dispatchPostMutation(MUTATION_POLICIES.prompt.action, taskId);
+    return this.dispatchPostMutation('prompt', taskId);
   }
 
     editTaskType(taskId: string, runnerKind: string, poolMemberId?: string): TaskState[] {
@@ -3018,10 +3019,8 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', typeChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, typeDelta);
 
-    const typeAction = hostChanged
-      ? MUTATION_POLICIES.poolMemberId.action
-      : MUTATION_POLICIES.runnerKind.action;
-    return this.dispatchPostMutation(typeAction, taskId);
+    const typeMutation: MutationKey = hostChanged ? 'poolMemberId' : 'runnerKind';
+    return this.dispatchPostMutation(typeMutation, taskId);
   }
 
     editTaskPool(taskId: string, poolId: string): TaskState[] {
@@ -3053,7 +3052,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', poolChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, poolDelta);
 
-    return this.dispatchPostMutation(MUTATION_POLICIES.poolMemberId.action, taskId);
+    return this.dispatchPostMutation('poolMemberId', taskId);
   }
 
     editTaskAgent(taskId: string, agentName: string): TaskState[] {
@@ -3073,7 +3072,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', agentChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, agentDelta);
 
-    return this.dispatchPostMutation(MUTATION_POLICIES.executionAgent.action, taskId);
+    return this.dispatchPostMutation('executionAgent', taskId);
   }
 
   /**
@@ -3210,7 +3209,7 @@ export class Orchestrator {
     // `MUTATION_POLICIES.mergeMode` keeps merge-mode dispatch
     // table-driven so a chart change propagates without touching this
     // method body.
-    return this.dispatchPostMutation(MUTATION_POLICIES.mergeMode.action, taskId);
+    return this.dispatchPostMutation('mergeMode', taskId);
   }
 
   /**
@@ -3352,7 +3351,7 @@ export class Orchestrator {
     // `MUTATION_POLICIES.fixContext` keeps fix-context dispatch
     // table-driven so a chart change propagates without touching this
     // method body.
-    return this.dispatchPostMutation(MUTATION_POLICIES.fixContext.action, taskId);
+    return this.dispatchPostMutation('fixContext', taskId);
   }
 
   /**
