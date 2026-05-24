@@ -18,6 +18,10 @@
 #   1 = one or more checks failed
 #   2 = usage/argument error
 #
+# INV-63 review contract:
+#   Positive fixtures must include at least one .allPassed == true doctor run
+#   Strict negative fixtures must fail first at lint-task-atomicity
+#
 # Output: JSON summary of all checks with pass/fail status
 set -euo pipefail
 
@@ -38,7 +42,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      sed -n '2,24p' "$0"
       exit 0
       ;;
     --skip-assumptions)
