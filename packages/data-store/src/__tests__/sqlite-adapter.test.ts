@@ -1643,7 +1643,7 @@ describe('SQLiteAdapter', () => {
       }
     });
 
-    it('prefers output_spool chunks over task_output rows when both exist', async () => {
+    it('returns output_spool chunks plus file-backed diagnostics when both exist', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-output-prefer-spool-'));
       const dbPath = join(dir, 'invoker.db');
 
@@ -1662,8 +1662,37 @@ describe('SQLiteAdapter', () => {
         // Canonical spool data is what should be returned.
         db.appendOutputChunk('t-both', 'spool line 1\n');
         db.appendOutputChunk('t-both', 'spool line 2\n');
+        db.appendTaskOutput('t-both', '[Shutdown Diagnostic]\nFAIL src/foo.test.ts\n');
 
-        expect(db.getTaskOutput('t-both')).toBe('spool line 1\nspool line 2\n');
+        expect(db.getTaskOutput('t-both')).toBe(
+          'spool line 1\nspool line 2\n[Shutdown Diagnostic]\nFAIL src/foo.test.ts\n',
+        );
+
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('retains executor startup diagnostics alongside streamed startup output', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-output-startup-diagnostic-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+        db.saveTask('wf-1', makeTask('t-startup-failure'));
+
+        db.appendOutputChunk('t-startup-failure', 'Executor startup failed (ssh): phase=bootstrap_clone_fetch\n');
+        db.appendTaskOutput(
+          't-startup-failure',
+          '\n[Executor Startup Diagnostic]\n--- startup error ---\nSTDERR:\nreal bootstrap failure\n',
+        );
+
+        const output = db.getTaskOutput('t-startup-failure');
+        expect(output).toContain('Executor startup failed (ssh): phase=bootstrap_clone_fetch');
+        expect(output).toContain('[Executor Startup Diagnostic]');
+        expect(output).toContain('STDERR:\nreal bootstrap failure');
 
         db.close();
       } finally {

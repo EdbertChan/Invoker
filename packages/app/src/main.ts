@@ -194,6 +194,38 @@ function isTaskInFlightForForcedStop(task: TaskState): boolean {
     || (task.status === 'pending' && task.execution.phase === 'launching');
 }
 
+const STARTUP_DIAGNOSTIC_MESSAGE_CHARS = 4_000;
+
+function persistExecutorStartupDiagnostic(taskId: string, response: WorkResponse, db: SQLiteAdapter): void {
+  if (response.status !== 'failed') {
+    return;
+  }
+
+  const error = typeof response.outputs.error === 'string' ? response.outputs.error : undefined;
+  if (!error?.startsWith('Executor startup failed')) {
+    return;
+  }
+
+  try {
+    let message = error.trimEnd();
+    if (message.length > STARTUP_DIAGNOSTIC_MESSAGE_CHARS) {
+      message = '...' + message.slice(message.length - STARTUP_DIAGNOSTIC_MESSAGE_CHARS);
+    }
+
+    const parts: string[] = ['\n[Executor Startup Diagnostic]'];
+    parts.push(`status=${response.status}`);
+    if (response.outputs.exitCode !== undefined && response.outputs.exitCode !== null) {
+      parts.push(`exitCode=${response.outputs.exitCode}`);
+    }
+    parts.push(`executionGeneration=${response.executionGeneration}`);
+    parts.push(`--- startup error ---\n${message}`);
+    parts.push('--- end executor startup diagnostic ---\n');
+    db.appendTaskOutput(taskId, parts.join('\n'));
+  } catch {
+    // Best-effort: the concrete startup error is still carried by the response.
+  }
+}
+
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
 
@@ -1759,6 +1791,7 @@ function createEmbeddedTerminalBackendFromConfig(
         },
         onComplete: (taskId, response) => {
           flushTaskOutput(taskId);
+          persistExecutorStartupDiagnostic(taskId, response, persistence);
           taskHandles.delete(taskId);
           assertFatalExecutionCapacity(`complete ${taskId}`);
           logger.info(
