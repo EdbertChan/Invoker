@@ -60,16 +60,16 @@ declare -a SUITES=()
 expected_executed_for_mode() {
   case "$MODE_KEY" in
     required)
-      printf '16'
+      printf '17'
       ;;
     extended)
-      printf '23'
+      printf '24'
       ;;
     dangerous)
       if [ "${#SKIPPED_UNAVAILABLE[@]}" -eq 1 ] && [ "${SKIPPED_UNAVAILABLE[0]}" = "dangerous/10-docker-comprehensive.sh" ]; then
-        printf '23'
-      else
         printf '24'
+      else
+        printf '25'
       fi
       ;;
   esac
