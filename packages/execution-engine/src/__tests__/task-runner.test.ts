@@ -1239,6 +1239,59 @@ describe('TaskRunner', () => {
       expect(handleWorkerResponse).not.toHaveBeenCalled();
     });
 
+    it('suppresses metadata write and failed response when persisted latest attempt has advanced', async () => {
+      const handleWorkerResponse = vi.fn();
+      const updateTask = vi.fn();
+      const loadAttempts = vi
+        .fn()
+        .mockReturnValueOnce([{ id: 'attempt-old' }])
+        .mockReturnValue([{ id: 'attempt-new' }]);
+      const orchestrator = {
+        getTask: () => makeTask({
+          id: 'stale-persisted-attempt',
+          status: 'running',
+          execution: { generation: 0 },
+        }),
+        handleWorkerResponse,
+      };
+      const startupErr: any = new Error('provision failed');
+      startupErr.workspacePath = '/tmp/persisted-old-worktree';
+      startupErr.branch = 'experiment/persisted-old-branch';
+      const throwingExecutor = {
+        type: 'ssh',
+        start: async () => { throw startupErr; },
+        onOutput: () => () => {},
+        onComplete: () => () => {},
+      };
+      const registry = {
+        getDefault: () => throwingExecutor,
+        get: () => throwingExecutor,
+        getAll: () => [throwingExecutor],
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: { updateTask, loadAttempts } as any,
+        executorRegistry: registry as any,
+        cwd: '/tmp',
+      });
+
+      await runner.executeTask(makeTask({
+        id: 'stale-persisted-attempt',
+        status: 'running',
+        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        execution: { generation: 0 },
+      }));
+
+      expect(updateTask).not.toHaveBeenCalledWith(
+        'stale-persisted-attempt',
+        expect.objectContaining({
+          execution: expect.objectContaining({ workspacePath: '/tmp/persisted-old-worktree' }),
+        }),
+      );
+      expect(handleWorkerResponse).not.toHaveBeenCalled();
+    });
+
     it('still persists metadata and emits response when lineage is current', async () => {
       const handleWorkerResponse = vi.fn();
       const updateTask = vi.fn();
