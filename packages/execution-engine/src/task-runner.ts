@@ -268,6 +268,7 @@ export class TaskRunner {
   /** Cache for SSH executors, keyed by poolMemberId. One instance per target for correct git locking. */
   private sshExecutorCache = new Map<string, SshExecutor>();
   private poolRoundRobinCursor = new Map<string, number>();
+  /** INV-113: keep selection handoff attempt-scoped, matching active execution ownership. */
   private pendingPoolSelections = new Map<string, PoolSelection>();
   private freshBaseCommits = new Map<string, FreshBaseCommit>();
 
@@ -818,12 +819,12 @@ export class TaskRunner {
     let handle!: ExecutorHandle;
     while (true) {
       bench('selectExecutor.start');
-      executor = this.selectExecutor(task, attemptedPoolMemberKeys);
-      const poolSelectionForStart = this.pendingPoolSelections.get(task.id);
+      executor = this.selectExecutor(task, attemptedPoolMemberKeys, attemptId);
+      const poolSelectionForStart = this.pendingPoolSelections.get(attemptId);
       if (!this.acquirePoolSelectionLease(task, attemptId, poolSelectionForStart)) {
         if (poolSelectionForStart) {
           attemptedPoolMemberKeys.add(poolSelectionForStart.memberKey);
-          this.pendingPoolSelections.delete(task.id);
+          this.pendingPoolSelections.delete(attemptId);
         }
         continue;
       }
@@ -897,7 +898,7 @@ export class TaskRunner {
               reason: 'ssh-startup-transport-failure',
               error: err instanceof Error ? err.message : String(err),
             });
-            this.pendingPoolSelections.delete(task.id);
+            this.pendingPoolSelections.delete(attemptId);
             this.releasePoolSelectionLease(poolSelectionForStart);
             continue;
           }
@@ -925,7 +926,7 @@ export class TaskRunner {
             execution.lastAgentSessionId = meta.agentSessionId;
           }
           if (meta.containerId) execution.containerId = meta.containerId;
-          const poolSelection = this.pendingPoolSelections.get(task.id);
+          const poolSelection = this.pendingPoolSelections.get(attemptId);
           const selectedSshTargetId = executor.type === 'ssh'
             ? this.selectedRemoteTargetId(task, poolSelection)
             : undefined;
@@ -937,7 +938,7 @@ export class TaskRunner {
             execution: execution as any,
           });
         }
-        this.pendingPoolSelections.delete(task.id);
+        this.pendingPoolSelections.delete(attemptId);
         this.releasePoolSelectionLease(poolSelectionForStart);
         const wrapped = new Error(
           `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}`,
@@ -974,8 +975,8 @@ export class TaskRunner {
       } catch (killErr) {
         this.logger.warn(`[TaskRunner] failed to kill rejected launch for task=${task.id}`, { killErr });
       }
-      this.releasePoolSelectionLease(this.pendingPoolSelections.get(task.id));
-      this.pendingPoolSelections.delete(task.id);
+      this.releasePoolSelectionLease(this.pendingPoolSelections.get(attemptId));
+      this.pendingPoolSelections.delete(attemptId);
       await this.cleanupPerTaskDockerExecutor(task);
       bench('markTaskRunningAfterLaunch.rejected');
       return;
@@ -989,7 +990,7 @@ export class TaskRunner {
     {
       // Fail-fast: workspacePath must be provided by all executors
       if (!handle.workspacePath) {
-        this.releasePoolSelectionLease(this.pendingPoolSelections.get(task.id));
+        this.releasePoolSelectionLease(this.pendingPoolSelections.get(attemptId));
         throw new Error(
           `Executor "${executor.type}" did not provide workspacePath for task "${task.id}". ` +
           `All executors must set workspacePath; refusing to fall back to host repo.`,
@@ -1001,10 +1002,10 @@ export class TaskRunner {
         executor,
         handle,
         attemptId,
-        this.pendingPoolSelections.get(task.id),
+        this.pendingPoolSelections.get(attemptId),
       );
 
-      const poolSelection = this.pendingPoolSelections.get(task.id);
+      const poolSelection = this.pendingPoolSelections.get(attemptId);
       const selectedSshTargetId = executor.type === 'ssh'
         ? this.selectedRemoteTargetId(task, poolSelection)
         : undefined;
@@ -1058,8 +1059,8 @@ export class TaskRunner {
     // Notify consumer about the spawned handle
     const activeHandle = handle as ActiveExecutionHandle;
     activeHandle.attemptId = attemptId;
-    const poolSelection = this.pendingPoolSelections.get(task.id);
-    this.pendingPoolSelections.delete(task.id);
+    const poolSelection = this.pendingPoolSelections.get(attemptId);
+    this.pendingPoolSelections.delete(attemptId);
     this.activeExecutions.set(attemptId, {
       handle: activeHandle,
       executor,
@@ -1190,6 +1191,10 @@ export class TaskRunner {
    */
   private poolMemberKey(member: ExecutionPoolMember): string {
     return `${member.type}:${member.id}`;
+  }
+
+  private pendingPoolSelectionKey(task: TaskState, attemptId?: string): string {
+    return attemptId ?? this.resolveAttemptIdForStart(task);
   }
 
   private poolMemberLoad(poolId: string, memberKey: string): number {
@@ -1404,11 +1409,12 @@ export class TaskRunner {
       ?? (task.config.poolId && this.getRemoteTargets()[task.config.poolId] ? task.config.poolId : undefined);
   }
 
-  selectExecutor(task: TaskState, excludedPoolMemberKeys: Set<string> = new Set()): Executor {
+  selectExecutor(task: TaskState, excludedPoolMemberKeys: Set<string> = new Set(), attemptId?: string): Executor {
     let effectiveType = task.config.runnerKind ?? (task.config.isMergeNode ? 'merge' : undefined);
     let selectedPoolMemberId: string | undefined;
     const explicitPoolMemberId = (task.config as { poolMemberId?: string }).poolMemberId;
-    this.pendingPoolSelections.delete(task.id);
+    const pendingSelectionKey = this.pendingPoolSelectionKey(task, attemptId);
+    this.pendingPoolSelections.delete(pendingSelectionKey);
 
     if (task.config.poolId && explicitPoolMemberId) {
       const pool = this.getExecutionPools()[task.config.poolId];
@@ -1422,7 +1428,7 @@ export class TaskRunner {
         }
         effectiveType = member.type;
         selectedPoolMemberId = member.id;
-        this.pendingPoolSelections.set(task.id, {
+        this.pendingPoolSelections.set(pendingSelectionKey, {
           poolId: task.config.poolId,
           member,
           memberKey: this.poolMemberKey(member),
@@ -1435,7 +1441,7 @@ export class TaskRunner {
       if (member) {
         effectiveType = member.type;
         selectedPoolMemberId = member.type === 'ssh' ? member.id : undefined;
-        this.pendingPoolSelections.set(task.id, {
+        this.pendingPoolSelections.set(pendingSelectionKey, {
           poolId: task.config.poolId,
           member,
           memberKey: this.poolMemberKey(member),

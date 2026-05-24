@@ -302,6 +302,126 @@ describe('TaskRunner', () => {
     expect(start).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps executor selection metadata scoped to overlapping attempts for the same task', async () => {
+    const startGates = new Map<string, () => void>();
+    const startPromises = new Map<string, Promise<void>>();
+    const completeCallbacks = new Map<string, (response: WorkResponse) => void>();
+    const startedAttempts: string[] = [];
+
+    for (const attemptId of ['pool-task-a1', 'pool-task-a2']) {
+      startPromises.set(attemptId, new Promise((resolve) => startGates.set(attemptId, resolve)));
+    }
+
+    const executorImpl = {
+      type: 'ssh',
+      start: vi.fn().mockImplementation(async (request: any) => {
+        startedAttempts.push(request.attemptId);
+        await startPromises.get(request.attemptId);
+        return {
+          executionId: `exec-${request.attemptId}`,
+          taskId: request.actionId,
+          workspacePath: `/tmp/mock-worktree-${request.attemptId}`,
+          branch: `experiment/${request.attemptId}-mock`,
+        };
+      }),
+      onComplete: vi.fn().mockImplementation((handle: any, cb: any) => {
+        completeCallbacks.set(handle.attemptId, cb);
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+    const logEvent = vi.fn();
+    const updateTask = vi.fn();
+    const registry = {
+      getDefault: () => executorImpl,
+      get: () => executorImpl,
+      getAll: () => [executorImpl],
+    };
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => undefined,
+        handleWorkerResponse: vi.fn(() => []),
+      } as any,
+      persistence: { updateTask, updateAttempt: vi.fn(), logEvent } as any,
+      executorRegistry: registry as any,
+      cwd: '/tmp',
+      remoteTargetsProvider: () => ({
+        'remote-a': { host: 'a.example.test', user: 'runner', sshKeyPath: '/tmp/key-a' },
+        'remote-b': { host: 'b.example.test', user: 'runner', sshKeyPath: '/tmp/key-b' },
+      }),
+      executionPoolsProvider: () => ({
+        pool: {
+          selectionStrategy: 'roundRobin',
+          members: [
+            { type: 'ssh', id: 'remote-a' },
+            { type: 'ssh', id: 'remote-b' },
+          ],
+        },
+      }),
+    });
+
+    const first = runner.executeTask(makeTask({
+      id: 'pool-task',
+      status: 'running',
+      config: { command: 'echo first', runnerKind: 'ssh' as any, poolId: 'pool' },
+      execution: { selectedAttemptId: 'pool-task-a1' },
+    }));
+    await vi.waitFor(() => expect(executorImpl.start).toHaveBeenCalledTimes(1));
+
+    const second = runner.executeTask(makeTask({
+      id: 'pool-task',
+      status: 'running',
+      config: { command: 'echo second', runnerKind: 'ssh' as any, poolId: 'pool' },
+      execution: { selectedAttemptId: 'pool-task-a2' },
+    }));
+    await vi.waitFor(() => expect(executorImpl.start).toHaveBeenCalledTimes(2));
+    expect(startedAttempts).toEqual(['pool-task-a1', 'pool-task-a2']);
+
+    startGates.get('pool-task-a1')?.();
+    await vi.waitFor(() => expect(completeCallbacks.has('pool-task-a1')).toBe(true));
+    startGates.get('pool-task-a2')?.();
+    await vi.waitFor(() => expect(completeCallbacks.has('pool-task-a2')).toBe(true));
+
+    expect(logEvent).toHaveBeenCalledWith('pool-task', 'task.executor.selected', expect.objectContaining({
+      attemptId: 'pool-task-a1',
+      poolMemberId: 'remote-a',
+      reason: expect.objectContaining({ poolMemberId: 'remote-a' }),
+    }));
+    expect(logEvent).toHaveBeenCalledWith('pool-task', 'task.executor.selected', expect.objectContaining({
+      attemptId: 'pool-task-a2',
+      poolMemberId: 'remote-b',
+      reason: expect.objectContaining({ poolMemberId: 'remote-b' }),
+    }));
+    expect(updateTask).toHaveBeenCalledWith('pool-task', expect.objectContaining({
+      config: expect.objectContaining({ poolMemberId: 'remote-a' }),
+    }));
+    expect(updateTask).toHaveBeenCalledWith('pool-task', expect.objectContaining({
+      config: expect.objectContaining({ poolMemberId: 'remote-b' }),
+    }));
+
+    completeCallbacks.get('pool-task-a1')?.({
+      requestId: 'req-pool-task-a1',
+      actionId: 'pool-task',
+      attemptId: 'pool-task-a1',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    completeCallbacks.get('pool-task-a2')?.({
+      requestId: 'req-pool-task-a2',
+      actionId: 'pool-task',
+      attemptId: 'pool-task-a2',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+
+    await Promise.all([first, second]);
+  });
+
   it('kills the active execution for a task by resolving its current attempt', async () => {
     let completeCallback: ((response: WorkResponse) => void) | undefined;
     const kill = vi.fn();
