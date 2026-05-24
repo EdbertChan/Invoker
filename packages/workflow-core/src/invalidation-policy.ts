@@ -148,6 +148,10 @@ export interface ActionSpec {
   ) => string[];
 }
 
+// INV-90 selected the table-driven policy as the source of truth:
+// non-invalidating task actions validate scope and apply their narrow
+// primitive, while invalidating actions must cancel before reset and
+// then cascade across workflows.
 const NON_INVALIDATING_TASK_STAGES: readonly InvalidationStage[] = [
   'validateScope',
   'applyPrimitive',
@@ -508,4 +512,3 @@ export function buildOrchestratorOnlyInvalidationDeps(
     },
   };
 }
-

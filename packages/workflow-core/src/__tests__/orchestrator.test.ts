@@ -3,6 +3,7 @@ import { reconciliationNeedsInputWorkResponse } from './reconciliation-needs-inp
 import { rid, sid } from './scoped-test-helpers.js';
 import { Orchestrator, PlanConflictError, descriptionForMergeNode } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
+import { MUTATION_POLICIES } from '../invalidation-policy.js';
 import { computeWorkflowRollup } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
 import type { Logger, WorkResponse } from '@invoker/contracts';
@@ -7202,6 +7203,7 @@ describe('Orchestrator', () => {
     }
 
     it('re-selecting with an ACTIVE downstream cancels first, then recreates downstream', () => {
+      expect(MUTATION_POLICIES.selectedExperiment.action).toBe('recreateTask');
       const { reconId, exp1Id, exp2Id, downstreamId } = setupReconciliationWithDownstream();
 
       // Initial selection unblocks downstream → downstream auto-starts.
@@ -7351,6 +7353,7 @@ describe('Orchestrator', () => {
     }
 
     it('re-selecting a CHANGED merged set with an ACTIVE downstream cancels first, then recreates downstream', () => {
+      expect(MUTATION_POLICIES.selectedExperimentSet.action).toBe('recreateTask');
       const { reconId, exp1Id, exp2Id, exp3Id, directDownstream } =
         setupMergedReconciliationWithDownstream();
 
