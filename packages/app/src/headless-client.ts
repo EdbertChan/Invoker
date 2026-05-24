@@ -302,6 +302,14 @@ function parseArgs(argv: string[]): { args: string[]; waitForApproval?: boolean;
   return { args, waitForApproval, noTrack };
 }
 
+function shouldRunInElectronRuntime(
+  args: string[],
+  standaloneMode: boolean,
+  internalOwnerServe: boolean,
+): boolean {
+  return !isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe;
+}
+
 /**
  * Resolve a writable owner endpoint using the resolver, then delegate.
  *
@@ -446,7 +454,7 @@ export async function runHeadlessClientCommand(
     return typeof exitCode === 'number' ? exitCode : 0;
   }
 
-  if (!isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {
+  if (shouldRunInElectronRuntime(args, standaloneMode, internalOwnerServe)) {
     return deps.runElectronHeadless(argv);
   }
 

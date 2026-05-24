@@ -148,7 +148,7 @@ function buildTargetStatus(
   };
 }
 
-function prefixedSkillNames(skillNames: string[]): string[] {
+function resolveManagedSkillNames(skillNames: string[]): string[] {
   return skillNames.map((name) => `${MANAGED_PREFIX}${name}`);
 }
 
@@ -166,7 +166,7 @@ export function resolveBundledSkillsStatus(context: BundledSkillsContext): Bundl
   }
 
   const bundledSkillNames = listBundledSkillNames(sourceRoot);
-  const installedNames = prefixedSkillNames(bundledSkillNames);
+  const installedNames = resolveManagedSkillNames(bundledSkillNames);
   const bundledHash = hashDirectory(sourceRoot);
   const manifest = readManifest(invokerHomeRoot);
   const targets = resolveManagedTargets().map((target) =>
@@ -197,7 +197,7 @@ export function installBundledSkills(
 
   const bundledSkillNames = listBundledSkillNames(sourceRoot);
   const bundledHash = hashDirectory(sourceRoot);
-  const installedNames = prefixedSkillNames(bundledSkillNames);
+  const installedNames = resolveManagedSkillNames(bundledSkillNames);
   const targets = resolveManagedTargets();
   const manifestTargets: BundledSkillsManifest['targets'] = {};
 

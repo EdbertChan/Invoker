@@ -60,6 +60,7 @@ import type {
   TaskStateChanges,
 } from '@invoker/workflow-core';
 import { makeEnvelope, CommandError } from '@invoker/contracts';
+import type { BundledSkillsInstallMode } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
@@ -413,19 +414,19 @@ interface InitServicesOptions {
 }
 
 function getBundledSkillsStatus() {
-  return resolveBundledSkillsStatus({
-    isPackaged: app.isPackaged,
-    repoRoot,
-    resourcesPath: process.resourcesPath,
-  });
+  return resolveBundledSkillsStatus(createBundledSkillsContext());
 }
 
-function installPackagedSkills(mode: import('@invoker/contracts').BundledSkillsInstallMode = 'install') {
-  return installBundledSkills({
+function createBundledSkillsContext() {
+  return {
     isPackaged: app.isPackaged,
     repoRoot,
     resourcesPath: process.resourcesPath,
-  }, mode);
+  };
+}
+
+function installPackagedSkills(mode: BundledSkillsInstallMode = 'install') {
+  return installBundledSkills(createBundledSkillsContext(), mode);
 }
 
 async function initServices(options?: InitServicesOptions): Promise<void> {
