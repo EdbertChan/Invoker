@@ -302,6 +302,90 @@ describe('TaskRunner', () => {
     expect(start).toHaveBeenCalledTimes(1);
   });
 
+  it('allows overlapping launches for different attempts of the same task', async () => {
+    const completeCallbacks = new Map<string, (response: WorkResponse) => void>();
+    const start = vi.fn().mockImplementation(async (request: any) => ({
+      executionId: `exec-${request.attemptId}`,
+      taskId: request.actionId,
+      workspacePath: `/tmp/mock-worktree-${request.attemptId}`,
+      branch: `experiment/${request.attemptId}-mock`,
+    }));
+    const executorImpl = {
+      type: 'worktree',
+      start,
+      onComplete: vi.fn().mockImplementation((handle: any, cb: any) => {
+        completeCallbacks.set(handle.executionId.replace(/^exec-/, ''), cb);
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+    const registry = {
+      getDefault: () => executorImpl,
+      get: () => executorImpl,
+      getAll: () => [executorImpl],
+    };
+    const handleWorkerResponse = vi.fn(() => []);
+    const orchestrator = {
+      getTask: () => undefined,
+      handleWorkerResponse,
+    };
+
+    const runner = new TaskRunner({
+      orchestrator: orchestrator as any,
+      persistence: { updateTask: vi.fn() } as any,
+      executorRegistry: registry as any,
+      cwd: '/tmp',
+    });
+
+    const firstAttempt = makeTask({
+      id: 'retry-task',
+      status: 'running',
+      config: { command: 'echo old' },
+      execution: { selectedAttemptId: 'retry-task-a1' },
+    });
+    const secondAttempt = makeTask({
+      id: 'retry-task',
+      status: 'running',
+      config: { command: 'echo retry' },
+      execution: { selectedAttemptId: 'retry-task-a2' },
+    });
+
+    const first = runner.executeTask(firstAttempt);
+    const second = runner.executeTask(secondAttempt);
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+
+    completeCallbacks.get('retry-task-a1')?.({
+      requestId: 'req-retry-old',
+      actionId: 'retry-task',
+      attemptId: 'retry-task-a1',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    completeCallbacks.get('retry-task-a2')?.({
+      requestId: 'req-retry-new',
+      actionId: 'retry-task',
+      attemptId: 'retry-task-a2',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+
+    await Promise.all([first, second]);
+
+    expect(handleWorkerResponse).toHaveBeenCalledWith(expect.objectContaining({
+      actionId: 'retry-task',
+      attemptId: 'retry-task-a1',
+    }));
+    expect(handleWorkerResponse).toHaveBeenCalledWith(expect.objectContaining({
+      actionId: 'retry-task',
+      attemptId: 'retry-task-a2',
+    }));
+  });
+
   it('kills the active execution for a task by resolving its current attempt', async () => {
     let completeCallback: ((response: WorkResponse) => void) | undefined;
     const kill = vi.fn();

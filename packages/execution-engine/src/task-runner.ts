@@ -271,7 +271,11 @@ export class TaskRunner {
   private pendingPoolSelections = new Map<string, PoolSelection>();
   private freshBaseCommits = new Map<string, FreshBaseCommit>();
 
-  /** In-flight executions keyed by attemptId (with taskId retained for external kill resolution). */
+  /**
+   * INV-113: keep in-flight execution state attempt-scoped. The experiment
+   * brief rejects taskId keying because overlapping retries for one task must
+   * not suppress or cancel each other.
+   */
   private activeExecutions = new Map<string, ActiveExecutionEntry>();
   private launchingAttemptIds = new Set<string>();
 

@@ -42,7 +42,7 @@ Expected output threshold:
 
 - Exit code: `0`.
 - Test files: exactly `1 passed (1)`.
-- Tests: exactly `125 passed (125)`.
+- Tests: exactly `126 passed (126)` after the implementation follow-up added an explicit overlapping-attempt regression.
 - No failed or skipped tests.
 
 Observed output on 2026-05-25:
@@ -51,6 +51,14 @@ Observed output on 2026-05-25:
 Test Files  1 passed (1)
      Tests  125 passed (125)
   Duration  4.79s
+```
+
+Implementation follow-up observed output on 2026-05-24:
+
+```text
+Test Files  1 passed (1)
+     Tests  126 passed (126)
+  Duration  5.25s
 ```
 
 Broader package smoke command run from the repository root:
@@ -65,7 +73,7 @@ Expected output threshold for that broader run:
 
 - Exit code: `0`.
 - Test files: exactly `51 passed (51)`.
-- Tests: exactly `995 passed (995)`.
+- Tests: exactly `996 passed (996)` after the implementation follow-up added one `task-runner.test.ts` regression.
 
 Observed output on 2026-05-25:
 
@@ -75,6 +83,14 @@ Test Files  51 passed (51)
   Duration  88.19s
 ```
 
+Implementation follow-up observed output on 2026-05-24:
+
+```text
+Test Files  51 passed (51)
+     Tests  996 passed (996)
+  Duration  171.82s
+```
+
 ## Deterministic Assertions
 
 The single-file command proves these reviewable properties:
@@ -82,7 +98,8 @@ The single-file command proves these reviewable properties:
 - Attempt lineage is preserved: `task-runner.test.ts:116` verifies `attemptId='gen-task-a1'` and `executionGeneration=7` are sent to the executor and returned to the orchestrator.
 - Startup failure dispatch is deterministic: `task-runner.test.ts:187` verifies a failed executor start emits a failed response and then dispatches newly ready tasks.
 - Duplicate launches are suppressed per attempt: `task-runner.test.ts:245` verifies two concurrent `executeTask` calls for one attempt call `executor.start` once.
-- Merge-gate branch ordering is deterministic: `task-runner.test.ts:5882` verifies merge order is `invoker/a-task`, `invoker/m-task`, `invoker/z-task` even when dependencies are listed as `z-task`, `a-task`, `m-task`.
+- Overlapping retries remain valid: `task-runner.test.ts:305` verifies two attempts for the same task launch independently and preserve distinct response attempt IDs.
+- Merge-gate branch ordering is deterministic: `task-runner.test.ts:5966` verifies merge order is `invoker/a-task`, `invoker/m-task`, `invoker/z-task` even when dependencies are listed as `z-task`, `a-task`, `m-task`.
 
 ## Verdict
 
