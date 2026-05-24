@@ -225,6 +225,39 @@ describe('Orchestrator launch claims', () => {
     expect(new Set(started.map((task) => task.id)).size).toBe(2);
   });
 
+  it('preserves ready-task scheduling and dispatch semantics after extraction', () => {
+    const { orchestrator, persistence } = makeOrchestrator({
+      launchOutboxMode: 'observe',
+      enqueueLaunchDispatchEnabled: true,
+      maxConcurrency: 2,
+    });
+    const plan: PlanDefinition = {
+      name: 'ready-dispatch-proof',
+      onFinish: 'none',
+      tasks: [
+        { id: 'root-a', description: 'first root', command: 'echo a' },
+        { id: 'root-b', description: 'second root', command: 'echo b' },
+        { id: 'after-a', description: 'downstream', command: 'echo after', dependencies: ['root-a'] },
+      ],
+    };
+
+    orchestrator.loadPlan(plan);
+    const rootA = taskIdBySuffix(orchestrator, 'root-a');
+    const rootB = taskIdBySuffix(orchestrator, 'root-b');
+    const afterA = taskIdBySuffix(orchestrator, 'after-a');
+
+    const started = orchestrator.startExecution();
+
+    expect(started.map((task) => task.id).sort()).toEqual([rootA, rootB].sort());
+    expect(orchestrator.getTask(afterA)?.status).toBe('pending');
+    expect(persistence.launchDispatchRows.map((row) => row.taskId).sort()).toEqual([rootA, rootB].sort());
+
+    respondForTask(orchestrator, rootA, 'completed');
+
+    expect(orchestrator.getTask(afterA)?.status).toBe('running');
+    expect(persistence.launchDispatchRows.map((row) => row.taskId).sort()).toEqual([afterA, rootA, rootB].sort());
+  });
+
   it('does not supersede an active launch claim when scheduling repeats', () => {
     const { orchestrator, persistence } = makeOrchestrator();
     orchestrator.loadPlan({
