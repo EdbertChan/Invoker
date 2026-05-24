@@ -4,8 +4,9 @@
  * Binds to 127.0.0.1 only (no external access). Default port 4100,
  * configurable via INVOKER_API_PORT env var.
  *
- * All write endpoints delegate to a WorkflowMutationFacade instance
- * which encapsulates the mutation → dispatch → topup lifecycle.
+ * INV-130 consumes docs/context/inv-130/experiment-brief.md here:
+ * all write endpoints delegate to a WorkflowMutationFacade instance
+ * which encapsulates the mutation -> dispatch -> topup lifecycle.
  *
  * Read endpoints:
  *   GET  /api/health
@@ -68,8 +69,10 @@ export interface ApiServerDeps {
     args: unknown[],
     options?: { deferDrain?: boolean },
   ) => number;
-  deleteWorkflow: (workflowId: string) => Promise<void>;
-  detachWorkflow: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
+  /** @deprecated Legacy injected callbacks are ignored; use mutations instead. */
+  deleteWorkflow?: (workflowId: string) => Promise<void>;
+  /** @deprecated Legacy injected callbacks are ignored; use mutations instead. */
+  detachWorkflow?: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
 }
 
 export interface ApiServer {
@@ -159,8 +162,6 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
     orchestrator,
     persistence,
     mutations,
-    deleteWorkflow,
-    detachWorkflow,
   } = deps;
   const port = parseInt(process.env.INVOKER_API_PORT ?? '4100', 10);
 
@@ -610,7 +611,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       if (method === 'DELETE' && wfDeleteMatch) {
         const workflowId = decodeURIComponent(wfDeleteMatch[1]);
         try {
-          await deleteWorkflow(workflowId);
+          await mutations.deleteWorkflow(workflowId);
           json(res, 200, { ok: true, workflowId, action: 'deleted' });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
@@ -629,7 +630,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             json(res, 400, { error: 'Missing "upstreamWorkflowId" in request body' });
             return;
           }
-          await detachWorkflow(workflowId, String(upstreamWorkflowId));
+          await mutations.detachWorkflow(workflowId, String(upstreamWorkflowId));
           json(res, 200, {
             ok: true,
             workflowId,

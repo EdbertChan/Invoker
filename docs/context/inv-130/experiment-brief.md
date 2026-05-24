@@ -135,3 +135,13 @@ Note: this command currently executes the package suite rather than only `api-se
 2. Confirm any changed API endpoint still references the facade boundary in `api-server.ts`.
 3. Confirm any changed mutation semantics still preserve DB-first behavior in `orchestrator.ts`.
 4. If test counts change, update this brief only when the added/removed tests directly affect the API mutation proof.
+
+## Implementation Consumption
+
+The implementation task consumes this brief by keeping `api-server.ts` as the HTTP adapter and routing workflow delete/detach writes through `WorkflowMutationFacade` instead of the legacy callback bypass.
+
+Consumption markers:
+
+- `packages/app/src/api-server.ts` documents INV-130 at the write boundary and calls `mutations.deleteWorkflow()` / `mutations.detachWorkflow()` for workflow admin routes.
+- `packages/workflow-core/src/orchestrator.ts` documents INV-130 at the DB-first mutation contract implemented by `refreshFromDb()` and `writeAndSync()`.
+- `packages/app/src/__tests__/api-server.test.ts` asserts the workflow admin routes use the facade path and do not call the legacy callbacks, while preserving the queued `rebase-recreate` proof.

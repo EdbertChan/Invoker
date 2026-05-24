@@ -4,8 +4,9 @@
  * Starts a real HTTP server on an ephemeral port with fully mocked deps.
  * Uses Node's built-in http module to send requests and assert responses.
  *
- * All write endpoints route through a WorkflowMutationFacade instance
- * which wraps the mocked orchestrator, persistence, and taskExecutor.
+ * INV-130 consumes docs/context/inv-130/experiment-brief.md here:
+ * write endpoint tests prove the API facade boundary, queued
+ * rebase-recreate path, and guards against accidental cross-route writes.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'node:http';
@@ -892,6 +893,9 @@ describe('POST /api/workflows/:id/fork', () => {
 });
 
 describe('POST /api/workflows/:id/rebase-recreate', () => {
+  // INV-130: this is the experiment-selected queued boundary. When a
+  // workflow mutation queue is present, the route accepts the intent
+  // without invoking direct route-level orchestration.
   it('queues rebase-recreate through the workflow mutation coordinator when available', async () => {
     const localMocks = createMocks();
     localMocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
@@ -973,32 +977,36 @@ describe('POST /api/workflows/:id/rebase-recreate', () => {
 });
 
 describe('DELETE /api/workflows/:id', () => {
-  it('deletes workflow via deleteWorkflow callback', async () => {
+  it('deletes workflow via the INV-130 mutation facade boundary', async () => {
     const res = await request(port, 'DELETE', '/api/workflows/wf-1');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('deleted');
-    expect(mocks.deleteWorkflow).toHaveBeenCalledWith('wf-1');
-    expect(mocks.orchestrator.deleteWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.deleteWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(mocks.deleteWorkflow).not.toHaveBeenCalled();
   });
 
   it('returns 404 when workflow not found', async () => {
-    mocks.deleteWorkflow.mockRejectedValue(new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, 'workflow not found'));
+    mocks.orchestrator.deleteWorkflow.mockImplementation(() => {
+      throw new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, 'workflow not found');
+    });
     const res = await request(port, 'DELETE', '/api/workflows/missing');
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('workflow not found');
+    expect(mocks.deleteWorkflow).not.toHaveBeenCalled();
   });
 });
 
 describe('POST /api/workflows/:id/detach', () => {
-  it('detaches workflow from one upstream workflow', async () => {
+  it('detaches workflow from one upstream workflow via the INV-130 mutation facade boundary', async () => {
     const res = await request(port, 'POST', '/api/workflows/wf-1/detach', {
       upstreamWorkflowId: 'wf-0',
     });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.action).toBe('detached');
-    expect(mocks.detachWorkflow).toHaveBeenCalledWith('wf-1', 'wf-0');
+    expect(mocks.orchestrator.detachWorkflow).toHaveBeenCalledWith('wf-1', 'wf-0');
+    expect(mocks.detachWorkflow).not.toHaveBeenCalled();
   });
 
   it('returns 400 when upstreamWorkflowId is missing', async () => {
