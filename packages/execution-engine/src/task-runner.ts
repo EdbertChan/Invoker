@@ -492,6 +492,8 @@ export class TaskRunner {
       phase: task.execution.phase,
       generation: startGeneration,
     });
+    // INV-113: suppress duplicates by attempt, not by task, so a recreate/retry
+    // launch can start a newer attempt while an older attempt is still active.
     if (this.launchingAttemptIds.has(attemptId) || this.activeExecutions.has(attemptId)) {
       traceExecution(
         `[TaskRunner] executeTask skipping duplicate launch for task=${task.id} attempt=${attemptId}`,
