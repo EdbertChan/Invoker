@@ -302,6 +302,71 @@ describe('TaskRunner', () => {
     expect(start).toHaveBeenCalledTimes(1);
   });
 
+  it('kills and suppresses metadata for a successful launch whose generation became stale before handoff', async () => {
+    const kill = vi.fn();
+    const updateTask = vi.fn();
+    const handleWorkerResponse = vi.fn();
+    const markTaskRunningAfterLaunch = vi.fn();
+    const onSpawned = vi.fn();
+    const handle = {
+      executionId: 'exec-stale-success',
+      taskId: 'stale-success',
+      workspacePath: '/tmp/stale-success-worktree',
+      branch: 'experiment/stale-success-old',
+    };
+    const executorImpl = {
+      type: 'worktree',
+      start: vi.fn().mockResolvedValue(handle),
+      onComplete: vi.fn(),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill,
+      destroyAll: vi.fn(),
+    };
+    const currentTask = makeTask({
+      id: 'stale-success',
+      status: 'running',
+      config: { command: 'echo current' },
+      execution: { selectedAttemptId: 'stale-success-a1', generation: 2 },
+    });
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: (id: string) => id === currentTask.id ? currentTask : undefined,
+        handleWorkerResponse,
+        markTaskRunningAfterLaunch,
+      } as any,
+      persistence: { updateTask } as any,
+      executorRegistry: {
+        getDefault: () => executorImpl,
+        get: () => executorImpl,
+        getAll: () => [executorImpl],
+      } as any,
+      cwd: '/tmp',
+      callbacks: { onSpawned },
+    });
+
+    await runner.executeTask(makeTask({
+      id: 'stale-success',
+      status: 'running',
+      config: { command: 'echo old' },
+      execution: { selectedAttemptId: 'stale-success-a1', generation: 1 },
+    }));
+
+    expect(kill).toHaveBeenCalledWith(handle);
+    expect(updateTask).not.toHaveBeenCalledWith(
+      'stale-success',
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          workspacePath: '/tmp/stale-success-worktree',
+          branch: 'experiment/stale-success-old',
+        }),
+      }),
+    );
+    expect(markTaskRunningAfterLaunch).not.toHaveBeenCalled();
+    expect(onSpawned).not.toHaveBeenCalled();
+    expect(handleWorkerResponse).not.toHaveBeenCalled();
+  });
+
   it('kills the active execution for a task by resolving its current attempt', async () => {
     let completeCallback: ((response: WorkResponse) => void) | undefined;
     const kill = vi.fn();

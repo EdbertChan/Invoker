@@ -480,6 +480,12 @@ export class TaskRunner {
     return false;
   }
 
+  private isLaunchGenerationStale(taskId: string, startGeneration: number): boolean {
+    const current = this.orchestrator.getTask(taskId);
+    if (!current) return false;
+    return (current.execution.generation ?? 0) !== startGeneration;
+  }
+
   async executeTask(task: TaskState, dispatchOpts?: LaunchDispatchOptions): Promise<void> {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
@@ -963,6 +969,24 @@ export class TaskRunner {
       hasWorkspacePath: Boolean(handle.workspacePath),
       hasAgentSessionId: Boolean(handle.agentSessionId),
     });
+    // INV-113: generation-stale launch suppression belongs at the
+    // TaskRunner boundary, including successful starts before any workspace
+    // metadata is persisted.
+    if (this.isLaunchGenerationStale(task.id, startGeneration)) {
+      this.logger.warn(
+        `[TaskRunner] suppressing stale launched execution for task=${task.id} attemptId=${attemptId}; killing spawned process`,
+      );
+      try {
+        await executor.kill(handle);
+      } catch (killErr) {
+        this.logger.warn(`[TaskRunner] failed to kill stale launch for task=${task.id}`, { killErr });
+      }
+      this.releasePoolSelectionLease(this.pendingPoolSelections.get(task.id));
+      this.pendingPoolSelections.delete(task.id);
+      await this.cleanupPerTaskDockerExecutor(task);
+      bench('executor.start.staleSuppressed');
+      return;
+    }
     const launchAccepted =
       this.orchestrator.markTaskRunningAfterLaunch?.(task.id, attemptId) ?? true;
     if (!launchAccepted) {
