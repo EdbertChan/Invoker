@@ -34,6 +34,7 @@ export function persistShutdownDiagnostic(
 
     const parts: string[] = ['\n[Shutdown Diagnostic]'];
     parts.push(`status=${task.status}`);
+    parts.push('syntheticError=Application quit');
     if (task.execution.error) {
       parts.push(`error=${task.execution.error}`);
     }

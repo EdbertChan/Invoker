@@ -1671,6 +1671,29 @@ describe('SQLiteAdapter', () => {
       }
     });
 
+    it('preserves file-backed diagnostics after output_spool chunks', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-output-spool-diagnostic-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+        db.saveTask('wf-1', makeTask('t-spool-diagnostic'));
+
+        db.appendOutputChunk('t-spool-diagnostic', 'runner line 1\n');
+        db.appendOutputChunk('t-spool-diagnostic', 'runner line 2\n');
+        db.appendTaskOutput('t-spool-diagnostic', '\n[Shutdown Diagnostic]\nsyntheticError=Application quit\n');
+
+        expect(db.getTaskOutput('t-spool-diagnostic')).toBe(
+          'runner line 1\nrunner line 2\n\n[Shutdown Diagnostic]\nsyntheticError=Application quit\n',
+        );
+
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('falls back to task_output when no output_spool chunks exist', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-output-fallback-'));
       const dbPath = join(dir, 'invoker.db');

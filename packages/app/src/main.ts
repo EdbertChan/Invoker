@@ -194,6 +194,22 @@ function isTaskInFlightForForcedStop(task: TaskState): boolean {
     || (task.status === 'pending' && task.execution.phase === 'launching');
 }
 
+const STARTUP_DIAGNOSTIC_TAIL_CHARS = 4_000;
+
+function tailText(value: string, limit = STARTUP_DIAGNOSTIC_TAIL_CHARS): string {
+  return value.length > limit ? `...${value.slice(value.length - limit)}` : value;
+}
+
+function errorField(error: unknown, field: 'stderr' | 'stderrTail'): string | undefined {
+  let cursor: unknown = error;
+  while (cursor && typeof cursor === 'object') {
+    const value = (cursor as Record<string, unknown>)[field];
+    if (typeof value === 'string' && value.trim()) return value;
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
 
@@ -1451,6 +1467,29 @@ function createEmbeddedTerminalBackendFromConfig(
     outputFlushTimers.set(taskId, timer);
   };
 
+  const persistStartupDiagnostic = (taskId: string, error: Error, executor: Executor): void => {
+    try {
+      flushTaskOutput(taskId);
+      const parts: string[] = ['\n[Startup Diagnostic]'];
+      parts.push(`executor=${executor.type}`);
+      parts.push(`message=${error.message}`);
+
+      const stderr = errorField(error, 'stderrTail') ?? errorField(error, 'stderr');
+      if (stderr) {
+        parts.push(`--- startup stderr ---\n${tailText(stderr)}`);
+      }
+
+      const tail = persistence.getOutputTail(taskId).map((chunk) => chunk.data).join('');
+      if (tail) {
+        parts.push(`--- recent output tail ---\n${tailText(tail)}`);
+      }
+      parts.push('--- end startup diagnostic ---\n');
+      persistence.appendTaskOutput(taskId, parts.join('\n'));
+    } catch {
+      // Best-effort: preserve the original startup failure.
+    }
+  };
+
   const flushUiTaskDeltas = (): void => {
     if (uiTaskDeltaFlushTimer) {
       clearTimeout(uiTaskDeltaFlushTimer);
@@ -1735,6 +1774,7 @@ function createEmbeddedTerminalBackendFromConfig(
         },
         onLaunchFailed: (taskId, error, executor) => {
           assertFatalExecutionCapacity(`launch failed ${taskId}`);
+          persistStartupDiagnostic(taskId, error, executor);
           logger.error(
             `Task "${taskId}" launch failed before spawn (executor: ${executor.type}): ${error.message}`,
             { module: 'exec' },
@@ -4089,7 +4129,7 @@ function createEmbeddedTerminalBackendFromConfig(
       }
       if (orchestrator) {
         for (const task of orchestrator.getAllTasks()) {
-          if (task.status === 'running' || task.status === 'fixing_with_ai') {
+          if (isTaskInFlightForForcedStop(task)) {
             if (persistence) {
               persistShutdownDiagnostic(task, persistence, {
                 flushPendingOutput: flushTaskOutput,

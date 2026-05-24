@@ -41,6 +41,7 @@ describe('persistShutdownDiagnostic', () => {
     const output = db.appended[0];
     expect(output).toContain('[Shutdown Diagnostic]');
     expect(output).toContain('status=running');
+    expect(output).toContain('syntheticError=Application quit');
     expect(output).toContain('--- end shutdown diagnostic ---');
   });
 
