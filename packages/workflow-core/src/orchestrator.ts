@@ -101,10 +101,24 @@ import {
   setTaskApprovalStatusImpl,
   type OrchestratorTransitionContext,
 } from './orchestrator/transitions.js';
+import {
+  TASK_DELTA_CHANNEL,
+  publishTaskDeltas,
+  publishTaskRemoval,
+  publishTaskUpdate,
+  type OrchestratorEventContext,
+} from './orchestrator/events.js';
+import {
+  buildMergeNodeTask,
+  editTaskMergeModeImpl,
+  type MergeMode,
+  type OrchestratorMergeContext,
+} from './orchestrator/merge.js';
+
+export { descriptionForMergeNode } from './orchestrator/merge.js';
 
 // ── Channel Constants ───────────────────────────────────────
 
-const TASK_DELTA_CHANNEL = 'task.delta';
 let workflowCounter = 0;
 
 function isReplaceableAttemptStatus(status: Attempt['status']): boolean {
@@ -323,22 +337,6 @@ export interface PlanDefinition {
     poolId?: string;
     executionAgent?: string;
   }>;
-}
-
-/** User-visible merge-node description aligned with `onFinish` / `mergeMode` (list + graph subtitle). */
-export function descriptionForMergeNode(plan: Pick<PlanDefinition, 'name' | 'onFinish' | 'mergeMode'>): string {
-  const onFinish = plan.onFinish ?? 'none';
-  const mergeMode = plan.mergeMode ?? 'manual';
-  if (mergeMode === 'external_review') {
-    return `Review gate for ${plan.name}`;
-  }
-  if (onFinish === 'pull_request') {
-    return `Pull request gate for ${plan.name}`;
-  }
-  if (onFinish === 'merge') {
-    return `Merge gate for ${plan.name}`;
-  }
-  return `Workflow gate for ${plan.name}`;
 }
 
 /**
@@ -902,6 +900,30 @@ export class Orchestrator {
     };
   }
 
+  private eventContext(): OrchestratorEventContext {
+    return {
+      persistence: this.persistence,
+      messageBus: this.messageBus,
+      taskDeltaChannel: TASK_DELTA_CHANNEL,
+      buildUpdateDelta: (before, after, changes) => this.buildUpdateDelta(before, after, changes),
+      buildRemoveDelta: (task) => this.buildRemoveDelta(task),
+    };
+  }
+
+  private mergeContext(): OrchestratorMergeContext {
+    return {
+      loadWorkflowMergeMode: (workflowId) => this.persistence.loadWorkflow?.(workflowId)?.mergeMode,
+      updateWorkflowMergeMode: (workflowId, mergeMode) => {
+        this.persistence.updateWorkflow?.(workflowId, { mergeMode });
+      },
+      isActiveForInvalidation,
+      cancelTask: (taskId) => {
+        this.cancelTask(taskId);
+      },
+      dispatchPostMutation: (action, taskId) => this.dispatchPostMutation(action as InvalidationAction, taskId),
+    };
+  }
+
   // ── DB Sync Helpers ────────────────────────────────────────
 
   /**
@@ -1102,9 +1124,7 @@ export class Orchestrator {
       }
     });
 
-    for (const delta of pendingTaskDeltas) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-    }
+    publishTaskDeltas(this.eventContext(), pendingTaskDeltas);
 
     const readyIds = this.stateMachine
       .getReadyTasks()
@@ -1577,13 +1597,7 @@ export class Orchestrator {
     const leafIds = plan.tasks
       .filter((t) => !dependedOn.has(t.id))
       .map((t) => localToScoped.get(t.id)!);
-    const mergeNodeId = `__merge__${workflowId}`;
-    const mergeTask = createTaskState(
-      mergeNodeId,
-      descriptionForMergeNode(plan),
-      leafIds,
-      { workflowId, isMergeNode: true, runnerKind: 'merge' },
-    );
+    const mergeTask = buildMergeNodeTask(workflowId, leafIds, plan);
 
     // ── Pass 2: all validation passed — persist everything ──
     this.activeWorkflowIds.add(workflowId);
@@ -1621,9 +1635,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(mergeTask.id, 'task.created');
     deltas.push({ type: 'created', task: mergeTask });
 
-    for (const delta of deltas) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-    }
+    publishTaskDeltas(this.eventContext(), deltas);
 
     this.reconcileMergeLeaves(workflowId);
   }
@@ -2115,9 +2127,7 @@ export class Orchestrator {
       branch: winner?.execution.branch,
       commit: winner?.execution.commit,
     });
-    const delta: TaskDelta = this.buildUpdateDelta(task, reconUpdated, changes);
-    this.persistence.logEvent?.(reconId, 'task.completed', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    publishTaskUpdate(this.eventContext(), task, reconUpdated, changes, 'task.completed');
 
     if (isReSelection) {
       const directDownstream = allTasksBefore
@@ -2198,9 +2208,7 @@ export class Orchestrator {
       branch: combinedBranch,
       commit: combinedCommit,
     });
-    const delta: TaskDelta = this.buildUpdateDelta(task, reconUpdated, changes);
-    this.persistence.logEvent?.(reconId, 'task.completed', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    publishTaskUpdate(this.eventContext(), task, reconUpdated, changes, 'task.completed');
 
     if (isReSelection) {
       const directDownstreamAfter = this.stateMachine
@@ -3153,7 +3161,7 @@ export class Orchestrator {
    */
   editTaskMergeMode(
     taskId: string,
-    mergeMode: 'manual' | 'automatic' | 'external_review',
+    mergeMode: MergeMode,
   ): TaskState[] {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
@@ -3161,45 +3169,12 @@ export class Orchestrator {
     if (!task.config.isMergeNode) {
       throw new Error(`Task ${taskId} is not a merge node`);
     }
-    const workflowId = task.config.workflowId;
-    if (!workflowId) {
-      throw new Error(`Merge node ${taskId} has no workflowId`);
-    }
-
-    // Step 9 same-mode no-op: skip cancel + persist + retry when the
-    // requested mode already matches what's persisted on the workflow.
-    // Without this guard a UI/CLI re-affirm would needlessly cancel
-    // active merge work and bump the merge node's execution generation.
-    const wf = this.persistence.loadWorkflow?.(workflowId);
-    if (wf && wf.mergeMode === mergeMode) {
-      return [];
-    }
-
-    // Step 9 cancel-first (chart Hard Invariant): when the merge node
-    // is actively executing or waiting on external review, interrupt
-    // it BEFORE we mutate the workflow's mergeMode and reset merge
-    // state. Stale merge work (an in-flight merge run, a merge fix
-    // session, or an external review wait) cannot survive a policy
-    // change because the merge attempt's execution input — the merge
-    // mode — just changed. Inactive statuses
-    // (`pending`/`completed`/`failed`/`needs_input`/`blocked`) skip
-    // cancel: there is no in-flight work to interrupt and
-    // `cancelTask` would otherwise mark a `pending` merge node as
-    // `failed`.
-    if (isActiveForInvalidation(task.status)) {
-      this.cancelTask(taskId);
-    }
-
-    // Persist new mode on the workflow record so the retried merge
-    // attempt picks up the new policy when restartTask reschedules it.
-    this.persistence.updateWorkflow?.(workflowId, { mergeMode });
-
-    // Retry-class reset via the policy table — `restartTask` is the
-    // current `retryTask` compatibility wire. Routing through
-    // `MUTATION_POLICIES.mergeMode` keeps merge-mode dispatch
-    // table-driven so a chart change propagates without touching this
-    // method body.
-    return this.dispatchPostMutation(MUTATION_POLICIES.mergeMode.action, taskId);
+    return editTaskMergeModeImpl(
+      this.mergeContext(),
+      task,
+      mergeMode,
+      MUTATION_POLICIES.mergeMode.action,
+    );
   }
 
   /**
@@ -3878,7 +3853,7 @@ export class Orchestrator {
 
     // 6. Publish removal deltas — drives UI cache cleanup via messageBus subscriber
     for (const task of affectedTasks) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildRemoveDelta(task));
+      publishTaskRemoval(this.eventContext(), task);
     }
   }
 
@@ -3911,7 +3886,7 @@ export class Orchestrator {
 
     // 5. Publish removal deltas (skipped when publishRemovalDeltas is false)
     for (const task of allTasks) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildRemoveDelta(task));
+      publishTaskRemoval(this.eventContext(), task);
     }
   }
 
