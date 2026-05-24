@@ -179,6 +179,8 @@ import {
   resolveActionDiagnosticsStallThresholdMs,
 } from './action-graph-diagnostics.js';
 import { registerReadOnlyIpcHandlers } from './ipc-read-handlers.js';
+import { runMainAppBootstrap, type MainAppMode } from './bootstrap/app-bootstrap.js';
+import { registerMainProcessIpc } from './ipc/ipc-registration.js';
 import { createTaskDeltaStreamSequence } from './task-delta-stream-sequence.js';
 import { startReviewGateStatusWorker, type ReviewGateStatusWorker } from './review-gate-status-worker.js';
 import {
@@ -2688,27 +2690,32 @@ function createEmbeddedTerminalBackendFromConfig(
     }, 0);
   }
 
-  app.whenReady().then(async () => {
-    recordStartupMark('app.whenReady');
-    ownerMode = true;
-    try {
-      recordStartupMark('initServices.start');
-      await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      recordStartupMark('initServices.end', { ownerMode: true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!message.includes('[db-writer-lock]')) {
-        process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
-        app.quit();
-        return;
+  app.whenReady().then(() => runMainAppBootstrap({
+    recordAppReady: () => {
+      recordStartupMark('app.whenReady');
+    },
+    initializeServices: async (): Promise<MainAppMode> => {
+      ownerMode = true;
+      try {
+        recordStartupMark('initServices.start');
+        await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
+        recordStartupMark('initServices.end', { ownerMode: true });
+        return 'owner';
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes('[db-writer-lock]')) {
+          process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
+          app.quit();
+          return 'follower';
+        }
+        recordStartupMark('initServices.readOnly.start');
+        await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
+        ownerMode = false;
+        recordStartupMark('initServices.readOnly.end', { ownerMode: false });
+        return 'follower';
       }
-      recordStartupMark('initServices.readOnly.start');
-      await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      ownerMode = false;
-      recordStartupMark('initServices.readOnly.end', { ownerMode: false });
-    }
-
-    if (ownerMode) {
+    },
+    configureOwnerRuntime: () => {
       rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
         persistence,
@@ -2741,15 +2748,19 @@ function createEmbeddedTerminalBackendFromConfig(
           maxConcurrency: effectiveMaxConcurrency,
         });
       }
-    } else {
+    },
+    configureFollowerRuntime: () => {
       logger.info('Launched in follower mode; mutation execution is delegated to the current owner', {
         module: 'init',
       });
-    }
+    },
+    registerOwnerIpc: () => {
+      registerMainProcessIpc({
+        registerOwnerDelegationHandlers: () => {
+          if (!ownerMode) return;
 
-    // ── IPC Delegation Handlers — peer → owner ────────────────
-    // Peer processes delegate write-heavy commands to the owner process via IpcBus.
-    if (ownerMode) {
+          // ── IPC Delegation Handlers — peer → owner ────────────────
+          // Peer processes delegate write-heavy commands to the owner process via IpcBus.
       workflowMutationDispatcher.set('headless.exec', async (payloadArg: unknown) => {
         return executeHeadlessExec(payloadArg as HeadlessExecMutationPayload);
       });
@@ -2856,38 +2867,44 @@ function createEmbeddedTerminalBackendFromConfig(
       });
       logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
       recordStartupMark('owner-ipc-ready');
-    }
-
-    bootstrapInitialWorkflowState();
-
-    reviewGateStatusWorker = startReviewGateStatusWorker({
-      ownerMode,
-      getTaskExecutor: requireTaskExecutor,
-      logger,
-    });
-
-    // Relaunch orphaned running tasks and start any pending-but-ready tasks.
-    if (!ownerMode) {
-      logger.info('follower mode startup: auto-run disabled', { module: 'init' });
-    } else if (invokerConfig.disableAutoRunOnStartup) {
-      logger.info('auto-run on startup disabled by config', { module: 'init' });
-    } else {
-      const allStarted = orchestrator.startExecution();
-      if (allStarted.length > 0) {
-        requireTaskExecutor().executeTasks(allStarted);
+        },
+      });
+    },
+    bootstrapWorkflowState: () => {
+      bootstrapInitialWorkflowState();
+    },
+    startReviewGateStatusWorker: () => {
+      reviewGateStatusWorker = startReviewGateStatusWorker({
+        ownerMode,
+        getTaskExecutor: requireTaskExecutor,
+        logger,
+      });
+    },
+    startInitialExecution: () => {
+      // Relaunch orphaned running tasks and start any pending-but-ready tasks.
+      if (!ownerMode) {
+        logger.info('follower mode startup: auto-run disabled', { module: 'init' });
+      } else if (invokerConfig.disableAutoRunOnStartup) {
+        logger.info('auto-run on startup disabled by config', { module: 'init' });
+      } else {
+        const allStarted = orchestrator.startExecution();
+        if (allStarted.length > 0) {
+          requireTaskExecutor().executeTasks(allStarted);
+        }
       }
-    }
-
-    const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
-    logger.info(`Database: ${dbPath}`, { module: 'init' });
-    logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
-    logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
-    logger.info('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig), module: 'startup' });
-    recordStartupMark('startup.ready-for-window');
-
-    // Forward deltas to renderer and keep snapshot cache in sync so
-    // the db-poll doesn't re-emit deltas the messageBus already delivered.
-    messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
+    },
+    logReadyState: () => {
+      const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
+      logger.info(`Database: ${dbPath}`, { module: 'init' });
+      logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
+      logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
+      logger.info('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig), module: 'startup' });
+      recordStartupMark('startup.ready-for-window');
+    },
+    subscribeRendererStreams: () => {
+      // Forward deltas to renderer and keep snapshot cache in sync so
+      // the db-poll doesn't re-emit deltas the messageBus already delivered.
+      messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
       uiPerfStats.mainDeltaToUi += 1;
       if (traceUiDeltaFlow) {
         logger.debug(`delta→ui: ${JSON.stringify(delta)}`, { module: 'ui' });
@@ -2922,29 +2939,32 @@ function createEmbeddedTerminalBackendFromConfig(
           sendTaskDeltaToRenderer(rendererDelta);
         }
       }
-    });
+      });
 
-    uiPerfLogInterval = setInterval(() => {
-      const snapshot = {
-        ts: new Date().toISOString(),
-        metric: 'main_delta_flow',
-        ...uiPerfStats,
-      };
-      try {
-        persistence.writeActivityLog('ui-perf-main', 'info', JSON.stringify(snapshot));
-      } catch {
-        // DB might be locked
-      }
-    }, 10000);
+      uiPerfLogInterval = setInterval(() => {
+        const snapshot = {
+          ts: new Date().toISOString(),
+          metric: 'main_delta_flow',
+          ...uiPerfStats,
+        };
+        try {
+          persistence.writeActivityLog('ui-perf-main', 'info', JSON.stringify(snapshot));
+        } catch {
+          // DB might be locked
+        }
+      }, 10000);
 
-    messageBus.subscribe(Channels.TASK_OUTPUT, (data: unknown) => {
-      if (mainWindow && !mainWindow.isDestroyed() && uiInteractive) {
-        mainWindow.webContents.send('invoker:task-output', data);
-      }
-    });
-
-    // Register IPC handlers
-    ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
+      messageBus.subscribe(Channels.TASK_OUTPUT, (data: unknown) => {
+        if (mainWindow && !mainWindow.isDestroyed() && uiInteractive) {
+          mainWindow.webContents.send('invoker:task-output', data);
+        }
+      });
+    },
+    registerRendererIpc: () => {
+      registerMainProcessIpc({
+        registerRendererHandlers: () => {
+          // Register IPC handlers
+          ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
       const startedAtMs = Date.now();
       const tasks = orchestrator.getAllTasks();
       const workflows = listWorkflowsByStartupRecency();
@@ -4022,20 +4042,25 @@ function createEmbeddedTerminalBackendFromConfig(
       return embeddedTerminalManager.resize(sessionId, cols, rows);
     });
 
-    ipcMain.handle('invoker:terminal-close', async (_event, sessionId: string) => {
-      return embeddedTerminalManager.close(sessionId);
-    });
-
-    seedUiSnapshotCache();
-    createWindow();
-    recordStartupMark('createWindow.end');
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
-    });
-  }).catch((err) => {
+          ipcMain.handle('invoker:terminal-close', async (_event, sessionId: string) => {
+            return embeddedTerminalManager.close(sessionId);
+          });
+        },
+      });
+    },
+    createInitialWindow: () => {
+      seedUiSnapshotCache();
+      createWindow();
+      recordStartupMark('createWindow.end');
+    },
+    registerActivationHandler: () => {
+      app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) {
+          createWindow();
+        }
+      });
+    },
+  })).catch((err) => {
     process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
     app.quit();
   });
