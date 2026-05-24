@@ -2006,24 +2006,19 @@ export class Orchestrator {
   }
 
   /**
-   * Select a winning experiment for a reconciliation task — **retry-class**
+   * Select a winning experiment for a reconciliation task — **recreate-class**
    * invalidation route per Step 7 of
    * `docs/architecture/task-invalidation-roadmap.md` and the Decision Table
    * row "Edit selected experiment" in
    * `docs/architecture/task-invalidation-chart.md`
-   * (`MUTATION_POLICIES.selectedExperiment` → `retryTask` / task scope).
+   * (`MUTATION_POLICIES.selectedExperiment` → `recreateTask` / task scope).
    *
-   * Why retry-class (not recreate-class). The chart classifies single
-   * experiment selection as a downstream-input mutation: the
-   * reconciliation task's *result* (its selected branch/commit) is the
-   * execution input that downstream consumers use, so changing the
-   * winner invalidates downstream attempts but does NOT change the
-   * reconciliation task's own spec. The chart's "Why" column reads
-   * "Downstream execution inputs changed". `applyInvalidation('task',
-   * 'retryTask', reconId, deps)` is wired to today's
-   * `Orchestrator.restartTask` via `buildInvalidationDeps` (the
-   * compatibility seam Step 1 introduced; Step 13 will rename
-   * `restartTask` → `retryTask` to close the matrix).
+   * Why recreate-class. INV-90's experiment-selected policy treats
+   * experiment selection changes as downstream execution input
+   * replacement: the reconciliation task's selected branch/commit is
+   * the ABI consumed by downstream tasks, so changing the winner
+   * invalidates downstream attempts and discards stale downstream
+   * lineage through `MUTATION_POLICIES.selectedExperiment.action`.
    *
    * Sequence (mirrors `applyInvalidation`'s contract for the
    * synchronous orchestrator-internal seam — see `invalidation-policy.ts`
@@ -2045,17 +2040,15 @@ export class Orchestrator {
    *      transitions to `completed`; this matches the existing
    *      "Behavior Today" column in the chart ("completes
    *      reconciliation task and unblocks downstream").
-   *   3. **Retry-class reset of downstream (re-selection only).** When
+   *   3. **Recreate-class reset of downstream (re-selection only).** When
    *      the recon was previously completed with a *different* winner,
-   *      every direct downstream consumer is reset via `restartTask`,
-   *      which is the current `retryTask` compatibility wire.
-   *      `restartTask` cascades to its own descendants and bumps each
-   *      affected task's execution generation exactly once via
-   *      `withBumpedExecutionGeneration` (single source of truth for the
-   *      retry reset shape — Step 7 deliberately reuses it instead of
-   *      duplicating the field list here, mirroring Steps 5/6). For
-   *      the initial-selection path no downstream reset is needed
-   *      because nothing has executed yet against the recon's result.
+   *      every direct downstream consumer is reset via the policy table.
+   *      `MUTATION_POLICIES.selectedExperiment.action` currently routes
+   *      to `recreateTask`, which clears stale branch/workspace lineage
+   *      and bumps each affected task's execution generation exactly
+   *      once. For the initial-selection path no downstream reset is
+   *      needed because nothing has executed yet against the recon's
+   *      result.
    *   4. **Auto-start newly ready tasks.** Existing behavior:
    *      `findNewlyReadyTasks(reconId)` plus `autoStartReadyTasks`
    *      unblocks downstream that just became ready due to recon
@@ -2069,12 +2062,10 @@ export class Orchestrator {
    * (per the chart's "Behavior Today" column); this method introduces
    * one.
    *
-   * NOTE: `recreateTask`'s lineage-discarding reset shape is
-   * deliberately NOT used here. Downstream tasks may still hold valid
-   * workspace lineage (their own branch, their own workspacePath) that
-   * the executor can reuse when the new winner's branch is rebased onto
-   * theirs; that is what makes selection retry-class rather than
-   * recreate-class in the chart's Decision Table.
+   * NOTE: the reset is deliberately routed through the policy table,
+   * not hard-coded here. INV-90's experiment brief chose
+   * table-driven invalidation so changes to the selected action remain
+   * reviewable in one place.
    */
   selectExperiment(taskId: string, experimentId: string): TaskState[] {
     this.refreshFromDb();
@@ -2135,7 +2126,7 @@ export class Orchestrator {
         .filter((t) => t.dependencies.includes(reconId))
         .map((t) => t.id);
       for (const dsId of directDownstream) {
-        this.recreateTask(dsId);
+        this.dispatchPostMutation(MUTATION_POLICIES.selectedExperiment.action, dsId);
       }
     }
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(reconId);
@@ -2220,7 +2211,7 @@ export class Orchestrator {
         .map((t) => t.id);
       for (const dsId of directDownstreamAfter) {
         if (this.stateGetTask(dsId)) {
-          this.recreateTask(dsId);
+          this.dispatchPostMutation(MUTATION_POLICIES.selectedExperimentSet.action, dsId);
         }
       }
     }
