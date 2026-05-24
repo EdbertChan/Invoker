@@ -127,7 +127,12 @@ class InMemoryPersistence implements OrchestratorPersistence {
 }
 
 class InMemoryBus implements OrchestratorMessageBus {
-  publish(): void {}
+  published: Array<{ channel: string; message: unknown }> = [];
+
+  publish<T>(channel: string, message: T): void {
+    this.published.push({ channel, message });
+  }
+
   subscribe(): () => void {
     return () => {};
   }
@@ -205,6 +210,63 @@ function seedStaleLaunchMetadata(
 }
 
 describe('Orchestrator launch claims', () => {
+  it('preserves ready-task scheduling after an upstream task completes', () => {
+    const { orchestrator, persistence } = makeOrchestrator({ maxConcurrency: 1 });
+    orchestrator.loadPlan({
+      name: 'extracted-scheduler-ready-cascade',
+      onFinish: 'none',
+      tasks: [
+        { id: 'prepare', description: 'prepare', command: 'echo prepare' },
+        { id: 'verify', description: 'verify', command: 'echo verify', dependencies: ['prepare'] },
+      ],
+    });
+
+    const prepareId = taskIdBySuffix(orchestrator, 'prepare');
+    const verifyId = taskIdBySuffix(orchestrator, 'verify');
+    const [prepareClaim] = orchestrator.startExecution();
+
+    expect(prepareClaim!.id).toBe(prepareId);
+    expect(orchestrator.getTask(verifyId)?.status).toBe('pending');
+    expect(orchestrator.getTask(verifyId)?.execution.selectedAttemptId).toBeUndefined();
+
+    const started = respondForTask(orchestrator, prepareId, 'completed');
+    const verifyAttemptId = orchestrator.getTask(verifyId)?.execution.selectedAttemptId;
+
+    expect(started.map((task) => task.id)).toEqual([verifyId]);
+    expect(orchestrator.getTask(verifyId)?.status).toBe('running');
+    expect(verifyAttemptId).toBeDefined();
+    expect(persistence.loadAttempt(verifyAttemptId!)?.status).toBe('running');
+  });
+
+  it('preserves deferred launch transition semantics when finalizing executor startup', () => {
+    const { orchestrator, persistence } = makeOrchestrator({ deferRunningUntilLaunch: true });
+    orchestrator.loadPlan({
+      name: 'extracted-transition-launch',
+      onFinish: 'none',
+      tasks: [{ id: 't1', description: 'one', command: 'echo one' }],
+    });
+
+    const taskId = taskIdBySuffix(orchestrator, 't1');
+    const [claim] = orchestrator.startExecution();
+    const attemptId = claim!.execution.selectedAttemptId!;
+    const launchedAt = new Date('2026-05-24T12:00:00.000Z');
+
+    expect(claim!.status).toBe('pending');
+    expect(claim!.execution.phase).toBe('launching');
+    expect(persistence.loadAttempt(attemptId)?.status).toBe('claimed');
+
+    expect(orchestrator.markTaskRunningAfterLaunch(taskId, attemptId, launchedAt)).toBe(true);
+    const running = orchestrator.getTask(taskId)!;
+    const attempt = persistence.loadAttempt(attemptId)!;
+
+    expect(running.status).toBe('running');
+    expect(running.execution.phase).toBe('executing');
+    expect(running.execution.startedAt).toEqual(launchedAt);
+    expect(running.execution.launchCompletedAt).toEqual(launchedAt);
+    expect(attempt.status).toBe('running');
+    expect(attempt.startedAt).toEqual(launchedAt);
+  });
+
   it('startExecution returns each started task exactly once', () => {
     const { orchestrator } = makeOrchestrator();
     const plan: PlanDefinition = {
