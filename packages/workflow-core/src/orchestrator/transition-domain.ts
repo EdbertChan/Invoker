@@ -2,8 +2,7 @@ import type { Logger } from '@invoker/contracts';
 import type { Attempt, TaskDelta, TaskState, TaskStateChanges } from '@invoker/workflow-graph';
 import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchestrator.js';
 import type { TaskRepository } from '../task-repository.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { publishTaskDelta } from './events-domain.js';
 
 export interface TransitionDomainHost {
   readonly persistence: OrchestratorPersistence;
@@ -96,5 +95,5 @@ export function setTaskApprovalStatus(
   });
   const delta: TaskDelta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(id, eventName, changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host.messageBus, delta);
 }

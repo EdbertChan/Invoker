@@ -5,8 +5,7 @@ import { isDiscardedAttempt } from '../attempt-policy.js';
 import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchestrator.js';
 import type { TaskRepository } from '../task-repository.js';
 import type { TaskScheduler } from '../scheduler.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { publishTaskDelta } from './events-domain.js';
 
 function nextLeaseExpiry(from: Date): Date {
   return new Date(from.getTime() + ATTEMPT_LEASE_MS);
@@ -299,7 +298,7 @@ export function drainScheduler(host: SchedulerDomainHost): TaskState[] {
         });
       }
     }
-    host.messageBus.publish(TASK_DELTA_CHANNEL, host.buildUpdateDelta(task, updated, changes));
+    publishTaskDelta(host.messageBus, host.buildUpdateDelta(task, updated, changes));
     started.push(updated);
     host.logger.info('[orchestrator] drainScheduler: started', {
       taskId: job.taskId,
@@ -387,7 +386,7 @@ export function markTaskRunningAfterLaunch(
 
     const launchUpdated = host.writeAndSync(taskId, changes);
     host.persistence.logEvent?.(taskId, 'task.running', changes);
-    host.messageBus.publish(TASK_DELTA_CHANNEL, host.buildUpdateDelta(task, launchUpdated, changes));
+    publishTaskDelta(host.messageBus, host.buildUpdateDelta(task, launchUpdated, changes));
     host.logger.info('[orchestrator] markTaskRunningAfterLaunch: executing', {
       taskId,
       attemptId,
