@@ -650,6 +650,26 @@ describe('Orchestrator', () => {
       expect(failedDeltas).toHaveLength(1);
     });
 
+    it('revertConflictResolution no-ops when the expected fix lineage is stale', () => {
+      const { savedError } = orchestrator.beginConflictResolution('t2');
+      const staleLineage = {
+        selectedAttemptId: orchestrator.getTask('t2')!.execution.selectedAttemptId,
+        generation: orchestrator.getTask('t2')!.execution.generation ?? 0,
+      };
+      orchestrator.retryTask('t2');
+      const currentAttemptId = orchestrator.getTask('t2')!.execution.selectedAttemptId;
+      publishedDeltas = [];
+
+      const reverted = orchestrator.revertConflictResolution('t2', savedError, 'late failure', staleLineage);
+
+      const task = orchestrator.getTask('t2')!;
+      expect(reverted).toBe(false);
+      expect(task.status).toBe('running');
+      expect(task.execution.selectedAttemptId).toBe(currentAttemptId);
+      expect(task.execution.error).toBeUndefined();
+      expect(publishedDeltas).toHaveLength(0);
+    });
+
     it('revertConflictResolution uses agent-agnostic fix failure prefix', () => {
       const { savedError } = orchestrator.beginConflictResolution('t2');
       orchestrator.revertConflictResolution('t2', savedError, 'startup failed');
@@ -739,6 +759,30 @@ describe('Orchestrator', () => {
       expect(task.execution.pendingFixError).toBe('test failed: expected 1 to be 2');
       expect(task.execution.isFixingWithAI).toBeFalsy();
       expect(persistence.loadAttempt(fixAttemptId!)?.status).toBe('needs_input');
+    });
+
+    it('setFixAwaitingApproval no-ops when the expected fix lineage is stale', () => {
+      orchestrator.beginConflictResolution('f2');
+      const staleLineage = {
+        selectedAttemptId: orchestrator.getTask('f2')!.execution.selectedAttemptId,
+        generation: orchestrator.getTask('f2')!.execution.generation ?? 0,
+      };
+      orchestrator.retryTask('f2');
+      const currentAttemptId = orchestrator.getTask('f2')!.execution.selectedAttemptId;
+      publishedDeltas = [];
+
+      const updated = orchestrator.setFixAwaitingApproval(
+        'f2',
+        'test failed: expected 1 to be 2',
+        staleLineage,
+      );
+
+      const task = orchestrator.getTask('f2')!;
+      expect(updated).toBe(false);
+      expect(task.status).toBe('running');
+      expect(task.execution.selectedAttemptId).toBe(currentAttemptId);
+      expect(task.execution.pendingFixError).toBeUndefined();
+      expect(publishedDeltas).toHaveLength(0);
     });
 
     it('setFixAwaitingApproval delta includes agentSessionId from DB', () => {

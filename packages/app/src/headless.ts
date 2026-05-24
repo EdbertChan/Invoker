@@ -48,6 +48,7 @@ import {
   recreateTask as sharedRecreateTask,
   forkWorkflow as sharedForkWorkflow,
   setWorkflowMergeMode,
+  StaleLineageError,
 } from './workflow-actions.js';
 import { normalizeMergeModeForPersistence } from './merge-mode.js';
 import type { CostGroupDimension } from './cost-rollup.js';
@@ -1653,6 +1654,10 @@ async function headlessFix(taskId: string, deps: HeadlessDeps, agentArg?: string
         : `Fix applied for task: ${taskId} (${agent}). Use 'approve ${taskId}' or 'reject ${taskId}' to finalize.\n`,
     );
   } catch (err) {
+    if (err instanceof StaleLineageError) {
+      deps.logger.info(`headless fix stale result discarded for "${taskId}": ${err.message}`, { module: 'headless' });
+      return;
+    }
     await finalizeMutationWithGlobalTopup({
       orchestrator: deps.orchestrator,
       taskExecutor: te,
@@ -1696,6 +1701,10 @@ async function headlessResolveConflict(taskId: string, deps: HeadlessDeps, agent
         : `Conflict resolved for task: ${taskId} (${agent}). Use 'approve ${taskId}' or 'reject ${taskId}' to finalize.\n`,
     );
   } catch (err) {
+    if (err instanceof StaleLineageError) {
+      deps.logger.info(`headless resolve-conflict stale result discarded for "${taskId}": ${err.message}`, { module: 'headless' });
+      return;
+    }
     await finalizeMutationWithGlobalTopup({
       orchestrator: deps.orchestrator,
       taskExecutor: te,

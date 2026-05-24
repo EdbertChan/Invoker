@@ -140,6 +140,7 @@ import {
   selectFailureRecoveryRoute,
   selectExperiments as sharedSelectExperiments,
   setWorkflowMergeMode,
+  StaleLineageError,
 } from './workflow-actions.js';
 import { spawn, execSync } from 'node:child_process';
 import { resolveTaskTerminalSpec } from './open-terminal-for-task.js';
@@ -3739,6 +3740,10 @@ function createEmbeddedTerminalBackendFromConfig(
           scopedTaskIds: [taskId],
         });
       } catch (err) {
+        if (err instanceof StaleLineageError) {
+          logger.info(`resolve-conflict stale result discarded for "${taskId}": ${err.message}`, { module: 'ipc' });
+          return;
+        }
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
@@ -3771,6 +3776,10 @@ function createEmbeddedTerminalBackendFromConfig(
           scopedTaskIds: [taskId],
         });
       } catch (err) {
+        if (err instanceof StaleLineageError) {
+          logger.info(`fix-with-agent stale result discarded for "${taskId}": ${err.message}`, { module: 'ipc' });
+          return;
+        }
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),

@@ -1312,7 +1312,11 @@ describe('fixWithAgentAction', () => {
 
     expect(taskExecutor.fixWithAgent).toHaveBeenCalledWith('task-a', 'test output', 'codex', 'boom');
     expect(taskExecutor.resolveConflict).not.toHaveBeenCalled();
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith(
+      'task-a',
+      'boom',
+      { taskId: 'task-a', selectedAttemptId: undefined, generation: 0 },
+    );
     expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
   });
 
@@ -1351,7 +1355,11 @@ describe('fixWithAgentAction', () => {
 
     expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'claude');
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError);
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith(
+      'task-a',
+      mergeError,
+      { taskId: 'task-a', selectedAttemptId: undefined, generation: 0 },
+    );
     expect(result).toEqual({ kind: 'resolveConflict', autoApproved: false, started: [] });
   });
 
@@ -2321,7 +2329,7 @@ describe('fixWithAgentAction lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('agent crashed');
+    })).rejects.toThrow(StaleLineageError);
 
     // revertConflictResolution must NOT be called when lineage is stale
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
@@ -2354,7 +2362,11 @@ describe('fixWithAgentAction lineage guard', () => {
     });
 
     // Normal path should proceed
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith(
+      'task-a',
+      'boom',
+      { taskId: 'task-a', selectedAttemptId: 'att-1', generation: 5 },
+    );
     expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
   });
 });
@@ -2438,7 +2450,7 @@ describe('resolveConflictAction lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('resolution failed');
+    })).rejects.toThrow(StaleLineageError);
 
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
   });
@@ -2667,7 +2679,11 @@ describe('autoFixOnReviewGateFailure', () => {
       expect.stringContaining('This auto-fix was triggered by failed CI'),
     );
     expect(taskExecutor.fixWithAgent.mock.calls[0]?.[4]).toContain('test-all');
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('merge-a', 'Review-gate CI failed');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith(
+      'merge-a',
+      'Review-gate CI failed',
+      { taskId: 'merge-a', selectedAttemptId: 'att-1', generation: 7 },
+    );
   });
 
   it('does not start when review-gate lineage is stale', async () => {

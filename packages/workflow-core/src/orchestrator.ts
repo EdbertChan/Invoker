@@ -747,6 +747,11 @@ export interface OrchestratorConfig {
   launchOutboxMode?: 'disabled' | 'observe' | 'active';
 }
 
+export interface FixMutationLineage {
+  selectedAttemptId?: string;
+  generation: number;
+}
+
 // ── Orchestrator ────────────────────────────────────────────
 
 export class Orchestrator {
@@ -1829,10 +1834,26 @@ export class Orchestrator {
     this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', additionalChanges);
   }
 
-  setFixAwaitingApproval(taskId: string, originalError: string): void {
+  private isFixMutationLineageCurrent(task: TaskState, expectedLineage?: FixMutationLineage): boolean {
+    if (!expectedLineage) return true;
+    return task.execution.selectedAttemptId === expectedLineage.selectedAttemptId
+      && (task.execution.generation ?? 0) === expectedLineage.generation;
+  }
+
+  setFixAwaitingApproval(taskId: string, originalError: string, expectedLineage?: FixMutationLineage): boolean {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    if (!this.isFixMutationLineageCurrent(task, expectedLineage)) {
+      this.logger.info('[setFixAwaitingApproval] stale lineage discarded', {
+        taskId,
+        expectedSelectedAttemptId: expectedLineage?.selectedAttemptId ?? null,
+        actualSelectedAttemptId: task.execution.selectedAttemptId ?? null,
+        expectedGeneration: expectedLineage?.generation ?? null,
+        actualGeneration: task.execution.generation ?? 0,
+      });
+      return false;
+    }
     const tid = task.id;
     if (task.status !== 'running' && task.status !== 'fixing_with_ai') {
       throw new Error(`Task ${tid} is not running or fixing with AI (status: ${task.status})`);
@@ -1876,6 +1897,7 @@ export class Orchestrator {
     const delta: TaskDelta = this.buildUpdateDelta(task, updated, changes);
     this.persistence.logEvent?.(tid, 'task.awaiting_approval', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    return true;
   }
 
   setBeforeApproveHook(fn: (task: TaskState) => Promise<void>): void {
@@ -2862,11 +2884,26 @@ export class Orchestrator {
    * Revert a conflict resolution attempt: restore the task to failed
    * with its original error and re-parsed mergeConflict field.
    */
-  revertConflictResolution(taskId: string, savedError: string, fixError?: string): void {
+  revertConflictResolution(
+    taskId: string,
+    savedError: string,
+    fixError?: string,
+    expectedLineage?: FixMutationLineage,
+  ): boolean {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     if (!task) {
       throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    }
+    if (!this.isFixMutationLineageCurrent(task, expectedLineage)) {
+      this.logger.info('[revertConflictResolution] stale lineage discarded', {
+        taskId,
+        expectedSelectedAttemptId: expectedLineage?.selectedAttemptId ?? null,
+        actualSelectedAttemptId: task.execution.selectedAttemptId ?? null,
+        expectedGeneration: expectedLineage?.generation ?? null,
+        actualGeneration: task.execution.generation ?? 0,
+      });
+      return false;
     }
     const id = task.id;
 
@@ -2896,6 +2933,7 @@ export class Orchestrator {
     const delta: TaskDelta = this.buildUpdateDelta(task, revertUpdated, changes);
     this.persistence.logEvent?.(id, 'task.failed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    return true;
   }
 
   /**
