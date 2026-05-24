@@ -151,6 +151,7 @@ import {
 } from './embedded-terminal-manager.js';
 import { collectSystemDiagnostics } from './system-diagnostics.js';
 import { installBundledSkills, resolveBundledSkillsStatus } from './bundled-skills.js';
+import type { BundledSkillsInstallMode, BundledSkillsStatus } from '@invoker/contracts';
 import { createRequire } from 'node:module';
 import { acquireDbWriterLock, type DbWriterLockResult } from './db-writer-lock.js';
 import { applyDelta, recoverQuarantinedTask, TaskSnapshotCache } from './delta-merge.js';
@@ -201,14 +202,31 @@ declare const __BUILD_VERSION__: string | undefined;
 // Electron passes extra args after `--` or interleaves them.
 // We look for `--headless` anywhere in process.argv.
 const headlessIndex = process.argv.indexOf('--headless');
-const directInstallSkills = process.argv.includes('--install-skills') || process.argv.slice(2).includes('install-skills');
+const directInstallFlagIndex = process.argv.indexOf('--install-skills');
+const directInstallCommandIndex = headlessIndex === -1 ? process.argv.slice(2).indexOf('install-skills') : -1;
+const directInstallSkills = directInstallFlagIndex !== -1 || directInstallCommandIndex !== -1;
 const isHeadless = headlessIndex !== -1 || directInstallSkills;
+
+function normalizeBundledSkillsInstallMode(mode: unknown): BundledSkillsInstallMode {
+  return mode === 'update' || mode === 'reinstall' ? mode : 'install';
+}
+
+function directInstallSkillsCliArgs(): string[] {
+  if (directInstallFlagIndex !== -1) {
+    return ['install-skills', normalizeBundledSkillsInstallMode(process.argv[directInstallFlagIndex + 1])];
+  }
+  if (directInstallCommandIndex !== -1) {
+    const absoluteIndex = directInstallCommandIndex + 2;
+    return ['install-skills', normalizeBundledSkillsInstallMode(process.argv[absoluteIndex + 1])];
+  }
+  return ['install-skills'];
+}
 
 // In headless mode, extract the CLI args after --headless
 let cliArgs = headlessIndex !== -1
   ? process.argv.slice(headlessIndex + 1)
   : directInstallSkills
-    ? ['install-skills']
+    ? directInstallSkillsCliArgs()
     : [];
 
 // Parse --wait-for-approval flag
@@ -420,12 +438,22 @@ function getBundledSkillsStatus() {
   });
 }
 
-function installPackagedSkills(mode: import('@invoker/contracts').BundledSkillsInstallMode = 'install') {
+function installPackagedSkills(mode: BundledSkillsInstallMode = 'install') {
   return installBundledSkills({
     isPackaged: app.isPackaged,
     repoRoot,
     resourcesPath: process.resourcesPath,
   }, mode);
+}
+
+function writeBundledSkillsInstallSummary(status: BundledSkillsStatus): void {
+  process.stdout.write(`Installed ${status.bundledSkillNames.length} bundled skills with prefix "${status.managedPrefix}".\n`);
+  for (const target of status.targets) {
+    process.stdout.write(`Target (${target.name}): ${target.path}\n`);
+  }
+  for (const skillName of status.bundledSkillNames) {
+    process.stdout.write(`- ${status.managedPrefix}${skillName}\n`);
+  }
 }
 
 async function initServices(options?: InitServicesOptions): Promise<void> {
@@ -686,8 +714,21 @@ const RED = '\x1b[31m';
 
 if (isHeadless) {
   app.whenReady().then(async () => {
-    const agentRegistry = registerBuiltinAgents();
     const command = cliArgs[0];
+
+    if (command === 'install-skills') {
+      try {
+        const status = installPackagedSkills(normalizeBundledSkillsInstallMode(cliArgs[1]));
+        writeBundledSkillsInstallSummary(status);
+        process.exit(0);
+      } catch (err) {
+        process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+        process.exit(1);
+      }
+      return;
+    }
+
+    const agentRegistry = registerBuiltinAgents();
     const readOnlyMode = isHeadlessReadOnlyCommand(cliArgs);
     const mutatingMode = isHeadlessMutatingCommand(cliArgs);
     const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1' || command === 'owner-serve';

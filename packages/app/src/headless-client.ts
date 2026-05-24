@@ -302,6 +302,16 @@ function parseArgs(argv: string[]): { args: string[]; waitForApproval?: boolean;
   return { args, waitForApproval, noTrack };
 }
 
+function normalizeDirectBundledSkillsArgs(args: string[]): string[] | null {
+  if (args[0] === 'install-skills') {
+    return args;
+  }
+  if (args[0] === '--install-skills') {
+    return ['install-skills', ...args.slice(1)];
+  }
+  return null;
+}
+
 /**
  * Resolve a writable owner endpoint using the resolver, then delegate.
  *
@@ -433,11 +443,16 @@ export async function runHeadlessClientCommand(
   argv: string[],
   deps: HeadlessClientDeps,
 ): Promise<number> {
+  const { args, waitForApproval, noTrack } = parseArgs(argv);
+  const bundledSkillsArgs = normalizeDirectBundledSkillsArgs(args);
+  if (bundledSkillsArgs) {
+    return deps.runElectronHeadless(bundledSkillsArgs);
+  }
+
   // Validate config before any delegation path so malformed JSON fails fast
   // even for commands that do not boot the full Electron owner process.
   loadConfig();
 
-  const { args, waitForApproval, noTrack } = parseArgs(argv);
   const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1';
   const internalOwnerServe = args[0] === 'owner-serve';
 

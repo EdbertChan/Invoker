@@ -128,6 +128,8 @@ function writeManifest(invokerHomeRoot: string, manifest: BundledSkillsManifest)
 
 function buildTargetStatus(
   target: BundledSkillTargetStatus,
+  sourceRoot: string,
+  bundledSkillNames: string[],
   expectedInstalledNames: string[],
   bundledHash: string,
   manifest: BundledSkillsManifest | null,
@@ -135,7 +137,13 @@ function buildTargetStatus(
   const installedSkillNames = expectedInstalledNames.filter((name) => existsSync(path.join(target.path, name, 'SKILL.md')));
   const installed = installedSkillNames.length === expectedInstalledNames.length;
   const manifestTarget = manifest?.targets[target.id];
+  const copiedSkillContentMatches = installed && bundledSkillNames.every((skillName) => {
+    const sourceDir = path.join(sourceRoot, skillName);
+    const targetDir = path.join(target.path, `${MANAGED_PREFIX}${skillName}`);
+    return existsSync(targetDir) && hashDirectory(sourceDir) === hashDirectory(targetDir);
+  });
   const upToDate = installed
+    && copiedSkillContentMatches
     && manifest?.bundledHash === bundledHash
     && manifestTarget?.path === target.path
     && expectedInstalledNames.every((name) => manifestTarget.installedSkillNames.includes(name));
@@ -170,7 +178,7 @@ export function resolveBundledSkillsStatus(context: BundledSkillsContext): Bundl
   const bundledHash = hashDirectory(sourceRoot);
   const manifest = readManifest(invokerHomeRoot);
   const targets = resolveManagedTargets().map((target) =>
-    buildTargetStatus(target, installedNames, bundledHash, manifest),
+    buildTargetStatus(target, sourceRoot, bundledSkillNames, installedNames, bundledHash, manifest),
   );
 
   return {
