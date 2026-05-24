@@ -2,6 +2,12 @@
 # skill-doctor.sh: Deterministic orchestrator for plan validation scripts
 # Usage: bash skill-doctor.sh [OPTIONS] <plan-file>
 #
+# INV-63 selected design:
+#   Source artifact: docs/context/inv-63/experiment-brief.md
+#   Supported: skill-doctor.sh is the primary aggregate validation contract
+#   Rejected: hand-authored direct script chains as the normal review surface
+#   Diagnostic: individual scripts remain fallback tools after doctor failure
+#
 # OPTIONS:
 #   --help              Show this help message
 #   --skip-assumptions  Skip assumption extraction (also skips verify plan generation)
@@ -22,6 +28,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INV63_ARTIFACT="docs/context/inv-63/experiment-brief.md"
+INV63_SUPPORTED="skill-doctor.sh primary aggregate validation contract"
+INV63_REJECTED="hand-authored direct script chains as the normal review surface"
+INV63_DIAGNOSTIC="individual scripts remain fallback tools after doctor failure"
 
 # Default mode flags
 SKIP_ASSUMPTIONS=false
@@ -38,7 +48,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      sed -n '2,25p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     --skip-assumptions)
@@ -339,10 +349,20 @@ if command -v jq &>/dev/null; then
     --arg planFile "$PLAN_FILE" \
     --argjson allPassed "$(if [[ "$OVERALL_FAILED" == "false" ]]; then echo true; else echo false; fi)" \
     --arg firstFailedStep "${FIRST_FAILED_STEP:-null}" \
+    --arg implementationArtifact "$INV63_ARTIFACT" \
+    --arg supportedVerdict "$INV63_SUPPORTED" \
+    --arg rejectedVerdict "$INV63_REJECTED" \
+    --arg diagnosticVerdict "$INV63_DIAGNOSTIC" \
     '{
       planFile: $planFile,
       allPassed: $allPassed,
       firstFailedStep: ($firstFailedStep | if . == "null" then null else . end),
+      implementationBasis: {
+        artifact: $implementationArtifact,
+        supportedVerdict: $supportedVerdict,
+        rejectedVerdict: $rejectedVerdict,
+        diagnosticVerdict: $diagnosticVerdict
+      },
       checks: $checks
     }')
 

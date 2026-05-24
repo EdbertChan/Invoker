@@ -45,6 +45,11 @@ Use these as concrete skill steps. Every step should run a command and produce p
 
 ### Primary validation surface
 
+INV-63 experiment artifact consumed: `docs/context/inv-63/experiment-brief.md`.
+Supported verdict: use `skill-doctor.sh` as the primary aggregate validation contract.
+Rejected verdict: do not make hand-authored shell chains the normal review surface.
+Deferred/diagnostic verdict: keep individual scripts available only for failure isolation and focused debugging.
+
 **Run all plan validation checks in one command:**
 
 ```bash
@@ -65,12 +70,12 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 - `--verbose` — show detailed output from each sub-check
 - `--help` — show usage information
 
-This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
+This single command runs the experiment-selected sequence: assumption extraction, verify plan generation, policy coverage checks, optional coverage-map and stack-manifest checks, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
 For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`. When validating a plan against a separate policy source, pass `--source-file`, `--coverage-map`, and `--stack-manifest`; policy-matrix inputs now fail without a coverage map and a real authored stack manifest.
 
 ### Fallback commands (for debugging individual checks)
 
-If `skill-doctor.sh` fails, run individual checks to isolate the problem:
+If `skill-doctor.sh` fails, run individual checks to isolate the problem. These fallback commands are diagnostic only; they do not replace the aggregate doctor pass/fail contract selected by `docs/context/inv-63/experiment-brief.md`:
 
 1. `step-extract-assumptions`
    `bash skills/plan-to-invoker/scripts/extract-assumptions.sh <plan-file>`
