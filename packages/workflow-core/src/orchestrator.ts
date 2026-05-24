@@ -2915,6 +2915,11 @@ export class Orchestrator {
    * `TaskState[]` synchronously. The async `applyInvalidation`
    * pipeline is reserved for the higher-level CommandService /
    * facade routing where cross-workflow cascade fires.
+   *
+   * INV-90 consumption: the committed experiment brief selected this
+   * policy-table seam and rejected hard-coded retry/recreate decisions
+   * inside each edit method. Keep edit methods passing
+   * `MUTATION_POLICIES.<key>.action` through this helper.
    */
   private dispatchPostMutation(
     action: InvalidationAction,
@@ -3205,11 +3210,9 @@ export class Orchestrator {
     // attempt picks up the new policy when restartTask reschedules it.
     this.persistence.updateWorkflow?.(workflowId, { mergeMode });
 
-    // Retry-class reset via the policy table — `restartTask` is the
-    // current `retryTask` compatibility wire. Routing through
-    // `MUTATION_POLICIES.mergeMode` keeps merge-mode dispatch
-    // table-driven so a chart change propagates without touching this
-    // method body.
+    // INV-90 selected the table-driven route: merge-mode edits consume
+    // `MUTATION_POLICIES.mergeMode` here instead of hard-coding
+    // `retryTask` in this method.
     return this.dispatchPostMutation(MUTATION_POLICIES.mergeMode.action, taskId);
   }
 
@@ -3347,11 +3350,9 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', fixContextChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, fixContextDelta);
 
-    // Retry-class reset via the policy table — `restartTask` is the
-    // current `retryTask` compatibility wire. Routing through
-    // `MUTATION_POLICIES.fixContext` keeps fix-context dispatch
-    // table-driven so a chart change propagates without touching this
-    // method body.
+    // INV-90 selected the table-driven route: fix-context edits consume
+    // `MUTATION_POLICIES.fixContext` here instead of hard-coding
+    // `retryTask` in this method.
     return this.dispatchPostMutation(MUTATION_POLICIES.fixContext.action, taskId);
   }
 

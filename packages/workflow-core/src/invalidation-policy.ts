@@ -42,6 +42,11 @@ export type MutationKey =
   | 'fixReject'
   | 'topology';
 
+// INV-90 experiment-selected design:
+// `docs/context/inv-90/experiment-brief.md` supports this table as the
+// single review point for mutation classification and rejects hard-coded
+// per-orchestrator-method invalidation branches. Any new mutation route
+// must choose an action here and wire the matching `ACTION_SPECS` entry.
 export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>> = Object.freeze({
   command:               { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   prompt:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
@@ -508,4 +513,3 @@ export function buildOrchestratorOnlyInvalidationDeps(
     },
   };
 }
-
