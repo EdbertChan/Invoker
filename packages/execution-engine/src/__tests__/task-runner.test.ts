@@ -302,6 +302,85 @@ describe('TaskRunner', () => {
     expect(start).toHaveBeenCalledTimes(1);
   });
 
+  it('allows concurrent launches for different attempts of the same task', async () => {
+    const completeCallbacks = new Map<string, (response: WorkResponse) => void>();
+    const start = vi.fn().mockImplementation(async (request: any) => ({
+      executionId: `exec-${request.attemptId}`,
+      taskId: request.actionId,
+      workspacePath: `/tmp/mock-worktree-${request.attemptId}`,
+      branch: `experiment/${request.attemptId}-mock`,
+    }));
+    const executorImpl = {
+      type: 'worktree',
+      start,
+      onComplete: vi.fn().mockImplementation((handle: any, cb: any) => {
+        completeCallbacks.set(handle.executionId.replace(/^exec-/, ''), cb);
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+    const registry = {
+      getDefault: () => executorImpl,
+      get: () => executorImpl,
+      getAll: () => [executorImpl],
+    };
+    const orchestrator = {
+      getTask: () => undefined,
+      handleWorkerResponse: vi.fn(() => []),
+    };
+
+    const runner = new TaskRunner({
+      orchestrator: orchestrator as any,
+      persistence: { updateTask: vi.fn(), updateAttempt: vi.fn() } as any,
+      executorRegistry: registry as any,
+      cwd: '/tmp',
+    });
+
+    const first = runner.executeTask(makeTask({
+      id: 'same-task',
+      status: 'running',
+      config: { command: 'echo first' },
+      execution: { selectedAttemptId: 'same-task-a1' },
+    }));
+    const second = runner.executeTask(makeTask({
+      id: 'same-task',
+      status: 'running',
+      config: { command: 'echo second' },
+      execution: { selectedAttemptId: 'same-task-a2' },
+    }));
+
+    await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    expect(start).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      actionId: 'same-task',
+      attemptId: 'same-task-a1',
+    }));
+    expect(start).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      actionId: 'same-task',
+      attemptId: 'same-task-a2',
+    }));
+
+    completeCallbacks.get('same-task-a1')?.({
+      requestId: 'req-same-task-a1',
+      actionId: 'same-task',
+      attemptId: 'same-task-a1',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    completeCallbacks.get('same-task-a2')?.({
+      requestId: 'req-same-task-a2',
+      actionId: 'same-task',
+      attemptId: 'same-task-a2',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    await Promise.all([first, second]);
+  });
+
   it('kills the active execution for a task by resolving its current attempt', async () => {
     let completeCallback: ((response: WorkResponse) => void) | undefined;
     const kill = vi.fn();

@@ -51,16 +51,16 @@ Expected output threshold:
 
 ```text
 Test Files  1 passed (1)
-Tests       125 passed (125)
+Tests       126 passed (126)
 exit code   0
 ```
 
-Observed on 2026-05-25:
+Observed on 2026-05-25 after implementation consumed this brief:
 
 ```text
 Test Files  1 passed (1)
-Tests       125 passed (125)
-Duration    2.15s
+Tests       126 passed (126)
+Duration    2.22s
 exit code   0
 ```
 
@@ -76,16 +76,16 @@ Expected output threshold:
 
 ```text
 Test Files  51 passed (51)
-Tests       995 passed (995)
+Tests       996 passed (996)
 exit code   0
 ```
 
-Observed on 2026-05-25:
+Observed on 2026-05-25 after implementation consumed this brief:
 
 ```text
 Test Files  51 passed (51)
-Tests       995 passed (995)
-Duration    92.85s
+Tests       996 passed (996)
+Duration    84.80s
 exit code   0
 ```
 
@@ -95,19 +95,20 @@ exit code   0
 | --- | --- | --- |
 | Work requests preserve `attemptId` and `executionGeneration` through completion | `task-runner.test.ts:116` | Passed |
 | Concurrent calls for the same attempt start only one executor | `task-runner.test.ts:245` | Passed |
-| Killing a task resolves the selected active attempt, not merely the task ID | `task-runner.test.ts:305`, `task-runner.test.ts:370` | Passed |
-| Startup failures emit failed `WorkResponse` and include startup context | `task-runner.test.ts:989`, `task-runner.test.ts:1001`, `task-runner.test.ts:1040` | Passed |
-| Startup metadata is persisted when the failing launch is still current | `task-runner.test.ts:1079`, `task-runner.test.ts:1242` | Passed |
-| Startup metadata and failed responses are suppressed for stale selected attempts or stale generations | `task-runner.test.ts:1135`, `task-runner.test.ts:1190`, `task-runner.test.ts:1301` | Passed |
-| Completed upstream tasks without branch metadata fail before downstream execution can silently drop changes | `task-runner.test.ts:1354` | Passed |
+| Concurrent calls for different attempts of the same task start separate executors | `task-runner.test.ts:305` | Passed |
+| Killing a task resolves the selected active attempt, not merely the task ID | `task-runner.test.ts:384`, `task-runner.test.ts:449` | Passed |
+| Startup failures emit failed `WorkResponse` and include startup context | `task-runner.test.ts:1080`, `task-runner.test.ts:1119` | Passed |
+| Startup metadata is persisted when the failing launch is still current | `task-runner.test.ts:1158`, `task-runner.test.ts:1321` | Passed |
+| Startup metadata and failed responses are suppressed for stale selected attempts or stale generations | `task-runner.test.ts:1215`, `task-runner.test.ts:1269`, `task-runner.test.ts:1380` | Passed |
+| Completed upstream tasks without branch metadata fail before downstream execution can silently drop changes | `task-runner.test.ts:1434` | Passed |
 
 ## Review Thresholds
 
 INV-113 proof is acceptable only when all of these hold:
 
 - The primary proof command exits `0`.
-- `src/__tests__/task-runner.test.ts` reports exactly `1` passed test file and at least `125` passed tests.
-- Any future decrease below `125` task-runner tests must be explained in the review, because the current proof depends on the stale-lineage, deduplication, metadata, and branch-guard cases remaining present.
+- `src/__tests__/task-runner.test.ts` reports exactly `1` passed test file and at least `126` passed tests.
+- Any future decrease below `126` task-runner tests must be explained in the review, because the current proof depends on the stale-lineage, deduplication, per-attempt concurrency, metadata, and branch-guard cases remaining present.
 - Any future change to `task-runner.ts` launch ownership, stale-lineage handling, metadata persistence, or completion fan-out must update this brief or replace it with a newer deterministic proof.
 
 ## Final Verdict
