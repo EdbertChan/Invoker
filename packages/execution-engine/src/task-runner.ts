@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 
 import { scopePlanTaskId } from '@invoker/workflow-core';
-import type { Orchestrator, TaskState, ExperimentVariant, RunnerKind } from '@invoker/workflow-core';
+import type { Orchestrator, TaskState, ExperimentVariant, RunnerKind, Attempt } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { WorkRequest, WorkResponse, ActionType, Logger } from '@invoker/contracts';
 import { ATTEMPT_LEASE_MS } from '@invoker/contracts';
@@ -391,7 +391,12 @@ export class TaskRunner {
     if (!loadAttempts) return undefined;
     try {
       const attempts = loadAttempts(taskId);
-      return attempts[attempts.length - 1]?.id;
+      return attempts.reduce<Attempt | undefined>((latest, attempt) => {
+        if (!latest) return attempt;
+        const latestCreatedAt = latest.createdAt.getTime();
+        const attemptCreatedAt = attempt.createdAt.getTime();
+        return attemptCreatedAt >= latestCreatedAt ? attempt : latest;
+      }, undefined)?.id;
     } catch {
       return undefined;
     }

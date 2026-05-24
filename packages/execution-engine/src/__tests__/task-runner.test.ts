@@ -518,6 +518,96 @@ describe('TaskRunner', () => {
     await staleExecution;
   });
 
+  it('falls back to the newest persisted attempt when no attempt is selected', async () => {
+    const completeCallbacks = new Map<string, (response: WorkResponse) => void>();
+    const kill = vi.fn();
+    const executorImpl = {
+      type: 'worktree',
+      start: vi.fn().mockImplementation(async (request: any) => ({
+        executionId: `exec-${request.attemptId}`,
+        taskId: request.actionId,
+        workspacePath: `/tmp/mock-worktree-${request.attemptId}`,
+        branch: `experiment/${request.attemptId}-mock`,
+      })),
+      onComplete: vi.fn().mockImplementation((handle: any, cb: any) => {
+        completeCallbacks.set(handle.executionId.replace(/^exec-/, ''), cb);
+        return () => {};
+      }),
+      onOutput: vi.fn().mockReturnValue(() => {}),
+      onHeartbeat: vi.fn().mockReturnValue(() => {}),
+      kill,
+      destroyAll: vi.fn(),
+    };
+    const registry = {
+      getDefault: () => executorImpl,
+      get: () => executorImpl,
+      getAll: () => [executorImpl],
+    };
+    const currentTask = makeTask({
+      id: 'latest-persisted-task',
+      status: 'running',
+      config: { command: 'echo current' },
+      execution: {},
+    });
+    const orchestrator = {
+      getTask: (id: string) => id === currentTask.id ? currentTask : undefined,
+      handleWorkerResponse: vi.fn(() => []),
+    };
+    const runner = new TaskRunner({
+      orchestrator: orchestrator as any,
+      persistence: {
+        updateTask: vi.fn(),
+        loadAttempts: vi.fn(() => [
+          { id: 'latest-persisted-task-a2', nodeId: currentTask.id, createdAt: new Date('2026-01-02T00:00:00Z') },
+          { id: 'latest-persisted-task-a1', nodeId: currentTask.id, createdAt: new Date('2026-01-01T00:00:00Z') },
+        ]),
+      } as any,
+      executorRegistry: registry as any,
+      cwd: '/tmp',
+    });
+
+    const oldExecution = runner.executeTask(makeTask({
+      id: currentTask.id,
+      status: 'running',
+      config: { command: 'echo old' },
+      execution: { selectedAttemptId: 'latest-persisted-task-a1' },
+    }));
+    const latestExecution = runner.executeTask(makeTask({
+      id: currentTask.id,
+      status: 'running',
+      config: { command: 'echo latest' },
+      execution: { selectedAttemptId: 'latest-persisted-task-a2' },
+    }));
+    await vi.waitFor(() => expect(executorImpl.start).toHaveBeenCalledTimes(2));
+
+    await runner.killActiveExecution(currentTask.id);
+
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledWith(expect.objectContaining({
+      executionId: 'exec-latest-persisted-task-a2',
+      taskId: currentTask.id,
+      attemptId: 'latest-persisted-task-a2',
+    }));
+
+    completeCallbacks.get('latest-persisted-task-a1')?.({
+      requestId: 'req-latest-old',
+      actionId: currentTask.id,
+      attemptId: 'latest-persisted-task-a1',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    completeCallbacks.get('latest-persisted-task-a2')?.({
+      requestId: 'req-latest-current',
+      actionId: currentTask.id,
+      attemptId: 'latest-persisted-task-a2',
+      executionGeneration: 0,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    await Promise.all([oldExecution, latestExecution]);
+  });
+
   it('marks recreateTask-style executions as requiring a fresh workspace', async () => {
     let seenRequest: any;
     let completeCallback: ((response: WorkResponse) => void) | undefined;
