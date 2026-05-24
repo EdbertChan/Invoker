@@ -8,8 +8,7 @@ import {
   type OrchestratorPersistence,
 } from '../orchestrator.js';
 import type { TaskRepository } from '../task-repository.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { publishTaskDelta } from './events.js';
 
 function nextLeaseExpiry(from: Date): Date {
   return new Date(from.getTime() + ATTEMPT_LEASE_MS);
@@ -67,7 +66,7 @@ export function provideTaskInput(host: TransitionHost, taskId: string, input: st
   }
   const delta: TaskDelta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(id, 'task.running', changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host, delta);
 }
 
 export function setTaskApprovalStatus(
@@ -133,7 +132,7 @@ export function setTaskApprovalStatus(
   });
   const delta: TaskDelta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(id, eventName, changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host, delta);
 }
 
 export function setFixAwaitingApproval(
@@ -186,7 +185,7 @@ export function setFixAwaitingApproval(
   });
   const delta: TaskDelta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(tid, 'task.awaiting_approval', changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host, delta);
 }
 
 export function resumeTaskAfterFixApproval(host: TransitionHost, taskId: string): TaskState[] {
@@ -210,7 +209,7 @@ export function resumeTaskAfterFixApproval(host: TransitionHost, taskId: string)
   });
   const delta: TaskDelta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(taskId, 'task.running', changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host, delta);
   return [host.stateGetTask(taskId)!];
 }
 
@@ -231,7 +230,7 @@ export function rejectTaskApproval(host: TransitionHost, taskId: string, reason?
   });
   const delta: TaskDelta = host.buildUpdateDelta(task, updated, changes);
   host.persistence.logEvent?.(taskId, 'task.failed', changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  publishTaskDelta(host, delta);
 }
 
 export function markTaskRunningAfterLaunch(
@@ -307,7 +306,7 @@ export function markTaskRunningAfterLaunch(
 
     const launchUpdated = host.writeAndSync(taskId, changes);
     host.persistence.logEvent?.(taskId, 'task.running', changes);
-    host.messageBus.publish(TASK_DELTA_CHANNEL, host.buildUpdateDelta(task, launchUpdated, changes));
+    publishTaskDelta(host, host.buildUpdateDelta(task, launchUpdated, changes));
     host.logger.info('[orchestrator] markTaskRunningAfterLaunch: executing', {
       taskId,
       attemptId,

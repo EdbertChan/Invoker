@@ -12,9 +12,6 @@
  *   4. publish delta    — notify UI
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { TaskStateMachine } from './state-machine.js';
 import { ResponseHandler } from './response-handler.js';
 import type { ParsedResponse } from './response-handler.js';
@@ -40,14 +37,14 @@ import {
   setTaskApprovalStatus as setTaskApprovalStatusDomain,
   type TransitionHost,
 } from './orchestrator/transitions.js';
-
-const MERGE_TRACE_LOG = resolve(homedir(), '.invoker', 'merge-trace.log');
-function mergeTrace(tag: string, data: Record<string, unknown>): void {
-  try {
-    mkdirSync(resolve(homedir(), '.invoker'), { recursive: true });
-    appendFileSync(MERGE_TRACE_LOG, `${new Date().toISOString()} [merge-trace:orchestrator] ${tag} ${JSON.stringify(data)}\n`);
-  } catch { /* best effort */ }
-}
+import { isExperimentReselection } from './orchestrator/experiments.js';
+import {
+  buildRemoveDelta as buildRemoveDeltaDomain,
+  buildUpdateDelta as buildUpdateDeltaDomain,
+  publishTaskDelta,
+  publishTaskDeltas,
+} from './orchestrator/events.js';
+import { traceMerge } from './orchestrator/merge.js';
 
 // ── Typed domain error codes ────────────────────────────────────
 export const OrchestratorErrorCode = {
@@ -104,7 +101,6 @@ import {
 
 // ── Channel Constants ───────────────────────────────────────
 
-const TASK_DELTA_CHANNEL = 'task.delta';
 let workflowCounter = 0;
 
 function isReplaceableAttemptStatus(status: Attempt['status']): boolean {
@@ -892,7 +888,7 @@ export class Orchestrator {
       writeAndSync: (taskId, changes) => this.writeAndSync(taskId, changes),
       buildUpdateDelta: (before, after, changes) => this.buildUpdateDelta(before, after, changes),
       updateSelectedAttempt: (taskId, changes) => this.updateSelectedAttempt(taskId, changes),
-      traceMerge: (tag, data) => mergeTrace(tag, data),
+      traceMerge,
     };
   }
 
@@ -975,24 +971,22 @@ export class Orchestrator {
    * returned by writeAndSync.
    */
   private buildUpdateDelta(before: TaskState, after: TaskState, changes: TaskStateChanges): TaskDelta {
-    return {
-      type: 'updated',
-      taskId: after.id,
-      changes,
-      taskStateVersion: after.taskStateVersion,
-      previousTaskStateVersion: before.taskStateVersion,
-    };
+    return buildUpdateDeltaDomain(before, after, changes);
   }
 
   /**
    * Build a 'removed' TaskDelta with the task's last known task-state version.
    */
   private buildRemoveDelta(task: TaskState): TaskDelta {
-    return {
-      type: 'removed',
-      taskId: task.id,
-      previousTaskStateVersion: task.taskStateVersion,
-    };
+    return buildRemoveDeltaDomain(task);
+  }
+
+  private publishTaskDelta(delta: TaskDelta): void {
+    publishTaskDelta({ messageBus: this.messageBus }, delta);
+  }
+
+  private publishTaskDeltas(deltas: TaskDelta[]): void {
+    publishTaskDeltas({ messageBus: this.messageBus }, deltas);
   }
 
   private touchWorkflow(workflowId: string): void {
@@ -1096,9 +1090,7 @@ export class Orchestrator {
       }
     });
 
-    for (const delta of pendingTaskDeltas) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-    }
+    this.publishTaskDeltas(pendingTaskDeltas);
 
     const readyIds = this.stateMachine
       .getReadyTasks()
@@ -1179,7 +1171,7 @@ export class Orchestrator {
       };
       const updated = this.writeAndSync(t.id, changes);
       this.persistence.logEvent?.(t.id, 'task.cancelled', changes);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(t, updated, changes));
+      this.publishTaskDelta(this.buildUpdateDelta(t, updated, changes));
       this.deferredTaskIds.delete(t.id);
       this.clearQueuedSchedulerEntries(t.id, t.execution.selectedAttemptId);
       cancelled.push(t.id);
@@ -1404,7 +1396,7 @@ export class Orchestrator {
       oldAttemptId: activeAttempt?.id,
       newAttemptId: freshAttempt.id,
     });
-    this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(task, updated, changes));
+    this.publishTaskDelta(this.buildUpdateDelta(task, updated, changes));
     return updated;
   }
 
@@ -1615,9 +1607,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(mergeTask.id, 'task.created');
     deltas.push({ type: 'created', task: mergeTask });
 
-    for (const delta of deltas) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-    }
+    this.publishTaskDeltas(deltas);
 
     this.reconcileMergeLeaves(workflowId);
   }
@@ -1814,13 +1804,13 @@ export class Orchestrator {
    * before transitioning state, so merge nodes get git-merged automatically.
    */
   async approve(taskId: string): Promise<TaskState[]> {
-    mergeTrace('APPROVE_ENTER', { taskId });
+    traceMerge('APPROVE_ENTER', { taskId });
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
-    mergeTrace('APPROVE_TASK_LOOKUP', { taskId, found: !!task, status: task?.status, isMergeNode: !!task?.config.isMergeNode, hasHook: !!this.beforeApproveHook });
+    traceMerge('APPROVE_TASK_LOOKUP', { taskId, found: !!task, status: task?.status, isMergeNode: !!task?.config.isMergeNode, hasHook: !!this.beforeApproveHook });
     const isApprovalState = task?.status === 'awaiting_approval' || task?.status === 'review_ready';
     if (!task || !isApprovalState) {
-      mergeTrace('APPROVE_SKIPPED_NOT_AWAITING', {
+      traceMerge('APPROVE_SKIPPED_NOT_AWAITING', {
         taskId,
         found: !!task,
         status: task?.status ?? 'NOT_FOUND',
@@ -1835,11 +1825,11 @@ export class Orchestrator {
     }
 
     if (this.beforeApproveHook) {
-      mergeTrace('APPROVE_HOOK_FIRING', { taskId, workflowId: task.config.workflowId });
+      traceMerge('APPROVE_HOOK_FIRING', { taskId, workflowId: task.config.workflowId });
       await this.beforeApproveHook(task);
-      mergeTrace('APPROVE_HOOK_DONE', { taskId });
+      traceMerge('APPROVE_HOOK_DONE', { taskId });
     } else {
-      mergeTrace('APPROVE_NO_HOOK', { taskId });
+      traceMerge('APPROVE_NO_HOOK', { taskId });
     }
 
     const changes: TaskStateChanges = {
@@ -1853,13 +1843,13 @@ export class Orchestrator {
     });
     const delta: TaskDelta = this.buildUpdateDelta(task, updated, changes);
     this.persistence.logEvent?.(taskId, 'task.completed', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-    mergeTrace('APPROVE_DONE', { taskId });
+    this.publishTaskDelta(delta);
+    traceMerge('APPROVE_DONE', { taskId });
 
     const workflowId = task.config.workflowId;
     if (workflowId) {
       const mergeNode = this.getMergeNode(workflowId);
-      mergeTrace('APPROVE_MERGE_NODE_STATE', {
+      traceMerge('APPROVE_MERGE_NODE_STATE', {
         taskId,
         workflowId,
         mergeNodeId: mergeNode?.id,
@@ -1873,11 +1863,11 @@ export class Orchestrator {
     }
 
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(task.id);
-    mergeTrace('APPROVE_READY_TASKS', { taskId: task.id, readyTaskIds });
+    traceMerge('APPROVE_READY_TASKS', { taskId: task.id, readyTaskIds });
     const started = this.autoStartReadyTasks(readyTaskIds);
     started.push(...this.autoStartUnblockedTasks());
     started.push(...this.autoStartExternallyUnblockedReadyTasks());
-    mergeTrace('APPROVE_STARTED', { taskId: task.id, startedIds: started.map(t => t.id), startedStatuses: started.map(t => t.status) });
+    traceMerge('APPROVE_STARTED', { taskId: task.id, startedIds: started.map(t => t.id), startedStatuses: started.map(t => t.status) });
     this.checkWorkflowCompletion();
     return started;
   }
@@ -1977,15 +1967,7 @@ export class Orchestrator {
       ?? (task.execution.selectedExperiment !== undefined
         ? [task.execution.selectedExperiment]
         : undefined);
-    const canonicalize = (ids: readonly string[]) =>
-      Array.from(new Set(ids)).slice().sort();
-    const newCanon = canonicalize([winnerId]);
-    const prevCanon = previousSet ? canonicalize(previousSet) : undefined;
-    const sameAsPrev =
-      prevCanon !== undefined &&
-      prevCanon.length === newCanon.length &&
-      prevCanon.every((id, i) => id === newCanon[i]);
-    const isReSelection = previousSet !== undefined && !sameAsPrev;
+    const isReSelection = isExperimentReselection(previousSet, [winnerId]);
     const allTasksBefore = this.stateMachine.getAllTasks();
     if (isReSelection) {
       const taskMapBefore = new Map(allTasksBefore.map((t) => [t.id, t]));
@@ -2017,7 +1999,7 @@ export class Orchestrator {
     });
     const delta: TaskDelta = this.buildUpdateDelta(task, reconUpdated, changes);
     this.persistence.logEvent?.(reconId, 'task.completed', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
 
     if (isReSelection) {
       const directDownstream = allTasksBefore
@@ -2057,15 +2039,7 @@ export class Orchestrator {
       ?? (task.execution.selectedExperiment !== undefined
           ? [task.execution.selectedExperiment]
           : undefined);
-    const canonicalize = (ids: readonly string[]) =>
-      Array.from(new Set(ids)).slice().sort();
-    const newCanon = canonicalize(experimentIds);
-    const prevCanon = previousSet ? canonicalize(previousSet) : undefined;
-    const sameAsPrev =
-      prevCanon !== undefined &&
-      prevCanon.length === newCanon.length &&
-      prevCanon.every((id, i) => id === newCanon[i]);
-    const isReSelection = previousSet !== undefined && !sameAsPrev;
+    const isReSelection = isExperimentReselection(previousSet, experimentIds);
 
     const allTasksBefore = this.stateMachine.getAllTasks();
 
@@ -2100,7 +2074,7 @@ export class Orchestrator {
     });
     const delta: TaskDelta = this.buildUpdateDelta(task, reconUpdated, changes);
     this.persistence.logEvent?.(reconId, 'task.completed', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
 
     if (isReSelection) {
       const directDownstreamAfter = this.stateMachine
@@ -2161,7 +2135,7 @@ export class Orchestrator {
         workspacePath: task.execution.workspacePath ?? 'none',
         note: 'retryTask does not clear workspacePath',
       });
-      mergeTrace('GATE_WS_RETRY_TASK_MERGE', {
+      traceMerge('GATE_WS_RETRY_TASK_MERGE', {
         taskId: id,
         workspacePathBefore: task.execution.workspacePath ?? null,
       });
@@ -2207,7 +2181,7 @@ export class Orchestrator {
         mergeNode: id,
         workspacePath: afterRt.execution.workspacePath ?? 'none',
       });
-      mergeTrace('GATE_WS_RETRY_TASK_MERGE_AFTER', {
+      traceMerge('GATE_WS_RETRY_TASK_MERGE_AFTER', {
         taskId: id,
         workspacePathAfter: afterRt.execution.workspacePath ?? null,
       });
@@ -2237,7 +2211,7 @@ export class Orchestrator {
           const blockedUpdated = this.writeAndSync(id, blockedChanges);
           const blockedDelta: TaskDelta = this.buildUpdateDelta(current, blockedUpdated, blockedChanges);
           this.persistence.logEvent?.(id, 'task.blocked', blockedChanges);
-          this.messageBus.publish(TASK_DELTA_CHANNEL, blockedDelta);
+          this.publishTaskDelta(blockedDelta);
           return [this.stateGetTask(id)!];
         }
       }
@@ -2415,7 +2389,7 @@ export class Orchestrator {
       const priorAttemptId = current.execution.selectedAttemptId;
       this.replaceSelectedAttempt(current);
       this.persistence.logEvent?.(id, 'task.pending', changesWithGeneration);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(current, recreateUpdated, changesWithGeneration));
+      this.publishTaskDelta(this.buildUpdateDelta(current, recreateUpdated, changesWithGeneration));
 
       this.deferredTaskIds.delete(id);
       this.clearQueuedSchedulerEntries(id, priorAttemptId);
@@ -2496,7 +2470,7 @@ export class Orchestrator {
           workspacePath: task.execution.workspacePath ?? 'NULL',
           note: 'will clear workspace_path',
         });
-        mergeTrace('GATE_WS_RESTART_WORKFLOW_MERGE', {
+        traceMerge('GATE_WS_RESTART_WORKFLOW_MERGE', {
           taskId: task.id,
           workspacePathBefore: task.execution.workspacePath ?? null,
         });
@@ -2523,7 +2497,7 @@ export class Orchestrator {
     });
       const delta: TaskDelta = this.buildUpdateDelta(task, after, changesWithGeneration);
       this.persistence.logEvent?.(task.id, 'task.pending', changesWithGeneration);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+      this.publishTaskDelta(delta);
       this.clearQueuedSchedulerEntries(task.id, priorAttemptId);
     }
 
@@ -2688,7 +2662,7 @@ export class Orchestrator {
     });
     const delta: TaskDelta = this.buildUpdateDelta(task, conflictUpdated, changesWithGeneration);
     this.persistence.logEvent?.(id, 'task.fixing_with_ai', changesWithGeneration);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
 
     return { savedError };
   }
@@ -2743,7 +2717,7 @@ export class Orchestrator {
     });
     const delta: TaskDelta = this.buildUpdateDelta(task, updated, changesWithGeneration);
     this.persistence.logEvent?.(id, 'task.fixing_with_ai', changesWithGeneration);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
     return { savedError };
   }
 
@@ -2784,7 +2758,7 @@ export class Orchestrator {
     });
     const delta: TaskDelta = this.buildUpdateDelta(task, revertUpdated, changes);
     this.persistence.logEvent?.(id, 'task.failed', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
   }
 
   /**
@@ -2836,7 +2810,7 @@ export class Orchestrator {
     const cmdUpdated = this.writeAndSync(taskId, cmdChanges);
     const cmdDelta: TaskDelta = this.buildUpdateDelta(cmdBefore, cmdUpdated, cmdChanges);
     this.persistence.logEvent?.(taskId, 'task.updated', cmdChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, cmdDelta);
+    this.publishTaskDelta(cmdDelta);
 
     return this.dispatchPostMutation(MUTATION_POLICIES.command.action, taskId);
   }
@@ -2856,7 +2830,7 @@ export class Orchestrator {
     const promptUpdated = this.writeAndSync(taskId, promptChanges);
     const promptDelta: TaskDelta = this.buildUpdateDelta(promptBefore, promptUpdated, promptChanges);
     this.persistence.logEvent?.(taskId, 'task.updated', promptChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, promptDelta);
+    this.publishTaskDelta(promptDelta);
 
     return this.dispatchPostMutation(MUTATION_POLICIES.prompt.action, taskId);
   }
@@ -2905,7 +2879,7 @@ export class Orchestrator {
     const typeUpdated = this.writeAndSync(taskId, typeChanges);
     const typeDelta: TaskDelta = this.buildUpdateDelta(typeBefore, typeUpdated, typeChanges);
     this.persistence.logEvent?.(taskId, 'task.updated', typeChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, typeDelta);
+    this.publishTaskDelta(typeDelta);
 
     const typeAction = hostChanged
       ? MUTATION_POLICIES.poolMemberId.action
@@ -2940,7 +2914,7 @@ export class Orchestrator {
     const poolUpdated = this.writeAndSync(taskId, poolChanges);
     const poolDelta: TaskDelta = this.buildUpdateDelta(poolBefore, poolUpdated, poolChanges);
     this.persistence.logEvent?.(taskId, 'task.updated', poolChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, poolDelta);
+    this.publishTaskDelta(poolDelta);
 
     return this.dispatchPostMutation(MUTATION_POLICIES.poolMemberId.action, taskId);
   }
@@ -2960,7 +2934,7 @@ export class Orchestrator {
     const agentUpdated = this.writeAndSync(taskId, agentChanges);
     const agentDelta: TaskDelta = this.buildUpdateDelta(agentBefore, agentUpdated, agentChanges);
     this.persistence.logEvent?.(taskId, 'task.updated', agentChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, agentDelta);
+    this.publishTaskDelta(agentDelta);
 
     return this.dispatchPostMutation(MUTATION_POLICIES.executionAgent.action, taskId);
   }
@@ -3234,7 +3208,7 @@ export class Orchestrator {
     const fixUpdated = this.writeAndSync(taskId, fixContextChanges);
     const fixContextDelta: TaskDelta = this.buildUpdateDelta(fixBefore, fixUpdated, fixContextChanges);
     this.persistence.logEvent?.(taskId, 'task.updated', fixContextChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, fixContextDelta);
+    this.publishTaskDelta(fixContextDelta);
 
     // Retry-class reset via the policy table — `restartTask` is the
     // current `retryTask` compatibility wire. Routing through
@@ -3337,7 +3311,7 @@ export class Orchestrator {
       updates,
       changed,
     });
-    this.messageBus.publish(TASK_DELTA_CHANNEL, policyDelta);
+    this.publishTaskDelta(policyDelta);
 
     // Re-evaluate and auto-start anything newly unblocked by this policy change.
     const started = this.autoStartExternallyUnblockedReadyTasks();
@@ -3425,7 +3399,7 @@ export class Orchestrator {
       };
       const newTask = createTaskState(newId, src.description, newDeps, newConfig);
       this.createAndSync(newTask);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newTask });
+      this.publishTaskDelta({ type: 'created', task: newTask });
       this.persistence.logEvent?.(newId, 'task.forked_from', { sourceTaskId: src.id });
       createdNew.push(newTask);
     }
@@ -3442,7 +3416,7 @@ export class Orchestrator {
       { workflowId: newWfId, isMergeNode: true, runnerKind: 'merge' },
     );
     this.createAndSync(newMerge);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newMerge });
+    this.publishTaskDelta({ type: 'created', task: newMerge });
 
     this.reconcileMergeLeaves(newWfId);
 
@@ -3543,7 +3517,7 @@ export class Orchestrator {
       const staleUpdated = this.writeAndSync(id, staleChanges);
       this.updateSelectedAttempt(id, { status: 'superseded' });
       this.persistence.logEvent?.(id, 'task.stale', staleChanges);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(staleBefore, staleUpdated, staleChanges));
+      this.publishTaskDelta(this.buildUpdateDelta(staleBefore, staleUpdated, staleChanges));
       this.clearQueuedSchedulerEntries(id, staleBefore.execution.selectedAttemptId);
     }
     const sourceBefore = this.stateGetTask(sourceId)!;
@@ -3551,7 +3525,7 @@ export class Orchestrator {
     const sourceUpdated = this.writeAndSync(sourceId, sourceChanges);
     this.updateSelectedAttempt(sourceId, { status: 'superseded' });
     this.persistence.logEvent?.(sourceId, 'task.stale', sourceChanges);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(sourceBefore, sourceUpdated, sourceChanges));
+    this.publishTaskDelta(this.buildUpdateDelta(sourceBefore, sourceUpdated, sourceChanges));
     this.clearQueuedSchedulerEntries(sourceId, sourceBefore.execution.selectedAttemptId);
 
     // 2. Create replacement tasks
@@ -3592,7 +3566,7 @@ export class Orchestrator {
       }
       const newTask = createTaskState(scopedId, rt.description, deps, rtConfig);
       this.createAndSync(newTask);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, { type: 'created', task: newTask });
+      this.publishTaskDelta({ type: 'created', task: newTask });
     }
 
     // 3. Reconcile merge node deps from actual graph state
@@ -3778,7 +3752,7 @@ export class Orchestrator {
 
     // 6. Publish removal deltas — drives UI cache cleanup via messageBus subscriber
     for (const task of affectedTasks) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildRemoveDelta(task));
+      this.publishTaskDelta(this.buildRemoveDelta(task));
     }
   }
 
@@ -3811,7 +3785,7 @@ export class Orchestrator {
 
     // 5. Publish removal deltas (skipped when publishRemovalDeltas is false)
     for (const task of allTasks) {
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildRemoveDelta(task));
+      this.publishTaskDelta(this.buildRemoveDelta(task));
     }
   }
 
@@ -3978,7 +3952,7 @@ export class Orchestrator {
       });
       const delta: TaskDelta = this.buildUpdateDelta(t, cancelUpdated, changes);
       this.persistence.logEvent?.(id, 'task.cancelled', changes);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+      this.publishTaskDelta(delta);
 
       cancelled.push(id);
     }
@@ -4040,7 +4014,7 @@ export class Orchestrator {
         completedAt: changes.execution?.completedAt,
       });
       this.persistence.logEvent?.(id, 'task.cancelled', changes);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(task, wfCancelUpdated, changes));
+      this.publishTaskDelta(this.buildUpdateDelta(task, wfCancelUpdated, changes));
       cancelled.push(id);
     }
 
@@ -4066,7 +4040,7 @@ export class Orchestrator {
     const deferUpdated = this.writeAndSync(id, changes);
     const delta: TaskDelta = this.buildUpdateDelta(task, deferUpdated, changes);
     this.persistence.logEvent?.(id, 'task.deferred', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
 
     // Remove any queued re-dispatch for this task; persisted attempt state now
     // owns active-slot truth.
@@ -4192,7 +4166,7 @@ export class Orchestrator {
     const delta: TaskDelta = this.buildUpdateDelta(task!, completedUpdated, changes);
     const eventName = needsApproval ? 'task.awaiting_approval' : 'task.completed';
     this.persistence.logEvent?.(taskId, eventName, changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
 
     // Dual-write: update current selected attempt to completed (best-effort)
     try {
@@ -4290,7 +4264,7 @@ export class Orchestrator {
 
     const delta: TaskDelta = this.buildUpdateDelta(existing, updated, changes);
     this.persistence.logEvent?.(taskId, eventName, changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
 
     this.checkExperimentCompletion(taskId);
 
@@ -4378,7 +4352,7 @@ export class Orchestrator {
     }
     const delta: TaskDelta = this.buildUpdateDelta(needsInputBefore, needsInputUpdated, changes);
     this.persistence.logEvent?.(taskId, 'task.needs_input', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    this.publishTaskDelta(delta);
     return [];
   }
 
@@ -4506,7 +4480,7 @@ export class Orchestrator {
         const reconUpdated = this.writeAndSync(recon.id, reconChanges);
         const delta: TaskDelta = this.buildUpdateDelta(recon, reconUpdated, reconChanges);
         this.persistence.logEvent?.(recon.id, 'task.experiment_results_recorded', reconChanges);
-        this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+        this.publishTaskDelta(delta);
       }
     }
   }
@@ -4807,7 +4781,7 @@ export class Orchestrator {
         workflowId,
         upstreamWorkflowId,
       });
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(task, updated, changes));
+      this.publishTaskDelta(this.buildUpdateDelta(task, updated, changes));
     }
 
     if (!removedDependency) {
