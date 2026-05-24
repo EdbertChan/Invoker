@@ -455,6 +455,9 @@ export async function runHeadlessClientCommand(
     return result;
   }
 
+  // INV-86: mutating commands must fail loudly after owner/bootstrap
+  // exhaustion instead of falling through to a second Node-only mutation
+  // runtime with separate ownership and resource-resolution behavior.
   process.stderr.write(
     `${RED}Error:${RESET} Mutation command "${args[0] ?? ''}" could not reach a standalone shared owner after bootstrap.\n`,
   );

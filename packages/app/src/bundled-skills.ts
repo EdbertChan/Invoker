@@ -209,6 +209,9 @@ export function installBundledSkills(
       rmSync(targetDir, { recursive: true, force: true });
       cpSync(sourceDir, targetDir, { recursive: true, force: true });
     }
+    // INV-86: status is tied to the sorted bundled-source hash plus this
+    // manifest state, so clean reinstall and prompt decisions stay
+    // deterministic across packaged and development runtimes.
     manifestTargets[target.id] = {
       path: target.path,
       installedSkillNames: installedNames,

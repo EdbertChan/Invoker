@@ -838,6 +838,9 @@ if (isHeadless) {
       };
 
       const createStandaloneTaskExecutor = (): TaskRunner => {
+        // INV-86: owner-serve, direct headless, and skill install commands share
+        // this Electron-composed runtime so packaged resources and config checks
+        // cannot drift from the GUI path.
         const executor = createHeadlessExecutor(headlessDeps);
         wireHeadlessApproveHook(headlessDeps, executor);
         return executor;
