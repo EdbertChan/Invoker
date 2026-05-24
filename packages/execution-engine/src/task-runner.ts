@@ -981,6 +981,13 @@ export class TaskRunner {
       return;
     }
     bench('markTaskRunningAfterLaunch.accepted');
+    const launchCurrentForTaskMetadata = !this.isLaunchStale(task.id, attemptId, startGeneration);
+    if (!launchCurrentForTaskMetadata) {
+      this.logger.warn(
+        `[TaskRunner] launch became stale before task metadata persistence for task=${task.id} attemptId=${attemptId}; suppressing task write`,
+      );
+      bench('launchLineage.staleAfterStart');
+    }
     if (dispatchOpts) {
       dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
     }
@@ -1023,7 +1030,9 @@ export class TaskRunner {
           containerId: handle.containerId ?? undefined,
         },
       };
-      this.persistence.updateTask(task.id, changes);
+      if (launchCurrentForTaskMetadata) {
+        this.persistence.updateTask(task.id, changes);
+      }
       // Mirror branch + workspacePath onto the attempt row so reconciliation
       // and post-mortem flows can recover provenance from the attempt without
       // joining back to the task. Pairs with the early `onBranchResolved`

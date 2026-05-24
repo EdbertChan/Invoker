@@ -1133,6 +1133,93 @@ describe('TaskRunner', () => {
   });
 
   describe('stale startup-failure lineage guard', () => {
+    it('keeps stale started attempt active but suppresses task metadata when lineage advances during startup', async () => {
+      let resolveStart: ((handle: any) => void) | undefined;
+      let completeCallback: ((response: WorkResponse) => void) | undefined;
+      const start = vi.fn().mockImplementation(() => new Promise((resolve) => {
+        resolveStart = resolve;
+      }));
+      const kill = vi.fn();
+      const updateTask = vi.fn();
+      let currentTask = makeTask({
+        id: 'stale-start-success',
+        status: 'running',
+        execution: { selectedAttemptId: 'attempt-1', generation: 0 },
+      });
+      const orchestrator = {
+        getTask: () => currentTask,
+        handleWorkerResponse: vi.fn(),
+      };
+      const executorImpl = {
+        type: 'worktree',
+        start,
+        onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
+          completeCallback = cb;
+          return () => {};
+        }),
+        onOutput: vi.fn().mockReturnValue(() => {}),
+        onHeartbeat: vi.fn().mockReturnValue(() => {}),
+        kill,
+        destroyAll: vi.fn(),
+      };
+      const registry = {
+        getDefault: () => executorImpl,
+        get: () => executorImpl,
+        getAll: () => [executorImpl],
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: { updateTask } as any,
+        executorRegistry: registry as any,
+        cwd: '/tmp',
+      });
+
+      const launchedTask = makeTask({
+        id: 'stale-start-success',
+        status: 'running',
+        config: { command: 'echo hi' },
+        execution: { selectedAttemptId: 'attempt-1', generation: 0 },
+      });
+      const done = runner.executeTask(launchedTask);
+      await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+
+      currentTask = makeTask({
+        id: 'stale-start-success',
+        status: 'running',
+        execution: { selectedAttemptId: 'attempt-2', generation: 0 },
+      });
+      resolveStart?.({
+        executionId: 'exec-stale-start-success',
+        taskId: 'stale-start-success',
+        workspacePath: '/tmp/stale-start-success',
+        branch: 'experiment/stale-start-success',
+      });
+      await vi.waitFor(() => expect(completeCallback).toBeDefined());
+      completeCallback?.({
+        requestId: 'req-stale-start-success',
+        actionId: 'stale-start-success',
+        attemptId: 'attempt-1',
+        executionGeneration: 0,
+        status: 'completed',
+        outputs: { exitCode: 0 },
+      });
+      await done;
+
+      expect(kill).not.toHaveBeenCalled();
+      expect(updateTask).not.toHaveBeenCalledWith(
+        'stale-start-success',
+        expect.objectContaining({
+          execution: expect.objectContaining({ workspacePath: '/tmp/stale-start-success' }),
+        }),
+      );
+      expect(orchestrator.handleWorkerResponse).toHaveBeenCalledWith(expect.objectContaining({
+        actionId: 'stale-start-success',
+        attemptId: 'attempt-1',
+        status: 'completed',
+      }));
+    });
+
     it('suppresses metadata write and failed response when selectedAttemptId has advanced', async () => {
       const handleWorkerResponse = vi.fn();
       const updateTask = vi.fn();
