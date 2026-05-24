@@ -1,8 +1,12 @@
 /**
- * Priority queue with simple maxConcurrency limit for task scheduling.
+ * Deterministic in-memory priority queue for task scheduling.
  *
- * No I/O, no Docker, no Git — just a sorted queue and concurrency tracking.
+ * No I/O, no Docker, no Git - just a sorted queue and concurrency tracking.
  * Higher priority numbers are dequeued first.
+ *
+ * Orchestrator flows that persist attempt leases use takeNext() so durable
+ * occupancy stays outside this process-local queue. Direct dequeue() callers
+ * can still use maxConcurrency for in-memory scheduling.
  */
 
 export interface TaskJob {
@@ -69,7 +73,7 @@ export class TaskScheduler {
     }
 
     let removed = 0;
-    for (const attemptId of attemptIds) {
+    for (const attemptId of Array.from(attemptIds)) {
       if (this.removeRunningAttempt(attemptId)) {
         removed += 1;
       }

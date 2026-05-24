@@ -388,14 +388,23 @@ describe('headless-client', () => {
     stdout.mockRestore();
   });
 
-  it('does not silently fall back for query ui-perf when no owner endpoint is reachable', async () => {
-    await expect(
-      runHeadlessClientCommand(['query', 'ui-perf', '--output', 'json'], {
-        messageBus: new LocalBus(),
-        ensureStandaloneOwner: vi.fn(async () => {}),
-        runElectronHeadless: vi.fn(async () => 0),
-      }),
-    ).rejects.toThrow(/requires a running shared owner process/);
+  it('does not silently fall back for owner-required queries when no owner endpoint is reachable', async () => {
+    await Promise.all([
+      expect(
+        runHeadlessClientCommand(['query', 'ui-perf', '--output', 'json'], {
+          messageBus: new LocalBus(),
+          ensureStandaloneOwner: vi.fn(async () => {}),
+          runElectronHeadless: vi.fn(async () => 0),
+        }),
+      ).rejects.toThrow(/requires a running shared owner process/),
+      expect(
+        runHeadlessClientCommand(['query', 'queue', '--output', 'json'], {
+          messageBus: new LocalBus(),
+          ensureStandaloneOwner: vi.fn(async () => {}),
+          runElectronHeadless: vi.fn(async () => 0),
+        }),
+      ).rejects.toThrow(/requires a running shared owner process/),
+    ]);
   }, 30_000);
 
   it('delegates query queue to a reachable owner endpoint', async () => {
