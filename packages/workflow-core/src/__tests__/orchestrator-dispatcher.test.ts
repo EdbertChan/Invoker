@@ -205,6 +205,59 @@ function seedStaleLaunchMetadata(
 }
 
 describe('Orchestrator launch claims', () => {
+  describe('extracted scheduling and transitions', () => {
+    it('preserves ready-task scheduling order and dispatch under concurrency pressure', () => {
+      const { orchestrator, persistence } = makeOrchestrator({ maxConcurrency: 1 });
+      orchestrator.loadPlan({
+        name: 'extracted-scheduler-proof',
+        onFinish: 'none',
+        tasks: [
+          { id: 'first', description: 'first', command: 'echo first' },
+          { id: 'second', description: 'second', command: 'echo second' },
+        ],
+      });
+      const firstId = taskIdBySuffix(orchestrator, 'first');
+      const secondId = taskIdBySuffix(orchestrator, 'second');
+
+      const initiallyStarted = orchestrator.startExecution();
+
+      expect(initiallyStarted.map((task) => task.id)).toEqual([firstId]);
+      expect(orchestrator.getTask(secondId)?.status).toBe('pending');
+      expect(persistence.loadAttempt(orchestrator.getTask(firstId)!.execution.selectedAttemptId!)?.status).toBe('running');
+
+      const afterFirstCompletes = respondForTask(orchestrator, firstId, 'completed', 0);
+
+      expect(afterFirstCompletes.map((task) => task.id)).toEqual([secondId]);
+      expect(orchestrator.getTask(secondId)?.status).toBe('running');
+      expect(persistence.loadAttempt(orchestrator.getTask(secondId)!.execution.selectedAttemptId!)?.status).toBe('running');
+    });
+
+    it('preserves fix-approval transition semantics across awaiting and resumed states', async () => {
+      const { orchestrator, persistence } = makeOrchestrator();
+      orchestrator.loadPlan({
+        name: 'extracted-transition-proof',
+        onFinish: 'none',
+        tasks: [{ id: 'fixme', description: 'fix me', command: 'echo fix' }],
+      });
+      const taskId = taskIdBySuffix(orchestrator, 'fixme');
+      const [started] = orchestrator.startExecution();
+      const attemptId = started!.execution.selectedAttemptId!;
+
+      orchestrator.setFixAwaitingApproval(taskId, 'original failure');
+
+      expect(orchestrator.getTask(taskId)?.status).toBe('awaiting_approval');
+      expect(orchestrator.getTask(taskId)?.execution.pendingFixError).toBe('original failure');
+      expect(persistence.loadAttempt(attemptId)?.status).toBe('needs_input');
+
+      const resumed = await orchestrator.resumeTaskAfterFixApproval(taskId);
+
+      expect(resumed.map((task) => task.id)).toEqual([taskId]);
+      expect(orchestrator.getTask(taskId)?.status).toBe('running');
+      expect(orchestrator.getTask(taskId)?.execution.pendingFixError).toBeUndefined();
+      expect(persistence.loadAttempt(attemptId)?.status).toBe('running');
+    });
+  });
+
   it('startExecution returns each started task exactly once', () => {
     const { orchestrator } = makeOrchestrator();
     const plan: PlanDefinition = {
