@@ -24,8 +24,23 @@ import type { RunnerKind } from '@invoker/workflow-graph';
 import { createTaskState, createAttempt } from '@invoker/workflow-graph';
 import type { WorkflowDerivedStatus } from '@invoker/workflow-graph';
 import type { Logger, WorkResponse } from '@invoker/contracts';
-import { ATTEMPT_LEASE_MS } from '@invoker/contracts';
 import { normalizeRunnerKind } from '@invoker/workflow-graph';
+import {
+  autoStartExternallyUnblockedReadyTasks as autoStartExternallyUnblockedReadyTasksImpl,
+  autoStartReadyTasks as autoStartReadyTasksImpl,
+  autoStartUnblockedTasks as autoStartUnblockedTasksImpl,
+  clearQueuedSchedulerEntries as clearQueuedSchedulerEntriesImpl,
+  drainScheduler as drainSchedulerImpl,
+  enqueueIfNotScheduled as enqueueIfNotScheduledImpl,
+  nextLeaseExpiry,
+  type SchedulerDomainHost,
+} from './orchestrator/scheduler-domain.js';
+import {
+  applyParsedWorkerTransition,
+  finalizeFailedTransition,
+  parseMergeConflictError,
+  type TransitionDomainHost,
+} from './orchestrator/transitions.js';
 
 const MERGE_TRACE_LOG = resolve(homedir(), '.invoker', 'merge-trace.log');
 function mergeTrace(tag: string, data: Record<string, unknown>): void {
@@ -125,33 +140,6 @@ const noopLogger: Logger = {
 
 function stripFixFailureWrapper(errorText: string): string {
   return errorText.replace(FIX_FAILURE_PREFIX_RE, '');
-}
-
-function tryParseJsonObject(value: string | undefined): Record<string, unknown> | undefined {
-  if (!value) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function parseMergeConflictError(
-  value: string | undefined,
-): { failedBranch: string; conflictFiles: string[] } | undefined {
-  const obj = tryParseJsonObject(value);
-  if (obj?.type !== 'merge_conflict') return undefined;
-
-  const failedBranch = typeof obj.failedBranch === 'string' ? obj.failedBranch : '';
-  const conflictFiles = Array.isArray(obj.conflictFiles)
-    ? obj.conflictFiles.filter((file): file is string => typeof file === 'string')
-    : [];
-  return { failedBranch, conflictFiles };
-}
-
-function nextLeaseExpiry(from: Date): Date {
-  return new Date(from.getTime() + ATTEMPT_LEASE_MS);
 }
 
 // ── Errors ──────────────────────────────────────────────────
@@ -1203,11 +1191,63 @@ export class Orchestrator {
     return count;
   }
 
+  private schedulerHost(): SchedulerDomainHost {
+    return {
+      scheduler: this.scheduler,
+      persistence: this.persistence,
+      messageBus: this.messageBus,
+      logger: this.logger,
+      maxConcurrency: this.maxConcurrency,
+      deferRunningUntilLaunch: this.deferRunningUntilLaunch,
+      launchOutboxMode: this.launchOutboxMode,
+      stateGetTask: (taskId) => this.stateGetTask(taskId),
+      writeAndSync: (taskId, changes) => this.writeAndSync(taskId, changes),
+      buildUpdateDelta: (before, after, changes) => this.buildUpdateDelta(before, after, changes),
+      ensureCurrentPendingAttempt: (task) => this.ensureCurrentPendingAttempt(task),
+      loadAttemptById: (attemptId) => this.loadAttemptById(attemptId),
+      isAttemptLeaseActive: (attempt, now) => this.isAttemptLeaseActive(attempt, now),
+      countActivePersistedAttempts: (now) => this.countActivePersistedAttempts(now),
+      getExecutionGeneration: (task) => this.getExecutionGeneration(task),
+      getExternalDependencyBlocker: (task) => this.getExternalDependencyBlocker(task),
+      areLocalDependenciesSatisfied: (task) => this.areLocalDependenciesSatisfied(task),
+      replaceSelectedAttempt: (task, patch) => this.replaceSelectedAttempt(task, patch),
+      getReadyTasks: () => this.stateMachine.getReadyTasks(),
+      getAllTasks: () => this.stateMachine.getAllTasks(),
+      updateAttempt: (attemptId, changes) => this.taskRepository.updateAttempt(attemptId, changes),
+      claimAttemptForLaunch: this.taskRepository.claimAttemptForLaunch
+        ? (attemptId, changes, now) => this.taskRepository.claimAttemptForLaunch!(attemptId, changes, now)
+        : undefined,
+    };
+  }
+
+  private transitionHost(): TransitionDomainHost {
+    return {
+      logger: this.logger,
+      persistence: this.persistence,
+      messageBus: this.messageBus,
+      stateGetTask: (taskId) => this.stateGetTask(taskId),
+      writeAndSync: (taskId, changes) => this.writeAndSync(taskId, changes),
+      buildUpdateDelta: (before, after, changes) => this.buildUpdateDelta(before, after, changes),
+      updateAttempt: (attemptId, changes) => this.taskRepository.updateAttempt(attemptId, changes),
+      failTaskAndAttempt: (taskId, taskChanges, attemptPatch) =>
+        this.taskRepository.failTaskAndAttempt(taskId, taskChanges, attemptPatch),
+      restoreTask: (task) => this.stateMachine.restoreTask(task),
+      setTaskApprovalStatus: (taskId, status, eventName, additionalChanges) =>
+        this.setTaskApprovalStatus(taskId, status, eventName, additionalChanges),
+      checkExperimentCompletion: (taskId) => this.checkExperimentCompletion(taskId),
+      checkWorkflowCompletion: () => this.checkWorkflowCompletion(),
+      autoStartReadyTasks: (taskIds, priority) => this.autoStartReadyTasks(taskIds, priority),
+      autoStartUnblockedTasks: () => this.autoStartUnblockedTasks(),
+      autoStartExternallyUnblockedReadyTasks: () => this.autoStartExternallyUnblockedReadyTasks(),
+      drainDeferredTasks: () => this.drainDeferredTasks(),
+      findNewlyReadyTasks: (taskId) => this.stateMachine.findNewlyReadyTasks(taskId),
+      selectExperiment: (taskId, experimentId) => this.selectExperiment(taskId, experimentId),
+      applyGraphMutation: (mutation) => this.applyGraphMutation(mutation),
+    };
+  }
+
   private clearQueuedSchedulerEntries(taskId: string, attemptId?: string): void {
-    if (attemptId) {
-      this.scheduler.removeJob(attemptId);
-    }
-    this.scheduler.removeJob(taskId);
+    clearQueuedSchedulerEntriesImpl(this.schedulerHost(), taskId, attemptId);
   }
 
   getPersistedActiveTaskIds(now: number = Date.now()): Set<string> {
@@ -1713,17 +1753,12 @@ export class Orchestrator {
 
     switch (parsed.type) {
       case 'completed':
-        return this.handleCompleted(canonicalTaskId, parsed);
       case 'review_ready':
-        return this.handleReviewReady(canonicalTaskId, parsed);
       case 'failed':
-        return this.handleFailed(canonicalTaskId, parsed);
       case 'needs_input':
-        return this.handleNeedsInput(canonicalTaskId, parsed);
       case 'spawn_experiments':
-        return this.handleSpawnExperiments(canonicalTaskId, parsed);
       case 'select_experiment':
-        return this.handleSelectExperiment(canonicalTaskId, parsed);
+        return applyParsedWorkerTransition(this.transitionHost(), canonicalTaskId, parsed);
       default:
         return [];
     }
@@ -4250,106 +4285,7 @@ export class Orchestrator {
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'completed' }>,
   ): TaskState[] {
-    const task = this.stateGetTask(taskId);
-    const needsApproval = task?.config.requiresManualApproval === true;
-
-    const execution: {
-      exitCode: number;
-      completedAt: Date;
-      commit?: string;
-      agentSessionId?: string;
-      agentName?: string;
-      lastAgentSessionId?: string;
-      lastAgentName?: string;
-      branch?: string;
-      reviewUrl?: string;
-      reviewId?: string;
-      reviewStatus?: string;
-    } = {
-      exitCode: parsed.exitCode,
-      completedAt: new Date(),
-    };
-    if (parsed.commitHash !== undefined) {
-      execution.commit = parsed.commitHash;
-    }
-    if (parsed.agentSessionId !== undefined) {
-      execution.agentSessionId = parsed.agentSessionId;
-      execution.lastAgentSessionId = parsed.agentSessionId;
-      execution.lastAgentName = parsed.agentName ?? task?.execution.agentName ?? task?.execution.lastAgentName;
-    }
-    if (parsed.agentName !== undefined) {
-      execution.agentName = parsed.agentName;
-      execution.lastAgentName = parsed.agentName;
-    }
-    if (parsed.branch !== undefined) {
-      execution.branch = parsed.branch;
-    }
-    if (parsed.reviewUrl !== undefined) {
-      execution.reviewUrl = parsed.reviewUrl;
-    }
-    if (parsed.reviewId !== undefined) {
-      execution.reviewId = parsed.reviewId;
-    }
-    if (parsed.reviewStatus !== undefined) {
-      execution.reviewStatus = parsed.reviewStatus;
-    }
-
-    const changes: TaskStateChanges = {
-      status: needsApproval ? 'awaiting_approval' : 'completed',
-      config: { summary: parsed.summary },
-      execution,
-    };
-    const completedUpdated = this.writeAndSync(taskId, changes);
-    const delta: TaskDelta = this.buildUpdateDelta(task!, completedUpdated, changes);
-    const eventName = needsApproval ? 'task.awaiting_approval' : 'task.completed';
-    this.persistence.logEvent?.(taskId, eventName, changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-
-    // Dual-write: update current selected attempt to completed (best-effort)
-    try {
-      const currentAttemptId = this.stateGetTask(taskId)?.execution.selectedAttemptId;
-      const currentAttempt = currentAttemptId ? this.persistence.loadAttempt(currentAttemptId) : undefined;
-      if (currentAttempt && currentAttempt.status === 'running') {
-        this.taskRepository.updateAttempt(currentAttempt.id, {
-          status: needsApproval ? 'needs_input' : 'completed',
-          exitCode: parsed.exitCode,
-          completedAt: new Date(),
-          ...(parsed.commitHash !== undefined ? { commit: parsed.commitHash } : {}),
-          ...(parsed.agentSessionId !== undefined ? { agentSessionId: parsed.agentSessionId } : {}),
-        });
-      }
-    } catch { /* best effort */ }
-
-    // If task requires manual approval, don't trigger downstream tasks yet
-    if (needsApproval) return [];
-
-    this.checkExperimentCompletion(taskId);
-
-    const readyTaskIds = this.stateMachine.findNewlyReadyTasks(taskId);
-    this.logger.info('[orchestrator] handleCompleted', {
-      taskId,
-      newlyReadyCount: readyTaskIds.length,
-      readyTaskIds,
-    });
-    const started = this.autoStartReadyTasks(readyTaskIds);
-    started.push(...this.autoStartUnblockedTasks());
-    started.push(...this.autoStartExternallyUnblockedReadyTasks());
-
-    // Re-enqueue deferred tasks now that a slot freed up
-    if (this.deferredTaskIds.size > 0) {
-      for (const id of this.deferredTaskIds) {
-        const t = this.stateGetTask(id);
-        if (t && t.status === 'pending') {
-          const attemptId = this.ensureCurrentPendingAttempt(t);
-          this.scheduler.enqueue({ taskId: id, attemptId, priority: 0 });
-        }
-      }
-      this.deferredTaskIds.clear();
-      started.push(...this.drainScheduler());
-    }
-
-    this.checkWorkflowCompletion();
-    return started;
+    return applyParsedWorkerTransition(this.transitionHost(), taskId, parsed);
   }
 
   /**
@@ -4369,198 +4305,42 @@ export class Orchestrator {
     },
     eventName: string,
   ): TaskState[] {
-    const existing = this.stateGetTask(taskId);
-    if (!existing) {
-      throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `finalizeFailedTask: task ${taskId} not found in graph`);
-    }
-
-    const changes: TaskStateChanges = {
-      status: 'failed',
-      execution: {
-        ...executionFields,
-        completedAt: new Date(),
-      },
-    };
-
-    // Atomic write for task + attempt via repository
-    this.taskRepository.failTaskAndAttempt(taskId, changes, {
-      status: 'failed',
-      exitCode: executionFields.exitCode,
-      error: executionFields.error,
-      completedAt: new Date(),
-    });
-
-    // Sync to in-memory state (same pattern as writeAndSync)
-    const updated: TaskState = {
-      ...existing,
-      status: 'failed',
-      execution: { ...existing.execution, ...changes.execution },
-      taskStateVersion: existing.taskStateVersion + 1,
-    };
-    this.stateMachine.restoreTask(updated);
-
-    const delta: TaskDelta = this.buildUpdateDelta(existing, updated, changes);
-    this.persistence.logEvent?.(taskId, eventName, changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-
-    this.checkExperimentCompletion(taskId);
-
-    const readyTaskIds = this.stateMachine.findNewlyReadyTasks(taskId);
-    this.logger.info('[orchestrator] finalizeFailedTask', {
-      taskId,
-      eventName,
-      newlyReadyCount: readyTaskIds.length,
-      readyTaskIds,
-    });
-    const started = this.autoStartReadyTasks(readyTaskIds);
-    started.push(...this.autoStartUnblockedTasks());
-    started.push(...this.autoStartExternallyUnblockedReadyTasks());
-
-    // Re-enqueue deferred tasks now that a slot freed up
-    if (this.deferredTaskIds.size > 0) {
-      for (const id of this.deferredTaskIds) {
-        const t = this.stateGetTask(id);
-        if (t && t.status === 'pending') {
-          const attemptId = this.ensureCurrentPendingAttempt(t);
-          this.scheduler.enqueue({ taskId: id, attemptId, priority: 0 });
-        }
-      }
-      this.deferredTaskIds.clear();
-      started.push(...this.drainScheduler());
-    }
-
-    this.checkWorkflowCompletion();
-    return started;
+    return finalizeFailedTransition(this.transitionHost(), taskId, executionFields, eventName);
   }
 
   private handleReviewReady(
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'review_ready' }>,
   ): TaskState[] {
-    const changes: TaskStateChanges = {
-      config: { summary: parsed.summary },
-      execution: {
-        exitCode: parsed.exitCode,
-        branch: parsed.branch,
-        reviewUrl: parsed.reviewUrl,
-        reviewId: parsed.reviewId,
-        reviewStatus: parsed.reviewStatus,
-      },
-    };
-    this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', changes);
-
-    const started = this.autoStartUnblockedTasks();
-    started.push(...this.autoStartExternallyUnblockedReadyTasks());
-    this.checkWorkflowCompletion();
-    return started;
+    return applyParsedWorkerTransition(this.transitionHost(), taskId, parsed);
   }
 
   private handleFailed(
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'failed' }>,
   ): TaskState[] {
-    const mergeConflict = parseMergeConflictError(parsed.error);
-    return this.finalizeFailedTask(
-      taskId,
-      {
-        exitCode: parsed.exitCode,
-        error: parsed.error,
-        agentName: parsed.agentName,
-        lastAgentName: parsed.agentName,
-        mergeConflict,
-      },
-      'task.failed',
-    );
+    return applyParsedWorkerTransition(this.transitionHost(), taskId, parsed);
   }
 
   private handleNeedsInput(
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'needs_input' }>,
   ): TaskState[] {
-    const changes: TaskStateChanges = {
-      status: 'needs_input',
-      execution: { inputPrompt: parsed.prompt },
-    };
-    const needsInputBefore = this.stateGetTask(taskId)!;
-    const needsInputUpdated = this.writeAndSync(taskId, changes);
-    const currentAttemptId = needsInputUpdated.execution.selectedAttemptId;
-    if (currentAttemptId) {
-      this.taskRepository.updateAttempt(currentAttemptId, { status: 'needs_input' });
-    }
-    const delta: TaskDelta = this.buildUpdateDelta(needsInputBefore, needsInputUpdated, changes);
-    this.persistence.logEvent?.(taskId, 'task.needs_input', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-    return [];
+    return applyParsedWorkerTransition(this.transitionHost(), taskId, parsed);
   }
 
   private handleSpawnExperiments(
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'spawn_experiments' }>,
   ): TaskState[] {
-    const parentTask = this.stateGetTask(taskId);
-    const wfId = parentTask?.config.workflowId;
-    if (!wfId) {
-      this.logger.warn('[orchestrator] handleSpawnExperiments: missing workflowId; skipping', {
-        taskId,
-      });
-      return [];
-    }
-    const scopeLocal = (local: string) => scopePlanTaskId(wfId, local);
-
-    const experimentTasks: GraphMutationNodeDef[] = parsed.variants.map((v) => ({
-      id: scopeLocal(v.id),
-      description: v.description ?? `Experiment: ${v.id}`,
-      dependencies: [taskId],
-      workflowId: wfId,
-      parentTask: taskId,
-      experimentPrompt: v.prompt,
-      prompt: v.prompt,
-      command: v.command,
-      runnerKind: parentTask?.config.runnerKind,
-    }));
-
-    const reconciliationId = `${taskId}-reconciliation`;
-    const newNodes: GraphMutationNodeDef[] = [
-      ...experimentTasks,
-      {
-        id: reconciliationId,
-        description: `Review and select winning experiment for ${taskId}`,
-        dependencies: experimentTasks.map((t) => t.id),
-        workflowId: wfId,
-        parentTask: taskId,
-        isReconciliation: true,
-        requiresManualApproval: true,
-      },
-    ];
-
-    const wf =
-      wfId && typeof this.persistence.loadWorkflow === 'function'
-        ? this.persistence.loadWorkflow(wfId)
-        : undefined;
-    const pivotBranch =
-      wf && typeof (wf as { baseBranch?: string }).baseBranch === 'string'
-        ? (wf as { baseBranch: string }).baseBranch.trim()
-        : '';
-    const sourceChanges =
-      pivotBranch !== '' ? { execution: { branch: pivotBranch } } : undefined;
-
-    this.applyGraphMutation({
-      sourceNodeId: taskId,
-      sourceDisposition: 'complete',
-      sourceChanges,
-      newNodes,
-      outputNodeId: reconciliationId,
-    });
-
-    const readyIds = experimentTasks.map((t) => t.id);
-    return this.autoStartReadyTasks(readyIds);
+    return applyParsedWorkerTransition(this.transitionHost(), taskId, parsed);
   }
 
   private handleSelectExperiment(
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'select_experiment' }>,
   ): TaskState[] {
-    return this.selectExperiment(taskId, parsed.experimentId);
+    return applyParsedWorkerTransition(this.transitionHost(), taskId, parsed);
   }
 
   // ── Private: Graph Mutation Primitive ─────────────────────
@@ -4629,68 +4409,11 @@ export class Orchestrator {
   }
 
   private autoStartReadyTasks(taskIds: string[], priority: number = 0): TaskState[] {
-    for (const taskId of taskIds) {
-      let task = this.stateGetTask(taskId);
-      if (!task) continue;
-      if (this.getExternalDependencyBlocker(task) !== undefined) continue;
-
-      // Unblock: if a blocked task's deps are all complete, it's genuinely ready
-      if (task.status === 'blocked') {
-        this.logger.info('[orchestrator] autoStartReadyTasks: unblocking blocked task', {
-          taskId,
-        });
-        this.replaceSelectedAttempt(task, { status: 'pending' });
-        this.writeAndSync(taskId, {
-          status: 'pending',
-          execution: {
-            startedAt: undefined,
-            completedAt: undefined,
-            lastHeartbeatAt: undefined,
-            launchStartedAt: undefined,
-            launchCompletedAt: undefined,
-            phase: undefined,
-          },
-        });
-        task = this.stateGetTask(taskId);
-        if (!task) continue;
-      }
-
-      this.enqueueIfNotScheduled(taskId, priority);
-    }
-
-    return this.drainScheduler();
+    return autoStartReadyTasksImpl(this.schedulerHost(), taskIds, priority);
   }
 
   private enqueueIfNotScheduled(taskId: string, priority: number = 0): void {
-    const task = this.stateGetTask(taskId);
-    if (!task) return;
-
-    const attemptId = this.ensureCurrentPendingAttempt(task);
-    const currentAttempt = this.loadAttemptById(attemptId);
-    if ((currentAttempt?.queuePriority ?? 0) !== priority) {
-      this.taskRepository.updateAttempt(attemptId, { queuePriority: priority });
-    }
-    // A task can be force-set back to blocked/pending by recovery logic while
-    // still carrying a stale selectedAttemptId from an older run. Only skip
-    // re-enqueue when the task is actually active.
-    if (
-      (task.status === 'running' || task.status === 'fixing_with_ai') &&
-      task.execution.selectedAttemptId === attemptId &&
-      this.isAttemptLeaseActive(currentAttempt)
-    ) {
-      return;
-    }
-    const queuedJob = this.scheduler
-      .getQueuedJobs()
-      .find((job) => job.attemptId === attemptId || job.taskId === taskId);
-    if (queuedJob) {
-      if (priority > queuedJob.priority) {
-        this.scheduler.removeJob(queuedJob.attemptId ?? queuedJob.taskId);
-        this.scheduler.enqueue({ taskId, attemptId, priority });
-      }
-      return;
-    }
-    this.scheduler.enqueue({ taskId, attemptId, priority });
+    enqueueIfNotScheduledImpl(this.schedulerHost(), taskId, priority);
   }
 
   /**
@@ -4712,38 +4435,11 @@ export class Orchestrator {
    * type-safely. No other behavior changes.
    */
   autoStartExternallyUnblockedReadyTasks(): TaskState[] {
-    const readyTasks = this.stateMachine
-      .getReadyTasks()
-      .filter((task) => (task.config.externalDependencies?.length ?? 0) > 0)
-      .filter((task) => this.getExternalDependencyBlocker(task) === undefined);
-
-    for (const task of readyTasks) {
-      this.enqueueIfNotScheduled(task.id);
-    }
-    return this.drainScheduler();
+    return autoStartExternallyUnblockedReadyTasksImpl(this.schedulerHost());
   }
 
   private autoStartUnblockedTasks(): TaskState[] {
-    for (const task of this.stateMachine.getAllTasks()) {
-      if (task.status !== 'blocked') continue;
-      if (!this.areLocalDependenciesSatisfied(task)) continue;
-      if (this.getExternalDependencyBlocker(task) !== undefined) continue;
-
-      this.replaceSelectedAttempt(task, { status: 'pending' });
-      this.writeAndSync(task.id, {
-        status: 'pending',
-        execution: {
-          startedAt: undefined,
-          completedAt: undefined,
-          lastHeartbeatAt: undefined,
-          launchStartedAt: undefined,
-          launchCompletedAt: undefined,
-          phase: undefined,
-        },
-      });
-      this.enqueueIfNotScheduled(task.id);
-    }
-    return this.drainScheduler();
+    return autoStartUnblockedTasksImpl(this.schedulerHost());
   }
 
   private areLocalDependenciesSatisfied(task: TaskState): boolean {
@@ -4997,146 +4693,21 @@ export class Orchestrator {
 
   /** Drain the scheduler queue, starting tasks that fit the concurrency limit. */
   private drainScheduler(): TaskState[] {
-    const started: TaskState[] = [];
-    const activeAttempts = this.countActivePersistedAttempts();
-    let availableSlots = Math.max(0, this.maxConcurrency - activeAttempts);
-    this.logger.info('[orchestrator] drainScheduler: begin', {
-      active: activeAttempts,
-      maxConcurrency: this.maxConcurrency,
-      availableSlots,
-    });
-    let job = availableSlots > 0 ? this.scheduler.takeNext() : null;
-    while (job && availableSlots > 0) {
-      const task = this.stateGetTask(job.taskId);
-      this.logger.info('[orchestrator] drainScheduler: dequeued', {
-        taskId: job.taskId,
-        actualStatus: task?.status ?? 'NOT_FOUND',
-      });
-      if (!task || task.status !== 'pending') {
-        this.logger.info('[orchestrator] drainScheduler: skipping non-pending task', {
-          taskId: job.taskId,
-        });
-        job = this.scheduler.takeNext();
-        continue;
-      }
+    return drainSchedulerImpl(this.schedulerHost());
+  }
 
-      const now = new Date();
-      let attemptId = job.attemptId ?? this.ensureCurrentPendingAttempt(task);
-      let currentAttempt = this.loadAttemptById(attemptId);
-      if (!currentAttempt || isDiscardedAttempt(currentAttempt)) {
-        attemptId = this.ensureCurrentPendingAttempt(task);
-        currentAttempt = this.loadAttemptById(attemptId);
-      }
-      if (!currentAttempt || isDiscardedAttempt(currentAttempt)) {
-        this.logger.info('[orchestrator] drainScheduler: skipping non-runnable attempt', {
-          taskId: job.taskId,
-          attemptId,
-          attemptStatus: currentAttempt?.status ?? 'missing',
-        });
-        job = this.scheduler.takeNext();
-        continue;
-      }
-      let launchAttemptId = attemptId;
-      const selectedTask = this.stateGetTask(job.taskId) ?? task;
-      if (selectedTask.execution.selectedAttemptId !== attemptId) {
-        this.writeAndSync(job.taskId, { execution: { selectedAttemptId: attemptId } });
-      }
-      let claimSucceeded = false;
-      const claimPatch = this.deferRunningUntilLaunch
-        ? {
-            status: 'claimed' as const,
-            claimedAt: now,
-            lastHeartbeatAt: now,
-            leaseExpiresAt: nextLeaseExpiry(now),
-          }
-        : {
-            status: 'running' as const,
-            claimedAt: currentAttempt?.claimedAt ?? now,
-            startedAt: now,
-            lastHeartbeatAt: now,
-            leaseExpiresAt: nextLeaseExpiry(now),
-          };
-      claimSucceeded = this.taskRepository.claimAttemptForLaunch?.(attemptId, claimPatch, now)
-        ?? !this.isAttemptLeaseActive(currentAttempt, now.getTime());
-      if (claimSucceeded && !this.taskRepository.claimAttemptForLaunch) {
-        this.taskRepository.updateAttempt(attemptId, claimPatch);
-      }
-      if (!claimSucceeded) {
-        this.logger.info('[orchestrator] drainScheduler: skipping already-claimed attempt', {
-          taskId: job.taskId,
-          attemptId,
-        });
-        job = availableSlots > 0 ? this.scheduler.takeNext() : null;
-        continue;
-      }
+  private drainDeferredTasks(): TaskState[] {
+    if (this.deferredTaskIds.size === 0) return [];
 
-      const changes: TaskStateChanges = this.deferRunningUntilLaunch
-        ? {
-            status: 'pending',
-            execution: {
-              selectedAttemptId: launchAttemptId,
-              generation: this.getExecutionGeneration(task),
-              lastHeartbeatAt: now,
-              phase: 'launching',
-              launchStartedAt: now,
-              launchCompletedAt: undefined,
-            },
-          }
-        : {
-            status: 'running',
-            execution: {
-              selectedAttemptId: launchAttemptId,
-              generation: this.getExecutionGeneration(task),
-              startedAt: now,
-              lastHeartbeatAt: now,
-              phase: 'launching',
-              launchStartedAt: now,
-              launchCompletedAt: undefined,
-            },
-          };
-      const updated = this.writeAndSync(job.taskId, changes);
-      this.persistence.logEvent?.(
-        job.taskId,
-        this.deferRunningUntilLaunch ? 'task.launch_claimed' : 'task.running',
-        changes,
-      );
-      if (
-        this.launchOutboxMode !== 'disabled'
-        && typeof this.persistence.enqueueLaunchDispatch === 'function'
-        && task.config.workflowId
-      ) {
-        try {
-          const dispatch = this.persistence.enqueueLaunchDispatch({
-            taskId: job.taskId,
-            attemptId: launchAttemptId,
-            workflowId: task.config.workflowId,
-            generation: this.getExecutionGeneration(task),
-          });
-          this.persistence.logEvent?.(job.taskId, 'task.dispatch_enqueued', {
-            ...changes,
-            dispatchId: dispatch.id,
-          });
-        } catch (err) {
-          this.logger.warn('[orchestrator] drainScheduler: enqueueLaunchDispatch failed', {
-            taskId: job.taskId,
-            attemptId: launchAttemptId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
+    for (const id of this.deferredTaskIds) {
+      const t = this.stateGetTask(id);
+      if (t && t.status === 'pending') {
+        const attemptId = this.ensureCurrentPendingAttempt(t);
+        this.scheduler.enqueue({ taskId: id, attemptId, priority: 0 });
       }
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(task, updated, changes));
-      started.push(updated);
-      this.logger.info('[orchestrator] drainScheduler: started', {
-        taskId: job.taskId,
-        attemptId: launchAttemptId,
-        phase: 'launching',
-        generation: changes.execution?.generation ?? 'unknown',
-      });
-
-      availableSlots -= 1;
-      job = availableSlots > 0 ? this.scheduler.takeNext() : null;
     }
-    return started;
+    this.deferredTaskIds.clear();
+    return this.drainScheduler();
   }
 
   /**
