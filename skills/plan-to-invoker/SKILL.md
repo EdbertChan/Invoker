@@ -52,7 +52,7 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 ```
 
 **Exit codes:** 0 = all checks pass, 1 = one or more failures, 2 = usage error
-**Output:** JSON summary with per-check pass/fail status
+**Output:** JSON summary with `allPassed`, `firstFailedStep`, and per-check `stepId`/`status` entries.
 
 **Optional flags:**
 - `--skip-assumptions` — skip assumption extraction and verify plan generation
@@ -65,7 +65,7 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 - `--verbose` — show detailed output from each sub-check
 - `--help` — show usage information
 
-This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
+This is the INV-63 experiment-selected validation surface. It provides the single aggregate verdict (`allPassed`) and first failure pointer (`firstFailedStep`) that replaced the rejected manual multi-command review path. This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
 For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`. When validating a plan against a separate policy source, pass `--source-file`, `--coverage-map`, and `--stack-manifest`; policy-matrix inputs now fail without a coverage map and a real authored stack manifest.
 
 ### Fallback commands (for debugging individual checks)

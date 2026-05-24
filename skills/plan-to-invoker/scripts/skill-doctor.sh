@@ -11,14 +11,14 @@
 #   --coverage-map FILE Validate row-to-workflow traceability for policy-matrix inputs
 #   --stack-manifest FILE Validate coverage-map workflow labels against a real authored stack manifest
 #   --verbose           Show detailed output from each sub-check
-#   --warn-delegation  Pass through to atomicity lint (prints advisory delegation-hint warnings)
+#   --warn-delegation   Pass through to atomicity lint (prints advisory delegation-hint warnings)
 #
 # Exit codes:
 #   0 = all checks passed
 #   1 = one or more checks failed
 #   2 = usage/argument error
 #
-# Output: JSON summary of all checks with pass/fail status
+# Output: JSON summary with allPassed, firstFailedStep, and per-check stepId/status entries
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +38,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      sed -n '2,21p' "$0" | sed 's/^# \?//'
       exit 0
       ;;
     --skip-assumptions)
