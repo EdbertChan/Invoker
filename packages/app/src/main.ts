@@ -194,6 +194,38 @@ function isTaskInFlightForForcedStop(task: TaskState): boolean {
     || (task.status === 'pending' && task.execution.phase === 'launching');
 }
 
+const STARTUP_DIAGNOSTIC_TAIL_CHARS = 4_000;
+
+function persistStartupFailureDiagnostic(
+  taskId: string,
+  error: Error,
+  executor: Executor,
+  db: SQLiteAdapter,
+  opts?: { flushPendingOutput?: (taskId: string) => void },
+): void {
+  try {
+    opts?.flushPendingOutput?.(taskId);
+    const tailChunks = db.getOutputTail(taskId);
+    let tail = tailChunks.map((chunk) => chunk.data).join('');
+    if (tail.length > STARTUP_DIAGNOSTIC_TAIL_CHARS) {
+      tail = '...' + tail.slice(tail.length - STARTUP_DIAGNOSTIC_TAIL_CHARS);
+    }
+
+    const parts = [
+      '\n[Startup Diagnostic]',
+      `executor=${executor.type}`,
+      `error=${error.message}`,
+    ];
+    if (tail) {
+      parts.push(`--- recent output tail ---\n${tail}`);
+    }
+    parts.push('--- end startup diagnostic ---\n');
+    db.appendTaskOutput(taskId, parts.join('\n'));
+  } catch {
+    // Best-effort: preserve the original startup failure path.
+  }
+}
+
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
 
@@ -1734,6 +1766,9 @@ function createEmbeddedTerminalBackendFromConfig(
           enqueueTaskOutput(taskId, data);
         },
         onLaunchFailed: (taskId, error, executor) => {
+          persistStartupFailureDiagnostic(taskId, error, executor, persistence, {
+            flushPendingOutput: flushTaskOutput,
+          });
           assertFatalExecutionCapacity(`launch failed ${taskId}`);
           logger.error(
             `Task "${taskId}" launch failed before spawn (executor: ${executor.type}): ${error.message}`,
