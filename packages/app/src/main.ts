@@ -201,7 +201,9 @@ declare const __BUILD_VERSION__: string | undefined;
 // Electron passes extra args after `--` or interleaves them.
 // We look for `--headless` anywhere in process.argv.
 const headlessIndex = process.argv.indexOf('--headless');
-const directInstallSkills = process.argv.includes('--install-skills') || process.argv.slice(2).includes('install-skills');
+// INV-86 selected the explicit shortcut only: bare `install-skills` remains a
+// headless subcommand after `--headless`, while `--install-skills` maps directly.
+const directInstallSkills = process.argv.includes('--install-skills');
 const isHeadless = headlessIndex !== -1 || directInstallSkills;
 
 // In headless mode, extract the CLI args after --headless

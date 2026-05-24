@@ -135,10 +135,16 @@ function buildTargetStatus(
   const installedSkillNames = expectedInstalledNames.filter((name) => existsSync(path.join(target.path, name, 'SKILL.md')));
   const installed = installedSkillNames.length === expectedInstalledNames.length;
   const manifestTarget = manifest?.targets[target.id];
+  const manifestEntriesMatch = manifestTarget !== undefined
+    && manifestTarget.installedSkillNames.length === expectedInstalledNames.length
+    && expectedInstalledNames.every((name, index) => manifestTarget.installedSkillNames[index] === name);
   const upToDate = installed
-    && manifest?.bundledHash === bundledHash
+    && manifest !== null
+    && manifest.bundledHash === bundledHash
+    && manifest.bundledSkillNames.length === expectedInstalledNames.length
+    && prefixedSkillNames(manifest.bundledSkillNames).every((name, index) => expectedInstalledNames[index] === name)
     && manifestTarget?.path === target.path
-    && expectedInstalledNames.every((name) => manifestTarget.installedSkillNames.includes(name));
+    && manifestEntriesMatch;
 
   return {
     ...target,

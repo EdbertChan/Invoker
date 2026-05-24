@@ -111,4 +111,50 @@ describe('bundled-skills', () => {
       }
     }
   });
+
+  it('requires exact manifest entries before reporting bundled skills up to date', () => {
+    const resourcesRoot = makeTempRoot('invoker-bundled-resources-');
+    const invokerHomeRoot = makeTempRoot('invoker-bundled-home-');
+    const repoRoot = makeTempRoot('invoker-bundled-repo-');
+    const codexHome = makeTempRoot('invoker-codex-home-');
+    const originalHome = process.env.HOME;
+    process.env.HOME = codexHome;
+
+    try {
+      writeSkill(resourcesRoot, 'plan-to-invoker');
+      writeSkill(resourcesRoot, 'make-pr');
+
+      installBundledSkills({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+
+      const manifestPath = join(invokerHomeRoot, 'bundled-skills.json');
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
+        targets: Record<string, { installedSkillNames: string[] }>;
+      };
+      manifest.targets.codex.installedSkillNames.push('invoker-extra');
+      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      const status = resolveBundledSkillsStatus({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+
+      const codexTarget = status.targets.find((target) => target.id === 'codex');
+      expect(codexTarget?.installed).toBe(true);
+      expect(codexTarget?.upToDate).toBe(false);
+      expect(status.promptRecommended).toBe(true);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
 });
