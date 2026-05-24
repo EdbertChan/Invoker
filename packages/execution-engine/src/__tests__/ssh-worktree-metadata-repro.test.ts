@@ -144,4 +144,94 @@ describe('SSH worktree metadata repro', () => {
       }),
     }));
   });
+
+  it('blocks stale SSH startup failure metadata after the selected attempt advances', async () => {
+    const ownerPath = '/home/invoker/.invoker/worktrees/049de5b865cc/experiment-wf-1-test-execution-engine-old';
+    const branch = 'experiment/wf-1/test-execution-engine-old';
+
+    const attempt1 = makeTask({
+      id: 'wf-1/test-execution-engine',
+      status: 'pending',
+      config: { command: 'pnpm test', runnerKind: 'ssh' },
+      execution: { selectedAttemptId: 'attempt-1', generation: 0 },
+    });
+    const attempt2 = makeTask({
+      id: 'wf-1/test-execution-engine',
+      status: 'pending',
+      config: { command: 'pnpm test', runnerKind: 'ssh' },
+      execution: {
+        selectedAttemptId: 'attempt-2',
+        generation: 0,
+        workspacePath: '/home/invoker/.invoker/worktrees/049de5b865cc/experiment-wf-1-test-execution-engine-new',
+        branch: 'experiment/wf-1/test-execution-engine-new',
+      },
+    });
+    let currentTask = attempt1;
+
+    const failingExecutor = {
+      type: 'ssh',
+      start: vi.fn().mockImplementation(async () => {
+        currentTask = attempt2;
+        throw Object.assign(new Error('SSH startup failed after recreate'), {
+          workspacePath: ownerPath,
+          branch,
+          agentSessionId: 'stale-session',
+        });
+      }),
+      onComplete: vi.fn(),
+      onOutput: vi.fn(),
+      onHeartbeat: vi.fn(),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const updateTask = vi.fn();
+    const appendTaskOutput = vi.fn();
+    const logEvent = vi.fn();
+    const handleResponse = vi.fn();
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => currentTask,
+        getAllTasks: () => [currentTask],
+        handleWorkerResponse: handleResponse,
+      } as any,
+      persistence: {
+        updateTask,
+        appendTaskOutput,
+        logEvent,
+      } as any,
+      executorRegistry: {
+        getDefault: () => failingExecutor,
+        get: () => failingExecutor,
+        getAll: () => [failingExecutor],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    await runner.executeTask(attempt1);
+
+    expect(updateTask).not.toHaveBeenCalledWith('wf-1/test-execution-engine', expect.objectContaining({
+      execution: expect.objectContaining({
+        workspacePath: ownerPath,
+        branch,
+      }),
+    }));
+    expect(handleResponse).not.toHaveBeenCalled();
+    expect(appendTaskOutput).toHaveBeenCalledWith(
+      'wf-1/test-execution-engine',
+      expect.stringContaining('Executor startup failed (ssh): SSH startup failed after recreate'),
+    );
+    expect(logEvent).toHaveBeenCalledWith(
+      'wf-1/test-execution-engine',
+      'task.executor.startup-failed-stale',
+      expect.objectContaining({
+        attemptId: 'attempt-1',
+        currentAttemptId: 'attempt-2',
+        workspacePath: ownerPath,
+        branch,
+        agentSessionId: 'stale-session',
+      }),
+    );
+  });
 });

@@ -480,6 +480,29 @@ export class TaskRunner {
     return false;
   }
 
+  private recordStaleStartupFailure(
+    taskId: string,
+    attemptId: string,
+    startGeneration: number,
+    runnerKind: string,
+    err: unknown,
+    meta: StartupFailureMetadata,
+  ): void {
+    const current = this.orchestrator.getTask(taskId);
+    this.persistence.logEvent?.(taskId, 'task.executor.startup-failed-stale', {
+      attemptId,
+      generation: startGeneration,
+      currentAttemptId: current?.execution.selectedAttemptId,
+      currentGeneration: current?.execution.generation ?? 0,
+      runnerKind,
+      workspacePath: meta.workspacePath,
+      branch: meta.branch,
+      agentSessionId: meta.agentSessionId,
+      containerId: meta.containerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   async executeTask(task: TaskState, dispatchOpts?: LaunchDispatchOptions): Promise<void> {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
@@ -528,7 +551,7 @@ export class TaskRunner {
     this.launchingAttemptIds.add(attemptId);
     this.callbacks.onLaunchAccepted?.(task.id);
     try {
-      await this.executeTaskInner(task, attemptId, bench, dispatchOpts);
+      await this.executeTaskInner(task, attemptId, bench, dispatchOpts, startGeneration);
       bench('executeTask.innerReturned');
     } catch (err) {
       bench('executeTask.failed', {
@@ -587,7 +610,7 @@ export class TaskRunner {
         requestId: `err-${task.id}`,
         actionId: task.id,
         attemptId,
-        executionGeneration: task.execution.generation ?? 0,
+        executionGeneration: startGeneration,
         status: 'failed',
         outputs: {
           exitCode: 1,
@@ -610,6 +633,7 @@ export class TaskRunner {
     attemptId: string,
     bench: (phase: string, metadata?: Record<string, unknown>) => void = () => {},
     dispatchOpts?: LaunchDispatchOptions,
+    startGeneration: number = task.execution.generation ?? 0,
   ): Promise<void> {
     bench('executeTaskInner.begin', {
       dependencyCount: task.dependencies.length,
@@ -744,7 +768,6 @@ export class TaskRunner {
     // on the attempt row. Reconciliation paths can then observe the branch
     // even if the executor crashes mid-startup.
     let branchPersistedEarly = false;
-    const startGeneration = task.execution.generation ?? 0;
     const onBranchResolved = (branch: string): void => {
       if (!branch || branchPersistedEarly) return;
       // Skip if the task has moved to a newer attempt/generation.
@@ -913,29 +936,30 @@ export class TaskRunner {
         // current.  If the task has moved to a newer attempt or generation
         // (e.g. via recreate-task), writing old workspace/branch metadata
         // would corrupt the live attempt's state.
-        if (
-          (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-          && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
-        ) {
-          const execution: Record<string, string> = {};
-          if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
-          if (meta.branch) execution.branch = meta.branch;
-          if (meta.agentSessionId) {
-            execution.agentSessionId = meta.agentSessionId;
-            execution.lastAgentSessionId = meta.agentSessionId;
+        if (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId) {
+          if (this.isLaunchStale(task.id, attemptId, startGeneration)) {
+            this.recordStaleStartupFailure(task.id, attemptId, startGeneration, executor.type, err, meta);
+          } else {
+            const execution: Record<string, string> = {};
+            if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
+            if (meta.branch) execution.branch = meta.branch;
+            if (meta.agentSessionId) {
+              execution.agentSessionId = meta.agentSessionId;
+              execution.lastAgentSessionId = meta.agentSessionId;
+            }
+            if (meta.containerId) execution.containerId = meta.containerId;
+            const poolSelection = this.pendingPoolSelections.get(task.id);
+            const selectedSshTargetId = executor.type === 'ssh'
+              ? this.selectedRemoteTargetId(task, poolSelection)
+              : undefined;
+            this.persistence.updateTask(task.id, {
+              config: {
+                runnerKind: executor.type as RunnerKind,
+                ...(selectedSshTargetId ? { poolMemberId: selectedSshTargetId } : {}),
+              },
+              execution: execution as any,
+            });
           }
-          if (meta.containerId) execution.containerId = meta.containerId;
-          const poolSelection = this.pendingPoolSelections.get(task.id);
-          const selectedSshTargetId = executor.type === 'ssh'
-            ? this.selectedRemoteTargetId(task, poolSelection)
-            : undefined;
-          this.persistence.updateTask(task.id, {
-            config: {
-              runnerKind: executor.type as RunnerKind,
-              ...(selectedSshTargetId ? { poolMemberId: selectedSshTargetId } : {}),
-            },
-            execution: execution as any,
-          });
         }
         this.pendingPoolSelections.delete(task.id);
         this.releasePoolSelectionLease(poolSelectionForStart);
