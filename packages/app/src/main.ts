@@ -60,7 +60,7 @@ import type {
   TaskStateChanges,
 } from '@invoker/workflow-core';
 import { makeEnvelope, CommandError } from '@invoker/contracts';
-import type { WorkResponse } from '@invoker/contracts';
+import type { BundledSkillsInstallMode, WorkResponse } from '@invoker/contracts';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
 import { IpcBus, Channels, TransportError, TransportErrorCode } from '@invoker/transport';
@@ -420,7 +420,11 @@ function getBundledSkillsStatus() {
   });
 }
 
-function installPackagedSkills(mode: import('@invoker/contracts').BundledSkillsInstallMode = 'install') {
+function normalizeBundledSkillsInstallMode(mode: unknown): BundledSkillsInstallMode {
+  return mode === 'update' || mode === 'reinstall' ? mode : 'install';
+}
+
+function installPackagedSkills(mode: BundledSkillsInstallMode = 'install') {
   return installBundledSkills({
     isPackaged: app.isPackaged,
     repoRoot,
@@ -3943,7 +3947,7 @@ function createEmbeddedTerminalBackendFromConfig(
     });
 
     ipcMain.handle('invoker:install-bundled-skills', (_event, mode = 'install') => {
-      return installPackagedSkills(mode);
+      return installPackagedSkills(normalizeBundledSkillsInstallMode(mode));
     });
 
     registerGuiMutationHandler('invoker:replace-task', async (taskIdArg: unknown, replacementTasksArg: unknown) => {

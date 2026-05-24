@@ -111,4 +111,63 @@ describe('bundled-skills', () => {
       }
     }
   });
+
+  it('detects installed skill drift and removes stale managed skill directories on reinstall', () => {
+    const resourcesRoot = makeTempRoot('invoker-bundled-resources-');
+    const invokerHomeRoot = makeTempRoot('invoker-bundled-home-');
+    const repoRoot = makeTempRoot('invoker-bundled-repo-');
+    const codexHome = makeTempRoot('invoker-codex-home-');
+    const originalHome = process.env.HOME;
+    process.env.HOME = codexHome;
+
+    try {
+      writeSkill(resourcesRoot, 'plan-to-invoker');
+      writeSkill(resourcesRoot, 'make-pr');
+
+      installBundledSkills({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+
+      const codexSkillsRoot = join(codexHome, '.codex', 'skills');
+      writeFileSync(join(codexSkillsRoot, 'invoker-plan-to-invoker', 'SKILL.md'), '# changed\n');
+      mkdirSync(join(codexSkillsRoot, 'invoker-old-skill'), { recursive: true });
+      writeFileSync(join(codexSkillsRoot, 'invoker-old-skill', 'SKILL.md'), '# old\n');
+
+      const drifted = resolveBundledSkillsStatus({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+      const codexTarget = drifted.targets.find((target) => target.id === 'codex');
+      expect(codexTarget?.installed).toBe(true);
+      expect(codexTarget?.upToDate).toBe(false);
+      expect(drifted.promptRecommended).toBe(true);
+
+      installBundledSkills({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      }, 'reinstall');
+
+      expect(existsSync(join(codexSkillsRoot, 'invoker-old-skill'))).toBe(false);
+      const repaired = resolveBundledSkillsStatus({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+      expect(repaired.targets.find((target) => target.id === 'codex')?.upToDate).toBe(true);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
 });
