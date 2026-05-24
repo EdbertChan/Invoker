@@ -4,8 +4,9 @@
  * Binds to 127.0.0.1 only (no external access). Default port 4100,
  * configurable via INVOKER_API_PORT env var.
  *
- * All write endpoints delegate to a WorkflowMutationFacade instance
- * which encapsulates the mutation → dispatch → topup lifecycle.
+ * INV-130 consumes docs/context/inv-130/experiment-brief.md here:
+ * all write endpoints delegate to a WorkflowMutationFacade instance
+ * which encapsulates the mutation -> dispatch -> topup lifecycle.
  *
  * Read endpoints:
  *   GET  /api/health
@@ -393,8 +394,11 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         const workflowTarget = decodeURIComponent(wfRebaseRecreateMatch[1]);
         try {
           const workflowId = resolveHeadlessTargetWorkflowId(workflowTarget, persistence);
-          if (deps.queueWorkflowMutation) {
-            const intentId = deps.queueWorkflowMutation(workflowId, 'high', 'invoker:rebase-recreate', [workflowId]);
+          const queueMutation = deps.queueWorkflowMutation;
+          if (queueMutation) {
+            // INV-130 selected this queued facade boundary for rebase-recreate
+            // instead of letting the HTTP route call the orchestrator directly.
+            const intentId = queueMutation(workflowId, 'high', 'invoker:rebase-recreate', [workflowId]);
             json(res, 202, {
               ok: true,
               workflowId,

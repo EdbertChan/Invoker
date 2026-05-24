@@ -4,8 +4,9 @@
  * Starts a real HTTP server on an ephemeral port with fully mocked deps.
  * Uses Node's built-in http module to send requests and assert responses.
  *
- * All write endpoints route through a WorkflowMutationFacade instance
- * which wraps the mocked orchestrator, persistence, and taskExecutor.
+ * INV-130 consumes docs/context/inv-130/experiment-brief.md here:
+ * write endpoint tests prove the API facade boundary, queued
+ * rebase-recreate path, and guards against accidental cross-route writes.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import http from 'node:http';
@@ -892,6 +893,9 @@ describe('POST /api/workflows/:id/fork', () => {
 });
 
 describe('POST /api/workflows/:id/rebase-recreate', () => {
+  // INV-130: this is the experiment-selected escape hatch. When a workflow
+  // mutation queue is present, the API accepts the intent and does not call
+  // recreateWorkflow from the HTTP route.
   it('queues rebase-recreate through the workflow mutation coordinator when available', async () => {
     const localMocks = createMocks();
     localMocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);

@@ -16,12 +16,12 @@ Use `WorkflowMutationFacade` as the API server's write boundary, and keep `Orche
 
 Evidence:
 
-- `packages/app/src/api-server.ts:57` defines `ApiServerDeps.mutations` as the write facade dependency.
-- `packages/app/src/api-server.ts:213`, `:228`, `:253`, `:274`, `:292`, `:313`, `:335`, `:361`, `:376`, `:408`, `:427`, `:445`, `:489`, `:508`, `:527`, `:546`, `:565`, `:585`, and `:656` route HTTP write actions through `mutations.*`.
-- `packages/app/src/api-server.ts:396` permits an explicit queued path for `rebase-recreate` when `queueWorkflowMutation` is injected, returning `202` without invoking the orchestrator directly.
+- `packages/app/src/api-server.ts:64` defines `ApiServerDeps.mutations` as the write facade dependency.
+- `packages/app/src/api-server.ts:214`, `:229`, `:254`, `:275`, `:293`, `:314`, `:336`, `:362`, `:377`, `:412`, `:431`, `:449`, `:493`, `:512`, `:531`, `:550`, `:569`, `:589`, and `:660` route HTTP write actions through `mutations.*`.
+- `packages/app/src/api-server.ts:397` permits an explicit queued path for `rebase-recreate` when `queueWorkflowMutation` is injected, returning `202` without invoking the orchestrator directly.
 - `packages/workflow-core/src/orchestrator.ts:1` documents the selected mutation model: DB first, in-memory graph as refreshed cache, then UI delta.
-- `packages/workflow-core/src/orchestrator.ts:855` refreshes active workflow state from persistence.
-- `packages/workflow-core/src/orchestrator.ts:878` implements `writeAndSync`, which persists changes via `taskRepository.updateTask` before restoring the in-memory task.
+- `packages/workflow-core/src/orchestrator.ts:856` refreshes active workflow state from persistence.
+- `packages/workflow-core/src/orchestrator.ts:879` implements `writeAndSync`, which persists changes via `taskRepository.updateTask` before restoring the in-memory task.
 
 ## Competing Design Considered
 
@@ -76,18 +76,18 @@ rg -n "All write endpoints|mutations\\.|queueWorkflowMutation|writeAndSync|refre
 Expected output must include these lines or equivalent line-number-adjusted matches:
 
 ```text
-packages/app/src/api-server.ts:62:  /** All write endpoints delegate to the facade for mutation + dispatch + topup. */
-packages/app/src/api-server.ts:213:          const result = await mutations.cancelTask(taskId);
-packages/app/src/api-server.ts:228:          const result = await mutations.retryTask(taskId);
-packages/app/src/api-server.ts:396:          if (deps.queueWorkflowMutation) {
-packages/workflow-core/src/orchestrator.ts:4: * ALL writes go through the persistence layer (DB) first.
-packages/workflow-core/src/orchestrator.ts:855:  private refreshFromDb(): void {
-packages/workflow-core/src/orchestrator.ts:878:  private writeAndSync(
-packages/app/src/__tests__/api-server.test.ts:446:  it('does not relaunch duplicate attempt from global top-up', async () => {
-packages/app/src/__tests__/api-server.test.ts:513:  // Step 16: approve POST does not trigger retry/recreate/cancel routes
-packages/app/src/__tests__/api-server.test.ts:566:  // Step 16: reject POST does not trigger retry/recreate/cancel routes (non-fix path)
-packages/app/src/__tests__/api-server.test.ts:766:  // Step 15: gate-policy POST does not trigger retry/recreate routes
-packages/app/src/__tests__/api-server.test.ts:895:  it('queues rebase-recreate through the workflow mutation coordinator when available', async () => {
+packages/app/src/api-server.ts:63:  /** All write endpoints delegate to the facade for mutation + dispatch + topup. */
+packages/app/src/api-server.ts:214:          const result = await mutations.cancelTask(taskId);
+packages/app/src/api-server.ts:229:          const result = await mutations.retryTask(taskId);
+packages/app/src/api-server.ts:397:          const queueMutation = deps.queueWorkflowMutation;
+packages/workflow-core/src/orchestrator.ts:5: * ALL writes go through the persistence layer (DB) first.
+packages/workflow-core/src/orchestrator.ts:856:  private refreshFromDb(): void {
+packages/workflow-core/src/orchestrator.ts:879:  private writeAndSync(
+packages/app/src/__tests__/api-server.test.ts:447:  it('does not relaunch duplicate attempt from global top-up', async () => {
+packages/app/src/__tests__/api-server.test.ts:514:  // Step 16: approve POST does not trigger retry/recreate/cancel routes
+packages/app/src/__tests__/api-server.test.ts:567:  // Step 16: reject POST does not trigger retry/recreate/cancel routes (non-fix path)
+packages/app/src/__tests__/api-server.test.ts:767:  // Step 15: gate-policy POST does not trigger retry/recreate routes
+packages/app/src/__tests__/api-server.test.ts:899:  it('queues rebase-recreate through the workflow mutation coordinator when available', async () => {
 ```
 
 Threshold:
@@ -105,19 +105,29 @@ Verdict if failing:
 
 ## Test Evidence Map
 
-- Duplicate dispatch prevention: `packages/app/src/__tests__/api-server.test.ts:446`.
-- Scoped restart plus global top-up: `packages/app/src/__tests__/api-server.test.ts:424`.
-- Edit prompt dispatches only returned running tasks: `packages/app/src/__tests__/api-server.test.ts:659`.
-- Edit agent does not call command/prompt edit paths: `packages/app/src/__tests__/api-server.test.ts:723`.
-- Gate-policy does not trigger retry/recreate/cancel: `packages/app/src/__tests__/api-server.test.ts:766`.
-- Approve does not trigger retry/recreate/cancel: `packages/app/src/__tests__/api-server.test.ts:513`.
-- Reject does not trigger retry/recreate/cancel: `packages/app/src/__tests__/api-server.test.ts:566` and `:584`.
-- Workflow restart handles concurrent requests independently: `packages/app/src/__tests__/api-server.test.ts:800`.
-- Fresh-base retry normalizes merge-node targets: `packages/app/src/__tests__/api-server.test.ts:849`.
-- Queued fresh-base recreate returns `202` and does not call `recreateWorkflow`: `packages/app/src/__tests__/api-server.test.ts:894`.
+- Duplicate dispatch prevention: `packages/app/src/__tests__/api-server.test.ts:447`.
+- Scoped restart plus global top-up: `packages/app/src/__tests__/api-server.test.ts:425`.
+- Edit prompt dispatches only returned running tasks: `packages/app/src/__tests__/api-server.test.ts:660`.
+- Edit agent does not call command/prompt edit paths: `packages/app/src/__tests__/api-server.test.ts:724`.
+- Gate-policy does not trigger retry/recreate/cancel: `packages/app/src/__tests__/api-server.test.ts:767`.
+- Approve does not trigger retry/recreate/cancel: `packages/app/src/__tests__/api-server.test.ts:514`.
+- Reject does not trigger retry/recreate/cancel: `packages/app/src/__tests__/api-server.test.ts:567` and `:585`.
+- Workflow restart handles concurrent requests independently: `packages/app/src/__tests__/api-server.test.ts:801`.
+- Fresh-base retry normalizes merge-node targets: `packages/app/src/__tests__/api-server.test.ts:850`.
+- Queued fresh-base recreate returns `202` and does not call `recreateWorkflow`: `packages/app/src/__tests__/api-server.test.ts:899`.
 
 ## Final Verdict
 
 Selected approach wins when the focused API server test suite passes and the targeted architecture assertion command still locates the facade boundary, DB-first orchestrator helpers, and regression tests listed above.
 
 The competing direct-orchestrator-per-route design remains available only if it can meet the same thresholds with less duplication and without weakening the existing deterministic tests. Current evidence favors the selected facade plus DB-first orchestrator design.
+
+## Implementation Consumption
+
+The implementation task consumes this brief by keeping the API server write boundary on `WorkflowMutationFacade`, preserving the queued `rebase-recreate` coordinator path, and retaining `Orchestrator` as the DB-first task-state coordinator.
+
+Consumption markers:
+
+- `packages/app/src/api-server.ts` documents INV-130 at the HTTP write boundary and uses the injected `queueWorkflowMutation` path for queued `rebase-recreate` instead of direct route-level orchestration.
+- `packages/workflow-core/src/orchestrator.ts` documents INV-130 at the DB-first mutation contract implemented by `refreshFromDb` and `writeAndSync`.
+- `packages/app/src/__tests__/api-server.test.ts` documents INV-130 at the regression suite that proves facade routing, cross-route isolation, duplicate top-up prevention, and queued `rebase-recreate`.
