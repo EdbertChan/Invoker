@@ -480,6 +480,20 @@ export class TaskRunner {
     return false;
   }
 
+  private buildStartupFailureResponse(task: TaskState, attemptId: string, err: unknown): WorkResponse {
+    return {
+      requestId: `err-${task.id}`,
+      actionId: task.id,
+      attemptId,
+      executionGeneration: task.execution.generation ?? 0,
+      status: 'failed',
+      outputs: {
+        exitCode: 1,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      },
+    };
+  }
+
   async executeTask(task: TaskState, dispatchOpts?: LaunchDispatchOptions): Promise<void> {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
@@ -583,17 +597,7 @@ export class TaskRunner {
       }
       // Clean up per-task Docker executor on startup/execution failure
       await this.cleanupPerTaskDockerExecutor(task);
-      const response: WorkResponse = {
-        requestId: `err-${task.id}`,
-        actionId: task.id,
-        attemptId,
-        executionGeneration: task.execution.generation ?? 0,
-        status: 'failed',
-        outputs: {
-          exitCode: 1,
-          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-        },
-      };
+      const response = this.buildStartupFailureResponse(task, attemptId, err);
       this.callbacks.onComplete?.(task.id, response);
       const newlyStarted = this.orchestrator.handleWorkerResponse(response) ?? [];
       if (newlyStarted.length > 0) {

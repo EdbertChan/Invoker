@@ -189,7 +189,7 @@ describe('TaskRunner', () => {
       id: 'docker-no-image',
       status: 'running',
       config: { command: 'echo never', runnerKind: 'docker' },
-      execution: { selectedAttemptId: 'docker-no-image-a1' },
+      execution: { generation: 3, selectedAttemptId: 'docker-no-image-a1' },
     });
     const newlyReady = makeTask({
       id: 'docker-concurrent-b',
@@ -236,6 +236,8 @@ describe('TaskRunner', () => {
     expect(handleWorkerResponse).toHaveBeenCalledWith(
       expect.objectContaining({
         actionId: 'docker-no-image',
+        attemptId: 'docker-no-image-a1',
+        executionGeneration: 3,
         status: 'failed',
       }),
     );
