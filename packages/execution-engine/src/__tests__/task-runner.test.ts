@@ -958,6 +958,165 @@ describe('TaskRunner', () => {
     });
   });
 
+  describe('reconciliation alternatives', () => {
+    it('passes completed reconciliation alternatives through WorkRequest', async () => {
+      let capturedRequest: any;
+      const tasks = new Map<string, TaskState>();
+      tasks.set('exp-v1', makeTask({
+        id: 'exp-v1',
+        description: 'Variant one',
+        status: 'completed',
+        execution: {
+          branch: 'experiment/exp-v1',
+          commit: 'commit-v1',
+        },
+      }));
+      tasks.set('exp-v2', makeTask({
+        id: 'exp-v2',
+        description: 'Variant two',
+        status: 'failed',
+        execution: {
+          branch: 'experiment/exp-v2',
+          commit: 'commit-v2',
+        },
+      }));
+      tasks.set('recon', makeTask({
+        id: 'recon',
+        status: 'completed',
+        config: { isReconciliation: true },
+        execution: {
+          branch: 'experiment/exp-v1',
+          experimentResults: [
+            { id: 'exp-v1', status: 'completed', exitCode: 0, summary: 'supported path' },
+            { id: 'exp-v2', status: 'failed', exitCode: 1, summary: 'rejected path' },
+          ],
+          selectedExperiments: ['exp-v1'],
+        },
+      }));
+
+      const capturingExecutor = {
+        type: 'worktree',
+        start: async (req: any) => {
+          capturedRequest = req;
+          return { executionId: 'exec-alt', taskId: 'downstream' };
+        },
+        onOutput: () => () => {},
+        onComplete: (_h: any, cb: any) => {
+          cb({ requestId: 'r', actionId: 'downstream', status: 'completed', outputs: { exitCode: 0 } });
+          return () => {};
+        },
+        onHeartbeat: () => () => {},
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: {
+          getTask: (id: string) => tasks.get(id),
+          handleWorkerResponse: vi.fn(),
+        } as any,
+        persistence: { updateTask: vi.fn() } as any,
+        executorRegistry: {
+          getDefault: () => capturingExecutor,
+          get: () => capturingExecutor,
+          getAll: () => [capturingExecutor],
+        } as any,
+        cwd: '/tmp',
+      });
+
+      const downstream = makeTask({
+        id: 'downstream',
+        status: 'running',
+        dependencies: ['recon'],
+        config: { command: 'echo compare' },
+      });
+
+      await runner.executeTask(downstream);
+
+      expect(capturedRequest.inputs.alternatives).toEqual([
+        {
+          taskId: 'exp-v1',
+          description: 'Variant one',
+          branch: 'experiment/exp-v1',
+          commitHash: 'commit-v1',
+          status: 'completed',
+          exitCode: 0,
+          summary: 'supported path',
+          selected: true,
+        },
+        {
+          taskId: 'exp-v2',
+          description: 'Variant two',
+          branch: 'experiment/exp-v2',
+          commitHash: 'commit-v2',
+          status: 'failed',
+          exitCode: 1,
+          summary: 'rejected path',
+          selected: false,
+        },
+      ]);
+    });
+
+    it('does not pass alternatives from unfinished reconciliation dependencies', async () => {
+      let capturedRequest: any;
+      const tasks = new Map<string, TaskState>();
+      tasks.set('exp-v1', makeTask({
+        id: 'exp-v1',
+        description: 'Variant one',
+        status: 'completed',
+        execution: { branch: 'experiment/exp-v1' },
+      }));
+      tasks.set('recon', makeTask({
+        id: 'recon',
+        status: 'running',
+        config: { isReconciliation: true },
+        execution: {
+          experimentResults: [
+            { id: 'exp-v1', status: 'completed', exitCode: 0, summary: 'stale partial result' },
+          ],
+          selectedExperiment: 'exp-v1',
+        },
+      }));
+
+      const capturingExecutor = {
+        type: 'worktree',
+        start: async (req: any) => {
+          capturedRequest = req;
+          return { executionId: 'exec-alt-pending', taskId: 'downstream' };
+        },
+        onOutput: () => () => {},
+        onComplete: (_h: any, cb: any) => {
+          cb({ requestId: 'r', actionId: 'downstream', status: 'completed', outputs: { exitCode: 0 } });
+          return () => {};
+        },
+        onHeartbeat: () => () => {},
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: {
+          getTask: (id: string) => tasks.get(id),
+          handleWorkerResponse: vi.fn(),
+        } as any,
+        persistence: { updateTask: vi.fn() } as any,
+        executorRegistry: {
+          getDefault: () => capturingExecutor,
+          get: () => capturingExecutor,
+          getAll: () => [capturingExecutor],
+        } as any,
+        cwd: '/tmp',
+      });
+
+      const downstream = makeTask({
+        id: 'downstream',
+        status: 'running',
+        dependencies: ['recon'],
+        config: { command: 'echo compare' },
+      });
+
+      await runner.executeTask(downstream);
+
+      expect(capturedRequest.inputs.alternatives).toBeUndefined();
+    });
+  });
+
   describe('executeTask error handling', () => {
     it('sends failed WorkResponse when executor.start throws', async () => {
       const handleWorkerResponse = vi.fn();

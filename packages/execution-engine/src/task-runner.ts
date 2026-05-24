@@ -2658,7 +2658,7 @@ export class TaskRunner {
 
     for (const depId of task.dependencies) {
       const dep = this.orchestrator.getTask(depId);
-      if (!dep?.config.isReconciliation) continue;
+      if (!dep?.config.isReconciliation || dep.status !== 'completed') continue;
 
       const selectedSet = new Set(dep.execution.selectedExperiments ?? (dep.execution.selectedExperiment ? [dep.execution.selectedExperiment] : []));
 

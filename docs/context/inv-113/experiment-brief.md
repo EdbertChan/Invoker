@@ -39,20 +39,20 @@ pnpm --filter @invoker/execution-engine test task-runner.test.ts
 Expected summary:
 
 ```text
-✓ src/__tests__/task-runner.test.ts (125 tests)
+✓ src/__tests__/task-runner.test.ts (127 tests)
 
 Test Files  1 passed (1)
-     Tests  125 passed (125)
+     Tests  127 passed (127)
 ```
 
 Observed on 2026-05-24:
 
 ```text
-✓ src/__tests__/task-runner.test.ts (125 tests) 1380ms
+✓ src/__tests__/task-runner.test.ts (127 tests) 1560ms
 
 Test Files  1 passed (1)
-     Tests  125 passed (125)
-  Duration  3.72s
+     Tests  127 passed (127)
+  Duration  4.29s
 ```
 
 ## Proof Points
@@ -65,11 +65,12 @@ Test Files  1 passed (1)
 | Active execution control targets the selected attempt | `kills the active execution for a task by resolving its current attempt`, lines 305-367 | Pass: kill receives the selected attempt handle. |
 | Upstream branch collection is deterministic | `collectUpstreamBranches` tests, lines 760-865 and surrounding suite | Pass: completed branches are collected in dependency order; missing, running, and failed dependencies are excluded. |
 | Reconciliation winner propagation is preserved | `collects branch from reconciliation with propagated winner branch`, lines 823-843 | Pass: downstream tasks receive the selected experiment branch. |
+| Reconciliation alternatives are TaskRunner-owned | `passes completed reconciliation alternatives through WorkRequest` and `does not pass alternatives from unfinished reconciliation dependencies` | Pass: completed reconciliation dependencies provide branch, commit, result status, exit code, summary, and selected markers; unfinished reconciliation state is not forwarded. |
 
 ## Thresholds
 
 - The task-runner suite must exit with code `0`.
-- `src/__tests__/task-runner.test.ts` must report exactly `1 passed` test file and at least `125 passed` tests.
+- `src/__tests__/task-runner.test.ts` must report exactly `1 passed` test file and at least `127 passed` tests.
 - No test in the task-runner suite may be skipped, failed, or timed out.
 - The suite must include deterministic proof for both the selected architecture and at least one competing design consideration in this brief.
 
