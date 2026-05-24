@@ -57,6 +57,17 @@ describe('persistShutdownDiagnostic', () => {
     expect(output).toContain('error=npm test failed with exit code 1');
   });
 
+  it('includes synthetic terminal error when provided', () => {
+    const task = makeTask({ status: 'running' });
+    const db = makeDb(['FAIL src/final-regression.test.ts\n']);
+
+    persistShutdownDiagnostic(task, db, { terminalError: 'Application quit' });
+
+    const output = db.appended[0];
+    expect(output).toContain('terminalError=Application quit');
+    expect(output).toContain('FAIL src/final-regression.test.ts');
+  });
+
   it('includes exitCode when present', () => {
     const task = makeTask({
       status: 'running',

@@ -194,6 +194,22 @@ function isTaskInFlightForForcedStop(task: TaskState): boolean {
     || (task.status === 'pending' && task.execution.phase === 'launching');
 }
 
+const STARTUP_DIAGNOSTIC_ERROR_CHARS = 4_000;
+
+function buildStartupFailureDiagnostic(response: WorkResponse): string | null {
+  if (response.status !== 'failed') return null;
+  const error = typeof response.outputs.error === 'string' ? response.outputs.error : '';
+  if (!error.startsWith('Executor startup failed (')) return null;
+  const compactError = error.length > STARTUP_DIAGNOSTIC_ERROR_CHARS
+    ? `...${error.slice(error.length - STARTUP_DIAGNOSTIC_ERROR_CHARS)}`
+    : error;
+  const parts = ['\n[Startup Failure Diagnostic]'];
+  parts.push(`exitCode=${response.outputs.exitCode ?? 1}`);
+  parts.push(`error=${compactError}`);
+  parts.push('--- end startup failure diagnostic ---\n');
+  return parts.join('\n');
+}
+
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
 
@@ -1213,7 +1229,11 @@ if (isHeadless) {
       if (ownsHeadlessShutdown && orchestrator) {
         for (const task of orchestrator.getAllTasks()) {
           if (isTaskInFlightForForcedStop(task)) {
-            if (persistence) persistShutdownDiagnostic(task, persistence);
+            if (persistence) {
+              persistShutdownDiagnostic(task, persistence, {
+                terminalError: 'Application quit',
+              });
+            }
             orchestrator.handleWorkerResponse({
               requestId: `quit-${task.id}`,
               actionId: task.id,
@@ -1751,6 +1771,14 @@ function createEmbeddedTerminalBackendFromConfig(
         },
         onComplete: (taskId, response) => {
           flushTaskOutput(taskId);
+          const startupDiagnostic = buildStartupFailureDiagnostic(response);
+          if (startupDiagnostic) {
+            try {
+              persistence.appendTaskOutput(taskId, startupDiagnostic);
+            } catch (err) {
+              logger.error(`Failed to persist startup failure diagnostic for ${taskId}: ${err}`, { module: 'output' });
+            }
+          }
           taskHandles.delete(taskId);
           assertFatalExecutionCapacity(`complete ${taskId}`);
           logger.info(
@@ -4093,6 +4121,7 @@ function createEmbeddedTerminalBackendFromConfig(
             if (persistence) {
               persistShutdownDiagnostic(task, persistence, {
                 flushPendingOutput: flushTaskOutput,
+                terminalError: 'Application quit',
               });
             }
             orchestrator.handleWorkerResponse({
