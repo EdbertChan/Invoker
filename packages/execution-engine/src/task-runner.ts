@@ -84,6 +84,12 @@ type ActiveExecutionEntry = {
   leaseHolderId?: string;
 };
 
+type LaunchLineage = {
+  taskId: string;
+  attemptId: string;
+  generation: number;
+};
+
 type ExecutionPoolMember =
   | { type: 'ssh'; id: string; maxConcurrentTasks?: number }
   | { type: 'worktree'; id: string; maxConcurrentTasks?: number };
@@ -401,6 +407,14 @@ export class TaskRunner {
     return task.execution.selectedAttemptId ?? this.loadLatestAttemptId(task.id) ?? task.id;
   }
 
+  private resolveLaunchLineage(task: TaskState): LaunchLineage {
+    return {
+      taskId: task.id,
+      attemptId: this.resolveAttemptIdForStart(task),
+      generation: task.execution.generation ?? 0,
+    };
+  }
+
   private resolveActiveExecution(taskId: string): { attemptId: string; entry: ActiveExecutionEntry } | undefined {
     const selectedAttemptId = this.orchestrator.getTask(taskId)?.execution.selectedAttemptId;
     if (selectedAttemptId) {
@@ -484,9 +498,10 @@ export class TaskRunner {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
     );
-    const attemptId = this.resolveAttemptIdForStart(task);
-    const startGeneration = task.execution.generation ?? 0;
-    const bench = this.createExecuteTaskBench(task.id, attemptId);
+    const launchLineage = this.resolveLaunchLineage(task);
+    const { attemptId } = launchLineage;
+    const startGeneration = launchLineage.generation;
+    const bench = this.createExecuteTaskBench(launchLineage.taskId, attemptId);
     bench('executeTask.accepted', {
       status: task.status,
       phase: task.execution.phase,
