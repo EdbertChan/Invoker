@@ -627,4 +627,38 @@ describe('Orchestrator launch claims', () => {
     const startedAfterApprove = await orchestrator.approve(approvalRootId);
     expect(startedAfterApprove.map((task) => task.id)).toContain(approvalDownstreamId);
   });
+
+  it('post-extraction preserves transition-before-scheduling and dispatch order', () => {
+    const { orchestrator, persistence } = makeOrchestrator({ maxConcurrency: 1 });
+    orchestrator.loadPlan({
+      name: 'transition-scheduling-proof',
+      onFinish: 'none',
+      tasks: [
+        { id: 'first', description: 'first', command: 'echo first' },
+        { id: 'second', description: 'second', command: 'echo second', dependencies: ['first'] },
+      ],
+    });
+
+    const firstId = taskIdBySuffix(orchestrator, 'first');
+    const secondId = taskIdBySuffix(orchestrator, 'second');
+
+    const [firstStarted] = orchestrator.startExecution();
+    expect(firstStarted!.id).toBe(firstId);
+    expect(orchestrator.getTask(secondId)?.status).toBe('pending');
+
+    const startedAfterFirst = respondForTask(orchestrator, firstId, 'completed', 0);
+
+    expect(orchestrator.getTask(firstId)?.status).toBe('completed');
+    expect(startedAfterFirst.map((task) => task.id)).toEqual([secondId]);
+    expect(orchestrator.getTask(secondId)?.status).toBe('running');
+
+    const completedIndex = persistence.events.findIndex(
+      (event) => event.taskId === firstId && event.eventType === 'task.completed',
+    );
+    const secondRunningIndex = persistence.events.findIndex(
+      (event) => event.taskId === secondId && event.eventType === 'task.running',
+    );
+    expect(completedIndex).toBeGreaterThanOrEqual(0);
+    expect(secondRunningIndex).toBeGreaterThan(completedIndex);
+  });
 });
