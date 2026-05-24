@@ -32,9 +32,9 @@
  * Using the same Electron binary for both modes provides a consistent runtime.
  */
 
-import { app, BrowserWindow, ipcMain, nativeImage, shell } from 'electron';
+import { app, ipcMain, type BrowserWindow } from 'electron';
 import * as path from 'node:path';
-import { existsSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 
 const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
 
@@ -75,7 +75,7 @@ import type { RuntimeServices } from '@invoker/runtime-service';
 import type { MessageBus } from '@invoker/transport';
 import {
   ExecutorRegistry, TaskRunner,
-  DockerExecutor, WorktreeExecutor, SshExecutor, GitHubMergeGateProvider, ReviewProviderRegistry,
+  WorktreeExecutor,
   initializeShellEnvironment,
   RESTART_TO_BRANCH_TRACE,
   remoteFetchForPool,
@@ -88,7 +88,6 @@ import type { TaskOutputData } from './types.js';
 import {
   loadConfig,
   resolveEmbeddedTerminalBackendConfig,
-  resolveSecretsFilePath,
   type EmbeddedTerminalBackendConfig,
   type InvokerConfig,
 } from './config.js';
@@ -127,7 +126,6 @@ import {
 } from './headless.js';
 import {
   approveTask as sharedApproveTask,
-  autoFixOnReviewGateFailure,
   buildInvalidationDeps,
   deleteAllWorkflows as sharedDeleteAllWorkflows,
   deleteAllWorkflowsBulk as sharedDeleteAllWorkflowsBulk,
@@ -179,6 +177,8 @@ import {
   resolveActionDiagnosticsStallThresholdMs,
 } from './action-graph-diagnostics.js';
 import { registerReadOnlyIpcHandlers } from './ipc-read-handlers.js';
+import { runMainAppBootstrap, type MainAppMode } from './bootstrap/app-bootstrap.js';
+import { registerMainProcessIpc } from './ipc/ipc-registration.js';
 import { createTaskDeltaStreamSequence } from './task-delta-stream-sequence.js';
 import { startReviewGateStatusWorker, type ReviewGateStatusWorker } from './review-gate-status-worker.js';
 import {
@@ -186,6 +186,16 @@ import {
   type HeadlessBatchExecRequest,
   type HeadlessExecMutationPayload,
 } from './headless-batch-exec.js';
+import {
+  createGuiTaskRunner,
+  wireTaskRunnerApproveHook,
+} from './execution/task-runner-wiring.js';
+import {
+  createMainWindow,
+  registerActivationHandler as registerWindowActivationHandler,
+  registerSecondInstanceFocus,
+  registerWindowAllClosedHandler,
+} from './window/window-lifecycle.js';
 
 function isTaskInFlightForForcedStop(task: TaskState): boolean {
   return task.status === 'running'
@@ -1681,111 +1691,37 @@ function createEmbeddedTerminalBackendFromConfig(
     }
   }
 
-  // Focus existing window when a second instance is launched
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+  registerSecondInstanceFocus({
+    app,
+    getMainWindow: () => mainWindow,
   });
 
   function rebuildTaskRunner(): void {
-    taskExecutor = new TaskRunner({
+    taskExecutor = createGuiTaskRunner({
       orchestrator,
       persistence,
       executorRegistry,
       executionAgentRegistry: agentRegistry,
-      cwd: repoRoot,
-      defaultBranch: invokerConfig.defaultBranch,
-      dockerConfig: {
-        imageName: invokerConfig.docker?.imageName,
-        secretsFile: resolveSecretsFilePath(invokerConfig),
-      },
-      remoteTargetsProvider: () => loadConfig().remoteTargets ?? {},
-      executionPoolsProvider: () => loadConfig().executionPools ?? {},
-      onReviewGateCiFailure: invokerConfig.autoFixCi
-        ? async (trigger) => {
-            const currentTaskExecutor = taskExecutor;
-            if (!currentTaskExecutor) {
-              throw new Error('Task executor is not initialized for review-gate CI auto-fix');
-            }
-            await autoFixOnReviewGateFailure(trigger, {
-              orchestrator,
-              persistence,
-              taskExecutor: currentTaskExecutor,
-              getAutoFixAgent: () => loadConfig().autoFixAgent,
-              getAutoApproveAIFixes: () => loadConfig().autoApproveAIFixes,
-            });
-          }
-        : undefined,
-      mergeGateProvider: new GitHubMergeGateProvider(),
-      reviewProviderRegistry: (() => {
-        const registry = new ReviewProviderRegistry();
-        registry.register(new GitHubMergeGateProvider());
-        return registry;
-      })(),
-      callbacks: {
-        onOutput: (taskId, data) => {
-          enqueueTaskOutput(taskId, data);
-        },
-        onLaunchFailed: (taskId, error, executor) => {
-          assertFatalExecutionCapacity(`launch failed ${taskId}`);
-          logger.error(
-            `Task "${taskId}" launch failed before spawn (executor: ${executor.type}): ${error.message}`,
-            { module: 'exec' },
-          );
-        },
-        onSpawned: (taskId, handle, executor) => {
-          flushTaskOutput(taskId);
-          logger.info(
-            `Task "${taskId}" spawned (handle: ${handle.executionId}, executor: ${executor.type}, workspace: ${handle.workspacePath ?? 'none'}, branch: ${handle.branch ?? 'none'})`,
-            { module: 'exec' },
-          );
-          taskHandles.set(taskId, { handle, executor });
-          assertFatalExecutionCapacity(`spawned ${taskId}`);
-        },
-        onComplete: (taskId, response) => {
-          flushTaskOutput(taskId);
-          taskHandles.delete(taskId);
-          assertFatalExecutionCapacity(`complete ${taskId}`);
-          logger.info(
-            `Task "${taskId}" completion callback received (status: ${response.status}, generation: ${response.executionGeneration}, exitCode: ${response.outputs.exitCode ?? 'none'})`,
-            { module: 'exec' },
-          );
-        },
-        onHeartbeat: (taskId) => {
-          const now = new Date();
-          const task = orchestrator.getTask(taskId);
-          const previousHeartbeat = task?.execution.lastHeartbeatAt instanceof Date
-            ? task.execution.lastHeartbeatAt
-            : task?.execution.lastHeartbeatAt
-              ? new Date(task.execution.lastHeartbeatAt)
-              : undefined;
-          const heartbeatGapMs = previousHeartbeat ? now.getTime() - previousHeartbeat.getTime() : undefined;
-          try { persistence.updateTask(taskId, { execution: { lastHeartbeatAt: now } }); } catch { /* db locked */ }
-          messageBus.publish(Channels.TASK_DELTA, {
-            type: 'updated' as const,
-            taskId,
-            changes: { execution: { lastHeartbeatAt: now } },
-          });
-          logger.info(
-            `Heartbeat for "${taskId}" (status: ${task?.status ?? 'unknown'}, generation: ${task?.execution.generation ?? 'unknown'}, gapMs: ${heartbeatGapMs ?? 'first'})`,
-            { module: 'heartbeat' },
-          );
-        },
-      },
+      messageBus,
+      repoRoot,
+      invokerConfig,
+      logger,
+      getCurrentTaskRunner: () => taskExecutor,
+      enqueueTaskOutput,
+      flushTaskOutput,
+      setTaskHandle: (taskId, entry) => taskHandles.set(taskId, entry),
+      deleteTaskHandle: (taskId) => taskHandles.delete(taskId),
+      assertFatalExecutionCapacity,
     });
     latestTaskExecutor = taskExecutor;
     wireApproveHook();
   }
 
   function wireApproveHook(): void {
-    orchestrator.setBeforeApproveHook(async (task) => {
-      if (task.config.isMergeNode && task.config.workflowId && task.execution.pendingFixError === undefined) {
-        const workflow = persistence.loadWorkflow(task.config.workflowId);
-        if (workflow?.mergeMode === "external_review") return; // external review is the merge mechanism
-        await requireTaskExecutor().approveMerge(task.config.workflowId);
-      }
+    wireTaskRunnerApproveHook({
+      orchestrator,
+      persistence,
+      getTaskRunner: requireTaskExecutor,
     });
   }
 
@@ -2258,111 +2194,21 @@ function createEmbeddedTerminalBackendFromConfig(
   }
 
   function createWindow(): void {
-    recordStartupMark('createWindow.begin');
-    const iconPath = path.join(__dirname, 'assets', 'icons', 'png', '256x256.png');
-    const icon = nativeImage.createFromPath(iconPath);
-    mainWindow = new BrowserWindow({
-      width: 1200,
-      height: 800,
-      // Show explicitly after load/timeout rather than relying on Electron's
-      // implicit initial map behavior, which has regressed on some Linux/X11
-      // sessions and leaves the BrowserWindow unmapped.
-      show: false,
-      webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: false,
+    createMainWindow({
+      app,
+      dirname: __dirname,
+      logger,
+      browserCommand: invokerConfig.browser,
+      enableTestCompositor,
+      getMainWindow: () => mainWindow,
+      setMainWindow: (window) => {
+        mainWindow = window;
       },
-      icon: !icon.isEmpty() && process.platform !== 'darwin' ? icon : undefined,
-      title: 'Invoker',
-    });
-
-    // BrowserWindow icons matter on Windows/Linux. macOS uses the bundle icon.
-    if (process.platform !== 'darwin') {
-      if (!icon.isEmpty()) mainWindow.setIcon(icon);
-    }
-
-    const devUrl = process.env.VITE_DEV_SERVER_URL;
-    if (devUrl) {
-      mainWindow.loadURL(devUrl);
-    } else {
-      const packagedUiPath = path.join(__dirname, 'ui', 'index.html');
-      const repoUiPath = path.join(__dirname, '..', '..', 'ui', 'dist', 'index.html');
-      const uiDistPath = existsSync(packagedUiPath) ? packagedUiPath : repoUiPath;
-      mainWindow.loadFile(uiDistPath).catch(() => {
-        mainWindow?.loadURL(
-          `data:text/html,<html><body style="background:#1a1a2e;color:#eee;font-family:system-ui;padding:2rem"><h1>Invoker</h1><p>UI not built yet. Run: <code>pnpm --filter @invoker/ui build</code></p></body></html>`,
-        );
-      });
-    }
-
-    mainWindow.webContents.on('did-finish-load', () => {
-      logger.info('main window did-finish-load', { module: 'window' });
-      recordStartupMark('window.did-finish-load');
-    });
-
-    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
-      logger.error(
-        `main window did-fail-load: code=${errorCode} desc=${errorDescription} url=${validatedURL}`,
-        { module: 'window' },
-      );
-    });
-
-    mainWindow.webContents.on('render-process-gone', (_event, details) => {
-      logger.error(
-        `main window render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`,
-        { module: 'window' },
-      );
-    });
-
-    const shouldShowWindow = process.env.NODE_ENV !== 'test' || enableTestCompositor;
-    if (shouldShowWindow) {
-      let showTriggered = false;
-      const showWindow = (): void => {
-        if (!mainWindow || mainWindow.isDestroyed() || showTriggered) return;
-        showTriggered = true;
-        logger.info('main window show()', { module: 'window' });
-        recordStartupMark('window.show');
-        mainWindow.show();
-        mainWindow.focus();
-        uiInteractive = true;
-        recordStartupMark('ui.interactive');
-        startDeferredStartupWork();
-      };
-
-      mainWindow.once('ready-to-show', showWindow);
-      setTimeout(showWindow, 1500).unref?.();
-    } else {
-      uiInteractive = true;
-      recordStartupMark('ui.interactive');
-      startDeferredStartupWork();
-    }
-
-    mainWindow.on('closed', () => {
-      logger.info('main window closed', { module: 'window' });
-      mainWindow = null;
-    });
-
-    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-      if (url.startsWith('https://') || url.startsWith('http://')) {
-        const browserCmd = invokerConfig.browser;
-        if (browserCmd) {
-          spawn(browserCmd, [url], { detached: true, stdio: 'ignore' }).unref();
-        } else {
-          const chromeCmd: [string, string[]] = process.platform === 'darwin'
-            ? ['open', ['-a', 'Google Chrome', url]]
-            : process.platform === 'win32'
-              ? ['cmd', ['/c', 'start', 'chrome', url]]
-              : ['google-chrome', [url]];
-          try {
-            spawn(chromeCmd[0], chromeCmd[1], { detached: true, stdio: 'ignore' }).unref();
-          } catch {
-            shell.openExternal(url);
-          }
-        }
-      }
-      return { action: 'deny' as const };
+      setUiInteractive: (interactive) => {
+        uiInteractive = interactive;
+      },
+      recordStartupMark,
+      startDeferredStartupWork,
     });
   }
 
@@ -2688,27 +2534,32 @@ function createEmbeddedTerminalBackendFromConfig(
     }, 0);
   }
 
-  app.whenReady().then(async () => {
-    recordStartupMark('app.whenReady');
-    ownerMode = true;
-    try {
-      recordStartupMark('initServices.start');
-      await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      recordStartupMark('initServices.end', { ownerMode: true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!message.includes('[db-writer-lock]')) {
-        process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
-        app.quit();
-        return;
+  app.whenReady().then(() => runMainAppBootstrap({
+    recordAppReady: () => {
+      recordStartupMark('app.whenReady');
+    },
+    initializeServices: async (): Promise<MainAppMode> => {
+      ownerMode = true;
+      try {
+        recordStartupMark('initServices.start');
+        await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
+        recordStartupMark('initServices.end', { ownerMode: true });
+        return 'owner';
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes('[db-writer-lock]')) {
+          process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
+          app.quit();
+          return 'follower';
+        }
+        recordStartupMark('initServices.readOnly.start');
+        await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
+        ownerMode = false;
+        recordStartupMark('initServices.readOnly.end', { ownerMode: false });
+        return 'follower';
       }
-      recordStartupMark('initServices.readOnly.start');
-      await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      ownerMode = false;
-      recordStartupMark('initServices.readOnly.end', { ownerMode: false });
-    }
-
-    if (ownerMode) {
+    },
+    configureOwnerRuntime: () => {
       rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
         persistence,
@@ -2741,15 +2592,19 @@ function createEmbeddedTerminalBackendFromConfig(
           maxConcurrency: effectiveMaxConcurrency,
         });
       }
-    } else {
+    },
+    configureFollowerRuntime: () => {
       logger.info('Launched in follower mode; mutation execution is delegated to the current owner', {
         module: 'init',
       });
-    }
+    },
+    registerOwnerIpc: () => {
+      registerMainProcessIpc({
+        registerOwnerDelegationHandlers: () => {
+          if (!ownerMode) return;
 
-    // ── IPC Delegation Handlers — peer → owner ────────────────
-    // Peer processes delegate write-heavy commands to the owner process via IpcBus.
-    if (ownerMode) {
+          // ── IPC Delegation Handlers — peer → owner ────────────────
+          // Peer processes delegate write-heavy commands to the owner process via IpcBus.
       workflowMutationDispatcher.set('headless.exec', async (payloadArg: unknown) => {
         return executeHeadlessExec(payloadArg as HeadlessExecMutationPayload);
       });
@@ -2856,38 +2711,44 @@ function createEmbeddedTerminalBackendFromConfig(
       });
       logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
       recordStartupMark('owner-ipc-ready');
-    }
-
-    bootstrapInitialWorkflowState();
-
-    reviewGateStatusWorker = startReviewGateStatusWorker({
-      ownerMode,
-      getTaskExecutor: requireTaskExecutor,
-      logger,
-    });
-
-    // Relaunch orphaned running tasks and start any pending-but-ready tasks.
-    if (!ownerMode) {
-      logger.info('follower mode startup: auto-run disabled', { module: 'init' });
-    } else if (invokerConfig.disableAutoRunOnStartup) {
-      logger.info('auto-run on startup disabled by config', { module: 'init' });
-    } else {
-      const allStarted = orchestrator.startExecution();
-      if (allStarted.length > 0) {
-        requireTaskExecutor().executeTasks(allStarted);
+        },
+      });
+    },
+    bootstrapWorkflowState: () => {
+      bootstrapInitialWorkflowState();
+    },
+    startReviewGateStatusWorker: () => {
+      reviewGateStatusWorker = startReviewGateStatusWorker({
+        ownerMode,
+        getTaskExecutor: requireTaskExecutor,
+        logger,
+      });
+    },
+    startInitialExecution: () => {
+      // Relaunch orphaned running tasks and start any pending-but-ready tasks.
+      if (!ownerMode) {
+        logger.info('follower mode startup: auto-run disabled', { module: 'init' });
+      } else if (invokerConfig.disableAutoRunOnStartup) {
+        logger.info('auto-run on startup disabled by config', { module: 'init' });
+      } else {
+        const allStarted = orchestrator.startExecution();
+        if (allStarted.length > 0) {
+          requireTaskExecutor().executeTasks(allStarted);
+        }
       }
-    }
-
-    const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
-    logger.info(`Database: ${dbPath}`, { module: 'init' });
-    logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
-    logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
-    logger.info('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig), module: 'startup' });
-    recordStartupMark('startup.ready-for-window');
-
-    // Forward deltas to renderer and keep snapshot cache in sync so
-    // the db-poll doesn't re-emit deltas the messageBus already delivered.
-    messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
+    },
+    logReadyState: () => {
+      const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
+      logger.info(`Database: ${dbPath}`, { module: 'init' });
+      logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
+      logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
+      logger.info('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig), module: 'startup' });
+      recordStartupMark('startup.ready-for-window');
+    },
+    subscribeRendererStreams: () => {
+      // Forward deltas to renderer and keep snapshot cache in sync so
+      // the db-poll doesn't re-emit deltas the messageBus already delivered.
+      messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
       uiPerfStats.mainDeltaToUi += 1;
       if (traceUiDeltaFlow) {
         logger.debug(`delta→ui: ${JSON.stringify(delta)}`, { module: 'ui' });
@@ -2922,29 +2783,32 @@ function createEmbeddedTerminalBackendFromConfig(
           sendTaskDeltaToRenderer(rendererDelta);
         }
       }
-    });
+      });
 
-    uiPerfLogInterval = setInterval(() => {
-      const snapshot = {
-        ts: new Date().toISOString(),
-        metric: 'main_delta_flow',
-        ...uiPerfStats,
-      };
-      try {
-        persistence.writeActivityLog('ui-perf-main', 'info', JSON.stringify(snapshot));
-      } catch {
-        // DB might be locked
-      }
-    }, 10000);
+      uiPerfLogInterval = setInterval(() => {
+        const snapshot = {
+          ts: new Date().toISOString(),
+          metric: 'main_delta_flow',
+          ...uiPerfStats,
+        };
+        try {
+          persistence.writeActivityLog('ui-perf-main', 'info', JSON.stringify(snapshot));
+        } catch {
+          // DB might be locked
+        }
+      }, 10000);
 
-    messageBus.subscribe(Channels.TASK_OUTPUT, (data: unknown) => {
-      if (mainWindow && !mainWindow.isDestroyed() && uiInteractive) {
-        mainWindow.webContents.send('invoker:task-output', data);
-      }
-    });
-
-    // Register IPC handlers
-    ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
+      messageBus.subscribe(Channels.TASK_OUTPUT, (data: unknown) => {
+        if (mainWindow && !mainWindow.isDestroyed() && uiInteractive) {
+          mainWindow.webContents.send('invoker:task-output', data);
+        }
+      });
+    },
+    registerRendererIpc: () => {
+      registerMainProcessIpc({
+        registerRendererHandlers: () => {
+          // Register IPC handlers
+          ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
       const startedAtMs = Date.now();
       const tasks = orchestrator.getAllTasks();
       const workflows = listWorkflowsByStartupRecency();
@@ -4022,30 +3886,26 @@ function createEmbeddedTerminalBackendFromConfig(
       return embeddedTerminalManager.resize(sessionId, cols, rows);
     });
 
-    ipcMain.handle('invoker:terminal-close', async (_event, sessionId: string) => {
-      return embeddedTerminalManager.close(sessionId);
-    });
-
-    seedUiSnapshotCache();
-    createWindow();
-    recordStartupMark('createWindow.end');
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
-    });
-  }).catch((err) => {
+          ipcMain.handle('invoker:terminal-close', async (_event, sessionId: string) => {
+            return embeddedTerminalManager.close(sessionId);
+          });
+        },
+      });
+    },
+    createInitialWindow: () => {
+      seedUiSnapshotCache();
+      createWindow();
+      recordStartupMark('createWindow.end');
+    },
+    registerActivationHandler: () => {
+      registerWindowActivationHandler({ app, createWindow });
+    },
+  })).catch((err) => {
     process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
     app.quit();
   });
 
-  app.on('window-all-closed', () => {
-    logger.info('window-all-closed', { module: 'window' });
-    if (process.platform !== 'darwin') {
-      app.quit();
-    }
-  });
+  registerWindowAllClosedHandler({ app, logger });
 
   let isQuitting = false;
   app.on('before-quit', async (event) => {
