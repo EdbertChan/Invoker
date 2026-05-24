@@ -3360,6 +3360,10 @@ describe('Orchestrator', () => {
 
   // ── editTaskCommand ────────────────────────────────────
 
+  // INV-90 lock-in: these sync edit tests mirror the experiment brief's
+  // selected registry design. Orchestrator edit APIs pass mutation keys
+  // through MUTATION_POLICIES, and these tests pin the resulting
+  // retry/recreate route plus cancel-first ordering.
   describe('editTaskCommand', () => {
     it('updates command, restarts the task, and publishes deltas', () => {
       orchestrator.loadPlan({

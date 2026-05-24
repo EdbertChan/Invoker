@@ -42,6 +42,21 @@ export type MutationKey =
   | 'fixReject'
   | 'topology';
 
+export type SyncEditMutationKey = Extract<
+  MutationKey,
+  | 'command'
+  | 'prompt'
+  | 'executionAgent'
+  | 'runnerKind'
+  | 'poolMemberId'
+  | 'mergeMode'
+  | 'fixContext'
+>;
+
+// INV-90 selected the table-driven registry in
+// docs/context/inv-90/experiment-brief.md. Keep mutation routing in this
+// policy table so implementations consume the accepted verdict instead of
+// reintroducing scattered imperative invalidation branches.
 export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>> = Object.freeze({
   command:               { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
   prompt:                { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateTask' as const },
@@ -508,4 +523,3 @@ export function buildOrchestratorOnlyInvalidationDeps(
     },
   };
 }
-

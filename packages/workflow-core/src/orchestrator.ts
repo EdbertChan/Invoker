@@ -81,6 +81,7 @@ import {
 import {
   MUTATION_POLICIES,
   type InvalidationAction,
+  type SyncEditMutationKey,
 } from './invalidation-policy.js';
 import {
   isActiveAttempt,
@@ -2904,11 +2905,11 @@ export class Orchestrator {
    * Each `editTask*` method shares the same shape: validate, optional
    * cancel-first when the task is active, persist the new spec, then
    * apply the post-edit invalidation primitive (`recreateTask` or
-   * `retryTask`) selected by `MUTATION_POLICIES`. Routing the final
-   * dispatch through this helper keeps the action source-of-truth in
-   * the policy table rather than hard-coded literals at each site, so
-   * a chart change (e.g. flipping `command` from `recreateTask` to
-   * `retryTask`) propagates without touching `editTask*` bodies.
+   * `retryTask`) selected by `MUTATION_POLICIES`. INV-90 accepted the
+   * table-driven design in `docs/context/inv-90/experiment-brief.md`;
+   * accepting the mutation key here keeps sync edit routes consuming
+   * that artifact's source of truth at the call boundary rather than
+   * passing hard-coded action literals around orchestrator code.
    *
    * Sync by design: the public `editTask*` API is sync and most
    * callers (api-server, headless, tests) consume the returned
@@ -2917,9 +2918,10 @@ export class Orchestrator {
    * facade routing where cross-workflow cascade fires.
    */
   private dispatchPostMutation(
-    action: InvalidationAction,
+    mutationKey: SyncEditMutationKey,
     taskId: string,
   ): TaskState[] {
+    const action: InvalidationAction = MUTATION_POLICIES[mutationKey].action;
     switch (action) {
       case 'recreateTask':
         return this.recreateTask(taskId);
@@ -2949,7 +2951,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', cmdChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, cmdDelta);
 
-    return this.dispatchPostMutation(MUTATION_POLICIES.command.action, taskId);
+    return this.dispatchPostMutation('command', taskId);
   }
 
     editTaskPrompt(taskId: string, newPrompt: string): TaskState[] {
@@ -2969,7 +2971,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', promptChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, promptDelta);
 
-    return this.dispatchPostMutation(MUTATION_POLICIES.prompt.action, taskId);
+    return this.dispatchPostMutation('prompt', taskId);
   }
 
     editTaskType(taskId: string, runnerKind: string, poolMemberId?: string): TaskState[] {
@@ -3019,8 +3021,8 @@ export class Orchestrator {
     this.messageBus.publish(TASK_DELTA_CHANNEL, typeDelta);
 
     const typeAction = hostChanged
-      ? MUTATION_POLICIES.poolMemberId.action
-      : MUTATION_POLICIES.runnerKind.action;
+      ? 'poolMemberId'
+      : 'runnerKind';
     return this.dispatchPostMutation(typeAction, taskId);
   }
 
@@ -3053,7 +3055,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', poolChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, poolDelta);
 
-    return this.dispatchPostMutation(MUTATION_POLICIES.poolMemberId.action, taskId);
+    return this.dispatchPostMutation('poolMemberId', taskId);
   }
 
     editTaskAgent(taskId: string, agentName: string): TaskState[] {
@@ -3073,7 +3075,7 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', agentChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, agentDelta);
 
-    return this.dispatchPostMutation(MUTATION_POLICIES.executionAgent.action, taskId);
+    return this.dispatchPostMutation('executionAgent', taskId);
   }
 
   /**
@@ -3205,12 +3207,9 @@ export class Orchestrator {
     // attempt picks up the new policy when restartTask reschedules it.
     this.persistence.updateWorkflow?.(workflowId, { mergeMode });
 
-    // Retry-class reset via the policy table — `restartTask` is the
-    // current `retryTask` compatibility wire. Routing through
-    // `MUTATION_POLICIES.mergeMode` keeps merge-mode dispatch
-    // table-driven so a chart change propagates without touching this
-    // method body.
-    return this.dispatchPostMutation(MUTATION_POLICIES.mergeMode.action, taskId);
+    // Retry-class reset via the policy table. Routing through the
+    // mutation key keeps merge-mode dispatch table-driven.
+    return this.dispatchPostMutation('mergeMode', taskId);
   }
 
   /**
@@ -3347,12 +3346,9 @@ export class Orchestrator {
     this.persistence.logEvent?.(taskId, 'task.updated', fixContextChanges);
     this.messageBus.publish(TASK_DELTA_CHANNEL, fixContextDelta);
 
-    // Retry-class reset via the policy table — `restartTask` is the
-    // current `retryTask` compatibility wire. Routing through
-    // `MUTATION_POLICIES.fixContext` keeps fix-context dispatch
-    // table-driven so a chart change propagates without touching this
-    // method body.
-    return this.dispatchPostMutation(MUTATION_POLICIES.fixContext.action, taskId);
+    // Retry-class reset via the policy table. Routing through the
+    // mutation key keeps fix-context dispatch table-driven.
+    return this.dispatchPostMutation('fixContext', taskId);
   }
 
   /**
