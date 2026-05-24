@@ -473,7 +473,7 @@ export class TaskRunner {
     // confirm the lineage advanced — fall through to the normal failure
     // path rather than silently suppressing the error.
     if (!current) return false;
-    const currentAttempt = current.execution.selectedAttemptId;
+    const currentAttempt = current.execution.selectedAttemptId ?? this.loadLatestAttemptId(taskId);
     const currentGeneration = current.execution.generation ?? 0;
     if (currentAttempt !== undefined && currentAttempt !== attemptId) return true;
     if (currentGeneration !== startGeneration) return true;

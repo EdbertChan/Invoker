@@ -37,15 +37,15 @@ Expected focused output threshold:
 
 - Exit code: `0`
 - Test files: `1 passed (1)`
-- Tests: `125 passed (125)`
+- Tests: `126 passed (126)`
 - Duration threshold: no fixed wall-clock threshold; pass/fail is the deterministic verdict.
 
 Observed focused output on 2026-05-24:
 
 ```text
 Test Files  1 passed (1)
-Tests  125 passed (125)
-Duration  2.08s
+Tests  126 passed (126)
+Duration  3.88s
 ```
 
 Broader package command also run:
@@ -58,8 +58,8 @@ Observed package-level output on 2026-05-24:
 
 ```text
 Test Files  51 passed (51)
-Tests  995 passed (995)
-Duration  94.07s
+Tests  996 passed (996)
+Duration  132.91s
 ```
 
 Note: the package script expanded to the full execution-engine Vitest surface. This is useful package confidence, but the focused command above is the deterministic reviewer command for this brief.
@@ -72,6 +72,7 @@ Note: the package script expanded to the full execution-engine Vitest surface. T
 | Concurrent launch dedupe is attempt-scoped. | `task-runner.ts:274-276`, `task-runner.ts:483-508` | `task-runner.test.ts:245-303` starts the same selected attempt twice and asserts executor `start` is called once. | `start` call count must be `1`. |
 | Startup failures still unblock newly ready tasks. | `task-runner.ts:533-604` | `task-runner.test.ts:187-243` forces executor startup failure, expects failed response, and expects `executeTasks([newlyReady])`. | Failed response emitted once and newly ready task dispatched. |
 | Stale startup failures cannot clobber newer lineage. | `task-runner.ts:466-480`, `task-runner.ts:912-947` | `task-runner.test.ts:1135-1300` verifies advanced attempt and advanced generation suppress metadata and response, while current lineage still persists metadata and emits failure. | Stale cases: no metadata write and no failed response. Current case: both occur. |
+| Persisted-attempt lineage is treated as launch lineage when no selected attempt is set. | `task-runner.ts:466-480`, `task-runner.ts:912-947` | `task-runner.test.ts:1190-1242` verifies an advanced latest persisted attempt suppresses stale startup metadata and response. | No stale metadata write and no failed response. |
 | Slow startup remains observable before `executor.start` resolves. | `task-runner.ts:848-867` | `task-runner.test.ts:1817-1860` advances fake timers and expects heartbeats at 30s and 65s while startup is pending. | Heartbeats equal `['slow-start']` at 30s and `['slow-start', 'slow-start']` before completion. |
 | Hanging startup has deterministic failure behavior. | `task-runner.ts:848-947` | `task-runner.test.ts:1863-1945` sets `INVOKER_EXECUTOR_START_TIMEOUT_MS=100` for a hanging executor. | Launch starts, then timeout path fails the task deterministically. |
 | Pool selection is deterministic under load. | `task-runner.ts:1195-1243`, `task-runner.ts:1407-1445` | Covered by focused suite plus `packages/execution-engine/src/__tests__/ssh-pool-member-capacity.test.ts` in the package-level run. | Capacity checks account for pending and active load; no over-capacity selection accepted. |
@@ -84,7 +85,7 @@ Competing task-id-only approach verdict: reject. It lacks a deterministic way to
 
 Acceptance thresholds for INV-113:
 
-- The focused command must pass with `125 passed`.
+- The focused command must pass with `126 passed`.
 - The brief must cite concrete implementation and test files under review.
 - At least one competing design must be compared against the selected design.
 - Any future change to launch lineage behavior must update this brief or add equivalent deterministic proof.
