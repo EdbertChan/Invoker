@@ -604,6 +604,20 @@ describe('Orchestrator', () => {
       expect(fixDeltas).toHaveLength(1);
     });
 
+    it('does not begin conflict resolution when expected lineage is stale', () => {
+      const before = orchestrator.getTask('t2')!;
+      expect(() => orchestrator.beginConflictResolution('t2', {
+        selectedAttemptId: before.execution.selectedAttemptId,
+        generation: (before.execution.generation ?? 0) + 1,
+      })).toThrow('lineage changed');
+
+      const after = orchestrator.getTask('t2')!;
+      expect(after.status).toBe('failed');
+      expect(after.execution.selectedAttemptId).toBe(before.execution.selectedAttemptId);
+      expect(after.execution.generation ?? 0).toBe(before.execution.generation ?? 0);
+      expect(publishedDeltas).toEqual([]);
+    });
+
     it('resets startedAt and lastHeartbeatAt timestamps', () => {
       const before = Date.now();
       orchestrator.beginConflictResolution('t2');
