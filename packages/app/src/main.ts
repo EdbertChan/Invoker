@@ -114,12 +114,6 @@ import { startApiServer, type ApiServer } from './api-server.js';
 import { WorkflowMutationFacade } from './workflow-mutation-facade.js';
 import {
   runHeadless,
-  isDelegated,
-  tryDelegateRun,
-  tryDelegateResume,
-  resolveDelegationTimeoutMs,
-  tryDelegateExec,
-  tryDelegateQuery,
   resolveAgentSession,
   createHeadlessExecutor,
   wireHeadlessApproveHook,
@@ -692,113 +686,20 @@ if (isHeadless) {
     const mutatingMode = isHeadlessMutatingCommand(cliArgs);
     const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1' || command === 'owner-serve';
     const ownsHeadlessShutdown = standaloneMode && !readOnlyMode && command === 'owner-serve';
-    const queueQueryMode = command === 'queue' || (command === 'query' && cliArgs[1] === 'queue');
 
-    const delegatedQueueOutputFormat = (): 'json' | 'jsonl' | 'label' | 'text' => {
-      const outputIndex = cliArgs.indexOf('--output');
-      const value = outputIndex >= 0 ? cliArgs[outputIndex + 1] : undefined;
-      if (value === 'json' || value === 'jsonl' || value === 'label') return value;
-      return 'text';
-    };
-
-    const writeDelegatedQueueStatus = (status: Record<string, unknown>): void => {
-      const format = delegatedQueueOutputFormat();
-      const running = Array.isArray(status.running) ? status.running as Array<Record<string, unknown>> : [];
-      const queued = Array.isArray(status.queued) ? status.queued as Array<Record<string, unknown>> : [];
-      if (format === 'json') {
-        process.stdout.write(JSON.stringify(status) + '\n');
-        return;
-      }
-      if (format === 'jsonl') {
-        for (const task of running) {
-          process.stdout.write(JSON.stringify({ ...task, state: 'running' }) + '\n');
-        }
-        for (const task of queued) {
-          process.stdout.write(JSON.stringify({ ...task, state: 'queued' }) + '\n');
-        }
-        return;
-      }
-      if (format === 'label') {
-        const ids = [...running, ...queued]
-          .map((task) => String(task.taskId ?? ''))
-          .filter(Boolean);
-        process.stdout.write(ids.join('\n') + '\n');
-        return;
-      }
-      const runningCount = Number(status.runningCount ?? running.length);
-      const maxConcurrency = Number(status.maxConcurrency ?? 0);
-      process.stdout.write(`running=${runningCount}/${maxConcurrency} queued=${queued.length}\n`);
-    };
-
-    // Try delegation for mutating commands first (owner mode).
-    // In standalone mode we skip delegation and run locally.
+    // The experiment-selected design keeps owner discovery, retry, and
+    // bootstrap in headless-client.ts. Electron headless only executes
+    // commands it was explicitly asked to host.
     if (mutatingMode && !standaloneMode) {
-      // Delegating headless commands must never become the IPC server.
-      // Otherwise a transient submitter can steal the transport socket away
-      // from the actual shared mutation owner.
-      const delegationBus = new IpcBus(undefined, { allowServe: false });
-      try {
-        await delegationBus.ready();
-
-        let delegated = false;
-        if (command === 'run') {
-          const planPath = cliArgs[1];
-          if (!planPath) throw new Error('Missing plan file. Usage: --headless run <plan.yaml>');
-          delegated = isDelegated(await tryDelegateRun(planPath, delegationBus, waitForApproval, noTrack));
-        } else if (command === 'resume') {
-          const workflowId = cliArgs[1];
-          if (!workflowId) throw new Error('Missing workflowId. Usage: --headless resume <id>');
-          delegated = isDelegated(await tryDelegateResume(workflowId, delegationBus, waitForApproval, noTrack));
-        } else {
-          const timeoutMs = noTrack ? undefined : await resolveDelegationTimeoutMs(cliArgs);
-          delegated = isDelegated(await tryDelegateExec(cliArgs, delegationBus, waitForApproval, noTrack, timeoutMs));
-        }
-
-        if (delegated) {
-          // Successfully delegated to owner
-          delegationBus.disconnect();
-          process.exit(process.exitCode ?? 0);
-          return; // Guard: process.exit() may not halt in Electron async context
-        }
-
-        // Delegation failed: no owner handler available.
-        delegationBus.disconnect();
-        if (!standaloneMode) {
-          process.stderr.write(
-            `${RED}Error:${RESET} Mutation command "${command}" requires a running owner process.\n` +
-            `\n${BOLD}Options:${RESET}\n` +
-            `  1. Start the interactive process: ${BOLD}electron dist/main.js${RESET}\n` +
-            `  2. Run in standalone mode: ${BOLD}INVOKER_HEADLESS_STANDALONE=1 electron dist/main.js --headless ${cliArgs.join(' ')}${RESET}\n` +
-            `\nStandalone mode opens a writable database. Only use it when no other process is accessing the database.\n`
-          );
-          process.exit(1);
-          return; // Guard: process.exit() may not halt in Electron async context
-        }
-      } catch (err) {
-        process.stderr.write(`${RED}Delegation error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-        delegationBus.disconnect();
-        process.exit(1);
-        return; // Guard: process.exit() may not halt in Electron async context
-      }
-    }
-
-    if (readOnlyMode && queueQueryMode && !standaloneMode) {
-      const delegationBus = new IpcBus(undefined, { allowServe: false });
-      try {
-        await delegationBus.ready();
-        const delegated = await tryDelegateQuery(delegationBus, { kind: 'queue' }, 5_000);
-        delegationBus.disconnect();
-        if (delegated) {
-          writeDelegatedQueueStatus(delegated);
-          process.exit(0);
-          return;
-        }
-      } catch (err) {
-        delegationBus.disconnect();
-        process.stderr.write(`${RED}Delegation error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-        process.exit(1);
-        return;
-      }
+      process.stderr.write(
+        `${RED}Error:${RESET} Mutation command "${command}" must be routed through headless-client owner resolution.\n` +
+        `\n${BOLD}Options:${RESET}\n` +
+        `  1. Use the Invoker CLI/headless client for automatic owner discovery and bootstrap.\n` +
+        `  2. Run in explicit standalone mode: ${BOLD}INVOKER_HEADLESS_STANDALONE=1 electron dist/main.js --headless ${cliArgs.join(' ')}${RESET}\n` +
+        `\nStandalone mode opens a writable database. Only use it when no other process is accessing the database.\n`,
+      );
+      process.exit(1);
+      return; // Guard: process.exit() may not halt in Electron async context
     }
 
     let exitCode = 0;
