@@ -3,8 +3,7 @@ import type { TaskDelta, TaskState, TaskStateChanges } from '@invoker/workflow-g
 import type { ParsedResponse } from '../response-handler.js';
 import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchestrator.js';
 import type { TaskRepository } from '../task-repository.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { TASK_DELTA_CHANNEL } from './events.js';
 
 export interface TransitionDomainHost {
   readonly logger: Logger;

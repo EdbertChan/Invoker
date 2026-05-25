@@ -5,8 +5,7 @@ import { isDiscardedAttempt } from '../attempt-policy.js';
 import type { OrchestratorMessageBus, OrchestratorPersistence } from '../orchestrator.js';
 import { TaskScheduler } from '../scheduler.js';
 import type { TaskRepository } from '../task-repository.js';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
+import { TASK_DELTA_CHANNEL } from './events.js';
 
 function nextLeaseExpiry(from: Date): Date {
   return new Date(from.getTime() + ATTEMPT_LEASE_MS);
