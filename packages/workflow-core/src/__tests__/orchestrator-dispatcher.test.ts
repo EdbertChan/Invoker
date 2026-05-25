@@ -627,4 +627,74 @@ describe('Orchestrator launch claims', () => {
     const startedAfterApprove = await orchestrator.approve(approvalRootId);
     expect(startedAfterApprove.map((task) => task.id)).toContain(approvalDownstreamId);
   });
+
+  describe('scheduler and transition extraction invariants', () => {
+    it('preserves ready-task scheduling and launch dispatch behavior', () => {
+      const { orchestrator, persistence } = makeOrchestrator({
+        deferRunningUntilLaunch: true,
+        enqueueLaunchDispatchEnabled: true,
+        launchOutboxMode: 'observe',
+      });
+      orchestrator.loadPlan({
+        name: 'ready-dispatch-invariant',
+        onFinish: 'none',
+        tasks: [
+          { id: 'root-a', description: 'root a', command: 'echo a' },
+          { id: 'root-b', description: 'root b', command: 'echo b' },
+          { id: 'after-a', description: 'after a', command: 'echo after', dependencies: ['root-a'] },
+        ],
+      });
+
+      const rootAId = taskIdBySuffix(orchestrator, 'root-a');
+      const rootBId = taskIdBySuffix(orchestrator, 'root-b');
+      const afterAId = taskIdBySuffix(orchestrator, 'after-a');
+
+      const started = orchestrator.startExecution();
+
+      expect(started.map((task) => task.id)).toEqual([rootAId, rootBId]);
+      expect(orchestrator.getTask(afterAId)?.status).toBe('pending');
+      expect(persistence.launchDispatchRows.map((row) => row.taskId)).toEqual([rootAId, rootBId]);
+      expect(
+        persistence.events.filter((event) => event.eventType === 'task.launch_claimed').map((event) => event.taskId),
+      ).toEqual([rootAId, rootBId]);
+      for (const task of started) {
+        const attemptId = task.execution.selectedAttemptId!;
+        expect(task.status).toBe('pending');
+        expect(task.execution.phase).toBe('launching');
+        expect(persistence.loadAttempt(attemptId)?.status).toBe('claimed');
+      }
+    });
+
+    it('preserves completion transition semantics before scheduling dependents', () => {
+      const { orchestrator, persistence } = makeOrchestrator();
+      orchestrator.loadPlan({
+        name: 'transition-schedule-invariant',
+        onFinish: 'none',
+        tasks: [
+          { id: 'upstream', description: 'upstream', command: 'echo upstream' },
+          { id: 'downstream', description: 'downstream', command: 'echo downstream', dependencies: ['upstream'] },
+        ],
+      });
+
+      const upstreamId = taskIdBySuffix(orchestrator, 'upstream');
+      const downstreamId = taskIdBySuffix(orchestrator, 'downstream');
+      const [upstreamStart] = orchestrator.startExecution();
+
+      const startedAfterCompletion = orchestrator.handleWorkerResponse({
+        ...makeResponse(upstreamId, 'completed', upstreamStart!.execution.generation ?? 0),
+        attemptId: upstreamStart!.execution.selectedAttemptId,
+      });
+
+      expect(orchestrator.getTask(upstreamId)?.status).toBe('completed');
+      expect(startedAfterCompletion.map((task) => task.id)).toEqual([downstreamId]);
+      expect(orchestrator.getTask(downstreamId)?.status).toBe('running');
+      expect(persistence.loadAttempt(upstreamStart!.execution.selectedAttemptId!)?.status).toBe('completed');
+      const eventTypes = persistence.events.map((event) => `${event.taskId}:${event.eventType}`);
+      expect(eventTypes).toContain(`${upstreamId}:task.completed`);
+      expect(eventTypes).toContain(`${downstreamId}:task.running`);
+      expect(eventTypes.indexOf(`${upstreamId}:task.completed`)).toBeLessThan(
+        eventTypes.indexOf(`${downstreamId}:task.running`),
+      );
+    });
+  });
 });
