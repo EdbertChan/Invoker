@@ -242,6 +242,64 @@ describe('TaskRunner', () => {
     expect(executeTasksSpy).toHaveBeenCalledWith([newlyReady]);
   });
 
+  it('suppresses startup-failure metadata and responses for stale launches', async () => {
+    let currentTask = makeTask({
+      id: 'stale-startup',
+      status: 'running',
+      config: { command: 'echo old' },
+      execution: { generation: 1, selectedAttemptId: 'stale-startup-a1' },
+    });
+    const handleWorkerResponse = vi.fn();
+    const updateTask = vi.fn();
+    const failingExecutor = {
+      type: 'worktree',
+      start: vi.fn(async () => {
+        currentTask = makeTask({
+          id: 'stale-startup',
+          status: 'running',
+          config: { command: 'echo new' },
+          execution: { generation: 2, selectedAttemptId: 'stale-startup-a2' },
+        });
+        const err = new Error('startup failed after recreate') as Error & {
+          workspacePath?: string;
+          branch?: string;
+        };
+        err.workspacePath = '/tmp/stale-worktree';
+        err.branch = 'experiment/stale-startup-a1';
+        throw err;
+      }),
+      onComplete: vi.fn(),
+      onOutput: vi.fn(),
+      onHeartbeat: vi.fn(),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => currentTask,
+        handleWorkerResponse,
+      } as any,
+      persistence: {
+        updateTask,
+        updateAttempt: vi.fn(),
+        appendTaskOutput: vi.fn(),
+      } as any,
+      executorRegistry: {
+        getDefault: () => failingExecutor,
+        get: () => failingExecutor,
+        getAll: () => [failingExecutor],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    await runner.executeTask(currentTask);
+
+    expect(failingExecutor.start).toHaveBeenCalledTimes(1);
+    expect(updateTask).not.toHaveBeenCalled();
+    expect(handleWorkerResponse).not.toHaveBeenCalled();
+  });
+
   it('deduplicates concurrent launches for the same attempt', async () => {
     let completeCallback: ((response: WorkResponse) => void) | undefined;
     const start = vi.fn().mockImplementation(async (request: any) => ({

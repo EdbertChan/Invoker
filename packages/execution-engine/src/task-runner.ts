@@ -458,7 +458,7 @@ export class TaskRunner {
    * 6. On completion → feed response to orchestrator → auto-execute newly ready tasks
    */
   /**
-   * Check whether the task lineage has moved past the attempt that was
+   * INV-113: check whether the task lineage has moved past the attempt that was
    * captured at launch time.  Returns `true` when the current
    * `selectedAttemptId` or `generation` no longer matches, meaning any
    * persistence from this launch would overwrite a newer attempt's data.
