@@ -424,6 +424,18 @@ export class TaskRunner {
     return undefined;
   }
 
+  private normalizeCompletionResponse(
+    response: WorkResponse,
+    attemptId: string,
+    executionGeneration: number,
+  ): WorkResponse {
+    return {
+      ...response,
+      attemptId: response.attemptId ?? attemptId,
+      executionGeneration: response.executionGeneration ?? executionGeneration,
+    };
+  }
+
   private createExecuteTaskBench(taskId: string, attemptId: string): (phase: string, metadata?: Record<string, unknown>) => void {
     return createExecutionBench({
       module: 'execute-task-bench',
@@ -1117,7 +1129,11 @@ export class TaskRunner {
     return new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
+          const normalizedResponse = this.normalizeCompletionResponse(
+            response,
+            attemptId,
+            task.execution.generation ?? 0,
+          );
           const activeExecution = this.activeExecutions.get(normalizedResponse.attemptId ?? attemptId);
           if (activeExecution?.leaseResourceKey && activeExecution.leaseHolderId) {
             this.persistence.releaseExecutionResourceLease?.(activeExecution.leaseResourceKey, activeExecution.leaseHolderId);
