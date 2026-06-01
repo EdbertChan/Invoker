@@ -24,8 +24,19 @@ import type { RunnerKind } from '@invoker/workflow-graph';
 import { createTaskState, createAttempt } from '@invoker/workflow-graph';
 import type { WorkflowDerivedStatus } from '@invoker/workflow-graph';
 import type { Logger, WorkResponse } from '@invoker/contracts';
-import { ATTEMPT_LEASE_MS } from '@invoker/contracts';
 import { normalizeRunnerKind } from '@invoker/workflow-graph';
+import {
+  drainSchedulerDomain,
+  markTaskRunningAfterLaunchDomain,
+  type SchedulerDomainHost,
+} from './orchestrator/scheduler-domain.js';
+import {
+  finalizeFailedTransition,
+  handleCompletedTransition,
+  handleNeedsInputTransition,
+  handleReviewReadyTransition,
+  type TransitionDomainHost,
+} from './orchestrator/transitions.js';
 
 const MERGE_TRACE_LOG = resolve(homedir(), '.invoker', 'merge-trace.log');
 function mergeTrace(tag: string, data: Record<string, unknown>): void {
@@ -148,10 +159,6 @@ function parseMergeConflictError(
     ? obj.conflictFiles.filter((file): file is string => typeof file === 'string')
     : [];
   return { failedBranch, conflictFiles };
-}
-
-function nextLeaseExpiry(from: Date): Date {
-  return new Date(from.getTime() + ATTEMPT_LEASE_MS);
 }
 
 // ── Errors ──────────────────────────────────────────────────
@@ -1208,6 +1215,52 @@ export class Orchestrator {
       this.scheduler.removeJob(attemptId);
     }
     this.scheduler.removeJob(taskId);
+  }
+
+  private schedulerDomainHost(): SchedulerDomainHost {
+    return {
+      logger: this.logger,
+      maxConcurrency: this.maxConcurrency,
+      deferRunningUntilLaunch: this.deferRunningUntilLaunch,
+      launchOutboxMode: this.launchOutboxMode,
+      scheduler: this.scheduler,
+      taskRepository: this.taskRepository,
+      persistence: this.persistence,
+      messageBus: this.messageBus,
+      refreshFromDb: () => this.refreshFromDb(),
+      stateGetTask: (taskId) => this.stateGetTask(taskId),
+      countActivePersistedAttempts: () => this.countActivePersistedAttempts(),
+      ensureCurrentPendingAttempt: (task) => this.ensureCurrentPendingAttempt(task),
+      loadAttemptById: (attemptId) => this.loadAttemptById(attemptId),
+      isAttemptLeaseActive: (attempt, now) => this.isAttemptLeaseActive(attempt, now),
+      getExecutionGeneration: (task) => this.getExecutionGeneration(task),
+      writeAndSync: (taskId, changes) => this.writeAndSync(taskId, changes),
+      buildUpdateDelta: (before, after, changes) => this.buildUpdateDelta(before, after, changes),
+      clearQueuedSchedulerEntries: (taskId, attemptId) => this.clearQueuedSchedulerEntries(taskId, attemptId),
+    };
+  }
+
+  private transitionDomainHost(): TransitionDomainHost {
+    return {
+      logger: this.logger,
+      taskRepository: this.taskRepository,
+      persistence: this.persistence,
+      messageBus: this.messageBus,
+      stateGetTask: (taskId) => this.stateGetTask(taskId),
+      restoreTask: (task) => this.stateMachine.restoreTask(task),
+      writeAndSync: (taskId, changes) => this.writeAndSync(taskId, changes),
+      buildUpdateDelta: (before, after, changes) => this.buildUpdateDelta(before, after, changes),
+      setTaskApprovalStatus: (taskId, status, eventName, additionalChanges) =>
+        this.setTaskApprovalStatus(taskId, status, eventName, additionalChanges),
+      checkExperimentCompletion: (taskId) => this.checkExperimentCompletion(taskId),
+      autoStartReadyTasks: (taskIds, priority) => this.autoStartReadyTasks(taskIds, priority),
+      autoStartUnblockedTasks: () => this.autoStartUnblockedTasks(),
+      autoStartExternallyUnblockedReadyTasks: () => this.autoStartExternallyUnblockedReadyTasks(),
+      reenqueueDeferredPendingTasks: () => this.reenqueueDeferredPendingTasks(),
+      checkWorkflowCompletion: () => this.checkWorkflowCompletion(),
+      taskNotFoundError: (message) =>
+        new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, message),
+    };
   }
 
   getPersistedActiveTaskIds(now: number = Date.now()): Set<string> {
@@ -4250,106 +4303,12 @@ export class Orchestrator {
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'completed' }>,
   ): TaskState[] {
-    const task = this.stateGetTask(taskId);
-    const needsApproval = task?.config.requiresManualApproval === true;
-
-    const execution: {
-      exitCode: number;
-      completedAt: Date;
-      commit?: string;
-      agentSessionId?: string;
-      agentName?: string;
-      lastAgentSessionId?: string;
-      lastAgentName?: string;
-      branch?: string;
-      reviewUrl?: string;
-      reviewId?: string;
-      reviewStatus?: string;
-    } = {
-      exitCode: parsed.exitCode,
-      completedAt: new Date(),
-    };
-    if (parsed.commitHash !== undefined) {
-      execution.commit = parsed.commitHash;
-    }
-    if (parsed.agentSessionId !== undefined) {
-      execution.agentSessionId = parsed.agentSessionId;
-      execution.lastAgentSessionId = parsed.agentSessionId;
-      execution.lastAgentName = parsed.agentName ?? task?.execution.agentName ?? task?.execution.lastAgentName;
-    }
-    if (parsed.agentName !== undefined) {
-      execution.agentName = parsed.agentName;
-      execution.lastAgentName = parsed.agentName;
-    }
-    if (parsed.branch !== undefined) {
-      execution.branch = parsed.branch;
-    }
-    if (parsed.reviewUrl !== undefined) {
-      execution.reviewUrl = parsed.reviewUrl;
-    }
-    if (parsed.reviewId !== undefined) {
-      execution.reviewId = parsed.reviewId;
-    }
-    if (parsed.reviewStatus !== undefined) {
-      execution.reviewStatus = parsed.reviewStatus;
-    }
-
-    const changes: TaskStateChanges = {
-      status: needsApproval ? 'awaiting_approval' : 'completed',
-      config: { summary: parsed.summary },
-      execution,
-    };
-    const completedUpdated = this.writeAndSync(taskId, changes);
-    const delta: TaskDelta = this.buildUpdateDelta(task!, completedUpdated, changes);
-    const eventName = needsApproval ? 'task.awaiting_approval' : 'task.completed';
-    this.persistence.logEvent?.(taskId, eventName, changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-
-    // Dual-write: update current selected attempt to completed (best-effort)
-    try {
-      const currentAttemptId = this.stateGetTask(taskId)?.execution.selectedAttemptId;
-      const currentAttempt = currentAttemptId ? this.persistence.loadAttempt(currentAttemptId) : undefined;
-      if (currentAttempt && currentAttempt.status === 'running') {
-        this.taskRepository.updateAttempt(currentAttempt.id, {
-          status: needsApproval ? 'needs_input' : 'completed',
-          exitCode: parsed.exitCode,
-          completedAt: new Date(),
-          ...(parsed.commitHash !== undefined ? { commit: parsed.commitHash } : {}),
-          ...(parsed.agentSessionId !== undefined ? { agentSessionId: parsed.agentSessionId } : {}),
-        });
-      }
-    } catch { /* best effort */ }
-
-    // If task requires manual approval, don't trigger downstream tasks yet
-    if (needsApproval) return [];
-
-    this.checkExperimentCompletion(taskId);
-
-    const readyTaskIds = this.stateMachine.findNewlyReadyTasks(taskId);
-    this.logger.info('[orchestrator] handleCompleted', {
+    return handleCompletedTransition(
+      this.transitionDomainHost(),
       taskId,
-      newlyReadyCount: readyTaskIds.length,
-      readyTaskIds,
-    });
-    const started = this.autoStartReadyTasks(readyTaskIds);
-    started.push(...this.autoStartUnblockedTasks());
-    started.push(...this.autoStartExternallyUnblockedReadyTasks());
-
-    // Re-enqueue deferred tasks now that a slot freed up
-    if (this.deferredTaskIds.size > 0) {
-      for (const id of this.deferredTaskIds) {
-        const t = this.stateGetTask(id);
-        if (t && t.status === 'pending') {
-          const attemptId = this.ensureCurrentPendingAttempt(t);
-          this.scheduler.enqueue({ taskId: id, attemptId, priority: 0 });
-        }
-      }
-      this.deferredTaskIds.clear();
-      started.push(...this.drainScheduler());
-    }
-
-    this.checkWorkflowCompletion();
-    return started;
+      parsed,
+      (id) => this.stateMachine.findNewlyReadyTasks(id),
+    );
   }
 
   /**
@@ -4369,90 +4328,20 @@ export class Orchestrator {
     },
     eventName: string,
   ): TaskState[] {
-    const existing = this.stateGetTask(taskId);
-    if (!existing) {
-      throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `finalizeFailedTask: task ${taskId} not found in graph`);
-    }
-
-    const changes: TaskStateChanges = {
-      status: 'failed',
-      execution: {
-        ...executionFields,
-        completedAt: new Date(),
-      },
-    };
-
-    // Atomic write for task + attempt via repository
-    this.taskRepository.failTaskAndAttempt(taskId, changes, {
-      status: 'failed',
-      exitCode: executionFields.exitCode,
-      error: executionFields.error,
-      completedAt: new Date(),
-    });
-
-    // Sync to in-memory state (same pattern as writeAndSync)
-    const updated: TaskState = {
-      ...existing,
-      status: 'failed',
-      execution: { ...existing.execution, ...changes.execution },
-      taskStateVersion: existing.taskStateVersion + 1,
-    };
-    this.stateMachine.restoreTask(updated);
-
-    const delta: TaskDelta = this.buildUpdateDelta(existing, updated, changes);
-    this.persistence.logEvent?.(taskId, eventName, changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-
-    this.checkExperimentCompletion(taskId);
-
-    const readyTaskIds = this.stateMachine.findNewlyReadyTasks(taskId);
-    this.logger.info('[orchestrator] finalizeFailedTask', {
+    return finalizeFailedTransition(
+      this.transitionDomainHost(),
       taskId,
+      executionFields,
       eventName,
-      newlyReadyCount: readyTaskIds.length,
-      readyTaskIds,
-    });
-    const started = this.autoStartReadyTasks(readyTaskIds);
-    started.push(...this.autoStartUnblockedTasks());
-    started.push(...this.autoStartExternallyUnblockedReadyTasks());
-
-    // Re-enqueue deferred tasks now that a slot freed up
-    if (this.deferredTaskIds.size > 0) {
-      for (const id of this.deferredTaskIds) {
-        const t = this.stateGetTask(id);
-        if (t && t.status === 'pending') {
-          const attemptId = this.ensureCurrentPendingAttempt(t);
-          this.scheduler.enqueue({ taskId: id, attemptId, priority: 0 });
-        }
-      }
-      this.deferredTaskIds.clear();
-      started.push(...this.drainScheduler());
-    }
-
-    this.checkWorkflowCompletion();
-    return started;
+      (id) => this.stateMachine.findNewlyReadyTasks(id),
+    );
   }
 
   private handleReviewReady(
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'review_ready' }>,
   ): TaskState[] {
-    const changes: TaskStateChanges = {
-      config: { summary: parsed.summary },
-      execution: {
-        exitCode: parsed.exitCode,
-        branch: parsed.branch,
-        reviewUrl: parsed.reviewUrl,
-        reviewId: parsed.reviewId,
-        reviewStatus: parsed.reviewStatus,
-      },
-    };
-    this.setTaskApprovalStatus(taskId, 'review_ready', 'task.review_ready', changes);
-
-    const started = this.autoStartUnblockedTasks();
-    started.push(...this.autoStartExternallyUnblockedReadyTasks());
-    this.checkWorkflowCompletion();
-    return started;
+    return handleReviewReadyTransition(this.transitionDomainHost(), taskId, parsed);
   }
 
   private handleFailed(
@@ -4477,20 +4366,7 @@ export class Orchestrator {
     taskId: string,
     parsed: Extract<ParsedResponse, { type: 'needs_input' }>,
   ): TaskState[] {
-    const changes: TaskStateChanges = {
-      status: 'needs_input',
-      execution: { inputPrompt: parsed.prompt },
-    };
-    const needsInputBefore = this.stateGetTask(taskId)!;
-    const needsInputUpdated = this.writeAndSync(taskId, changes);
-    const currentAttemptId = needsInputUpdated.execution.selectedAttemptId;
-    if (currentAttemptId) {
-      this.taskRepository.updateAttempt(currentAttemptId, { status: 'needs_input' });
-    }
-    const delta: TaskDelta = this.buildUpdateDelta(needsInputBefore, needsInputUpdated, changes);
-    this.persistence.logEvent?.(taskId, 'task.needs_input', changes);
-    this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
-    return [];
+    return handleNeedsInputTransition(this.transitionDomainHost(), taskId, parsed);
   }
 
   private handleSpawnExperiments(
@@ -4626,6 +4502,19 @@ export class Orchestrator {
     for (const wfId of this.activeWorkflowIds) {
       this.touchWorkflow(wfId);
     }
+  }
+
+  private reenqueueDeferredPendingTasks(): TaskState[] {
+    if (this.deferredTaskIds.size === 0) return [];
+    for (const id of this.deferredTaskIds) {
+      const t = this.stateGetTask(id);
+      if (t && t.status === 'pending') {
+        const attemptId = this.ensureCurrentPendingAttempt(t);
+        this.scheduler.enqueue({ taskId: id, attemptId, priority: 0 });
+      }
+    }
+    this.deferredTaskIds.clear();
+    return this.drainScheduler();
   }
 
   private autoStartReadyTasks(taskIds: string[], priority: number = 0): TaskState[] {
@@ -4997,146 +4886,7 @@ export class Orchestrator {
 
   /** Drain the scheduler queue, starting tasks that fit the concurrency limit. */
   private drainScheduler(): TaskState[] {
-    const started: TaskState[] = [];
-    const activeAttempts = this.countActivePersistedAttempts();
-    let availableSlots = Math.max(0, this.maxConcurrency - activeAttempts);
-    this.logger.info('[orchestrator] drainScheduler: begin', {
-      active: activeAttempts,
-      maxConcurrency: this.maxConcurrency,
-      availableSlots,
-    });
-    let job = availableSlots > 0 ? this.scheduler.takeNext() : null;
-    while (job && availableSlots > 0) {
-      const task = this.stateGetTask(job.taskId);
-      this.logger.info('[orchestrator] drainScheduler: dequeued', {
-        taskId: job.taskId,
-        actualStatus: task?.status ?? 'NOT_FOUND',
-      });
-      if (!task || task.status !== 'pending') {
-        this.logger.info('[orchestrator] drainScheduler: skipping non-pending task', {
-          taskId: job.taskId,
-        });
-        job = this.scheduler.takeNext();
-        continue;
-      }
-
-      const now = new Date();
-      let attemptId = job.attemptId ?? this.ensureCurrentPendingAttempt(task);
-      let currentAttempt = this.loadAttemptById(attemptId);
-      if (!currentAttempt || isDiscardedAttempt(currentAttempt)) {
-        attemptId = this.ensureCurrentPendingAttempt(task);
-        currentAttempt = this.loadAttemptById(attemptId);
-      }
-      if (!currentAttempt || isDiscardedAttempt(currentAttempt)) {
-        this.logger.info('[orchestrator] drainScheduler: skipping non-runnable attempt', {
-          taskId: job.taskId,
-          attemptId,
-          attemptStatus: currentAttempt?.status ?? 'missing',
-        });
-        job = this.scheduler.takeNext();
-        continue;
-      }
-      let launchAttemptId = attemptId;
-      const selectedTask = this.stateGetTask(job.taskId) ?? task;
-      if (selectedTask.execution.selectedAttemptId !== attemptId) {
-        this.writeAndSync(job.taskId, { execution: { selectedAttemptId: attemptId } });
-      }
-      let claimSucceeded = false;
-      const claimPatch = this.deferRunningUntilLaunch
-        ? {
-            status: 'claimed' as const,
-            claimedAt: now,
-            lastHeartbeatAt: now,
-            leaseExpiresAt: nextLeaseExpiry(now),
-          }
-        : {
-            status: 'running' as const,
-            claimedAt: currentAttempt?.claimedAt ?? now,
-            startedAt: now,
-            lastHeartbeatAt: now,
-            leaseExpiresAt: nextLeaseExpiry(now),
-          };
-      claimSucceeded = this.taskRepository.claimAttemptForLaunch?.(attemptId, claimPatch, now)
-        ?? !this.isAttemptLeaseActive(currentAttempt, now.getTime());
-      if (claimSucceeded && !this.taskRepository.claimAttemptForLaunch) {
-        this.taskRepository.updateAttempt(attemptId, claimPatch);
-      }
-      if (!claimSucceeded) {
-        this.logger.info('[orchestrator] drainScheduler: skipping already-claimed attempt', {
-          taskId: job.taskId,
-          attemptId,
-        });
-        job = availableSlots > 0 ? this.scheduler.takeNext() : null;
-        continue;
-      }
-
-      const changes: TaskStateChanges = this.deferRunningUntilLaunch
-        ? {
-            status: 'pending',
-            execution: {
-              selectedAttemptId: launchAttemptId,
-              generation: this.getExecutionGeneration(task),
-              lastHeartbeatAt: now,
-              phase: 'launching',
-              launchStartedAt: now,
-              launchCompletedAt: undefined,
-            },
-          }
-        : {
-            status: 'running',
-            execution: {
-              selectedAttemptId: launchAttemptId,
-              generation: this.getExecutionGeneration(task),
-              startedAt: now,
-              lastHeartbeatAt: now,
-              phase: 'launching',
-              launchStartedAt: now,
-              launchCompletedAt: undefined,
-            },
-          };
-      const updated = this.writeAndSync(job.taskId, changes);
-      this.persistence.logEvent?.(
-        job.taskId,
-        this.deferRunningUntilLaunch ? 'task.launch_claimed' : 'task.running',
-        changes,
-      );
-      if (
-        this.launchOutboxMode !== 'disabled'
-        && typeof this.persistence.enqueueLaunchDispatch === 'function'
-        && task.config.workflowId
-      ) {
-        try {
-          const dispatch = this.persistence.enqueueLaunchDispatch({
-            taskId: job.taskId,
-            attemptId: launchAttemptId,
-            workflowId: task.config.workflowId,
-            generation: this.getExecutionGeneration(task),
-          });
-          this.persistence.logEvent?.(job.taskId, 'task.dispatch_enqueued', {
-            ...changes,
-            dispatchId: dispatch.id,
-          });
-        } catch (err) {
-          this.logger.warn('[orchestrator] drainScheduler: enqueueLaunchDispatch failed', {
-            taskId: job.taskId,
-            attemptId: launchAttemptId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(task, updated, changes));
-      started.push(updated);
-      this.logger.info('[orchestrator] drainScheduler: started', {
-        taskId: job.taskId,
-        attemptId: launchAttemptId,
-        phase: 'launching',
-        generation: changes.execution?.generation ?? 'unknown',
-      });
-
-      availableSlots -= 1;
-      job = availableSlots > 0 ? this.scheduler.takeNext() : null;
-    }
-    return started;
+    return drainSchedulerDomain(this.schedulerDomainHost());
   }
 
   /**
@@ -5146,97 +4896,6 @@ export class Orchestrator {
    * should abort the launched process in that case.
    */
   markTaskRunningAfterLaunch(taskId: string, attemptId: string, launchedAt: Date = new Date()): boolean {
-    this.refreshFromDb();
-    const task = this.stateGetTask(taskId);
-    if (!task) {
-      this.logger.info('[orchestrator] markTaskRunningAfterLaunch: reject', {
-        taskId,
-        attemptId,
-        reason: 'not_found',
-      });
-      this.clearQueuedSchedulerEntries(taskId, attemptId);
-      return false;
-    }
-
-    const selectedAttemptId = task.execution.selectedAttemptId;
-    if (selectedAttemptId !== attemptId) {
-      this.logger.info('[orchestrator] markTaskRunningAfterLaunch: reject', {
-        taskId,
-        attemptId,
-        reason: 'attempt_mismatch',
-        selectedAttemptId,
-      });
-      this.clearQueuedSchedulerEntries(taskId, attemptId);
-      return false;
-    }
-
-    const existingAttempt = this.loadAttemptById(attemptId);
-    if (!existingAttempt || isDiscardedAttempt(existingAttempt)) {
-      this.logger.info('[orchestrator] markTaskRunningAfterLaunch: reject', {
-        taskId,
-        attemptId,
-        reason: !existingAttempt ? 'attempt_missing' : 'attempt_superseded',
-      });
-      this.clearQueuedSchedulerEntries(taskId, attemptId);
-      return false;
-    }
-
-    if (task.status !== 'running' && task.status !== 'pending' && task.status !== 'fixing_with_ai') {
-      this.logger.info('[orchestrator] markTaskRunningAfterLaunch: reject', {
-        taskId,
-        attemptId,
-        reason: 'invalid_status',
-        status: task.status,
-      });
-      this.clearQueuedSchedulerEntries(taskId, attemptId);
-      return false;
-    }
-
-    if (task.status !== 'fixing_with_ai') {
-      const baseExecution: TaskStateChanges['execution'] = {
-        selectedAttemptId: attemptId,
-        lastHeartbeatAt: launchedAt,
-        phase: 'executing',
-        launchStartedAt: task.execution.launchStartedAt ?? task.execution.startedAt ?? launchedAt,
-        launchCompletedAt: launchedAt,
-      };
-      const changes: TaskStateChanges = task.status === 'pending'
-        ? {
-            status: 'running',
-            execution: {
-              ...baseExecution,
-              startedAt: launchedAt,
-              generation: this.getExecutionGeneration(task),
-            },
-          }
-        : { execution: baseExecution };
-
-      const launchUpdated = this.writeAndSync(taskId, changes);
-      this.persistence.logEvent?.(taskId, 'task.running', changes);
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(task, launchUpdated, changes));
-      this.logger.info('[orchestrator] markTaskRunningAfterLaunch: executing', {
-        taskId,
-        attemptId,
-        previousStatus: task.status,
-      });
-    }
-
-    try {
-      this.taskRepository.updateAttempt(attemptId, {
-        status: 'running',
-        claimedAt: existingAttempt.claimedAt ?? launchedAt,
-        startedAt: launchedAt,
-        lastHeartbeatAt: launchedAt,
-        leaseExpiresAt: nextLeaseExpiry(launchedAt),
-      });
-    } catch {
-      // best effort — do not fail launch-state transition due to attempt sync
-    }
-
-    this.logger.info('[orchestrator] markTaskRunningAfterLaunch: ok', {
-      taskId,
-      attemptId,
-    });
-    return true;
+    return markTaskRunningAfterLaunchDomain(this.schedulerDomainHost(), taskId, attemptId, launchedAt);
   }
 }
