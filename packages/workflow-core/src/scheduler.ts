@@ -69,7 +69,7 @@ export class TaskScheduler {
     }
 
     let removed = 0;
-    for (const attemptId of attemptIds) {
+    for (const attemptId of [...attemptIds]) {
       if (this.removeRunningAttempt(attemptId)) {
         removed += 1;
       }
@@ -112,20 +112,22 @@ export class TaskScheduler {
    * Returns null if at capacity or queue empty.
    */
   dequeue(): TaskJob | null {
-    if (this.queue.length === 0) {
+    if (this.running.size >= this.maxConcurrency) {
       return null;
     }
 
-    if (this.running.size < this.maxConcurrency) {
-      const job = this.queue.shift()!;
-      this.addRunning(job);
-      return {
-        ...job,
-        attemptId: this.getJobKey(job),
-      };
+    // INV-143 keeps persisted attempt leases as the authority; dequeue is the
+    // only path that mirrors queue removal into this in-memory running set.
+    const job = this.takeNext();
+    if (!job) {
+      return null;
     }
 
-    return null;
+    this.addRunning(job);
+    return {
+      ...job,
+      attemptId: this.getJobKey(job),
+    };
   }
 
   /** Mark a job as complete, freeing its slot. */

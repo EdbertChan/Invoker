@@ -24,18 +24,19 @@ fi
 # VS Code terminals set this, which breaks electron imports.
 unset ELECTRON_RUN_AS_NODE
 
-SANDBOX_FLAG=""
+ELECTRON_ARGS=()
 if [ "$(uname)" = "Linux" ]; then
   SANDBOX_BIN="$REPO_ROOT/node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox"
   # shellcheck disable=SC2086
   if ! stat -c '%U:%a' $SANDBOX_BIN 2>/dev/null | grep -q '^root:4755$'; then
-    SANDBOX_FLAG="--no-sandbox"
+    ELECTRON_ARGS+=(--no-sandbox)
   fi
-fi
 
-if [ "$(uname)" = "Linux" ]; then
   export LIBGL_ALWAYS_SOFTWARE=1
 fi
 
+ELECTRON_ARGS+=(packages/app/dist/main.js --headless run "$PLAN_FILE")
+
 echo "==> Submitting plan: $PLAN_FILE"
-./packages/app/node_modules/.bin/electron packages/app/dist/main.js $SANDBOX_FLAG --headless run "$PLAN_FILE"
+# INV-143 keeps plan submission on the same Electron launcher used by the GUI.
+exec ./scripts/electron.cjs "${ELECTRON_ARGS[@]}"
