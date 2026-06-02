@@ -12,11 +12,9 @@
  */
 
 import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig } from '@invoker/workflow-graph';
-import type { GraphMutation, OrchestratorPersistence, OrchestratorMessageBus } from './orchestrator.js';
+import type { GraphMutation } from './orchestrator.js';
 import { createTaskState } from '@invoker/workflow-graph';
 import { findLeafTaskIds } from '@invoker/workflow-graph';
-
-const TASK_DELTA_CHANNEL = 'task.delta';
 
 // ── Host Interface ──────────────────────────────────────────
 
@@ -30,10 +28,11 @@ export interface GraphMutationHost {
     getTask(id: string): TaskState | undefined;
     restoreTask(task: TaskState): void;
   };
-  persistence: OrchestratorPersistence;
-  messageBus: OrchestratorMessageBus;
   writeAndSync(taskId: string, changes: TaskStateChanges): TaskState;
   createAndSync(task: TaskState): TaskState;
+  buildUpdateDelta(before: TaskState, after: TaskState, changes: TaskStateChanges): TaskDelta;
+  logTaskEvent(taskId: string, eventType: string, payload?: unknown): void;
+  publishDelta(delta: TaskDelta): void;
   getMergeNode(workflowId: string): TaskState | undefined;
 }
 
@@ -118,13 +117,7 @@ export function reconcileMergeLeavesImpl(host: GraphMutationHost, workflowId: st
     execution: {},
   };
   const updated = host.writeAndSync(mergeNode.id, changes);
-  host.messageBus.publish(TASK_DELTA_CHANNEL, {
-    type: 'updated',
-    taskId: mergeNode.id,
-    changes,
-    taskStateVersion: updated.taskStateVersion,
-    previousTaskStateVersion: mergeNode.taskStateVersion,
-  });
+  host.publishDelta(host.buildUpdateDelta(mergeNode, updated, changes));
 }
 
 /**
@@ -150,8 +143,8 @@ export function applyGraphMutationImpl(host: GraphMutationHost, mutation: GraphM
     );
     const remapChanges: TaskStateChanges = { dependencies: newDeps };
     const remapped = host.writeAndSync(task.id, remapChanges);
-    const delta: TaskDelta = { type: 'updated', taskId: task.id, changes: remapChanges, taskStateVersion: remapped.taskStateVersion, previousTaskStateVersion: task.taskStateVersion };
-    host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    const delta = host.buildUpdateDelta(task, remapped, remapChanges);
+    host.publishDelta(delta);
     allDeltas.push(delta);
   }
 
@@ -169,19 +162,21 @@ export function applyGraphMutationImpl(host: GraphMutationHost, mutation: GraphM
   } as TaskStateChanges;
   const sourceTaskBefore = host.stateMachine.getTask(mutation.sourceNodeId);
   const updatedSource = host.writeAndSync(mutation.sourceNodeId, sourceChanges);
-  const sourceDelta: TaskDelta = {
-    type: 'updated',
-    taskId: mutation.sourceNodeId,
-    changes: sourceChanges,
-    taskStateVersion: updatedSource.taskStateVersion,
-    previousTaskStateVersion: sourceTaskBefore?.taskStateVersion ?? 0,
-  };
-  host.persistence.logEvent?.(
+  const sourceDelta: TaskDelta = sourceTaskBefore
+    ? host.buildUpdateDelta(sourceTaskBefore, updatedSource, sourceChanges)
+    : {
+        type: 'updated',
+        taskId: mutation.sourceNodeId,
+        changes: sourceChanges,
+        taskStateVersion: updatedSource.taskStateVersion,
+        previousTaskStateVersion: 0,
+      };
+  host.logTaskEvent(
     mutation.sourceNodeId,
     mutation.sourceDisposition === 'complete' ? 'task.completed' : 'task.stale',
     sourceChanges,
   );
-  host.messageBus.publish(TASK_DELTA_CHANNEL, sourceDelta);
+  host.publishDelta(sourceDelta);
   allDeltas.push(sourceDelta);
 
   // 3. Create new nodes
@@ -214,8 +209,8 @@ export function applyGraphMutationImpl(host: GraphMutationHost, mutation: GraphM
     const task = createTaskState(nodeDef.id, nodeDef.description, nodeDef.dependencies, nodeConfig);
     host.createAndSync(task);
     const delta: TaskDelta = { type: 'created', task };
-    host.persistence.logEvent?.(task.id, 'task.created');
-    host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+    host.logTaskEvent(task.id, 'task.created');
+    host.publishDelta(delta);
     allDeltas.push(delta);
   }
 
