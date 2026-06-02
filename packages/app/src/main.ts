@@ -64,7 +64,7 @@ import { makeEnvelope, CommandError } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { SQLiteAdapter, ConversationRepository, SqliteTaskRepository } from '@invoker/data-store';
-import { IpcBus, Channels, TransportError, TransportErrorCode } from '@invoker/transport';
+import { IpcBus, Channels } from '@invoker/transport';
 import {
   WorkspaceProbeAdapter,
   ContainerProbeAdapter,
@@ -184,10 +184,19 @@ import { registerReadOnlyIpcHandlers } from './ipc-read-handlers.js';
 import { createTaskDeltaStreamSequence } from './task-delta-stream-sequence.js';
 import { startReviewGateStatusWorker, type ReviewGateStatusWorker } from './review-gate-status-worker.js';
 import {
-  executeNoTrackHeadlessBatch,
-  type HeadlessBatchExecRequest,
   type HeadlessExecMutationPayload,
 } from './headless-batch-exec.js';
+import {
+  initializeGuiBootstrap,
+  registerGuiActivateHandler,
+} from './bootstrap/app-bootstrap.js';
+import {
+  createGuiMutationRegistration,
+  registerOwnerDelegationIpc,
+  type GuiMutationPayload,
+  type HeadlessRunMutationPayload,
+  type HeadlessResumeMutationPayload,
+} from './ipc/ipc-registration.js';
 
 function isTaskInFlightForForcedStop(task: TaskState): boolean {
   return task.status === 'running'
@@ -261,21 +270,6 @@ let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
 let writerLock: DbWriterLockResult | null = null;
 const workflowMutationOwnerId = `owner-${process.pid}-${Date.now()}`;
 const appProcessStartedAt = Date.now();
-
-interface GuiMutationPayload {
-  channel: string;
-  args: unknown[];
-}
-
-interface HeadlessRunMutationPayload {
-  planPath: string;
-  traceId?: string;
-}
-
-interface HeadlessResumeMutationPayload {
-  workflowId: string;
-  traceId?: string;
-}
 
 type HeadlessOwnerMode = 'standalone' | 'gui';
 
@@ -1289,7 +1283,6 @@ function createEmbeddedTerminalBackendFromConfig(
   // process-local duplicate-suppression guard. The renderer's
   // `activeExecutions` count now just reflects spawned execution
   // handles in `taskHandles`.
-  const guiMutationHandlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();
   let dbPollInterval: ReturnType<typeof setInterval> | null = null;
   let activityPollInterval: ReturnType<typeof setInterval> | null = null;
   let uiPerfLogInterval: ReturnType<typeof setInterval> | null = null;
@@ -2226,42 +2219,17 @@ function createEmbeddedTerminalBackendFromConfig(
     });
   }
 
-  function registerGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    guiMutationHandlers.set(channel, handler as (...args: unknown[]) => Promise<unknown>);
-    ipcMain.handle(channel, async (_event, ...args: unknown[]) => {
-      if (ownerMode) {
-        return handler(...args);
-      }
-      const translated = translateGuiMutationToHeadless({ channel, args });
-      if (!translated) {
-        throw new Error(`No owner delegation route is available for ${channel}`);
-      }
-      try {
-        return await messageBus.request<typeof translated.request, TResult>(translated.channel, translated.request);
-      } catch (err) {
-        if (err instanceof TransportError && err.code === TransportErrorCode.NO_HANDLER) {
-          throw new Error('No mutation owner is available');
-        }
-        throw err;
-      }
-    });
-  }
-
-  function registerWorkflowScopedGuiMutationHandler<TResult = unknown>(
-    channel: string,
-    resolveWorkflowId: (...args: unknown[]) => string | undefined,
-    priority: WorkflowMutationPriority,
-    handler: (...args: unknown[]) => Promise<TResult>,
-  ): void {
-    workflowMutationDispatcher.set(channel, (...args: unknown[]) => handler(...args));
-    registerGuiMutationHandler(channel, async (...args: unknown[]) => {
-      const workflowId = resolveWorkflowId(...args);
-      return runWorkflowMutation(workflowId, priority, channel, args, () => handler(...args));
-    });
-  }
+  const {
+    registerGuiMutationHandler,
+    registerWorkflowScopedGuiMutationHandler,
+  } = createGuiMutationRegistration({
+    ipcMain,
+    getOwnerMode: () => ownerMode,
+    getMessageBus: () => messageBus,
+    translateGuiMutationToHeadless,
+    runWorkflowMutation,
+    workflowMutationDispatcher,
+  });
 
   function createWindow(): void {
     recordStartupMark('createWindow.begin');
@@ -2700,24 +2668,19 @@ function createEmbeddedTerminalBackendFromConfig(
   }
 
   app.whenReady().then(async () => {
-    recordStartupMark('app.whenReady');
-    ownerMode = true;
-    try {
-      recordStartupMark('initServices.start');
-      await initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      recordStartupMark('initServices.end', { ownerMode: true });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!message.includes('[db-writer-lock]')) {
+    const bootstrapMode = await initializeGuiBootstrap({
+      recordStartupMark,
+      initOwnerServices: () => initServices({ executionAgentRegistry: agentRegistry, startupSyncMode: 'none' }),
+      initFollowerServices: () => initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' }),
+      setOwnerMode: (nextOwnerMode) => {
+        ownerMode = nextOwnerMode;
+      },
+      onFatalStartupError: (message) => {
         process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
         app.quit();
-        return;
-      }
-      recordStartupMark('initServices.readOnly.start');
-      await initServices({ readOnly: true, executionAgentRegistry: agentRegistry, startupSyncMode: 'none' });
-      ownerMode = false;
-      recordStartupMark('initServices.readOnly.end', { ownerMode: false });
-    }
+      },
+    });
+    if (bootstrapMode === 'quit') return;
 
     if (ownerMode) {
       rebuildTaskRunner();
@@ -2777,96 +2740,22 @@ function createEmbeddedTerminalBackendFromConfig(
       workflowMutationDispatcher.set('surface:approve-task', async (taskIdArg: unknown) => {
         await performSharedApproveTask(String(taskIdArg), 'surface');
       });
-      messageBus.onRequest('headless.owner-ping', async () => ({
-        ok: true,
-        ownerId: workflowMutationOwnerId,
-        mode: 'gui',
-      }));
-      messageBus.onRequest('headless.query', async (req: unknown) => {
-        const { kind, reset } = req as { kind?: string; reset?: boolean };
-        if (kind === 'ui-perf') {
-          if (reset) {
-            resetUiPerfStats();
-          }
-          return {
-            ownerMode: 'gui',
-            ...getUiPerfStats(),
-          };
-        }
-        if (kind === 'queue') {
-          return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
-        }
-        throw new Error(`Unsupported headless query: ${String(kind)}`);
+      registerOwnerDelegationIpc({
+        messageBus,
+        logger,
+        workflowMutationOwnerId,
+        getWorkflowMutationCoordinator: () => workflowMutationCoordinator,
+        getQueueStatus: () => orchestrator.getQueueStatus() as unknown as Record<string, unknown>,
+        getUiPerfStats,
+        resetUiPerfStats,
+        executeHeadlessRun,
+        executeHeadlessResume,
+        executeHeadlessExec,
+        classifyHeadlessExecMutation,
+        acknowledgeNoTrackHeadlessExec,
+        runWorkflowMutation,
+        recordStartupMark,
       });
-      messageBus.onRequest('headless.run', async (req: unknown) => {
-        const { planPath, traceId } = req as { planPath: string; traceId?: string };
-        logger.info(
-          `headless.run received trace=${traceId ?? '<none>'} planPath="${planPath}" ownerId=${workflowMutationOwnerId} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        const result = await executeHeadlessRun({ planPath });
-        logger.info(
-          `headless.run accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        return result;
-      });
-
-      messageBus.onRequest('headless.resume', async (req: unknown) => {
-        const { workflowId, traceId } = req as { workflowId: string; traceId?: string };
-        logger.info(
-          `headless.resume received trace=${traceId ?? '<none>'} workflowId="${workflowId}" ownerId=${workflowMutationOwnerId} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        const result = await executeHeadlessResume({ workflowId });
-        logger.info(
-          `headless.resume accepted trace=${traceId ?? '<none>'} workflow="${result.workflowId}" tasks=${result.tasks.length} mode=gui`,
-          { module: 'ipc-delegate' },
-        );
-        return result;
-      });
-
-      messageBus.onRequest('headless.exec', async (req: unknown) => {
-        const { args, waitForApproval: delegatedWait, noTrack: delegatedNoTrack, traceId } =
-          req as { args: string[]; waitForApproval?: boolean; noTrack?: boolean; traceId?: string };
-        if (!Array.isArray(args) || args.length === 0) {
-          throw new Error('Missing delegated headless command arguments');
-        }
-        const payload: HeadlessExecMutationPayload = {
-          args,
-          waitForApproval: delegatedWait,
-          noTrack: delegatedNoTrack,
-          traceId,
-        };
-        logHeadlessExecReceived(payload, 'gui');
-        const { workflowId, priority } = classifyHeadlessExecMutation(payload);
-        const acknowledgement = acknowledgeNoTrackHeadlessExec(payload, workflowId, priority, 'gui');
-        if (acknowledgement) return acknowledgement;
-        return runWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => executeHeadlessExec(payload));
-      });
-      messageBus.onRequest('headless.batch-exec', async (req: unknown) => {
-        const request = req as HeadlessBatchExecRequest;
-        const itemCount = Array.isArray(request.items) ? request.items.length : 0;
-        logger.info(`headless.batch-exec received items=${itemCount} noTrack=${request.noTrack ? 'true' : 'false'} mode=gui`, {
-          module: 'ipc-delegate',
-        });
-        if (!workflowMutationCoordinator) {
-          throw new Error('Workflow mutation coordinator is unavailable');
-        }
-        const coordinator = workflowMutationCoordinator;
-        const results = executeNoTrackHeadlessBatch(request, {
-          classify: classifyHeadlessExecMutation,
-          submit: (workflowId, priority, channel, args, options) =>
-            coordinator.submit(workflowId, priority, channel, args, options),
-        });
-        const accepted = results.filter((result) => result.ok).length;
-        logger.info(`headless.batch-exec accepted=${accepted} failed=${results.length - accepted} mode=gui`, {
-          module: 'ipc-delegate',
-        });
-        return results;
-      });
-      logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
-      recordStartupMark('owner-ipc-ready');
     }
 
     bootstrapInitialWorkflowState();
@@ -4049,10 +3938,10 @@ function createEmbeddedTerminalBackendFromConfig(
     createWindow();
     recordStartupMark('createWindow.end');
 
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
+    registerGuiActivateHandler({
+      app,
+      BrowserWindow,
+      createWindow,
     });
   }).catch((err) => {
     process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
