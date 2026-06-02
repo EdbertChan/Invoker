@@ -1,0 +1,29 @@
+{
+  "name": "Public engineering example - Git merge strategy architecture",
+  "workType": "architecture",
+  "sourcePlan": "- Decide how a merge strategy should handle rename conflicts.\n- Compare alternatives for preserving history, minimizing surprising conflict markers, and keeping rerere evidence useful.\n- Capture a prototype or experiment artifact before committing to behavior.\n- Implement only the selected decision boundary in a follow-up workflow.\n- Run focused conflict-scenario verification and terminal regression checks last.",
+  "expectedSourceClaims": [
+    "merge strategy",
+    "rename conflicts",
+    "preserving history",
+    "conflict markers",
+    "rerere evidence",
+    "experiment artifact",
+    "decision boundary",
+    "terminal regression"
+  ],
+  "requiredWorkflowProperties": [
+    "alternatives",
+    "decision boundary",
+    "terminal verification last"
+  ],
+  "forbiddenSplitPatterns": [
+    "programming-language-specific assumption"
+  ],
+  "expectedSummaryClaims": [
+    "merge strategy",
+    "rename conflicts",
+    "experiment",
+    "verification"
+  ]
+}

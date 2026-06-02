@@ -1,0 +1,31 @@
+{
+  "name": "Invoker git-config PR split",
+  "workType": "coding",
+  "profile": "invoker_review_compression",
+  "sourcePlan": "- Add a git config reader for Invoker target repositories.\n- Expose repository identity and preferred branch through the API contract.\n- Keep the split reviewable as stacked workflows.\n- Add fixtures for missing config, valid config, and malformed config.\n- Verify the terminal workflow with the package test suite.",
+  "expectedSourceClaims": [
+    "git config reader",
+    "repository identity",
+    "preferred branch",
+    "stacked workflows",
+    "missing config",
+    "valid config",
+    "malformed config",
+    "terminal workflow"
+  ],
+  "requiredWorkflowProperties": [
+    "review metadata",
+    "source claim coverage",
+    "terminal verification last"
+  ],
+  "forbiddenSplitPatterns": [
+    "dormant foundation without activation",
+    "generic chunks"
+  ],
+  "expectedSummaryClaims": [
+    "git config",
+    "API contract",
+    "fixtures",
+    "terminal verification"
+  ]
+}

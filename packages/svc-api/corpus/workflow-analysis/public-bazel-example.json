@@ -1,0 +1,28 @@
+{
+  "name": "Public engineering example - Bazel remote cache debugging",
+  "workType": "debugging",
+  "sourcePlan": "- Reproduce a remote cache miss using a minimal build target.\n- Capture evidence that action keys differ between local and remote execution.\n- Compare counterarguments around environment variables, toolchain selection, and declared inputs.\n- Implement the narrow fix only after the evidence points to the cause.\n- Verify with the minimal target first, then run terminal regression coverage.",
+  "expectedSourceClaims": [
+    "remote cache miss",
+    "minimal build target",
+    "action keys",
+    "counterarguments",
+    "environment variables",
+    "toolchain selection",
+    "declared inputs",
+    "terminal regression"
+  ],
+  "requiredWorkflowProperties": [
+    "evidence before fix",
+    "terminal verification last"
+  ],
+  "forbiddenSplitPatterns": [
+    "programming-language-specific assumption"
+  ],
+  "expectedSummaryClaims": [
+    "remote cache",
+    "evidence",
+    "fix",
+    "regression"
+  ]
+}

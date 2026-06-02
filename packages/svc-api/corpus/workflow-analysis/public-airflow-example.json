@@ -1,0 +1,29 @@
+{
+  "name": "Public engineering example - Airflow scheduler research",
+  "workType": "research",
+  "sourcePlan": "- Research scheduler backpressure behavior under a large DAG backlog.\n- Compare alternatives for queue fairness, worker slot accounting, and retry timing.\n- Produce an experiment artifact that records assumptions and observed tradeoffs.\n- Recommend the smallest architecture decision that can be reviewed independently.\n- Verify the recommendation against the original backlog scenario.",
+  "expectedSourceClaims": [
+    "scheduler backpressure",
+    "large DAG backlog",
+    "queue fairness",
+    "worker slot accounting",
+    "retry timing",
+    "experiment artifact",
+    "architecture decision",
+    "backlog scenario"
+  ],
+  "requiredWorkflowProperties": [
+    "alternatives",
+    "experiment artifact",
+    "decision proof"
+  ],
+  "forbiddenSplitPatterns": [
+    "programming-language-specific assumption"
+  ],
+  "expectedSummaryClaims": [
+    "scheduler",
+    "tradeoffs",
+    "experiment",
+    "recommendation"
+  ]
+}

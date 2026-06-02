@@ -1,0 +1,31 @@
+{
+  "name": "Invoker review-compression policy",
+  "workType": "architecture",
+  "profile": "invoker_review_compression",
+  "sourcePlan": "- Define a profile named invoker_review_compression.\n- Prefer functional workflow slices over file-only chunks.\n- Reject dormant foundations unless the slice includes activation or verification proof.\n- Require review claim, safety invariant, slice rationale, and architectural effect on every workflow.\n- Preserve source-claim coverage in the quality report.",
+  "expectedSourceClaims": [
+    "invoker_review_compression",
+    "functional workflow slices",
+    "dormant foundations",
+    "review claim",
+    "safety invariant",
+    "slice rationale",
+    "architectural effect",
+    "source-claim coverage"
+  ],
+  "requiredWorkflowProperties": [
+    "review metadata",
+    "coverage map",
+    "forbidden pattern findings"
+  ],
+  "forbiddenSplitPatterns": [
+    "file-only chunks",
+    "dormant foundation without activation"
+  ],
+  "expectedSummaryClaims": [
+    "profile",
+    "functional",
+    "review",
+    "coverage"
+  ]
+}
