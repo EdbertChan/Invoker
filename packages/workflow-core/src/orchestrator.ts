@@ -878,8 +878,29 @@ export class Orchestrator {
   }
 
   /**
-   * Write field changes to the DB, then update the in-memory cache
-   * to match. Returns the updated task state.
+   * Load the authoritative persisted task row after a write and restore it
+   * into the in-memory cache. INV-88 selected this DB-first path over an
+   * in-memory-primary graph: persistence-side normalization and versioning
+   * must be consumed before deltas are published.
+   */
+  private restorePersistedTaskAfterWrite(taskId: string, workflowId: string | undefined): TaskState {
+    const workflowIds = workflowId ? [workflowId] : [...this.activeWorkflowIds];
+    for (const wfId of workflowIds) {
+      const persisted = this.persistence.loadTasks(wfId).find((task) => task.id === taskId);
+      if (persisted) {
+        this.stateMachine.restoreTask(persisted);
+        return persisted;
+      }
+    }
+    if (workflowId) {
+      throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `restorePersistedTaskAfterWrite: task ${taskId} not found in DB`);
+    }
+    throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `restorePersistedTaskAfterWrite: task ${taskId} not found in active workflow DB rows`);
+  }
+
+  /**
+   * Write field changes to the DB, then reload the authoritative persisted
+   * row into the in-memory cache. Returns the persisted updated task state.
    */
   private writeAndSync(
     taskId: string,
@@ -892,16 +913,7 @@ export class Orchestrator {
     }
     const id = existing.id;
     this.taskRepository.updateTask(id, changes);
-    const updated: TaskState = {
-      ...existing,
-      ...(changes.status !== undefined ? { status: changes.status } : {}),
-      ...(changes.dependencies !== undefined ? { dependencies: changes.dependencies } : {}),
-      // Type assertion: spread widens the discriminated union but the runtime
-      // value preserves the correct runnerKind discriminant from existing.config.
-      config: { ...existing.config, ...changes.config } as TaskConfig,
-      execution: { ...existing.execution, ...changes.execution },
-      taskStateVersion: existing.taskStateVersion + 1,
-    };
+    const updated = this.restorePersistedTaskAfterWrite(id, existing.config.workflowId);
     if (process.env.NODE_ENV !== 'test' && TRACE_PERSIST_SYNC) {
       const ex = updated.execution;
       const execKeys = changes.execution ? Object.keys(changes.execution).join(',') : '';
@@ -917,7 +929,6 @@ export class Orchestrator {
         execKeys: execKeys || '—',
       });
     }
-    this.stateMachine.restoreTask(updated);
     if (!opts?.skipWorkflowStatusSync && changes.status !== undefined && existing.config.workflowId) {
       this.touchWorkflow(existing.config.workflowId);
     }
@@ -4424,14 +4435,7 @@ export class Orchestrator {
       completedAt: new Date(),
     });
 
-    // Sync to in-memory state (same pattern as writeAndSync)
-    const updated: TaskState = {
-      ...existing,
-      status: 'failed',
-      execution: { ...existing.execution, ...changes.execution },
-      taskStateVersion: existing.taskStateVersion + 1,
-    };
-    this.stateMachine.restoreTask(updated);
+    const updated = this.restorePersistedTaskAfterWrite(existing.id, existing.config.workflowId);
 
     const delta: TaskDelta = this.buildUpdateDelta(existing, updated, changes);
     this.persistence.logEvent?.(taskId, eventName, changes);
