@@ -56,5 +56,32 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('passes an abortable context to running jobs', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-abort';
+    const started = deferred();
+    const aborted = deferred();
+    let seenWorkflowId = '';
+    let seenReason: unknown;
+
+    const running = c.enqueue(wf, 'normal', async (context) => {
+      seenWorkflowId = context.workflowId;
+      context.signal.addEventListener('abort', () => {
+        seenReason = context.signal.reason;
+        aborted.resolve();
+      }, { once: true });
+      started.resolve();
+      await aborted.promise;
+    });
+
+    await started.promise;
+    expect(c.abortRunning(wf, new Error('superseded'))).toBe(true);
+    await running;
+
+    expect(seenWorkflowId).toBe(wf);
+    expect(seenReason).toBeInstanceOf(Error);
+    expect((seenReason as Error).message).toBe('superseded');
+    expect(c.abortRunning(wf)).toBe(false);
+  });
+});
