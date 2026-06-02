@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 
 import { scopePlanTaskId } from '@invoker/workflow-core';
-import type { Orchestrator, TaskState, ExperimentVariant, RunnerKind } from '@invoker/workflow-core';
+import type { Orchestrator, TaskState, RunnerKind } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { WorkRequest, WorkResponse, ActionType, Logger } from '@invoker/contracts';
 import { ATTEMPT_LEASE_MS } from '@invoker/contracts';
@@ -59,6 +59,9 @@ import {
   type PrAuthoringContext,
 } from './pr-authoring.js';
 import { assertNotGitConfigMutation, ensureRemoteUrl } from './git-config-mutation.js';
+import { notifyLaunchStart, prepareTaskLaunch } from './task-runner-prepare.js';
+import { buildPivotResponse, completeLaunchDispatch } from './task-runner-dispatch.js';
+import { buildFailedWorkResponse, routeWorkerResponse, wireExecutorCompletion } from './task-runner-finalize.js';
 
 export type { TaskRunnerCallbacks } from './task-runner-callbacks.js';
 
@@ -264,7 +267,7 @@ export class TaskRunner {
   private dockerConfig: { imageName?: string; secretsFile?: string };
   private executionAgentRegistry?: AgentRegistry;
   private logger: Logger;
-  private readonly runnerInstanceId = randomUUID();
+  /** @internal */ readonly runnerInstanceId = randomUUID();
   /** Cache for SSH executors, keyed by poolMemberId. One instance per target for correct git locking. */
   private sshExecutorCache = new Map<string, SshExecutor>();
   private poolRoundRobinCursor = new Map<string, number>();
@@ -272,8 +275,8 @@ export class TaskRunner {
   private freshBaseCommits = new Map<string, FreshBaseCommit>();
 
   /** In-flight executions keyed by attemptId (with taskId retained for external kill resolution). */
-  private activeExecutions = new Map<string, ActiveExecutionEntry>();
-  private launchingAttemptIds = new Set<string>();
+  /** @internal */ activeExecutions = new Map<string, ActiveExecutionEntry>();
+  /** @internal */ launchingAttemptIds = new Set<string>();
 
   /** Serializes async onComplete handlers so orchestrator mutations never overlap. */
   private completionChain: Promise<void> = Promise.resolve();
@@ -492,41 +495,14 @@ export class TaskRunner {
       phase: task.execution.phase,
       generation: startGeneration,
     });
-    if (this.launchingAttemptIds.has(attemptId) || this.activeExecutions.has(attemptId)) {
-      traceExecution(
-        `[TaskRunner] executeTask skipping duplicate launch for task=${task.id} attempt=${attemptId}`,
-      );
-      bench('executeTask.duplicateSkipped');
-      if (dispatchOpts) {
-        // Another runner already owns this attempt — release the dispatch
-        // row so the dispatcher can re-queue if needed instead of orphaning.
-        dispatchOpts.launchOutbox.failDispatch(
-          dispatchOpts.dispatchId,
-          new Error('Duplicate launch suppressed in TaskRunner'),
-        );
-      }
-      return;
-    }
-    if (dispatchOpts) {
-      const accepted = dispatchOpts.launchOutbox.ackDispatch(
-        dispatchOpts.dispatchId,
-        this.runnerInstanceId,
-      );
-      if (!accepted) {
-        this.logger.warn(
-          `[TaskRunner] launch dispatch ack rejected (lease reaped?) for task=${task.id} attempt=${attemptId} dispatchId=${dispatchOpts.dispatchId}`,
-        );
-        bench('executeTask.dispatchAckRejected');
-        return;
-      }
-    }
-    this.logger.info(
-      `[TaskRunner] launch accepted task=${task.id} attempt=${attemptId} status=${task.status} ` +
-        `phase=${task.execution.phase ?? 'none'} generation=${startGeneration} ` +
-        `dispatchId=${dispatchOpts?.dispatchId ?? 'none'}`,
-    );
-    this.launchingAttemptIds.add(attemptId);
-    this.callbacks.onLaunchAccepted?.(task.id);
+    const launchPrepared = prepareTaskLaunch({
+      runnerInstanceId: this.runnerInstanceId,
+      launchingAttemptIds: this.launchingAttemptIds,
+      activeExecutions: this.activeExecutions,
+      callbacks: this.callbacks,
+      logger: this.logger,
+    }, task, attemptId, startGeneration, bench, dispatchOpts);
+    if (!launchPrepared) return;
     try {
       await this.executeTaskInner(task, attemptId, bench, dispatchOpts);
       bench('executeTask.innerReturned');
@@ -583,22 +559,8 @@ export class TaskRunner {
       }
       // Clean up per-task Docker executor on startup/execution failure
       await this.cleanupPerTaskDockerExecutor(task);
-      const response: WorkResponse = {
-        requestId: `err-${task.id}`,
-        actionId: task.id,
-        attemptId,
-        executionGeneration: task.execution.generation ?? 0,
-        status: 'failed',
-        outputs: {
-          exitCode: 1,
-          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-        },
-      };
-      this.callbacks.onComplete?.(task.id, response);
-      const newlyStarted = this.orchestrator.handleWorkerResponse(response) ?? [];
-      if (newlyStarted.length > 0) {
-        this.executeTasks(newlyStarted);
-      }
+      const response = buildFailedWorkResponse(task, attemptId, err);
+      routeWorkerResponse(this, task, response);
     } finally {
       this.launchingAttemptIds.delete(attemptId);
       bench('executeTask.settled');
@@ -622,25 +584,7 @@ export class TaskRunner {
     // response instead of running through the executor.
     if (task.config.pivot && task.config.experimentVariants && task.config.experimentVariants.length > 0) {
       bench('executeTaskInner.pivotResponse');
-      const response: WorkResponse = {
-        requestId: `req-${task.id}`,
-        actionId: task.id,
-        attemptId,
-        executionGeneration: task.execution.generation ?? 0,
-        status: 'spawn_experiments',
-        outputs: {},
-        dagMutation: {
-          spawnExperiments: {
-            description: task.description,
-            variants: task.config.experimentVariants.map((v: ExperimentVariant) => ({
-              id: v.id,
-              description: v.description,
-              prompt: v.prompt,
-              command: v.command,
-            })),
-          },
-        },
-      };
+      const response = buildPivotResponse(task, attemptId);
       const newlyStarted = this.orchestrator.handleWorkerResponse(response) ?? [];
       if (newlyStarted.length > 0) {
         this.executeTasks(newlyStarted);
@@ -653,20 +597,7 @@ export class TaskRunner {
       // abandoned. The spawn_experiments path is the terminal state
       // for the pivot itself; only the spawned variants should
       // continue through the outbox.
-      if (dispatchOpts) {
-        try {
-          dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
-        } catch (err) {
-          // completeDispatch is best-effort here — if the row has
-          // already been failed or completed by another path the
-          // failure is benign. Log and continue so the pivot's
-          // observable behaviour (spawning variants) is unaffected.
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[task-runner] pivot completeDispatch failed for dispatchId=${dispatchOpts.dispatchId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
+      completeLaunchDispatch(dispatchOpts, 'pivot');
       bench('executeTaskInner.pivotReturned', {
         newlyStartedCount: newlyStarted.length,
       });
@@ -841,7 +772,7 @@ export class TaskRunner {
       bench('onLaunchStart.before', {
         executorType: executor.type,
       });
-      this.callbacks.onLaunchStart?.(task.id, executor);
+      notifyLaunchStart(this, task.id, executor);
       bench('executor.start.before', {
         executorType: executor.type,
       });
@@ -981,9 +912,7 @@ export class TaskRunner {
       return;
     }
     bench('markTaskRunningAfterLaunch.accepted');
-    if (dispatchOpts) {
-      dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
-    }
+    completeLaunchDispatch(dispatchOpts, 'launch');
 
     // Persist execution metadata immediately at task start — all fields explicit
     {
@@ -1111,65 +1040,17 @@ export class TaskRunner {
       this.callbacks.onHeartbeat?.(task.id);
     });
 
-    // Wait for completion and feed response to orchestrator.
-    // The callback is serialized through completionChain so that concurrent
-    // onComplete firings never overlap inside orchestrator mutations.
-    return new Promise<void>((resolvePromise) => {
-      executor.onComplete(handle, async (response: WorkResponse) => {
-        const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
-          const activeExecution = this.activeExecutions.get(normalizedResponse.attemptId ?? attemptId);
-          if (activeExecution?.leaseResourceKey && activeExecution.leaseHolderId) {
-            this.persistence.releaseExecutionResourceLease?.(activeExecution.leaseResourceKey, activeExecution.leaseHolderId);
-          }
-          this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
-          this.logger.info(
-            `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
-              `status=${normalizedResponse.status} exitCode=${normalizedResponse.outputs.exitCode ?? 'none'} ` +
-              `executionId=${handle.executionId} activeExecutions=${this.activeExecutions.size}`,
-          );
-          try {
-            traceExecution(
-              `[task-runner] onComplete taskId=${task.id} responseStatus=${response.status} ` +
-                `responseAttemptId=${normalizedResponse.attemptId ?? attemptId} responseGeneration=${response.executionGeneration} executionId=${handle.executionId}`,
-            );
-            traceExecution(
-              `${RESTART_TO_BRANCH_TRACE} resolvePromise | task.config.isMergeNode = ${task.config.isMergeNode}`,
-            );
-            this.callbacks.onComplete?.(task.id, normalizedResponse);
-
-            const newlyStarted = this.orchestrator.handleWorkerResponse(normalizedResponse) ?? [];
-
-            if (newlyStarted.length > 0) {
-              this.executeTasks(newlyStarted);
-            }
-          } catch (err) {
-            this.logger.error(`[TaskRunner] onComplete handler failed for task=${task.id}`, { err });
-            const errResponse: WorkResponse = {
-              requestId: response.requestId,
-              actionId: task.id,
-              attemptId,
-              executionGeneration: task.execution.generation ?? 0,
-              status: 'failed',
-              outputs: {
-                exitCode: 1,
-                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-              },
-            };
-            this.callbacks.onComplete?.(task.id, errResponse);
-            this.orchestrator.handleWorkerResponse(errResponse);
-          } finally {
-            // Clean up per-task Docker executor to avoid resource leaks
-            await this.cleanupPerTaskDockerExecutor(task);
-          }
-        };
-
-        const prev = this.completionChain;
-        this.completionChain = prev.then(work, work);
-        await this.completionChain;
-        resolvePromise();
-      });
-    });
+    return wireExecutorCompletion({
+      callbacks: this.callbacks,
+      orchestrator: this.orchestrator,
+      activeExecutions: this.activeExecutions,
+      persistence: this.persistence,
+      logger: this.logger,
+      executeTasks: (tasks) => this.executeTasks(tasks),
+      getCompletionChain: () => this.completionChain,
+      setCompletionChain: (chain) => { this.completionChain = chain; },
+      cleanupPerTaskDockerExecutor: (cleanupTask) => this.cleanupPerTaskDockerExecutor(cleanupTask),
+    }, task, attemptId, executor, handle);
   }
 
   /**
