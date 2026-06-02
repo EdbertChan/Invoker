@@ -741,6 +741,25 @@ describe('Orchestrator', () => {
       expect(persistence.loadAttempt(fixAttemptId!)?.status).toBe('needs_input');
     });
 
+    it('setFixAwaitingApproval is a no-op when expected lineage is stale', () => {
+      orchestrator.beginConflictResolution('f2');
+      const task = orchestrator.getTask('f2')!;
+      const fixAttemptId = task.execution.selectedAttemptId;
+      publishedDeltas = [];
+
+      orchestrator.setFixAwaitingApproval('f2', 'test failed: expected 1 to be 2', {
+        taskId: task.id,
+        selectedAttemptId: fixAttemptId,
+        generation: (task.execution.generation ?? 0) + 1,
+      });
+
+      const latest = orchestrator.getTask('f2')!;
+      expect(latest.status).toBe('fixing_with_ai');
+      expect(latest.execution.pendingFixError).toBeUndefined();
+      expect(persistence.loadAttempt(fixAttemptId!)?.status).toBe('running');
+      expect(publishedDeltas).toHaveLength(0);
+    });
+
     it('setFixAwaitingApproval delta includes agentSessionId from DB', () => {
       orchestrator.beginConflictResolution('f2');
       // Simulate conflict-resolver persisting sessionId directly to DB
@@ -794,6 +813,25 @@ describe('Orchestrator', () => {
       const task = orchestrator.getTask('f2')!;
       expect(task.status).toBe('failed');
       expect(task.execution.error).toBe('test failed: expected 1 to be 2');
+    });
+
+    it('revertConflictResolution is a no-op when expected lineage is stale', () => {
+      orchestrator.beginConflictResolution('f2');
+      const task = orchestrator.getTask('f2')!;
+      const fixAttemptId = task.execution.selectedAttemptId;
+      publishedDeltas = [];
+
+      orchestrator.revertConflictResolution('f2', 'test failed: expected 1 to be 2', 'late cleanup', {
+        taskId: task.id,
+        selectedAttemptId: fixAttemptId,
+        generation: (task.execution.generation ?? 0) + 1,
+      });
+
+      const latest = orchestrator.getTask('f2')!;
+      expect(latest.status).toBe('fixing_with_ai');
+      expect(latest.execution.error).toBeUndefined();
+      expect(persistence.loadAttempt(fixAttemptId!)?.status).toBe('running');
+      expect(publishedDeltas).toHaveLength(0);
     });
 
     it('non-merge merge_conflict JSON pendingFixError resume transitions failed -> fixing_with_ai -> awaiting_approval -> running and clears pendingFixError', async () => {
