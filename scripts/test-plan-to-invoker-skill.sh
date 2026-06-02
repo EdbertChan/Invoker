@@ -97,11 +97,10 @@ must_contain "$CLAUDE_MD" "Do not run \`git remote\`, \`env\`, \`printenv\`, \`s
 must_contain "$CLAUDE_MD" "Do not write \`version:\` or \`metadata:\` wrappers." "CLAUDE.md must reject legacy benchmark YAML wrappers"
 must_contain "$CLAUDE_MD" "anything that can trigger an agent/autofix" "CLAUDE.md must prevent benchmark autofix-triggering tasks"
 
-must_contain "$SKILL_MD" "INV-63 experiment-selected gate" "SKILL must consume the INV-63 experiment artifact conclusion"
-must_contain "$SKILL_MD" "docs/context/inv-63/experiment-brief.md" "SKILL must reference the committed INV-63 experiment artifact"
-must_contain "$SKILL_MD" 'Supported: use `skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>` as the primary deterministic proof surface' "SKILL must record the experiment-supported primary gate"
-must_contain "$SKILL_MD" "Rejected: schema-only validation or ad hoc individual script checks as the review gate" "SKILL must preserve the experiment-rejected alternative"
-must_contain "$SKILL_MD" "Deferred: individual validator scripts remain fallback diagnostics only" "SKILL must preserve deferred fallback diagnostics"
+must_contain "$SKILL_MD" "Deterministic validation gate" "SKILL must document the primary deterministic proof gate"
+must_contain "$SKILL_MD" 'Use `skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>` as the primary deterministic proof surface' "SKILL must record the primary doctor gate"
+must_contain "$SKILL_MD" "Schema-only validation or ad hoc individual script checks are not sufficient as the review gate" "SKILL must reject incomplete primary gates"
+must_contain "$SKILL_MD" "Individual validator scripts remain fallback diagnostics only" "SKILL must preserve fallback diagnostics"
 
 DOCTOR_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/skill-doctor.sh"
 DOCTOR_HELP="$(bash "$DOCTOR_SCRIPT" --help)"
