@@ -128,12 +128,22 @@ class InMemoryPersistence implements OrchestratorPersistence {
     const resolvedId = this.resolveBareTaskKey(taskId);
     const entry = this.tasks.get(resolvedId);
     if (entry) {
+      const hasVersionedChange =
+        changes.description !== undefined
+        || changes.status !== undefined
+        || changes.dependencies !== undefined
+        || Object.keys(changes.config ?? {}).length > 0
+        || Object.keys(changes.execution ?? {}).length > 0;
       entry.task = {
         ...entry.task,
+        ...(changes.description !== undefined ? { description: changes.description } : {}),
         ...(changes.status !== undefined ? { status: changes.status } : {}),
         ...(changes.dependencies !== undefined ? { dependencies: changes.dependencies } : {}),
         config: { ...entry.task.config, ...changes.config },
         execution: { ...entry.task.execution, ...changes.execution },
+        taskStateVersion: hasVersionedChange
+          ? entry.task.taskStateVersion + 1
+          : entry.task.taskStateVersion,
       } as TaskState;
     }
   }
@@ -230,6 +240,24 @@ class CountingPersistence extends InMemoryPersistence {
   override loadTasks(workflowId: string): TaskState[] {
     this.loadTasksCalls.push(workflowId);
     return super.loadTasks(workflowId);
+  }
+}
+
+class PersistedNormalizationPersistence extends InMemoryPersistence {
+  override updateTask(taskId: string, changes: TaskStateChanges): void {
+    super.updateTask(taskId, changes);
+    if (changes.status !== 'running') return;
+
+    const entry = this.getTaskEntry(taskId);
+    if (!entry) return;
+
+    entry.task = {
+      ...entry.task,
+      execution: {
+        ...entry.task.execution,
+        branch: 'db-normalized-branch',
+      },
+    };
   }
 }
 
@@ -4568,6 +4596,40 @@ describe('Orchestrator', () => {
         const persisted = persistence.getTaskEntry(task.id);
         expect(persisted!.task.status).toBe(task.status);
       }
+    });
+
+    it('writeAndSync rebuilds in-memory state from the persisted row', () => {
+      const persistence = new PersistedNormalizationPersistence();
+      const bus = new InMemoryBus();
+      const deltas: TaskDelta[] = [];
+      bus.subscribe('task.delta', (delta) => {
+        deltas.push(delta as TaskDelta);
+      });
+      const o = new Orchestrator({
+        persistence,
+        messageBus: bus,
+        maxConcurrency: 1,
+      });
+
+      o.loadPlan({
+        name: 'db-normalization-test',
+        tasks: [{ id: 't1', description: 'Root' }],
+      });
+      deltas.length = 0;
+
+      const [started] = o.startExecution();
+      const cached = o.getTask('t1')!;
+      const persisted = persistence.getTaskEntry(cached.id)!.task;
+      const runningDelta = deltas.find(
+        (delta): delta is Extract<TaskDelta, { type: 'updated' }> =>
+          delta.type === 'updated' && delta.taskId === cached.id,
+      );
+
+      expect(started!.execution.branch).toBe('db-normalized-branch');
+      expect(cached.execution.branch).toBe(persisted.execution.branch);
+      expect(cached.taskStateVersion).toBe(persisted.taskStateVersion);
+      expect(runningDelta?.previousTaskStateVersion).toBe(persisted.taskStateVersion - 1);
+      expect(runningDelta?.taskStateVersion).toBe(persisted.taskStateVersion);
     });
 
     it('in-memory matches DB after handleWorkerResponse', () => {
