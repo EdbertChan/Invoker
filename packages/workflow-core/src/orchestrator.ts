@@ -1897,11 +1897,19 @@ export class Orchestrator {
    * Approve a task awaiting approval. Fires beforeApproveHook (if set)
    * before transitioning state, so merge nodes get git-merged automatically.
    */
-  async approve(taskId: string): Promise<TaskState[]> {
+  async approve(taskId: string, expectedLineage?: TaskLineageExpectation): Promise<TaskState[]> {
     mergeTrace('APPROVE_ENTER', { taskId });
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
     mergeTrace('APPROVE_TASK_LOOKUP', { taskId, found: !!task, status: task?.status, isMergeNode: !!task?.config.isMergeNode, hasHook: !!this.beforeApproveHook });
+    if (task && !this.taskMatchesLineageExpectation(task, expectedLineage)) {
+      mergeTrace('APPROVE_SKIPPED_STALE_LINEAGE', {
+        taskId,
+        selectedAttemptId: task.execution.selectedAttemptId,
+        generation: task.execution.generation ?? 0,
+      });
+      return [];
+    }
     const isApprovalState = task?.status === 'awaiting_approval' || task?.status === 'review_ready';
     if (!task || !isApprovalState) {
       mergeTrace('APPROVE_SKIPPED_NOT_AWAITING', {
@@ -1922,6 +1930,17 @@ export class Orchestrator {
       mergeTrace('APPROVE_HOOK_FIRING', { taskId, workflowId: task.config.workflowId });
       await this.beforeApproveHook(task);
       mergeTrace('APPROVE_HOOK_DONE', { taskId });
+      this.refreshFromDb();
+      const latestTask = this.stateGetTask(taskId);
+      if (!latestTask || !this.taskMatchesLineageExpectation(latestTask, expectedLineage)) {
+        mergeTrace('APPROVE_SKIPPED_STALE_LINEAGE_AFTER_HOOK', {
+          taskId,
+          found: !!latestTask,
+          selectedAttemptId: latestTask?.execution.selectedAttemptId,
+          generation: latestTask?.execution.generation ?? 0,
+        });
+        return [];
+      }
     } else {
       mergeTrace('APPROVE_NO_HOOK', { taskId });
     }
@@ -1966,9 +1985,12 @@ export class Orchestrator {
     return started;
   }
 
-  async resumeTaskAfterFixApproval(taskId: string): Promise<TaskState[]> {
+  async resumeTaskAfterFixApproval(taskId: string, expectedLineage?: TaskLineageExpectation): Promise<TaskState[]> {
     this.refreshFromDb();
     const task = this.stateGetTask(taskId);
+    if (task && !this.taskMatchesLineageExpectation(task, expectedLineage)) {
+      return [];
+    }
     const isApprovalState = task?.status === 'awaiting_approval' || task?.status === 'review_ready';
     if (!task || !isApprovalState || task.execution.pendingFixError === undefined) {
       return [];
