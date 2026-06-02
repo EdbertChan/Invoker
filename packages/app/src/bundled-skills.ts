@@ -10,6 +10,12 @@ import { resolveInvokerHomeRoot } from './delete-all-snapshot.js';
 const MANAGED_PREFIX = 'invoker-';
 const MANIFEST_FILE = 'bundled-skills.json';
 
+export const BUNDLED_SKILLS_SELECTED_DESIGN = {
+  source: 'docs/context/inv-86/experiment-brief.md',
+  verdict: 'supported',
+  owner: 'bundled-skills-functional-core',
+} as const;
+
 interface BundledSkillsManifest {
   bundledHash: string;
   bundledSkillNames: string[];
@@ -18,7 +24,7 @@ interface BundledSkillsManifest {
   targets: Record<string, { path: string; installedSkillNames: string[] }>;
 }
 
-interface BundledSkillsContext {
+export interface BundledSkillsContext {
   isPackaged: boolean;
   repoRoot: string;
   resourcesPath?: string;

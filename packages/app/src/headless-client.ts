@@ -81,6 +81,7 @@ const READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 8_000;
 const POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS = 3;
 const DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS = 60_000;
+const INV_86_OWNER_BACKED_QUERY_COMMANDS = new Set(['queue', 'ui-perf']);
 
 function standaloneOwnerBootstrapTimeoutMs(): number {
   const raw = process.env.INVOKER_HEADLESS_OWNER_BOOTSTRAP_TIMEOUT_MS;
@@ -134,13 +135,16 @@ async function delegateReadOnlyQuery(
   bus: MessageBus,
   refreshMessageBus?: () => Promise<MessageBus>,
 ): Promise<boolean> {
-  const isUiPerf = args[0] === 'query' && args[1] === 'ui-perf';
-  const isQueue = (args[0] === 'query' && args[1] === 'queue') || args[0] === 'queue';
-  if (!isUiPerf && !isQueue) {
+  const queryName = args[0] === 'query' ? args[1] : args[0];
+  if (!INV_86_OWNER_BACKED_QUERY_COMMANDS.has(queryName ?? '')) {
     return false;
   }
 
-  // Use the resolver to wait for any reachable owner
+  const isUiPerf = queryName === 'ui-perf';
+  const isQueue = queryName === 'queue';
+
+  // INV-86 keeps selected read-only query proof owner-backed instead of
+  // silently starting an isolated Electron runtime.
   const resolver = createOwnerResolver(
     { messageBus: bus, refreshMessageBus, ensureStandaloneOwner: async () => {} },
     { discoveryTimeoutMs: 2_000 },
