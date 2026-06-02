@@ -13,6 +13,7 @@ fi
 PLAN_FILE="$1"
 CALLER_PWD="$(pwd)"
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+HEADLESS_MAIN="packages/app/dist/main.js"
 cd "$REPO_ROOT"
 
 # Resolve plan path relative to caller's pwd if not absolute
@@ -38,4 +39,4 @@ if [ "$(uname)" = "Linux" ]; then
 fi
 
 echo "==> Submitting plan: $PLAN_FILE"
-./packages/app/node_modules/.bin/electron packages/app/dist/main.js $SANDBOX_FLAG --headless run "$PLAN_FILE"
+./packages/app/node_modules/.bin/electron "$HEADLESS_MAIN" $SANDBOX_FLAG --headless run "$PLAN_FILE"

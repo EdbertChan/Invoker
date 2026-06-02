@@ -69,7 +69,7 @@ export class TaskScheduler {
     }
 
     let removed = 0;
-    for (const attemptId of attemptIds) {
+    for (const attemptId of Array.from(attemptIds)) {
       if (this.removeRunningAttempt(attemptId)) {
         removed += 1;
       }
