@@ -12,7 +12,7 @@ import { Orchestrator } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
 import type { WorkResponse } from '@invoker/contracts';
-import { MUTATION_POLICIES } from '../invalidation-policy.js';
+import { MUTATION_POLICIES, type InvalidationAction } from '../invalidation-policy.js';
 
 // ── In-Memory Persistence Mock ──────────────────────────────
 
@@ -162,6 +162,14 @@ function failedResponse(actionId: string, error?: string): WorkResponse {
     status: 'failed',
     outputs: { exitCode: 1, error },
   });
+}
+
+type PolicyDispatchHost = {
+  dispatchPostMutation(action: InvalidationAction, taskId: string): TaskState[];
+};
+
+function spyOnPolicyDispatch(target: Orchestrator) {
+  return vi.spyOn(target as unknown as PolicyDispatchHost, 'dispatchPostMutation');
 }
 
 // ── Tests ───────────────────────────────────────────────────
@@ -905,15 +913,17 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(orchestrator.getTask(downstreamId)!.status).toBe('running');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const dispatchSpy = spyOnPolicyDispatch(orchestrator);
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       // Re-select to a different winner while downstream is active.
       orchestrator.selectExperiment(reconId, expV2Id);
 
       expect(cancelSpy).toHaveBeenCalledWith(downstreamId);
+      expect(dispatchSpy).toHaveBeenCalledWith(MUTATION_POLICIES.selectedExperiment.action, downstreamId);
       expect(recreateSpy).toHaveBeenCalledWith(downstreamId);
       expect(cancelSpy.mock.invocationCallOrder[0]).toBeLessThan(
-        recreateSpy.mock.invocationCallOrder[0],
+        dispatchSpy.mock.invocationCallOrder[0],
       );
 
       // Recon now reflects the new winner.
@@ -922,6 +932,7 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(recon.execution.selectedExperiment).toBe(expV2Id);
 
       cancelSpy.mockRestore();
+      dispatchSpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
@@ -937,6 +948,7 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(orchestrator.getTask(downstreamId)!.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const dispatchSpy = spyOnPolicyDispatch(orchestrator);
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.selectExperiment(reconId, expV2Id);
@@ -944,9 +956,11 @@ describe('Experiment Lifecycle (integration)', () => {
       // Inactive downstream -> no cancel needed; recreateTask still resets
       // the downstream subgraph so it reruns against the new winner.
       expect(cancelSpy).not.toHaveBeenCalled();
+      expect(dispatchSpy).toHaveBeenCalledWith(MUTATION_POLICIES.selectedExperiment.action, downstreamId);
       expect(recreateSpy).toHaveBeenCalledWith(downstreamId);
 
       cancelSpy.mockRestore();
+      dispatchSpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
@@ -954,16 +968,19 @@ describe('Experiment Lifecycle (integration)', () => {
       const { reconId, expV1Id, downstreamId } = runToReconNeedsInput();
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const dispatchSpy = spyOnPolicyDispatch(orchestrator);
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.selectExperiment(reconId, expV1Id);
 
       expect(cancelSpy).not.toHaveBeenCalled();
+      expect(dispatchSpy).not.toHaveBeenCalled();
       expect(recreateSpy).not.toHaveBeenCalled();
       // Downstream auto-started by the existing unblock path.
       expect(orchestrator.getTask(downstreamId)!.status).toBe('running');
 
       cancelSpy.mockRestore();
+      dispatchSpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
@@ -1042,14 +1059,17 @@ describe('Experiment Lifecycle (integration)', () => {
       orchestrator.handleWorkerResponse(completedResponse(downstreamId));
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const dispatchSpy = spyOnPolicyDispatch(orchestrator);
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.selectExperiment(reconId, expV1Id);
 
       expect(cancelSpy).not.toHaveBeenCalled();
+      expect(dispatchSpy).not.toHaveBeenCalled();
       expect(recreateSpy).not.toHaveBeenCalled();
 
       cancelSpy.mockRestore();
+      dispatchSpy.mockRestore();
       recreateSpy.mockRestore();
     });
   });
@@ -1138,6 +1158,7 @@ describe('Experiment Lifecycle (integration)', () => {
       ]);
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const dispatchSpy = spyOnPolicyDispatch(orchestrator);
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       // Re-select to a different merged set while downstream is
@@ -1150,10 +1171,11 @@ describe('Experiment Lifecycle (integration)', () => {
       );
 
       expect(cancelSpy).toHaveBeenCalledWith(dsId);
+      expect(dispatchSpy).toHaveBeenCalledWith(MUTATION_POLICIES.selectedExperimentSet.action, dsId);
       expect(recreateSpy).toHaveBeenCalled();
       const cancelOrder = cancelSpy.mock.invocationCallOrder[0];
-      const restartOrder = recreateSpy.mock.invocationCallOrder[0];
-      expect(cancelOrder).toBeLessThan(restartOrder);
+      const dispatchOrder = dispatchSpy.mock.invocationCallOrder[0];
+      expect(cancelOrder).toBeLessThan(dispatchOrder);
 
       // Recon now reflects the new merged lineage.
       const recon = orchestrator.getTask(reconId)!;
@@ -1163,6 +1185,7 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(recon.execution.commit).toBe('merged13');
 
       cancelSpy.mockRestore();
+      dispatchSpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
@@ -1183,6 +1206,7 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(orchestrator.getTask(dsId)!.status).toBe('failed');
 
       const cancelSpy = vi.spyOn(orchestrator, 'cancelTask');
+      const dispatchSpy = spyOnPolicyDispatch(orchestrator);
       const recreateSpy = vi.spyOn(orchestrator, 'recreateTask');
 
       orchestrator.selectExperiments(
@@ -1193,9 +1217,11 @@ describe('Experiment Lifecycle (integration)', () => {
       );
 
       expect(cancelSpy).not.toHaveBeenCalled();
+      expect(dispatchSpy).toHaveBeenCalledWith(MUTATION_POLICIES.selectedExperimentSet.action, dsId);
       expect(recreateSpy).toHaveBeenCalled();
 
       cancelSpy.mockRestore();
+      dispatchSpy.mockRestore();
       recreateSpy.mockRestore();
     });
 
