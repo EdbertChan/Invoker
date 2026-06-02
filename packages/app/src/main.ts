@@ -1048,13 +1048,21 @@ if (isHeadless) {
         if (!workflowMutationDispatcher.has('headless.exec')) {
           workflowMutationDispatcher.set('headless.exec', async (payloadArg: unknown) => {
             const payload = payloadArg as HeadlessExecMutationPayload;
-            await runHeadless(payload.args, {
-              ...headlessDeps,
-              waitForApproval: payload.waitForApproval,
-              noTrack: payload.noTrack,
-              signal: activeMutationContext?.signal,
-              mutationTiming: activeMutationContext?.mutationTiming,
-            });
+            try {
+              await runHeadless(payload.args, {
+                ...headlessDeps,
+                waitForApproval: payload.waitForApproval,
+                noTrack: payload.noTrack,
+                signal: activeMutationContext?.signal,
+                mutationTiming: activeMutationContext?.mutationTiming,
+              });
+            } catch (err) {
+              if (err instanceof StaleLineageError) {
+                logger.info(`headless.exec discarded stale result for args="${payload.args.join(' ')}": ${err.message}`, { module: 'ipc-delegate' });
+                return { ok: true, stale: true };
+              }
+              throw err;
+            }
             return { ok: true };
           });
         }
@@ -1945,96 +1953,104 @@ function createEmbeddedTerminalBackendFromConfig(
     ) {
       cancelDeferredWorkflowLaunch(resolvedHeadlessTarget.workflowId, `headless.${headlessCommand}`);
     }
-    await runHeadless(payload.args, {
-      logger,
-      orchestrator, persistence, executorRegistry, messageBus,
-      commandService,
-      repoRoot, invokerConfig, initServices, wireSlackBot,
-      signal: activeMutationContext?.signal,
-      mutationTiming: activeMutationContext?.mutationTiming,
-      cancelTask: (taskId: string) => performCancelTask(taskId),
-      cancelWorkflow: (workflowId: string) => performCancelWorkflow(workflowId),
-      waitForApproval: payload.waitForApproval,
-      noTrack: payload.noTrack,
-      preemptTaskSubgraph: (taskId: string) => preemptTaskSubgraph(taskId),
-      preemptWorkflowExecution: (workflowId: string) => preemptWorkflowExecution(workflowId),
-      deferRunnableTasks: (tasks: TaskState[], workflowId?: string) => {
-        const filteredTasks = tasks;
-        const crossWorkflowTasks = workflowId
-          ? tasks.filter((task) => task.config.workflowId !== workflowId)
-          : [];
-        if (crossWorkflowTasks.length > 0) {
+    try {
+      await runHeadless(payload.args, {
+        logger,
+        orchestrator, persistence, executorRegistry, messageBus,
+        commandService,
+        repoRoot, invokerConfig, initServices, wireSlackBot,
+        signal: activeMutationContext?.signal,
+        mutationTiming: activeMutationContext?.mutationTiming,
+        cancelTask: (taskId: string) => performCancelTask(taskId),
+        cancelWorkflow: (workflowId: string) => performCancelWorkflow(workflowId),
+        waitForApproval: payload.waitForApproval,
+        noTrack: payload.noTrack,
+        preemptTaskSubgraph: (taskId: string) => preemptTaskSubgraph(taskId),
+        preemptWorkflowExecution: (workflowId: string) => preemptWorkflowExecution(workflowId),
+        deferRunnableTasks: (tasks: TaskState[], workflowId?: string) => {
+          const filteredTasks = tasks;
+          const crossWorkflowTasks = workflowId
+            ? tasks.filter((task) => task.config.workflowId !== workflowId)
+            : [];
+          if (crossWorkflowTasks.length > 0) {
+            logger.info(
+              `deferRunnableTasks dispatching cross-workflow runnable tasks for workflow="${workflowId}": ${crossWorkflowTasks.map((task) => `${task.id}(${task.config.workflowId ?? 'unknown'})`).join(', ')}`,
+              { module: 'ipc-delegate' },
+            );
+          }
+          if (filteredTasks.length === 0) {
+            return;
+          }
+          // Keep this path timer-based for now: it is a low-blast-radius, mutation-safe
+          // way to decouple no-track command handling from heavy executor startup while
+          // still coalescing rapid restarts. We are considering an RxJS/backpressure
+          // scheduler refactor for richer queue semantics, but that is a broader design
+          // change than this targeted starvation fix.
+          const deferDelayMs = Number.parseInt(process.env.INVOKER_DEFER_RUNNABLE_DELAY_MS ?? '25', 10) || 25;
+          const maxCoalesceMs = Number.parseInt(
+            process.env.INVOKER_DEFER_RUNNABLE_MAX_COALESCE_MS ?? String(Math.max(1000, deferDelayMs)),
+            10,
+          ) || Math.max(1000, deferDelayMs);
+          const launchKey = workflowId ?? filteredTasks.map((task) => task.id).sort().join('|');
+          const existingLaunch = deferredWorkflowLaunches.get(launchKey);
+          const nowMs = Date.now();
+          const timing = computeDeferredLaunchTiming({
+            existingFirstScheduledAtMs: existingLaunch?.firstScheduledAtMs,
+            nowMs,
+            deferDelayMs,
+            maxCoalesceMs,
+          });
+          if (existingLaunch) {
+            clearTimeout(existingLaunch.timer);
+            logger.info(
+              `deferRunnableTasks coalesce workflow="${workflowId ?? 'unknown'}" previousCount=${existingLaunch.taskIds.length} nextCount=${filteredTasks.length} delayMs=${timing.delayMs} maxCoalesceMs=${maxCoalesceMs}`,
+              { module: 'ipc-delegate' },
+            );
+          }
           logger.info(
-            `deferRunnableTasks dispatching cross-workflow runnable tasks for workflow="${workflowId}": ${crossWorkflowTasks.map((task) => `${task.id}(${task.config.workflowId ?? 'unknown'})`).join(', ')}`,
+            `deferRunnableTasks schedule workflow="${workflowId ?? 'unknown'}" count=${filteredTasks.length} delayMs=${timing.delayMs} ids=${filteredTasks.map((task) => task.id).join(',')}`,
             { module: 'ipc-delegate' },
           );
-        }
-        if (filteredTasks.length === 0) {
-          return;
-        }
-        // Keep this path timer-based for now: it is a low-blast-radius, mutation-safe
-        // way to decouple no-track command handling from heavy executor startup while
-        // still coalescing rapid restarts. We are considering an RxJS/backpressure
-        // scheduler refactor for richer queue semantics, but that is a broader design
-        // change than this targeted starvation fix.
-        const deferDelayMs = Number.parseInt(process.env.INVOKER_DEFER_RUNNABLE_DELAY_MS ?? '25', 10) || 25;
-        const maxCoalesceMs = Number.parseInt(
-          process.env.INVOKER_DEFER_RUNNABLE_MAX_COALESCE_MS ?? String(Math.max(1000, deferDelayMs)),
-          10,
-        ) || Math.max(1000, deferDelayMs);
-        const launchKey = workflowId ?? filteredTasks.map((task) => task.id).sort().join('|');
-        const existingLaunch = deferredWorkflowLaunches.get(launchKey);
-        const nowMs = Date.now();
-        const timing = computeDeferredLaunchTiming({
-          existingFirstScheduledAtMs: existingLaunch?.firstScheduledAtMs,
-          nowMs,
-          deferDelayMs,
-          maxCoalesceMs,
-        });
-        if (existingLaunch) {
-          clearTimeout(existingLaunch.timer);
-          logger.info(
-            `deferRunnableTasks coalesce workflow="${workflowId ?? 'unknown'}" previousCount=${existingLaunch.taskIds.length} nextCount=${filteredTasks.length} delayMs=${timing.delayMs} maxCoalesceMs=${maxCoalesceMs}`,
-            { module: 'ipc-delegate' },
-          );
-        }
-        logger.info(
-          `deferRunnableTasks schedule workflow="${workflowId ?? 'unknown'}" count=${filteredTasks.length} delayMs=${timing.delayMs} ids=${filteredTasks.map((task) => task.id).join(',')}`,
-          { module: 'ipc-delegate' },
-        );
-        const launch = setTimeout(() => {
-          deferredWorkflowLaunches.delete(launchKey);
-          logger.info(
-            `deferRunnableTasks start workflow="${workflowId ?? 'unknown'}" count=${filteredTasks.length}`,
-            { module: 'ipc-delegate' },
-          );
-          remoteFetchForPool.enabled = false;
-          void requireTaskExecutor().executeTasks(filteredTasks)
-            .then(() => {
-              logger.info(
-                `deferRunnableTasks complete workflow="${workflowId ?? 'unknown'}" count=${filteredTasks.length}`,
-                { module: 'ipc-delegate' },
-              );
-            })
-            .catch((err) => {
-              logger.error(
-                `background delegated workflow execution failed for ${workflowId ?? filteredTasks.map((t) => t.id).join(', ')}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
-                { module: 'ipc-delegate' },
-              );
-            })
-            .finally(() => {
-              remoteFetchForPool.enabled = true;
-            });
-        }, timing.delayMs);
-        launch.unref?.();
-        deferredWorkflowLaunches.set(launchKey, {
-          timer: launch,
-          taskIds: filteredTasks.map((task) => task.id),
-          firstScheduledAtMs: timing.firstScheduledAtMs,
-        });
-      },
-      executionAgentRegistry: registerBuiltinAgents(),
-    });
+          const launch = setTimeout(() => {
+            deferredWorkflowLaunches.delete(launchKey);
+            logger.info(
+              `deferRunnableTasks start workflow="${workflowId ?? 'unknown'}" count=${filteredTasks.length}`,
+              { module: 'ipc-delegate' },
+            );
+            remoteFetchForPool.enabled = false;
+            void requireTaskExecutor().executeTasks(filteredTasks)
+              .then(() => {
+                logger.info(
+                  `deferRunnableTasks complete workflow="${workflowId ?? 'unknown'}" count=${filteredTasks.length}`,
+                  { module: 'ipc-delegate' },
+                );
+              })
+              .catch((err) => {
+                logger.error(
+                  `background delegated workflow execution failed for ${workflowId ?? filteredTasks.map((t) => t.id).join(', ')}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+                  { module: 'ipc-delegate' },
+                );
+              })
+              .finally(() => {
+                remoteFetchForPool.enabled = true;
+              });
+          }, timing.delayMs);
+          launch.unref?.();
+          deferredWorkflowLaunches.set(launchKey, {
+            timer: launch,
+            taskIds: filteredTasks.map((task) => task.id),
+            firstScheduledAtMs: timing.firstScheduledAtMs,
+          });
+        },
+        executionAgentRegistry: registerBuiltinAgents(),
+      });
+    } catch (err) {
+      if (err instanceof StaleLineageError) {
+        logger.info(`headless.exec discarded stale result for args="${payload.args.join(' ')}": ${err.message}`, { module: 'ipc-delegate' });
+        return { ok: true, stale: true };
+      }
+      throw err;
+    }
     const { workflowId } = classifyHeadlessExecMutation(payload);
     logger.info(`executeHeadlessExec end args="${payload.args.join(' ')}" workflow="${workflowId ?? 'unknown'}"`, {
       module: 'ipc-delegate',
