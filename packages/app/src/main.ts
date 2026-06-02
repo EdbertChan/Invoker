@@ -58,7 +58,6 @@ import type {
   TaskDelta,
   TaskReplacementDef,
   TaskState,
-  TaskStateChanges,
 } from '@invoker/workflow-core';
 import { makeEnvelope, CommandError } from '@invoker/contracts';
 import type { WorkResponse } from '@invoker/contracts';
@@ -188,6 +187,12 @@ import {
   type HeadlessBatchExecRequest,
   type HeadlessExecMutationPayload,
 } from './headless-batch-exec.js';
+import { runElectronReadyBootstrap } from './bootstrap/app-bootstrap.js';
+import {
+  registerBootstrapStateIpcHandler,
+  registerTestTaskStateInjectionHandler,
+  subscribeGuiRuntimeEvents,
+} from './ipc/ipc-registration.js';
 
 function isTaskInFlightForForcedStop(task: TaskState): boolean {
   return task.status === 'running'
@@ -2699,7 +2704,8 @@ function createEmbeddedTerminalBackendFromConfig(
     }, 0);
   }
 
-  app.whenReady().then(async () => {
+  runElectronReadyBootstrap(app, {
+    onReady: async () => {
     recordStartupMark('app.whenReady');
     ownerMode = true;
     try {
@@ -2898,41 +2904,31 @@ function createEmbeddedTerminalBackendFromConfig(
 
     // Forward deltas to renderer and keep snapshot cache in sync so
     // the db-poll doesn't re-emit deltas the messageBus already delivered.
-    messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
-      uiPerfStats.mainDeltaToUi += 1;
-      if (traceUiDeltaFlow) {
-        logger.debug(`delta→ui: ${JSON.stringify(delta)}`, { module: 'ui' });
-      }
-      sendTaskDeltaToRenderer(delta as TaskDelta);
-
-      const d = delta as TaskDelta;
-      const deltaTaskId = d.type === 'updated' || d.type === 'removed'
-        ? d.taskId
-        : undefined;
-      if (d.type === 'updated' && d.changes.status === 'failed') {
-        const cancellationError = shouldSkipAutoFixForError(d.changes.execution?.error);
-        const shouldAutoFixFromOrchestrator = orchestrator.shouldAutoFix(d.taskId);
-        logAutoFixDebug(d.taskId, 'delta-failed', {
+    subscribeGuiRuntimeEvents({
+      messageBus,
+      traceUiDeltaFlow,
+      logger,
+      incrementMainDeltaToUi: () => { uiPerfStats.mainDeltaToUi += 1; },
+      sendTaskDeltaToRenderer,
+      onTaskFailedDelta: (taskId, changes) => {
+        const cancellationError = shouldSkipAutoFixForError(changes.execution?.error);
+        const shouldAutoFixFromOrchestrator = orchestrator.shouldAutoFix(taskId);
+        logAutoFixDebug(taskId, 'delta-failed', {
           shouldSkipForCancellation: cancellationError,
           shouldAutoFixFromOrchestrator,
         });
-        if (!cancellationError && shouldAutoFixFromOrchestrator && deltaTaskId) {
-          logAutoFixDebug(deltaTaskId, 'delta-trigger-schedule');
-          scheduleAutoFix(deltaTaskId);
+        if (!cancellationError && shouldAutoFixFromOrchestrator) {
+          logAutoFixDebug(taskId, 'delta-trigger-schedule');
+          scheduleAutoFix(taskId);
         }
-      }
-
-      const { quarantined } = applyDelta(d, lastKnownTaskStates);
-      for (const taskId of quarantined) {
-        logger.info(`[gap-detect] quarantined task="${taskId}" — triggering authoritative reload`, { module: 'delta-merge' });
-        const { rendererDelta } = recoverQuarantinedTask(lastKnownTaskStates, taskId, {
-          loadTask: loadTaskByIdFromPersistence,
-          getMergeNode: (workflowId) => orchestrator.getMergeNode(workflowId),
-        });
-        if (rendererDelta) {
-          sendTaskDeltaToRenderer(rendererDelta);
-        }
-      }
+      },
+      applyDeltaToCache: (delta) => applyDelta(delta, lastKnownTaskStates).quarantined,
+      recoverQuarantinedTask: (taskId) => recoverQuarantinedTask(lastKnownTaskStates, taskId, {
+        loadTask: loadTaskByIdFromPersistence,
+        getMergeNode: (workflowId) => orchestrator.getMergeNode(workflowId),
+      }).rendererDelta,
+      shouldForwardTaskOutput: () => Boolean(mainWindow && !mainWindow.isDestroyed() && uiInteractive),
+      sendTaskOutputToRenderer: (data) => { mainWindow?.webContents.send('invoker:task-output', data); },
     });
 
     uiPerfLogInterval = setInterval(() => {
@@ -2948,32 +2944,15 @@ function createEmbeddedTerminalBackendFromConfig(
       }
     }, 10000);
 
-    messageBus.subscribe(Channels.TASK_OUTPUT, (data: unknown) => {
-      if (mainWindow && !mainWindow.isDestroyed() && uiInteractive) {
-        mainWindow.webContents.send('invoker:task-output', data);
-      }
-    });
-
     // Register IPC handlers
-    ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
-      const startedAtMs = Date.now();
-      const tasks = orchestrator.getAllTasks();
-      const workflows = listWorkflowsByStartupRecency();
-      const streamSequence = getTaskDeltaStreamSequence();
-      const payload = {
-        tasks,
-        workflows,
-        initialWorkflowId: startupWorkflowId,
-        appStartedAtEpochMs: appProcessStartedAt,
-        streamSequence,
-      };
-      const jsonSizeBytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
-      recordStartupDuration('bootstrap-ipc.serialize-return', startedAtMs, {
-        taskCount: tasks.length,
-        workflowCount: workflows.length,
-        jsonSizeBytes,
-      });
-      event.returnValue = payload;
+    registerBootstrapStateIpcHandler({
+      ipcMain,
+      getTasks: () => orchestrator.getAllTasks(),
+      listWorkflowsByStartupRecency,
+      getInitialWorkflowId: () => startupWorkflowId,
+      appStartedAtEpochMs: appProcessStartedAt,
+      getTaskDeltaStreamSequence,
+      recordStartupDuration,
     });
     registerGuiMutationHandler('invoker:load-plan', async (planTextArg: unknown) => {
       const planText = String(planTextArg);
@@ -2985,36 +2964,17 @@ function createEmbeddedTerminalBackendFromConfig(
       orchestrator.loadPlan(plan, { allowGraphMutation: invokerConfig.allowGraphMutation });
     });
 
-    if (process.env.NODE_ENV === 'test') {
-      ipcMain.handle(
-        'invoker:inject-task-states',
-        async (_event, updates: Array<{ taskId: string; changes: TaskStateChanges }>) => {
-          for (const { taskId, changes } of updates) {
-            const before = orchestrator.getTask(taskId);
-            const previousSnapshot = lastKnownTaskStates.get(taskId);
-            const previousTaskStateVersion = previousSnapshot
-              ? (
-                  (JSON.parse(previousSnapshot) as { taskStateVersion?: number }).taskStateVersion
-                  ?? before?.taskStateVersion
-                  ?? 1
-                )
-              : (before?.taskStateVersion ?? 0);
-            persistence.updateTask(taskId, changes);
-            messageBus.publish(Channels.TASK_DELTA, {
-              type: 'updated',
-              taskId,
-              changes,
-              previousTaskStateVersion,
-              taskStateVersion: previousTaskStateVersion + 1,
-            } satisfies TaskDelta);
-          }
-          orchestrator.syncAllFromDb();
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            requestWorkflowMetadataPublish('gap-detect');
-          }
-        },
-      );
-    }
+    registerTestTaskStateInjectionHandler({
+      ipcMain,
+      enabled: process.env.NODE_ENV === 'test',
+      getTask: (taskId) => orchestrator.getTask(taskId),
+      getPreviousTaskSnapshot: (taskId) => lastKnownTaskStates.get(taskId),
+      updateTask: (taskId, changes) => { persistence.updateTask(taskId, changes); },
+      publishDelta: (delta) => { messageBus.publish(Channels.TASK_DELTA, delta); },
+      syncAllFromDb: () => { orchestrator.syncAllFromDb(); },
+      requestWorkflowMetadataPublish,
+      hasMainWindow: () => Boolean(mainWindow && !mainWindow.isDestroyed()),
+    });
 
     registerGuiMutationHandler('invoker:start', async () => {
       logger.info('start', { module: 'ipc' });
@@ -4054,9 +4014,11 @@ function createEmbeddedTerminalBackendFromConfig(
         createWindow();
       }
     });
-  }).catch((err) => {
-    process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-    app.quit();
+    },
+    onError: (err) => {
+      process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
+      app.quit();
+    },
   });
 
   app.on('window-all-closed', () => {
