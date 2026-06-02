@@ -181,6 +181,8 @@ import {
   resolveActionDiagnosticsStallThresholdMs,
 } from './action-graph-diagnostics.js';
 import { registerReadOnlyIpcHandlers } from './ipc-read-handlers.js';
+import { startAppBootstrap } from './bootstrap/app-bootstrap.js';
+import { registerApplicationIpcHandlers } from './ipc/ipc-registration.js';
 import { createTaskDeltaStreamSequence } from './task-delta-stream-sequence.js';
 import { startReviewGateStatusWorker, type ReviewGateStatusWorker } from './review-gate-status-worker.js';
 import {
@@ -2699,8 +2701,7 @@ function createEmbeddedTerminalBackendFromConfig(
     }, 0);
   }
 
-  app.whenReady().then(async () => {
-    recordStartupMark('app.whenReady');
+  async function initializeInteractiveServices(): Promise<void> {
     ownerMode = true;
     try {
       recordStartupMark('initServices.start');
@@ -2718,7 +2719,9 @@ function createEmbeddedTerminalBackendFromConfig(
       ownerMode = false;
       recordStartupMark('initServices.readOnly.end', { ownerMode: false });
     }
+  }
 
+  function configureInteractiveRuntime(): void {
     if (ownerMode) {
       rebuildTaskRunner();
       workflowMutationCoordinator = new PersistedWorkflowMutationCoordinator(
@@ -2757,7 +2760,9 @@ function createEmbeddedTerminalBackendFromConfig(
         module: 'init',
       });
     }
+  }
 
+  function registerOwnerDelegationIpcHandlers(): void {
     // ── IPC Delegation Handlers — peer → owner ────────────────
     // Peer processes delegate write-heavy commands to the owner process via IpcBus.
     if (ownerMode) {
@@ -2868,15 +2873,17 @@ function createEmbeddedTerminalBackendFromConfig(
       logger.info(`owner-ipc-ready ownerId=${workflowMutationOwnerId}`, { module: 'ipc-delegate' });
       recordStartupMark('owner-ipc-ready');
     }
+  }
 
-    bootstrapInitialWorkflowState();
-
+  function startInteractiveReviewGateStatusWorker(): void {
     reviewGateStatusWorker = startReviewGateStatusWorker({
       ownerMode,
       getTaskExecutor: requireTaskExecutor,
       logger,
     });
+  }
 
+  function runInteractiveAutoStart(): void {
     // Relaunch orphaned running tasks and start any pending-but-ready tasks.
     if (!ownerMode) {
       logger.info('follower mode startup: auto-run disabled', { module: 'init' });
@@ -2888,14 +2895,17 @@ function createEmbeddedTerminalBackendFromConfig(
         requireTaskExecutor().executeTasks(allStarted);
       }
     }
+  }
 
+  function logInteractiveStartupConfiguration(): void {
     const dbPath = path.join(resolveInvokerHomeRoot(), 'invoker.db');
     logger.info(`Database: ${dbPath}`, { module: 'init' });
     logger.info(`Repo root: ${repoRoot}`, { module: 'init' });
     logger.info(`Config: disableAutoRunOnStartup=${invokerConfig.disableAutoRunOnStartup ?? false}`, { module: 'init' });
     logger.info('Effective configuration', { config: getSafeInvokerConfigForLogging(invokerConfig), module: 'startup' });
-    recordStartupMark('startup.ready-for-window');
+  }
 
+  function wireRendererStreams(): void {
     // Forward deltas to renderer and keep snapshot cache in sync so
     // the db-poll doesn't re-emit deltas the messageBus already delivered.
     messageBus.subscribe(Channels.TASK_DELTA, (delta: unknown) => {
@@ -2953,7 +2963,9 @@ function createEmbeddedTerminalBackendFromConfig(
         mainWindow.webContents.send('invoker:task-output', data);
       }
     });
+  }
 
+  function registerInteractiveIpcHandlers(): void {
     // Register IPC handlers
     ipcMain.on('invoker:get-bootstrap-state-sync', (event) => {
       const startedAtMs = Date.now();
@@ -4044,19 +4056,38 @@ function createEmbeddedTerminalBackendFromConfig(
     ipcMain.handle('invoker:terminal-close', async (_event, sessionId: string) => {
       return embeddedTerminalManager.close(sessionId);
     });
+  }
 
-    seedUiSnapshotCache();
-    createWindow();
-    recordStartupMark('createWindow.end');
-
-    app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
+  function registerInteractiveIpcHandlersThroughModule(): void {
+    registerApplicationIpcHandlers({
+      steps: [
+        {
+          name: 'interactive-main-ipc',
+          register: registerInteractiveIpcHandlers,
+        },
+      ],
     });
-  }).catch((err) => {
-    process.stderr.write(`${RED}Error:${RESET} ${err instanceof Error ? err.message : String(err)}\n`);
-    app.quit();
+  }
+
+  startAppBootstrap({
+    app,
+    BrowserWindow,
+    recordStartupMark,
+    initializeServices: initializeInteractiveServices,
+    configureRuntime: configureInteractiveRuntime,
+    registerOwnerDelegationIpc: registerOwnerDelegationIpcHandlers,
+    bootstrapInitialWorkflowState,
+    startReviewGateStatusWorker: startInteractiveReviewGateStatusWorker,
+    runAutoStart: runInteractiveAutoStart,
+    logStartupConfiguration: logInteractiveStartupConfiguration,
+    wireRendererStreams,
+    registerIpcHandlers: registerInteractiveIpcHandlersThroughModule,
+    seedUiSnapshotCache,
+    createWindow,
+    formatError: (err) => err instanceof Error ? err.message : String(err),
+    onFatalStartupError: (message) => {
+      process.stderr.write(`${RED}Error:${RESET} ${message}\n`);
+    },
   });
 
   app.on('window-all-closed', () => {
