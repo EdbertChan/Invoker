@@ -22,7 +22,7 @@ Evidence in code:
 - `handleSpawnExperiments` creates experiment tasks, creates a reconciliation task, rewires downstream through the reconciliation node, and starts experiment variants in `packages/workflow-core/src/orchestrator.ts:4530`.
 - `checkExperimentCompletion` records completed and failed experiment results before reconciliation needs manual input in `packages/workflow-core/src/orchestrator.ts:4617`.
 
-Review note: the prose comment above `selectExperiment` still describes an older retry-class rationale at `packages/workflow-core/src/orchestrator.ts:2020`, but the executable policy table and method body prove recreate-class behavior.
+Implementation consumption note: the prose comment above `selectExperiment` now records this recreate-class conclusion, and both `selectExperiment` and `selectExperiments` route changed selections through `mutationPolicyForExperimentSelection(...)` before dispatching the downstream reset primitive.
 
 ## Competing Design Considered
 
