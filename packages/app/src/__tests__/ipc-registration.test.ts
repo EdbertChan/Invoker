@@ -3,7 +3,9 @@ import type { IpcMain } from 'electron';
 import { TransportError, TransportErrorCode } from '@invoker/transport';
 import {
   registerBootstrapStateIpc,
+  registerGuiBootstrapStateIpc,
   registerGuiMutationHandler,
+  registerOwnerPeerIpcHandlers,
   registerWorkflowScopedGuiMutationHandler,
   type GuiMutationRegistrationContext,
   type WorkflowScopedGuiMutationRegistrationContext,
@@ -150,7 +152,7 @@ describe('ipc-registration', () => {
   it('registers bootstrap sync IPC with unchanged payload fields', () => {
     const { ipcMain, onHandlers } = createFakeIpcMain();
     const recordStartupDuration = vi.fn();
-    registerBootstrapStateIpc({
+    registerGuiBootstrapStateIpc({
       ipcMain,
       getTasks: () => [{ id: 'task-1' } as any],
       getWorkflows: () => [{ id: 'workflow-1' }],
@@ -179,5 +181,85 @@ describe('ipc-registration', () => {
         jsonSizeBytes: expect.any(Number),
       }),
     );
+  });
+
+  it('keeps the bootstrap registrar as a direct compatibility wrapper', () => {
+    const direct = createFakeIpcMain();
+    const wrapped = createFakeIpcMain();
+    const context = {
+      getTasks: () => [],
+      getWorkflows: () => [],
+      getInitialWorkflowId: () => null,
+      appStartedAtEpochMs: 456,
+      getTaskDeltaStreamSequence: () => 9,
+      recordStartupDuration: vi.fn(),
+    };
+
+    registerBootstrapStateIpc({
+      ipcMain: direct.ipcMain,
+      ...context,
+    });
+    registerGuiBootstrapStateIpc({
+      ipcMain: wrapped.ipcMain,
+      ...context,
+    });
+
+    expect([...wrapped.onHandlers.keys()]).toEqual([...direct.onHandlers.keys()]);
+  });
+
+  it('registers owner peer IPC channels in unchanged order', () => {
+    const channels: string[] = [];
+    registerOwnerPeerIpcHandlers({
+      messageBus: {
+        onRequest: (channel: string) => {
+          channels.push(channel);
+          return undefined as never;
+        },
+      },
+      handlers: {
+        ping: vi.fn(),
+        query: vi.fn(),
+        run: vi.fn(),
+        resume: vi.fn(),
+        exec: vi.fn(),
+        batchExec: vi.fn(),
+      },
+    });
+
+    expect(channels).toEqual([
+      'headless.owner-ping',
+      'headless.query',
+      'headless.run',
+      'headless.resume',
+      'headless.exec',
+      'headless.batch-exec',
+    ]);
+  });
+
+  it('omits optional batch owner IPC without affecting required channels', () => {
+    const channels: string[] = [];
+    registerOwnerPeerIpcHandlers({
+      messageBus: {
+        onRequest: (channel: string) => {
+          channels.push(channel);
+          return undefined as never;
+        },
+      },
+      handlers: {
+        ping: vi.fn(),
+        query: vi.fn(),
+        run: vi.fn(),
+        resume: vi.fn(),
+        exec: vi.fn(),
+      },
+    });
+
+    expect(channels).toEqual([
+      'headless.owner-ping',
+      'headless.query',
+      'headless.run',
+      'headless.resume',
+      'headless.exec',
+    ]);
   });
 });
