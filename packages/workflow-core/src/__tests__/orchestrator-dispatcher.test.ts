@@ -205,6 +205,14 @@ function seedStaleLaunchMetadata(
 }
 
 describe('Orchestrator launch claims', () => {
+  it('keeps extracted public orchestrator method signatures stable', () => {
+    expect(Orchestrator.prototype.startExecution).toHaveLength(0);
+    expect(Orchestrator.prototype.handleWorkerResponse).toHaveLength(1);
+    expect(Orchestrator.prototype.getQueueStatus).toHaveLength(0);
+    expect(Orchestrator.prototype.autoStartExternallyUnblockedReadyTasks).toHaveLength(0);
+    expect(Orchestrator.prototype.markTaskRunningAfterLaunch).toHaveLength(2);
+  });
+
   it('startExecution returns each started task exactly once', () => {
     const { orchestrator } = makeOrchestrator();
     const plan: PlanDefinition = {
@@ -223,6 +231,34 @@ describe('Orchestrator launch claims', () => {
 
     expect(started).toHaveLength(2);
     expect(new Set(started.map((task) => task.id)).size).toBe(2);
+  });
+
+  it('preserves ready-task scheduling and dispatch after a completion transition', () => {
+    const { orchestrator, persistence } = makeOrchestrator();
+    orchestrator.loadPlan({
+      name: 'completion-dispatch-proof',
+      onFinish: 'none',
+      tasks: [
+        { id: 'prepare', description: 'prepare', command: 'echo prepare' },
+        { id: 'downstream', description: 'downstream', command: 'echo downstream', dependencies: ['prepare'] },
+      ],
+    });
+
+    const prepareId = taskIdBySuffix(orchestrator, 'prepare');
+    const downstreamId = taskIdBySuffix(orchestrator, 'downstream');
+
+    const initiallyStarted = orchestrator.startExecution();
+    expect(initiallyStarted.map((task) => task.id)).toEqual([prepareId]);
+    expect(orchestrator.getTask(downstreamId)?.status).toBe('pending');
+
+    const startedAfterCompletion = respondForTask(orchestrator, prepareId, 'completed', 0);
+
+    expect(startedAfterCompletion.map((task) => task.id)).toEqual([downstreamId]);
+    expect(orchestrator.getTask(prepareId)?.status).toBe('completed');
+    expect(orchestrator.getTask(downstreamId)?.status).toBe('running');
+    expect(persistence.loadAttempt(orchestrator.getTask(downstreamId)!.execution.selectedAttemptId!)?.status).toBe('running');
+    expect(persistence.events.map((event) => event.eventType)).toContain('task.completed');
+    expect(persistence.events.map((event) => event.eventType)).toContain('task.running');
   });
 
   it('does not supersede an active launch claim when scheduling repeats', () => {
