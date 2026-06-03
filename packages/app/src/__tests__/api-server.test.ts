@@ -147,6 +147,8 @@ function buildFacade(m: typeof mocks) {
     persistence: m.persistence as any,
     taskExecutor: m.taskExecutor as any,
     killRunningTask: m.killRunningTask,
+    deleteWorkflow: m.deleteWorkflow,
+    detachWorkflow: m.detachWorkflow,
   });
 }
 
@@ -159,8 +161,6 @@ beforeAll(async () => {
     persistence: mocks.persistence as any,
     executorRegistry: mocks.executorRegistry as any,
     mutations: buildFacade(mocks),
-    deleteWorkflow: mocks.deleteWorkflow,
-    detachWorkflow: mocks.detachWorkflow,
   });
   // Wait for the server to start listening
   await new Promise<void>((resolve) => {
@@ -875,7 +875,7 @@ describe('POST /api/workflows/:id/rebase-recreate', () => {
 });
 
 describe('DELETE /api/workflows/:id', () => {
-  it('deletes workflow via deleteWorkflow callback', async () => {
+  it('deletes workflow via facade admin handler', async () => {
     const res = await request(port, 'DELETE', '/api/workflows/wf-1');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
@@ -893,7 +893,7 @@ describe('DELETE /api/workflows/:id', () => {
 });
 
 describe('POST /api/workflows/:id/detach', () => {
-  it('detaches workflow from one upstream workflow', async () => {
+  it('detaches workflow from one upstream workflow via facade admin handler', async () => {
     const res = await request(port, 'POST', '/api/workflows/wf-1/detach', {
       upstreamWorkflowId: 'wf-0',
     });

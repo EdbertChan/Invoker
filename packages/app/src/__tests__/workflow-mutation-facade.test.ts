@@ -220,6 +220,24 @@ describe('WorkflowMutationFacade', () => {
       expect(deps.taskExecutor.closeWorkflowReview).toHaveBeenCalledWith('wf-1');
       expect(deps.orchestrator.deleteWorkflow).toHaveBeenCalledWith('wf-1');
     });
+
+    it('uses injected admin delete handler after active task cleanup', async () => {
+      const deleteWorkflow = vi.fn().mockResolvedValue(undefined);
+      deps = makeDeps({
+        deleteWorkflow,
+        orchestrator: {
+          ...deps.orchestrator,
+          getAllTasks: vi.fn(() => []),
+        } as unknown as Orchestrator,
+      });
+      facade = new WorkflowMutationFacade(deps);
+
+      await facade.deleteWorkflow('wf-1');
+
+      expect(deps.taskExecutor.closeWorkflowReview).toHaveBeenCalledWith('wf-1');
+      expect(deleteWorkflow).toHaveBeenCalledWith('wf-1');
+      expect(deps.orchestrator.deleteWorkflow).not.toHaveBeenCalled();
+    });
   });
 
   describe('detachWorkflow', () => {
@@ -227,6 +245,17 @@ describe('WorkflowMutationFacade', () => {
       await facade.detachWorkflow('wf-child', 'wf-parent');
 
       expect(deps.orchestrator.detachWorkflow).toHaveBeenCalledWith('wf-child', 'wf-parent');
+    });
+
+    it('uses injected admin detach handler when provided', async () => {
+      const detachWorkflow = vi.fn().mockResolvedValue(undefined);
+      deps = makeDeps({ detachWorkflow });
+      facade = new WorkflowMutationFacade(deps);
+
+      await facade.detachWorkflow('wf-child', 'wf-parent');
+
+      expect(detachWorkflow).toHaveBeenCalledWith('wf-child', 'wf-parent');
+      expect(deps.orchestrator.detachWorkflow).not.toHaveBeenCalled();
     });
   });
 

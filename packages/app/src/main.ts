@@ -2395,9 +2395,20 @@ function createEmbeddedTerminalBackendFromConfig(
           taskExecutor: requireTaskExecutor(),
           autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
           killRunningTask,
+          deleteWorkflow: async (workflowId: string) => {
+            const envelope = makeEnvelope('delete-workflow', 'ui', 'workflow', { workflowId });
+            const result = await commandService.deleteWorkflow(envelope);
+            if (!result.ok) throw CommandError.fromResult(result.error);
+          },
+          detachWorkflow: async (workflowId: string, upstreamWorkflowId: string) => {
+            const envelope = makeEnvelope('detach-workflow', 'ui', 'workflow', {
+              workflowId,
+              upstreamWorkflowId,
+            });
+            const result = await commandService.detachWorkflow(envelope);
+            if (!result.ok) throw CommandError.fromResult(result.error);
+          },
         }),
-        deleteWorkflow: performDeleteWorkflow,
-        detachWorkflow: performDetachWorkflow,
       });
       recordStartupMark('api-server.started');
 

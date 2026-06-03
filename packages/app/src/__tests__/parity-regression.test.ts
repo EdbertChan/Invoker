@@ -353,6 +353,8 @@ describe('Parity: API endpoints wire to facade methods', () => {
       persistence: mocks.persistence as any,
       taskExecutor: mocks.taskExecutor as any,
       killRunningTask: mocks.killRunningTask,
+      deleteWorkflow: mocks.deleteWorkflow,
+      detachWorkflow: mocks.detachWorkflow,
     });
     process.env.INVOKER_API_PORT = '0';
     api = startApiServer({
@@ -360,8 +362,6 @@ describe('Parity: API endpoints wire to facade methods', () => {
       persistence: mocks.persistence as any,
       executorRegistry: mocks.executorRegistry as any,
       mutations: facade,
-      deleteWorkflow: mocks.deleteWorkflow,
-      detachWorkflow: mocks.detachWorkflow,
     });
     await new Promise<void>((resolve) => {
       if (api.server.listening) resolve();
