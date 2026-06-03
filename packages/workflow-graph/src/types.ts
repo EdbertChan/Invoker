@@ -96,6 +96,12 @@ export interface ExternalDependency {
   readonly gatePolicy?: 'completed' | 'review_ready';
 }
 
+export interface DetachedExternalDependency extends ExternalDependency {
+  readonly upstreamWorkflowId: string;
+  readonly detachedAt: string;
+  readonly detachedBy?: string;
+}
+
 // ── Task Execution (runtime state) ─────────────────────────
 // Never copied when cloning. Reset on restart.
 

@@ -28,6 +28,8 @@ import type {
   TaskStatus,
   WorkflowRollup,
   WorkflowRollupTaskSummary,
+  ExternalDependency,
+  DetachedExternalDependency,
 } from '@invoker/workflow-core';
 import { DISPATCH_LEASE_MS } from '@invoker/contracts';
 import type { SearchResultItem, SearchOptions } from '@invoker/contracts';
@@ -582,6 +584,8 @@ export class SQLiteAdapter implements PersistenceAdapter {
         feature_branch TEXT,
         merge_mode TEXT,
         review_provider TEXT,
+        external_dependencies TEXT,
+        detached_external_dependencies TEXT,
         generation INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
@@ -887,6 +891,8 @@ export class SQLiteAdapter implements PersistenceAdapter {
       'ALTER TABLE tasks ADD COLUMN agent_session_id TEXT',
       'ALTER TABLE attempts ADD COLUMN agent_session_id TEXT',
       'ALTER TABLE workflows ADD COLUMN review_provider TEXT',
+      'ALTER TABLE workflows ADD COLUMN external_dependencies TEXT',
+      'ALTER TABLE workflows ADD COLUMN detached_external_dependencies TEXT',
       // execution_agent / agent_name: interchangeable agent support
       'ALTER TABLE tasks ADD COLUMN execution_agent TEXT',
       'ALTER TABLE tasks ADD COLUMN agent_name TEXT',
@@ -930,6 +936,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
     if (!this.readOnly) {
       this.migrateTestCommands();
       this.migrateGatePolicyApprovedToCompleted();
+      this.migrateTaskExternalDependenciesToWorkflows();
       this.runCompatibilityMigration();
     }
   }
@@ -960,6 +967,8 @@ export class SQLiteAdapter implements PersistenceAdapter {
         feature_branch TEXT,
         merge_mode TEXT,
         review_provider TEXT,
+        external_dependencies TEXT,
+        detached_external_dependencies TEXT,
         generation INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
@@ -969,12 +978,14 @@ export class SQLiteAdapter implements PersistenceAdapter {
       INSERT INTO workflows_new (
         id, name, description, visual_proof, plan_file, repo_url, intermediate_repo_url,
         branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode,
-        review_provider, generation, created_at, updated_at
+        review_provider, external_dependencies, detached_external_dependencies,
+        generation, created_at, updated_at
       )
       SELECT
         id, name, description, visual_proof, plan_file, repo_url, intermediate_repo_url,
         branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode,
-        review_provider, generation, created_at, updated_at
+        review_provider, external_dependencies, detached_external_dependencies,
+        generation, created_at, updated_at
       FROM workflows
     `);
     this.db.run('DROP TABLE workflows');
@@ -1048,12 +1059,106 @@ export class SQLiteAdapter implements PersistenceAdapter {
     }
   }
 
+  private normalizeExternalDependencies(raw: unknown): ExternalDependency[] {
+    if (!Array.isArray(raw)) return [];
+    const normalized: ExternalDependency[] = [];
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      const dep = item as Record<string, unknown>;
+      if (typeof dep.workflowId !== 'string' || dep.workflowId.trim() === '') continue;
+      const taskId = typeof dep.taskId === 'string' && dep.taskId.trim() !== '' ? dep.taskId.trim() : '__merge__';
+      const gatePolicy = dep.gatePolicy === 'review_ready' ? 'review_ready' : 'completed';
+      normalized.push({
+        workflowId: dep.workflowId.trim(),
+        taskId,
+        requiredStatus: 'completed',
+        gatePolicy,
+      });
+    }
+    return normalized;
+  }
+
+  private mergeExternalDependencySets(existing: ExternalDependency[], incoming: ExternalDependency[]): ExternalDependency[] {
+    const byKey = new Map<string, ExternalDependency>();
+    for (const dep of [...existing, ...incoming]) {
+      const taskId = dep.taskId?.trim() || '__merge__';
+      const key = `${dep.workflowId}::${taskId}`;
+      const previous = byKey.get(key);
+      const gatePolicy =
+        previous?.gatePolicy === 'completed' || dep.gatePolicy === 'completed'
+          ? 'completed'
+          : 'review_ready';
+      byKey.set(key, {
+        workflowId: dep.workflowId,
+        taskId,
+        requiredStatus: 'completed',
+        gatePolicy,
+      });
+    }
+    return Array.from(byKey.values());
+  }
+
+  /**
+   * Promote legacy per-task external dependencies to workflow metadata.
+   * This is intentionally idempotent: once task rows are cleared, later runs
+   * only see the workflow-level source of truth.
+   */
+  private migrateTaskExternalDependenciesToWorkflows(): void {
+    try {
+      const rows = this.queryAll(
+        `SELECT id, workflow_id, external_dependencies FROM tasks WHERE external_dependencies IS NOT NULL AND external_dependencies != ''`,
+      ) as Array<{ id: string; workflow_id: string; external_dependencies: string }>;
+      if (rows.length === 0) return;
+
+      const incomingByWorkflow = new Map<string, ExternalDependency[]>();
+      for (const row of rows) {
+        try {
+          const deps = this.normalizeExternalDependencies(JSON.parse(row.external_dependencies));
+          if (deps.length === 0) continue;
+          incomingByWorkflow.set(row.workflow_id, [
+            ...(incomingByWorkflow.get(row.workflow_id) ?? []),
+            ...deps,
+          ]);
+        } catch {
+          // Skip malformed task JSON; do not clear it.
+        }
+      }
+
+      for (const [workflowId, incoming] of incomingByWorkflow) {
+        const wf = this.queryOne(
+          `SELECT external_dependencies FROM workflows WHERE id = ?`,
+          [workflowId],
+        ) as { external_dependencies?: string | null } | undefined;
+        if (!wf) continue;
+        let existing: ExternalDependency[] = [];
+        if (wf.external_dependencies) {
+          try {
+            existing = this.normalizeExternalDependencies(JSON.parse(wf.external_dependencies));
+          } catch {
+            existing = [];
+          }
+        }
+        const merged = this.mergeExternalDependencySets(existing, incoming);
+        this.execRun(
+          `UPDATE workflows SET external_dependencies = ?, updated_at = ? WHERE id = ?`,
+          [merged.length > 0 ? JSON.stringify(merged) : null, new Date().toISOString(), workflowId],
+        );
+      }
+
+      this.execRun(
+        `UPDATE tasks SET external_dependencies = NULL WHERE external_dependencies IS NOT NULL AND external_dependencies != ''`,
+      );
+    } catch {
+      // Tables/columns may not exist yet on first run.
+    }
+  }
+
   // ── Workflows ─────────────────────────────────────────
 
   saveWorkflow(workflow: Workflow): void {
     this.execRun(`
-      INSERT OR REPLACE INTO workflows (id, name, description, visual_proof, plan_file, repo_url, intermediate_repo_url, branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode, review_provider, generation, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO workflows (id, name, description, visual_proof, plan_file, repo_url, intermediate_repo_url, branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode, review_provider, external_dependencies, detached_external_dependencies, generation, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       workflow.id, workflow.name,
       workflow.description ?? null,
@@ -1062,12 +1167,14 @@ export class SQLiteAdapter implements PersistenceAdapter {
       workflow.onFinish ?? null, workflow.baseBranch ?? null, null, workflow.featureBranch ?? null,
       workflow.mergeMode ?? null,
       workflow.reviewProvider ?? null,
+      workflow.externalDependencies ? JSON.stringify(workflow.externalDependencies) : null,
+      workflow.detachedExternalDependencies ? JSON.stringify(workflow.detachedExternalDependencies) : null,
       workflow.generation ?? 0,
       workflow.createdAt, workflow.updatedAt,
     ]);
   }
 
-  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'name' | 'description' | 'visualProof' | 'planFile' | 'repoUrl' | 'intermediateRepoUrl' | 'branch' | 'onFinish' | 'baseBranch' | 'featureBranch' | 'mergeMode' | 'reviewProvider' | 'generation' | 'updatedAt'>>): void {
+  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'name' | 'description' | 'visualProof' | 'planFile' | 'repoUrl' | 'intermediateRepoUrl' | 'branch' | 'onFinish' | 'baseBranch' | 'featureBranch' | 'mergeMode' | 'reviewProvider' | 'externalDependencies' | 'detachedExternalDependencies' | 'generation' | 'updatedAt'>>): void {
     const setClauses: string[] = [];
     const values: unknown[] = [];
     const columnMap: Record<string, string> = {
@@ -1102,6 +1209,14 @@ export class SQLiteAdapter implements PersistenceAdapter {
     }
     if (changes.mergeMode !== undefined) {
       // handled by columnMap; kept for backward-compatible patch shapes
+    }
+    if (changes.externalDependencies !== undefined) {
+      setClauses.push('external_dependencies = ?');
+      values.push(changes.externalDependencies ? JSON.stringify(changes.externalDependencies) : null);
+    }
+    if (changes.detachedExternalDependencies !== undefined) {
+      setClauses.push('detached_external_dependencies = ?');
+      values.push(changes.detachedExternalDependencies ? JSON.stringify(changes.detachedExternalDependencies) : null);
     }
     setClauses.push('updated_at = ?');
     values.push(changes.updatedAt ?? new Date().toISOString());
@@ -1311,7 +1426,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       JSON.stringify(task.dependencies),
       cfg.command ?? null, cfg.prompt ?? null, cfg.experimentPrompt ?? null,
       exec.exitCode ?? null, exec.error ?? null, exec.protocolErrorCode ?? null, exec.protocolErrorMessage ?? null, exec.inputPrompt ?? null,
-      cfg.externalDependencies ? JSON.stringify(cfg.externalDependencies) : null,
+      null,
       cfg.summary ?? null, cfg.problem ?? null, cfg.approach ?? null,
       cfg.testPlan ?? null, cfg.reproCommand ?? null, cfg.fixPrompt ?? null, cfg.fixContext ?? null,
       exec.branch ?? null,
@@ -2433,6 +2548,8 @@ export class SQLiteAdapter implements PersistenceAdapter {
       featureBranch: row.feature_branch ?? undefined,
       mergeMode: row.merge_mode ?? undefined,
       reviewProvider: row.review_provider ?? undefined,
+      externalDependencies: row.external_dependencies ? JSON.parse(row.external_dependencies) : undefined,
+      detachedExternalDependencies: row.detached_external_dependencies ? JSON.parse(row.detached_external_dependencies) as DetachedExternalDependency[] : undefined,
       generation: row.generation ?? 0,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
