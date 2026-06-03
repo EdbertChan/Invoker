@@ -203,6 +203,7 @@ export interface OrchestratorPersistence {
     externalDependencyChanges?: ExternalDependencyChange[];
     generation?: number;
   }>;
+  loadTask?(taskId: string): TaskState | undefined;
   loadTasks(workflowId: string): TaskState[];
   loadWorkflowTaskSnapshot?(): {
     workflows: Array<{
@@ -901,9 +902,40 @@ export class Orchestrator {
     }
   }
 
+  private loadPersistedTask(taskId: string, workflowId?: string): TaskState | undefined {
+    const direct = this.persistence.loadTask?.(taskId);
+    if (direct) return direct;
+
+    const workflowIds = new Set<string>();
+    if (workflowId) workflowIds.add(workflowId);
+    for (const activeWorkflowId of this.activeWorkflowIds) {
+      workflowIds.add(activeWorkflowId);
+    }
+    for (const workflow of this.persistence.listWorkflows()) {
+      workflowIds.add(workflow.id);
+    }
+    for (const wfId of workflowIds) {
+      const found = this.persistence.loadTasks(wfId).find((task) => task.id === taskId);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private restorePersistedTaskAfterWrite(taskId: string, workflowId: string | undefined, caller: string): TaskState {
+    const persisted = this.loadPersistedTask(taskId, workflowId);
+    if (!persisted) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.TASK_NOT_FOUND,
+        `${caller}: task ${taskId} missing from DB after write`,
+      );
+    }
+    this.stateMachine.restoreTask(persisted);
+    return persisted;
+  }
+
   /**
    * Write field changes to the DB, then update the in-memory cache
-   * to match. Returns the updated task state.
+   * from the persisted row. Returns the updated task state.
    */
   private writeAndSync(
     taskId: string,
@@ -916,16 +948,10 @@ export class Orchestrator {
     }
     const id = existing.id;
     this.taskRepository.updateTask(id, changes);
-    const updated: TaskState = {
-      ...existing,
-      ...(changes.status !== undefined ? { status: changes.status } : {}),
-      ...(changes.dependencies !== undefined ? { dependencies: changes.dependencies } : {}),
-      // Type assertion: spread widens the discriminated union but the runtime
-      // value preserves the correct runnerKind discriminant from existing.config.
-      config: { ...existing.config, ...changes.config } as TaskConfig,
-      execution: { ...existing.execution, ...changes.execution },
-      taskStateVersion: existing.taskStateVersion + 1,
-    };
+    const workflowId = changes.config && 'workflowId' in changes.config
+      ? changes.config.workflowId
+      : existing.config.workflowId;
+    const updated = this.restorePersistedTaskAfterWrite(id, workflowId, 'writeAndSync');
     if (process.env.NODE_ENV !== 'test' && TRACE_PERSIST_SYNC) {
       const ex = updated.execution;
       const execKeys = changes.execution ? Object.keys(changes.execution).join(',') : '';
@@ -941,7 +967,6 @@ export class Orchestrator {
         execKeys: execKeys || '—',
       });
     }
-    this.stateMachine.restoreTask(updated);
     if (!opts?.skipWorkflowStatusSync && changes.status !== undefined && existing.config.workflowId) {
       this.touchWorkflow(existing.config.workflowId);
     }
@@ -4530,24 +4555,21 @@ export class Orchestrator {
     };
 
     // Atomic write for task + attempt via repository
-    this.taskRepository.failTaskAndAttempt(taskId, changes, {
+    this.taskRepository.failTaskAndAttempt(existing.id, changes, {
       status: 'failed',
       exitCode: executionFields.exitCode,
       error: executionFields.error,
       completedAt: new Date(),
     });
 
-    // Sync to in-memory state (same pattern as writeAndSync)
-    const updated: TaskState = {
-      ...existing,
-      status: 'failed',
-      execution: { ...existing.execution, ...changes.execution },
-      taskStateVersion: existing.taskStateVersion + 1,
-    };
-    this.stateMachine.restoreTask(updated);
+    const updated = this.restorePersistedTaskAfterWrite(
+      existing.id,
+      existing.config.workflowId,
+      'finalizeFailedTask',
+    );
 
     const delta: TaskDelta = this.buildUpdateDelta(existing, updated, changes);
-    this.persistence.logEvent?.(taskId, eventName, changes);
+    this.persistence.logEvent?.(existing.id, eventName, changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
     this.checkExperimentCompletion(taskId);

@@ -4657,9 +4657,30 @@ describe('Orchestrator', () => {
       });
       orchestrator.startExecution();
 
-      orchestrator.handleWorkerResponse(
-        makeResponse({ actionId: 't1', status: 'completed', outputs: { exitCode: 0 } }),
-      );
+      const taskId = sid(orchestrator, 0, 't1');
+      const canonicalCommit = 'db-canonical-after-write';
+      const updateTask = persistence.updateTask.bind(persistence);
+      const updateTaskSpy = vi.spyOn(persistence, 'updateTask').mockImplementation((id, changes) => {
+        updateTask(id, changes);
+        const entry = persistence.getTaskEntry(id);
+        if (entry?.task.id === taskId && changes.status === 'completed') {
+          entry.task = {
+            ...entry.task,
+            execution: { ...entry.task.execution, commit: canonicalCommit },
+          };
+        }
+      });
+
+      try {
+        orchestrator.handleWorkerResponse(
+          makeResponse({ actionId: 't1', status: 'completed', outputs: { exitCode: 0 } }),
+        );
+      } finally {
+        updateTaskSpy.mockRestore();
+      }
+
+      expect(orchestrator.getTask(taskId)!.execution.commit).toBe(canonicalCommit);
+      expect(persistence.getTaskEntry(taskId)!.task.execution.commit).toBe(canonicalCommit);
 
       for (const task of orchestrator.getAllTasks()) {
         const persisted = persistence.getTaskEntry(task.id);
