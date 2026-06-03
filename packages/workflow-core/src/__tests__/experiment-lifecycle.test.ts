@@ -12,7 +12,10 @@ import { Orchestrator } from '../orchestrator.js';
 import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } from '../orchestrator.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt } from '../task-types.js';
 import type { WorkResponse } from '@invoker/contracts';
-import { MUTATION_POLICIES } from '../invalidation-policy.js';
+import {
+  MUTATION_POLICIES,
+  mutationPolicyForExperimentSelection,
+} from '../invalidation-policy.js';
 
 // ── In-Memory Persistence Mock ──────────────────────────────
 
@@ -893,6 +896,9 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(MUTATION_POLICIES.selectedExperiment.action).toBe('recreateTask');
       expect(MUTATION_POLICIES.selectedExperiment.invalidateIfActive).toBe(true);
       expect(MUTATION_POLICIES.selectedExperiment.invalidatesExecutionSpec).toBe(true);
+      expect(mutationPolicyForExperimentSelection(1)).toBe(
+        MUTATION_POLICIES.selectedExperiment,
+      );
     });
 
     it('re-selecting with ACTIVE downstream cancels first, then routes through recreateTask', () => {
@@ -1115,6 +1121,9 @@ describe('Experiment Lifecycle (integration)', () => {
       expect(MUTATION_POLICIES.selectedExperimentSet.action).toBe('recreateTask');
       expect(MUTATION_POLICIES.selectedExperimentSet.invalidateIfActive).toBe(true);
       expect(MUTATION_POLICIES.selectedExperimentSet.invalidatesExecutionSpec).toBe(true);
+      expect(mutationPolicyForExperimentSelection(2)).toBe(
+        MUTATION_POLICIES.selectedExperimentSet,
+      );
     });
 
     it('re-selecting CHANGED set with ACTIVE downstream cancels first, then routes through recreateTask', () => {
