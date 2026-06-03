@@ -494,6 +494,33 @@ export class TaskRunner {
     return false;
   }
 
+  private logStaleStartupFailure(
+    taskId: string,
+    attemptId: string,
+    startGeneration: number,
+    executorType: string,
+    err: unknown,
+    meta: StartupFailureMetadata,
+  ): void {
+    try {
+      const current = this.orchestrator.getTask(taskId);
+      this.persistence.logEvent?.(taskId, 'task.executor.startup-failure-stale', {
+        attemptId,
+        generation: startGeneration,
+        currentAttemptId: current?.execution.selectedAttemptId,
+        currentGeneration: current?.execution.generation ?? 0,
+        runnerKind: executorType,
+        error: err instanceof Error ? err.message : String(err),
+        workspacePath: meta.workspacePath,
+        branch: meta.branch,
+        agentSessionId: meta.agentSessionId,
+        containerId: meta.containerId,
+      });
+    } catch {
+      // Diagnostics are best-effort; stale launches must not mutate live execution state.
+    }
+  }
+
   async executeTask(task: TaskState, dispatchOpts?: LaunchDispatchOptions): Promise<void> {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
@@ -932,9 +959,13 @@ export class TaskRunner {
         // current.  If the task has moved to a newer attempt or generation
         // (e.g. via recreate-task), writing old workspace/branch metadata
         // would corrupt the live attempt's state.
+        const startupFailureIsStale = this.isLaunchStale(task.id, attemptId, startGeneration);
+        if (startupFailureIsStale) {
+          this.logStaleStartupFailure(task.id, attemptId, startGeneration, executor.type, err, meta);
+        }
         if (
           (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-          && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
+          && !startupFailureIsStale
         ) {
           const execution: Record<string, string> = {};
           if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
