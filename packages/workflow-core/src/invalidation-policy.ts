@@ -61,6 +61,14 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   topology:              { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'workflowFork' as const },
 });
 
+export function mutationPolicyForExperimentSelection(
+  selectedExperimentCount: number,
+): TaskMutationPolicy {
+  return selectedExperimentCount > 1
+    ? MUTATION_POLICIES.selectedExperimentSet
+    : MUTATION_POLICIES.selectedExperiment;
+}
+
 export type CancelInFlightFn = (
   scope: InvalidationScope,
   id: string,
@@ -508,4 +516,3 @@ export function buildOrchestratorOnlyInvalidationDeps(
     },
   };
 }
-
