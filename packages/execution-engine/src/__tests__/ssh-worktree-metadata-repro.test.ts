@@ -144,4 +144,81 @@ describe('SSH worktree metadata repro', () => {
       }),
     }));
   });
+
+  it('does not attach stale SSH startup-failure metadata after the selected attempt advances', async () => {
+    const staleOwnerPath = '/home/invoker/.invoker/worktrees/049de5b865cc/experiment-wf-1-test-execution-engine-old';
+    const staleBranch = 'experiment/wf-1/test-execution-engine-old';
+
+    const failingExecutor = {
+      type: 'ssh',
+      start: vi.fn().mockRejectedValue(Object.assign(
+        new Error(
+          'SSH remote script failed (exit=128)\n' +
+            `STDERR:\nfatal: '${staleBranch}' is already used by worktree at '${staleOwnerPath}'\n`,
+        ),
+        {
+          workspacePath: staleOwnerPath,
+          branch: staleBranch,
+        },
+      )),
+      onComplete: vi.fn(),
+      onOutput: vi.fn(),
+      onHeartbeat: vi.fn(),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const staleLaunchTask = makeTask({
+      id: 'wf-1/test-execution-engine',
+      config: { command: 'pnpm test', runnerKind: 'ssh' },
+      execution: { selectedAttemptId: 'attempt-1', generation: 0 },
+    });
+    const currentTask = makeTask({
+      id: 'wf-1/test-execution-engine',
+      config: { command: 'pnpm test', runnerKind: 'ssh' },
+      execution: { selectedAttemptId: 'attempt-2', generation: 0 },
+    });
+
+    const updateSpy = vi.fn();
+    const handleResponseSpy = vi.fn();
+    const logEvent = vi.fn();
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => currentTask,
+        getAllTasks: () => [currentTask],
+        handleWorkerResponse: handleResponseSpy,
+      } as any,
+      persistence: {
+        updateTask: updateSpy,
+        appendTaskOutput: vi.fn(),
+        logEvent,
+      } as any,
+      executorRegistry: {
+        getDefault: () => failingExecutor,
+        get: () => failingExecutor,
+        getAll: () => [failingExecutor],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    await runner.executeTask(staleLaunchTask);
+
+    expect(updateSpy).not.toHaveBeenCalledWith('wf-1/test-execution-engine', expect.objectContaining({
+      execution: expect.objectContaining({
+        workspacePath: staleOwnerPath,
+        branch: staleBranch,
+      }),
+    }));
+    expect(handleResponseSpy).not.toHaveBeenCalled();
+    expect(logEvent).toHaveBeenCalledWith('wf-1/test-execution-engine', 'task.executor.startup-failure-suppressed', expect.objectContaining({
+      attemptId: 'attempt-1',
+      selectedAttemptId: 'attempt-2',
+      reason: 'lineage_advanced',
+      suppressedMetadata: {
+        workspacePath: staleOwnerPath,
+        branch: staleBranch,
+      },
+    }));
+  });
 });

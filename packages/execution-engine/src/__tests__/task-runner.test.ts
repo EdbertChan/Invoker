@@ -1136,6 +1136,7 @@ describe('TaskRunner', () => {
     it('suppresses metadata write and failed response when selectedAttemptId has advanced', async () => {
       const handleWorkerResponse = vi.fn();
       const updateTask = vi.fn();
+      const logEvent = vi.fn();
       // Orchestrator returns a task whose selectedAttemptId has moved forward
       const orchestrator = {
         getTask: () => makeTask({
@@ -1162,7 +1163,7 @@ describe('TaskRunner', () => {
 
       const runner = new TaskRunner({
         orchestrator: orchestrator as any,
-        persistence: { updateTask } as any,
+        persistence: { updateTask, logEvent } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
       });
@@ -1185,6 +1186,15 @@ describe('TaskRunner', () => {
       );
       // Failed WorkResponse must NOT be emitted
       expect(handleWorkerResponse).not.toHaveBeenCalled();
+      expect(logEvent).toHaveBeenCalledWith('stale-1', 'task.executor.startup-failure-suppressed', expect.objectContaining({
+        attemptId: 'attempt-1',
+        selectedAttemptId: 'attempt-2',
+        reason: 'lineage_advanced',
+        suppressedMetadata: {
+          workspacePath: '/tmp/stale-worktree',
+          branch: 'experiment/stale-branch',
+        },
+      }));
     });
 
     it('suppresses metadata write and failed response when generation has advanced', async () => {
@@ -1237,6 +1247,71 @@ describe('TaskRunner', () => {
         }),
       );
       expect(handleWorkerResponse).not.toHaveBeenCalled();
+    });
+
+    it('suppresses metadata write and failed response when latest attempt advanced without selectedAttemptId', async () => {
+      const handleWorkerResponse = vi.fn();
+      const updateTask = vi.fn();
+      const logEvent = vi.fn();
+      const orchestrator = {
+        getTask: () => makeTask({
+          id: 'latest-advanced',
+          status: 'running',
+          execution: { generation: 0 },
+        }),
+        handleWorkerResponse,
+      };
+      const startupErr: any = new Error('stale SSH owner path');
+      startupErr.workspacePath = '/tmp/attempt-1-worktree';
+      startupErr.branch = 'experiment/attempt-1-branch';
+      const throwingExecutor = {
+        type: 'ssh',
+        start: async () => { throw startupErr; },
+        onOutput: () => () => {},
+        onComplete: () => () => {},
+      };
+      const registry = {
+        getDefault: () => throwingExecutor,
+        get: () => throwingExecutor,
+        getAll: () => [throwingExecutor],
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: {
+          updateTask,
+          logEvent,
+          loadAttempts: () => [
+            { id: 'attempt-1' },
+            { id: 'attempt-2' },
+          ],
+        } as any,
+        executorRegistry: registry as any,
+        cwd: '/tmp',
+      });
+
+      await runner.executeTask(makeTask({
+        id: 'latest-advanced',
+        status: 'running',
+        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        execution: { selectedAttemptId: 'attempt-1', generation: 0 },
+      }));
+
+      expect(updateTask).not.toHaveBeenCalledWith(
+        'latest-advanced',
+        expect.objectContaining({
+          execution: expect.objectContaining({ workspacePath: '/tmp/attempt-1-worktree' }),
+        }),
+      );
+      expect(handleWorkerResponse).not.toHaveBeenCalled();
+      expect(logEvent).toHaveBeenCalledWith('latest-advanced', 'task.executor.startup-failure-suppressed', expect.objectContaining({
+        attemptId: 'attempt-1',
+        latestAttemptId: 'attempt-2',
+        suppressedMetadata: {
+          workspacePath: '/tmp/attempt-1-worktree',
+          branch: 'experiment/attempt-1-branch',
+        },
+      }));
     });
 
     it('still persists metadata and emits response when lineage is current', async () => {

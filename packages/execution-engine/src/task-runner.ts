@@ -490,9 +490,50 @@ export class TaskRunner {
     if (!current) return false;
     const currentAttempt = current.execution.selectedAttemptId;
     const currentGeneration = current.execution.generation ?? 0;
-    if (currentAttempt !== undefined && currentAttempt !== attemptId) return true;
+    if (currentAttempt !== undefined) {
+      if (currentAttempt !== attemptId) return true;
+    } else {
+      const latestAttempt = this.loadLatestAttemptId(taskId);
+      if (latestAttempt !== undefined && latestAttempt !== attemptId) return true;
+    }
     if (currentGeneration !== startGeneration) return true;
     return false;
+  }
+
+  private logSuppressedStaleStartupFailure(
+    task: TaskState,
+    attemptId: string,
+    startGeneration: number,
+    err: unknown,
+  ): void {
+    const current = this.orchestrator.getTask(task.id);
+    const selectedAttemptId = current?.execution.selectedAttemptId;
+    const selectedGeneration = current?.execution.generation ?? 0;
+    const latestAttemptId = selectedAttemptId ? undefined : this.loadLatestAttemptId(task.id);
+    const cause = err instanceof Error ? err.cause : undefined;
+    const metadataSource = (cause ?? err) as StartupFailureMetadata;
+    const suppressedMetadata: StartupFailureMetadata = {};
+    if (metadataSource.workspacePath) suppressedMetadata.workspacePath = metadataSource.workspacePath;
+    if (metadataSource.branch) suppressedMetadata.branch = metadataSource.branch;
+    if (metadataSource.agentSessionId) suppressedMetadata.agentSessionId = metadataSource.agentSessionId;
+    if (metadataSource.containerId) suppressedMetadata.containerId = metadataSource.containerId;
+
+    try {
+      this.persistence.logEvent?.(task.id, 'task.executor.startup-failure-suppressed', {
+        attemptId,
+        generation: startGeneration,
+        selectedAttemptId,
+        selectedGeneration,
+        latestAttemptId,
+        runnerKind: task.config.runnerKind,
+        reason: 'lineage_advanced',
+        error: err instanceof Error ? err.message : String(err),
+        cause: cause instanceof Error ? cause.message : undefined,
+        suppressedMetadata: Object.keys(suppressedMetadata).length > 0 ? suppressedMetadata : undefined,
+      });
+    } catch {
+      // Diagnostics are best-effort; suppression must still protect live task state.
+    }
   }
 
   async executeTask(task: TaskState, dispatchOpts?: LaunchDispatchOptions): Promise<void> {
@@ -574,6 +615,10 @@ export class TaskRunner {
         this.logger.warn(
           `[TaskRunner] suppressing stale startup-failure metadata/response for task=${task.id} attemptId=${attemptId}`,
         );
+        this.logSuppressedStaleStartupFailure(task, attemptId, startGeneration, err);
+        if (dispatchOpts) {
+          dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
+        }
         await this.cleanupPerTaskDockerExecutor(task);
         return;
       }
@@ -935,7 +980,7 @@ export class TaskRunner {
         // would corrupt the live attempt's state.
         if (
           (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-          && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
+          && !this.isLaunchStale(task.id, attemptId, startGeneration)
         ) {
           const execution: Record<string, string> = {};
           if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
