@@ -19,7 +19,7 @@ import { TaskStateMachine } from './state-machine.js';
 import { ResponseHandler } from './response-handler.js';
 import type { ParsedResponse } from './response-handler.js';
 import { TaskScheduler } from './scheduler.js';
-import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, ExternalDependency, TaskStatus } from '@invoker/workflow-graph';
+import type { TaskState, TaskDelta, TaskStateChanges, TaskConfig, Attempt, ExternalDependency, DetachedExternalDependency, TaskStatus } from '@invoker/workflow-graph';
 import type { RunnerKind } from '@invoker/workflow-graph';
 import { createTaskState, createAttempt } from '@invoker/workflow-graph';
 import type { WorkflowDerivedStatus } from '@invoker/workflow-graph';
@@ -184,8 +184,10 @@ export interface OrchestratorPersistence {
     baseBranch?: string;
     featureBranch?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
+    externalDependencies?: ExternalDependency[];
+    detachedExternalDependencies?: DetachedExternalDependency[];
   }): void;
-  updateWorkflow?(workflowId: string, changes: { updatedAt?: string; baseBranch?: string; generation?: number; mergeMode?: 'manual' | 'automatic' | 'external_review' }): void;
+  updateWorkflow?(workflowId: string, changes: { updatedAt?: string; baseBranch?: string; generation?: number; mergeMode?: 'manual' | 'automatic' | 'external_review'; externalDependencies?: ExternalDependency[]; detachedExternalDependencies?: DetachedExternalDependency[] }): void;
   saveTask(workflowId: string, task: TaskState): void;
   updateTask(taskId: string, changes: TaskStateChanges): void;
   logEvent?(taskId: string, eventType: string, payload?: unknown): void;
@@ -198,6 +200,8 @@ export interface OrchestratorPersistence {
     baseBranch?: string;
     onFinish?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
+    externalDependencies?: ExternalDependency[];
+    detachedExternalDependencies?: DetachedExternalDependency[];
     generation?: number;
   }>;
   loadTasks(workflowId: string): TaskState[];
@@ -211,6 +215,8 @@ export interface OrchestratorPersistence {
       baseBranch?: string;
       onFinish?: string;
       mergeMode?: 'manual' | 'automatic' | 'external_review';
+      externalDependencies?: ExternalDependency[];
+      detachedExternalDependencies?: DetachedExternalDependency[];
       generation?: number;
     }>;
     tasks: TaskState[];
@@ -239,6 +245,8 @@ export interface OrchestratorPersistence {
     baseBranch?: string;
     featureBranch?: string;
     mergeMode?: 'manual' | 'automatic' | 'external_review';
+    externalDependencies?: ExternalDependency[];
+    detachedExternalDependencies?: DetachedExternalDependency[];
   } | undefined;
   /** Delete a single workflow and its tasks from the DB. */
   deleteWorkflow?(workflowId: string): void;
@@ -289,15 +297,22 @@ export interface PlanDefinition {
   reviewProvider?: string;
   repoUrl?: string;
   intermediateRepoUrl?: string;
+  externalDependencies?: Array<{
+    workflowId: string;
+    taskId?: string;
+    requiredStatus?: 'completed';
+    gatePolicy?: 'completed' | 'review_ready';
+  }>;
   tasks: Array<{
     id: string;
     description: string;
     command?: string;
     prompt?: string;
     dependencies?: string[];
+    /** @deprecated Cross-workflow dependencies are workflow-owned; parser rejects this for new YAML. */
     externalDependencies?: Array<{
       workflowId: string;
-      taskId: string;
+      taskId?: string;
       requiredStatus?: 'completed';
       gatePolicy?: 'completed' | 'review_ready';
     }>;
@@ -1394,6 +1409,10 @@ export class Orchestrator {
   loadPlan(plan: PlanDefinition, opts?: { allowGraphMutation?: boolean }): void {
     const workflowId = nextWorkflowId();
     const localToScoped = buildPlanLocalToScopedIdMap(workflowId, plan.tasks);
+    const workflowExternalDependencies = this.normalizePlanExternalDependencies([
+      ...(plan.externalDependencies ?? []),
+      ...plan.tasks.flatMap((task) => task.externalDependencies ?? []),
+    ]);
 
     // ── Conflict check (read-only) ──────────────────────────
     if (!opts?.allowGraphMutation) {
@@ -1461,13 +1480,6 @@ export class Orchestrator {
         }
         return s;
       });
-      const externalDependencies =
-        taskDef.externalDependencies?.map((dep) => ({
-          workflowId: dep.workflowId,
-          taskId: dep.taskId,
-          requiredStatus: dep.requiredStatus ?? 'completed',
-          gatePolicy: dep.gatePolicy ?? this.defaultExternalGatePolicy(dep.taskId),
-        })) ?? [];
       const baseConfig = {
         workflowId,
         command: taskDef.command,
@@ -1477,7 +1489,6 @@ export class Orchestrator {
         requiresManualApproval: taskDef.requiresManualApproval,
         featureBranch: taskDef.featureBranch,
         executionAgent: taskDef.executionAgent,
-        externalDependencies,
         poolId: effectivePoolId,
       } as const;
       let taskConfig: TaskConfig;
@@ -1499,14 +1510,12 @@ export class Orchestrator {
 
     // Validate cross-workflow prerequisites exist before writing anything.
     const missingExternalDeps: string[] = [];
-    for (const taskDef of plan.tasks) {
-      for (const dep of taskDef.externalDependencies ?? []) {
-        if (!this.findExternalDependencyTask(dep.workflowId, dep.taskId)) {
-          const depDisplayId = this.externalDependencyDisplayId(dep.workflowId, dep.taskId);
-          missingExternalDeps.push(
-            `task "${taskDef.id}" references missing external dependency "${depDisplayId}"`,
-          );
-        }
+    for (const dep of workflowExternalDependencies) {
+      if (!this.findExternalDependencyTask(dep.workflowId, dep.taskId)) {
+        const depDisplayId = this.externalDependencyDisplayId(dep.workflowId, dep.taskId);
+        missingExternalDeps.push(
+          `workflow "${plan.name}" references missing external dependency "${depDisplayId}"`,
+        );
       }
     }
     if (missingExternalDeps.length > 0) {
@@ -1544,6 +1553,7 @@ export class Orchestrator {
       baseBranch: plan.baseBranch,
       featureBranch: plan.featureBranch,
       mergeMode: plan.mergeMode,
+      externalDependencies: workflowExternalDependencies.length > 0 ? workflowExternalDependencies : undefined,
       createdAt,
       updatedAt: createdAt,
     });
@@ -3395,22 +3405,22 @@ export class Orchestrator {
    * policy router (e.g. a hypothetical fork-class equivalent) gets
    * the same non-invalidating semantics as this method.
    */
-  setTaskExternalGatePolicies(taskId: string, updates: ExternalGatePolicyUpdate[]): TaskState[] {
+  setWorkflowExternalGatePolicies(workflowId: string, updates: ExternalGatePolicyUpdate[]): TaskState[] {
     this.refreshFromDb();
-    const task = this.stateGetTask(taskId);
-    if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     this.lastInvalidationPlan = planInvalidation({
       action: 'scheduleOnly',
-      targetId: task.id,
+      targetId: workflowId,
       tasks: this.stateMachine.getAllTasks(),
     });
-    if (task.status === 'running' || task.status === 'fixing_with_ai') {
-      throw new Error(`Cannot edit running task ${taskId}`);
-    }
 
-    const deps = task.config.externalDependencies;
+    const workflow = this.persistence.loadWorkflow?.(workflowId)
+      ?? this.persistence.listWorkflows().find((candidate) => candidate.id === workflowId);
+    if (!workflow) {
+      throw new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, `Workflow ${workflowId} not found`);
+    }
+    const deps = workflow.externalDependencies;
     if (!deps || deps.length === 0) {
-      throw new Error(`Task ${taskId} has no external dependencies`);
+      throw new Error(`Workflow ${workflowId} has no external dependencies`);
     }
     if (!updates.length) return [];
 
@@ -3422,7 +3432,7 @@ export class Orchestrator {
     const byKey = new Map<string, ExternalGatePolicyUpdate>();
     for (const update of updates) {
       if (update.gatePolicy !== 'completed' && update.gatePolicy !== 'review_ready') {
-        throw new Error(`Invalid gatePolicy "${String(update.gatePolicy)}" for task ${taskId}`);
+        throw new Error(`Invalid gatePolicy "${String(update.gatePolicy)}" for workflow ${workflowId}`);
       }
       byKey.set(keyOf(update.workflowId, update.taskId), update);
     }
@@ -3439,21 +3449,28 @@ export class Orchestrator {
 
     if (changed === 0) return [];
 
-    const policyChanges: TaskStateChanges = {
-      config: { externalDependencies: nextDeps },
-    };
-    const policyUpdated = this.writeAndSync(taskId, policyChanges);
-    const policyDelta: TaskDelta = this.buildUpdateDelta(task, policyUpdated, policyChanges);
-    this.persistence.logEvent?.(taskId, 'task.external_dependency_policy_updated', {
+    this.taskRepository.updateWorkflow(workflowId, { externalDependencies: nextDeps });
+    const eventTask = this.getMergeNode(workflowId) ?? this.stateMachine.getAllTasks().find((task) => task.config.workflowId === workflowId);
+    if (eventTask) this.persistence.logEvent?.(eventTask.id, 'workflow.external_dependency_policy_updated', {
       updates,
       changed,
     });
-    this.messageBus.publish(TASK_DELTA_CHANNEL, policyDelta);
 
     // Re-evaluate and auto-start anything newly unblocked by this policy change.
     const started = this.autoStartExternallyUnblockedReadyTasks();
     this.checkWorkflowCompletion();
     return started;
+  }
+
+  setTaskExternalGatePolicies(taskId: string, updates: ExternalGatePolicyUpdate[]): TaskState[] {
+    this.refreshFromDb();
+    const task = this.stateGetTask(taskId);
+    if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
+    const workflowId = task.config.workflowId;
+    if (!workflowId) {
+      throw new Error(`Task ${taskId} has no workflowId`);
+    }
+    return this.setWorkflowExternalGatePolicies(workflowId, updates);
   }
 
   forkWorkflow(workflowId: string, opts?: { autoStart?: boolean }): ForkWorkflowResult {
@@ -3496,6 +3513,12 @@ export class Orchestrator {
       if (typeof m.featureBranch === 'string') baseSaveWf.featureBranch = m.featureBranch;
       if (m.mergeMode === 'manual' || m.mergeMode === 'automatic' || m.mergeMode === 'external_review') {
         baseSaveWf.mergeMode = m.mergeMode;
+      }
+      if (Array.isArray(m.externalDependencies)) {
+        baseSaveWf.externalDependencies = m.externalDependencies as ExternalDependency[];
+      }
+      if (Array.isArray(m.detachedExternalDependencies)) {
+        baseSaveWf.detachedExternalDependencies = m.detachedExternalDependencies as DetachedExternalDependency[];
       }
     }
     this.persistence.saveWorkflow(baseSaveWf);
@@ -4679,6 +4702,7 @@ export class Orchestrator {
   private enqueueIfNotScheduled(taskId: string, priority: number = 0): void {
     const task = this.stateGetTask(taskId);
     if (!task) return;
+    if (this.getExternalDependencyBlocker(task) !== undefined) return;
 
     const attemptId = this.ensureCurrentPendingAttempt(task);
     const currentAttempt = this.loadAttemptById(attemptId);
@@ -4729,7 +4753,6 @@ export class Orchestrator {
   autoStartExternallyUnblockedReadyTasks(): TaskState[] {
     const readyTasks = this.stateMachine
       .getReadyTasks()
-      .filter((task) => (task.config.externalDependencies?.length ?? 0) > 0)
       .filter((task) => this.getExternalDependencyBlocker(task) === undefined);
 
     for (const task of readyTasks) {
@@ -4784,6 +4807,35 @@ export class Orchestrator {
     return normalizedTaskId === '__merge__' ? 'completed' : 'review_ready';
   }
 
+  private normalizePlanExternalDependencies(
+    deps: Array<{
+      workflowId: string;
+      taskId?: string;
+      requiredStatus?: 'completed';
+      gatePolicy?: 'completed' | 'review_ready';
+    }>,
+  ): ExternalDependency[] {
+    const byKey = new Map<string, ExternalDependency>();
+    for (const dep of deps) {
+      const workflowId = dep.workflowId?.trim();
+      if (!workflowId) continue;
+      const taskId = dep.taskId?.trim() || '__merge__';
+      const key = `${workflowId}::${taskId}`;
+      const existing = byKey.get(key);
+      const gatePolicy =
+        existing?.gatePolicy === 'completed' || dep.gatePolicy === 'completed'
+          ? 'completed'
+          : dep.gatePolicy ?? this.defaultExternalGatePolicy(taskId);
+      byKey.set(key, {
+        workflowId,
+        taskId,
+        requiredStatus: dep.requiredStatus ?? 'completed',
+        gatePolicy,
+      });
+    }
+    return Array.from(byKey.values());
+  }
+
   private findExternalDependencyTask(workflowId: string, taskId?: string): TaskState | undefined {
     const normalizedTaskId = taskId?.trim() || '__merge__';
     if (normalizedTaskId === '__merge__') {
@@ -4797,8 +4849,14 @@ export class Orchestrator {
     return tasks.find((t) => t.id === scopedId || t.id === normalizedTaskId);
   }
 
-  private getExternalDependencyBlocker(task: TaskState): string | undefined {
-    const deps = task.config.externalDependencies;
+  private getWorkflowExternalDependencies(workflowId: string): ExternalDependency[] {
+    const workflow = this.persistence.loadWorkflow?.(workflowId)
+      ?? this.persistence.listWorkflows().find((candidate) => candidate.id === workflowId);
+    return workflow?.externalDependencies ?? [];
+  }
+
+  private getWorkflowDependencyBlocker(workflowId: string): string | undefined {
+    const deps = this.getWorkflowExternalDependencies(workflowId);
     if (!deps || deps.length === 0) return undefined;
 
     for (const dep of deps) {
@@ -4825,18 +4883,22 @@ export class Orchestrator {
     return undefined;
   }
 
+  private getExternalDependencyBlocker(task: TaskState): string | undefined {
+    const workflowId = task.config.workflowId;
+    if (!workflowId) return undefined;
+    return this.getWorkflowDependencyBlocker(workflowId);
+  }
+
   private collectWorkflowDependencyEdges(): Map<string, Set<string>> {
     const edges = new Map<string, Set<string>>();
-    for (const task of this.stateMachine.getAllTasks()) {
-      const workflowId = task.config.workflowId;
-      if (!workflowId) continue;
-      for (const dep of task.config.externalDependencies ?? []) {
+    for (const workflow of this.persistence.listWorkflows()) {
+      for (const dep of workflow.externalDependencies ?? []) {
         let dependents = edges.get(dep.workflowId);
         if (!dependents) {
           dependents = new Set<string>();
           edges.set(dep.workflowId, dependents);
         }
-        dependents.add(workflowId);
+        dependents.add(workflow.id);
       }
     }
     return edges;
@@ -4946,23 +5008,12 @@ export class Orchestrator {
       throw new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, `Workflow ${workflowId} not found`);
     }
 
-    let removedDependency = false;
-    for (const task of targetTasks) {
-      const deps = task.config.externalDependencies ?? [];
-      const nextDeps = deps.filter((dep) => dep.workflowId !== upstreamWorkflowId);
-      if (nextDeps.length === deps.length) continue;
-
-      removedDependency = true;
-      const changes: TaskStateChanges = {
-        config: { externalDependencies: nextDeps.length > 0 ? nextDeps : undefined },
-      };
-      const updated = this.writeAndSync(task.id, changes);
-      this.persistence.logEvent?.(task.id, 'task.external_dependency_detached', {
-        workflowId,
-        upstreamWorkflowId,
-      });
-      this.messageBus.publish(TASK_DELTA_CHANNEL, this.buildUpdateDelta(task, updated, changes));
-    }
+    const targetWorkflow = this.persistence.loadWorkflow?.(workflowId)
+      ?? this.persistence.listWorkflows().find((candidate) => candidate.id === workflowId);
+    const deps = targetWorkflow?.externalDependencies ?? [];
+    const removedDeps = deps.filter((dep) => dep.workflowId === upstreamWorkflowId);
+    const nextDeps = deps.filter((dep) => dep.workflowId !== upstreamWorkflowId);
+    const removedDependency = removedDeps.length > 0;
 
     if (!removedDependency) {
       throw new Error(
@@ -4970,9 +5021,41 @@ export class Orchestrator {
       );
     }
 
+    const now = workflowTimestamp().toISOString();
+    const existingDetached = targetWorkflow?.detachedExternalDependencies ?? [];
+    const detachedByKey = new Map<string, DetachedExternalDependency>();
+    for (const dep of existingDetached) {
+      detachedByKey.set(`${dep.workflowId}::${dep.taskId?.trim() || '__merge__'}`, dep);
+    }
+    for (const dep of removedDeps) {
+      const taskId = dep.taskId?.trim() || '__merge__';
+      const key = `${dep.workflowId}::${taskId}`;
+      if (detachedByKey.has(key)) continue;
+      detachedByKey.set(key, {
+        ...dep,
+        taskId,
+        upstreamWorkflowId: dep.workflowId,
+        detachedAt: now,
+      });
+    }
+    this.taskRepository.updateWorkflow(workflowId, {
+      externalDependencies: nextDeps.length > 0 ? nextDeps : undefined,
+      detachedExternalDependencies: Array.from(detachedByKey.values()),
+    });
+
+    const eventTask = this.getMergeNode(workflowId) ?? targetTasks[0];
+    this.persistence.logEvent?.(eventTask.id, 'workflow.external_dependency_detached', {
+      workflowId,
+      upstreamWorkflowId,
+      removedDependencies: removedDeps,
+    });
+    this.persistence.logEvent?.(eventTask.id, 'task.external_dependency_detached', {
+      workflowId,
+      upstreamWorkflowId,
+    });
+
     const upstreamFeatureBranch = opts?.upstreamWorkflow?.featureBranch?.trim();
     const upstreamBaseBranch = opts?.upstreamWorkflow?.baseBranch?.trim();
-    const targetWorkflow = this.persistence.loadWorkflow?.(workflowId);
     const targetBaseBranch = targetWorkflow?.baseBranch?.trim();
     if (
       upstreamFeatureBranch
@@ -5030,6 +5113,15 @@ export class Orchestrator {
       if (!task || task.status !== 'pending') {
         this.logger.info('[orchestrator] drainScheduler: skipping non-pending task', {
           taskId: job.taskId,
+        });
+        job = this.scheduler.takeNext();
+        continue;
+      }
+      const workflowBlocker = this.getExternalDependencyBlocker(task);
+      if (workflowBlocker !== undefined) {
+        this.logger.info('[orchestrator] drainScheduler: skipping externally blocked workflow task', {
+          taskId: job.taskId,
+          blocker: workflowBlocker,
         });
         job = this.scheduler.takeNext();
         continue;

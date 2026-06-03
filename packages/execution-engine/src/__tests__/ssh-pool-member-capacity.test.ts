@@ -149,7 +149,12 @@ describe('SSH pool member capacity', () => {
     runner.selectExecutor(firstTask);
     await runner.executeTask(secondTask);
 
-    expect(deferTask).toHaveBeenCalledWith(secondTask.id);
+    expect(deferTask).toHaveBeenCalledWith(secondTask.id, expect.objectContaining({
+      attemptId: secondTask.execution.selectedAttemptId,
+      message: 'Execution pool "ssh-pool" has no member capacity available',
+      phase: 'none',
+      reason: 'resource-limit',
+    }));
     expect(sshExecutor.start).not.toHaveBeenCalled();
   });
 
@@ -231,7 +236,12 @@ describe('SSH pool member capacity', () => {
       await secondRunner.executeTask(secondTask);
 
       expect(secondExecutor.start).not.toHaveBeenCalled();
-      expect(deferTask).toHaveBeenCalledWith(secondTask.id);
+      expect(deferTask).toHaveBeenCalledWith(secondTask.id, expect.objectContaining({
+        attemptId: secondTask.execution.selectedAttemptId,
+        message: 'Execution pool "ssh-pool" has no member capacity available',
+        phase: 'none',
+        reason: 'resource-limit',
+      }));
 
       firstComplete?.({
         requestId: 'req',

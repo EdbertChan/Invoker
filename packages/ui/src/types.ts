@@ -43,6 +43,12 @@ export interface ExternalDependency {
   readonly gatePolicy?: 'completed' | 'review_ready';
 }
 
+export interface DetachedExternalDependency extends ExternalDependency {
+  readonly upstreamWorkflowId: string;
+  readonly detachedAt: string;
+  readonly detachedBy?: string;
+}
+
 export interface ExternalGatePolicyUpdate {
   workflowId: string;
   taskId?: string;
@@ -162,6 +168,8 @@ export interface WorkflowMeta {
   repoUrl?: string;
   intermediateRepoUrl?: string;
   reviewProvider?: string;
+  externalDependencies?: readonly ExternalDependency[];
+  detachedExternalDependencies?: readonly DetachedExternalDependency[];
   createdAt?: string;
   updatedAt?: string;
 }
@@ -251,6 +259,7 @@ export interface PlanDefinition {
   onFinish?: 'none' | 'merge' | 'pull_request';
   baseBranch?: string;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
+  externalDependencies?: ExternalDependency[];
 }
 
 // ── Task Replacement ────────────────────────────────────────
