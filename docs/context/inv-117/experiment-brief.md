@@ -102,7 +102,7 @@ Verdict threshold:
 - `Skipped by checkpoint` must be exactly `0`.
 - `Skipped unavailable` must be exactly `0`.
 
-Any `ERROR: INV-67 proof ...` line emitted by the current implementation is a threshold failure for this INV-117 experiment as well.
+Any lingering `ERROR: INV-67 proof ...` line in runner output remains a threshold failure; the implementation should emit `ERROR: INV-117 proof ...` for this contract.
 
 ## Extended Proof Command
 
