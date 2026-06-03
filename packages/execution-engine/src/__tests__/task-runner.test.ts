@@ -1239,6 +1239,79 @@ describe('TaskRunner', () => {
       expect(handleWorkerResponse).not.toHaveBeenCalled();
     });
 
+    it('uses launch-time generation when startup fails after in-place lineage mutation', async () => {
+      const handleWorkerResponse = vi.fn();
+      const updateTask = vi.fn();
+      const appendTaskOutput = vi.fn();
+      const logEvent = vi.fn();
+      const task = makeTask({
+        id: 'stale-mutated-gen',
+        status: 'running',
+        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        execution: { selectedAttemptId: 'attempt-1', generation: 1 },
+      });
+      const orchestrator = {
+        getTask: () => task,
+        handleWorkerResponse,
+      };
+      let rejectStart!: (err: unknown) => void;
+      const startPromise = new Promise<never>((_resolve, reject) => {
+        rejectStart = reject;
+      });
+      const throwingExecutor = {
+        type: 'ssh',
+        start: vi.fn(async () => await startPromise),
+        onOutput: () => () => {},
+        onComplete: () => () => {},
+      };
+      const registry = {
+        getDefault: () => throwingExecutor,
+        get: () => throwingExecutor,
+        getAll: () => [throwingExecutor],
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: { updateTask, appendTaskOutput, logEvent } as any,
+        executorRegistry: registry as any,
+        cwd: '/tmp',
+      });
+
+      const run = runner.executeTask(task);
+      await vi.waitFor(() => expect(throwingExecutor.start).toHaveBeenCalledTimes(1));
+      task.execution.generation = 2;
+      const startupErr: any = new Error('late provision failed');
+      startupErr.workspacePath = '/tmp/mutated-gen-old-worktree';
+      startupErr.branch = 'experiment/mutated-gen-old-branch';
+      rejectStart(startupErr);
+      await run;
+
+      expect(updateTask).not.toHaveBeenCalledWith(
+        'stale-mutated-gen',
+        expect.objectContaining({
+          execution: expect.objectContaining({ workspacePath: '/tmp/mutated-gen-old-worktree' }),
+        }),
+      );
+      expect(handleWorkerResponse).not.toHaveBeenCalled();
+      expect(appendTaskOutput).toHaveBeenCalledWith(
+        'stale-mutated-gen',
+        expect.stringContaining('Executor startup failed (ssh): late provision failed'),
+      );
+      expect(logEvent).toHaveBeenCalledWith(
+        'stale-mutated-gen',
+        'task.executor.startup-failure-stale',
+        expect.objectContaining({
+          attemptId: 'attempt-1',
+          generation: 1,
+          currentAttemptId: 'attempt-1',
+          currentGeneration: 2,
+          runnerKind: 'ssh',
+          workspacePath: '/tmp/mutated-gen-old-worktree',
+          branch: 'experiment/mutated-gen-old-branch',
+        }),
+      );
+    });
+
     it('still persists metadata and emits response when lineage is current', async () => {
       const handleWorkerResponse = vi.fn();
       const updateTask = vi.fn();
