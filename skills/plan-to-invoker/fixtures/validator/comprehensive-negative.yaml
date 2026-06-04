@@ -1,0 +1,49 @@
+# Validator negative fixture with deliberate validation errors.
+# This file should fail validate-plan with multiple distinct error types.
+
+# Missing: name field
+# Missing: repoUrl field
+# Missing: description field when onFinish is pull_request
+
+onFinish: pull_request
+mergeMode: invalid_mode
+baseBranch: master
+
+tasks:
+  - description: Task without ID field should fail validation
+    command: echo "missing id"
+
+  - id: task-with-both-command-and-prompt
+    description: This task violates command/prompt exclusivity by having both
+    command: echo "has command"
+    prompt: "Also has prompt"
+
+  - id: task-with-no-execution
+    description: This task has neither command nor prompt
+
+  - id: task-with-invalid-pool-id
+    description: This task has an invalid poolId value type
+    command: echo "test"
+    poolId:
+      - invalid_type
+
+  - id: task-with-banned-pattern
+    description: This task uses the banned npx vitest run pattern
+    command: cd packages/app && npx vitest run
+
+  - id: task-with-invalid-dependency
+    description: This task depends on a non-existent task ID
+    command: echo "test"
+    dependencies:
+      - non-existent-task-id
+
+  - id: task-without-description
+    command: echo "no description"
+
+  - id: task-with-invalid-external-dep
+    description: This task has an externalDependency with invalid fields
+    command: echo "test"
+    externalDependencies:
+      - workflowId: some-workflow
+        requiredStatus: invalid_status
+        gatePolicy: invalid_policy
