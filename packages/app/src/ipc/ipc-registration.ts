@@ -110,3 +110,34 @@ export function registerBootstrapStateIpc(context: BootstrapStateIpcContext): vo
     event.returnValue = payload;
   });
 }
+
+export interface GuiBootstrapStateRegistrationContext extends BootstrapStateIpcContext {}
+
+export function registerGuiBootstrapStateIpc(context: GuiBootstrapStateRegistrationContext): void {
+  registerBootstrapStateIpc(context);
+}
+
+export interface OwnerPeerIpcHandlers {
+  ping: () => Promise<unknown>;
+  query: (request: unknown) => Promise<unknown>;
+  run: (request: unknown) => Promise<unknown>;
+  resume: (request: unknown) => Promise<unknown>;
+  exec: (request: unknown) => Promise<unknown>;
+  batchExec?: (request: unknown) => Promise<unknown>;
+}
+
+export interface OwnerPeerIpcRegistrationContext {
+  messageBus: Pick<MessageBus, 'onRequest'>;
+  handlers: OwnerPeerIpcHandlers;
+}
+
+export function registerOwnerPeerIpcHandlers(context: OwnerPeerIpcRegistrationContext): void {
+  context.messageBus.onRequest('headless.owner-ping', context.handlers.ping);
+  context.messageBus.onRequest('headless.query', context.handlers.query);
+  context.messageBus.onRequest('headless.run', context.handlers.run);
+  context.messageBus.onRequest('headless.resume', context.handlers.resume);
+  context.messageBus.onRequest('headless.exec', context.handlers.exec);
+  if (context.handlers.batchExec) {
+    context.messageBus.onRequest('headless.batch-exec', context.handlers.batchExec);
+  }
+}

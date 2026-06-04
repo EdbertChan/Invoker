@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -11,10 +11,38 @@ const repoRoot = resolve(__dirname, '../../../..');
 const cliPath = resolve(repoRoot, 'packages/cli/dist/index.js');
 const fixturePlan = resolve(repoRoot, 'plans/fixtures/hello-world.yaml');
 
-function writeStandalonePlan(dir: string, body: string): string {
+function createTinyRepo(): string {
+  const repoDir = mkdtempSync(join(tmpdir(), 'invoker-cli-repo-'));
+  execFileSync('git', ['init', '-b', 'master'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir });
+  execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repoDir });
+  writeFileSync(join(repoDir, 'README.md'), 'standalone fixture\n', 'utf8');
+  execFileSync('git', ['add', 'README.md'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'initial'], { cwd: repoDir, stdio: 'ignore' });
+  return repoDir;
+}
+
+function writeStandalonePlan(dir: string, body: string, repoPath = createTinyRepo()): string {
   const planPath = join(dir, 'plan.yaml');
-  writeFileSync(planPath, body.replace('__REPO_ROOT__', JSON.stringify(repoRoot)), 'utf8');
+  writeFileSync(
+    planPath,
+    body
+      .replaceAll('__REPO_ROOT__', JSON.stringify(repoPath))
+      .replaceAll('__REPO_URL__', JSON.stringify(repoPath)),
+    'utf8',
+  );
   return planPath;
+}
+
+function writeHelloPlan(dir: string): string {
+  return writeStandalonePlan(dir, `name: Standalone smoke
+repoUrl: __REPO_URL__
+onFinish: none
+tasks:
+  - id: hello
+    description: Print hello from the standalone CLI.
+    command: echo hello-from-invoker-cli
+`);
 }
 
 function runCli(args: string[]) {
@@ -57,15 +85,15 @@ describe('invoker-cli', () => {
   });
 
   it('runs the hello-world fixture with an isolated db dir', () => {
-    const dbDir = mkdtempSync(join(tmpdir(), 'invoker-cli-test-db-'));
-    const result = runCli(['run', fixturePlan, '--standalone', '--db-dir', dbDir]);
+    const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-test-'));
+    const result = runCli(['run', writeHelloPlan(dir), '--standalone', '--db-dir', join(dir, 'db')]);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('hello-from-invoker-cli');
   });
 
   it('--json emits a successful workflow result object', () => {
-    const dbDir = mkdtempSync(join(tmpdir(), 'invoker-cli-json-db-'));
-    const result = runCli(['run', fixturePlan, '--standalone', '--db-dir', dbDir, '--json']);
+    const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-json-'));
+    const result = runCli(['run', writeHelloPlan(dir), '--standalone', '--db-dir', join(dir, 'db'), '--json']);
     expect(result.status).toBe(0);
     const lines = result.stdout.trim().split('\n');
     const json = JSON.parse(lines[lines.length - 1]);
@@ -117,14 +145,7 @@ describe('invoker-cli', () => {
     const output = captureProcessOutput();
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-standalone-'));
     const dbDir = join(dir, 'db');
-    const planPath = writeStandalonePlan(dir, `name: Standalone in process
-repoUrl: __REPO_ROOT__
-onFinish: none
-tasks:
-  - id: hello
-    description: Print hello from the standalone CLI.
-    command: echo hello-from-invoker-cli
-`);
+    const planPath = writeHelloPlan(dir);
     const createMessageBus = vi.fn(() => {
       throw new Error('unexpected IPC');
     });
@@ -160,14 +181,7 @@ tasks:
     const bus = new LocalBus();
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-auto-'));
     const dbDir = join(dir, 'db');
-    const planPath = writeStandalonePlan(dir, `name: Auto fallback in process
-repoUrl: __REPO_ROOT__
-onFinish: none
-tasks:
-  - id: hello
-    description: Print hello from the standalone CLI.
-    command: echo hello-from-invoker-cli
-`);
+    const planPath = writeHelloPlan(dir);
 
     const code = await main(
       ['run', planPath, '--db-dir', dbDir],
