@@ -435,10 +435,10 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
     ownerCapability: true,
     outputDir: join(dbDir, 'outputs'),
   });
+  const executorRegistry = new ExecutorRegistry();
 
   try {
     const executionAgentRegistry = registerBuiltinAgents();
-    const executorRegistry = new ExecutorRegistry();
     executorRegistry.register('worktree', new WorktreeExecutor({
       worktreeBaseDir: join(dbDir, 'worktrees'),
       cacheDir: join(dbDir, 'repos'),
@@ -498,6 +498,9 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
       mode: 'standalone',
     };
   } finally {
+    await Promise.all(
+      executorRegistry.getAll().map((executor) => executor.destroyAll().catch(() => {})),
+    );
     if (previousInvokerDbDir === undefined) {
       delete process.env.INVOKER_DB_DIR;
     } else {
