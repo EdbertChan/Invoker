@@ -12,10 +12,9 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 
 import { scopePlanTaskId } from '@invoker/workflow-core';
-import type { Orchestrator, TaskState, ExperimentVariant, RunnerKind } from '@invoker/workflow-core';
+import type { Orchestrator, TaskState, RunnerKind } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import type { WorkRequest, WorkResponse, ActionType, Logger } from '@invoker/contracts';
-import { ATTEMPT_LEASE_MS } from '@invoker/contracts';
+import type { WorkRequest, ActionType, Logger } from '@invoker/contracts';
 import type { Executor, ExecutorHandle } from './executor.js';
 import type { TaskRunnerCallbacks } from './task-runner-callbacks.js';
 import { BaseExecutor } from './base-executor.js';
@@ -30,7 +29,6 @@ import { DockerExecutor } from './docker-executor.js';
 import { WorktreeExecutor } from './worktree-executor.js';
 import { MergeGateExecutor } from './merge-gate-executor.js';
 import { isInvokerManagedPoolBranch } from './plan-base-remote.js';
-import { formatLifecycleTag, extractAttemptSuffix } from './branch-utils.js';
 import { SshExecutor } from './ssh-executor.js';
 import {
   executeMergeNodeImpl,
@@ -59,81 +57,33 @@ import {
   type PrAuthoringContext,
 } from './pr-authoring.js';
 import { assertNotGitConfigMutation, ensureRemoteUrl } from './git-config-mutation.js';
+import {
+  beginExecuteTaskLaunch,
+  handlePivotTask,
+  prepareWorkRequest,
+} from './task-runner-phases/prepare.js';
+import {
+  PRE_START_HEARTBEAT_INTERVAL_MS,
+  nextLeaseExpiry,
+  startExecutorForTask,
+} from './task-runner-phases/dispatch.js';
+import {
+  finalizeStartupFailure,
+  waitForExecutorCompletion,
+} from './task-runner-phases/finalize.js';
+import type {
+  ActiveExecutionEntry,
+  ActiveExecutionHandle,
+  ExecutionPoolConfig,
+  ExecutionPoolMember,
+  FreshBaseCommit,
+  LaunchDispatchOptions,
+  PoolSelection,
+  RemoteTargetDisplay,
+} from './task-runner-phases/types.js';
 
 export type { TaskHeartbeatEvent, TaskRunnerCallbacks } from './task-runner-callbacks.js';
-
-/** Keeps `lastHeartbeatAt` fresh while `executor.start()` is awaited (SSH remote setup/provision can take minutes). Matches BaseExecutor default heartbeat cadence. */
-const PRE_START_HEARTBEAT_INTERVAL_MS = 30_000;
-const DEFAULT_EXECUTOR_START_TIMEOUT_MS = 10 * 60 * 1000;
-
-type StartupFailureMetadata = {
-  workspacePath?: string;
-  branch?: string;
-  agentSessionId?: string;
-  containerId?: string;
-};
-
-type ActiveExecutionHandle = ExecutorHandle & { attemptId?: string };
-type ActiveExecutionEntry = {
-  handle: ActiveExecutionHandle;
-  executor: Executor;
-  taskId: string;
-  poolId?: string;
-  poolMemberKey?: string;
-  leaseResourceKey?: string;
-  leaseHolderId?: string;
-};
-
-type ExecutionPoolMember =
-  | { type: 'ssh'; id: string; maxConcurrentTasks?: number }
-  | { type: 'worktree'; id: string; maxConcurrentTasks?: number };
-
-type ExecutionPoolConfig = {
-  members: ExecutionPoolMember[];
-  selectionStrategy?: 'roundRobin' | 'leastLoaded';
-  maxConcurrentTasksPerMember?: number;
-};
-
-type PoolSelection = {
-  poolId: string;
-  member: ExecutionPoolMember;
-  memberKey: string;
-  selectionStrategy: 'roundRobin' | 'leastLoaded';
-  leaseResourceKey?: string;
-  leaseHolderId?: string;
-};
-
-function isRetryableSshStartupTransportError(err: unknown): boolean {
-  const message = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
-  const lower = message.toLowerCase();
-  return lower.includes('exit=255')
-    || lower.includes('ssh transport failed')
-    || lower.includes('connection timed out')
-    || lower.includes('operation timed out')
-    || lower.includes('connection reset')
-    || lower.includes('broken pipe')
-    || lower.includes('banner exchange')
-    || lower.includes('kex_exchange_identification')
-    || lower.includes('remote session terminated unexpectedly');
-}
-
-type FreshBaseCommit = {
-  branch: string;
-  commit: string;
-};
-
-type RemoteTargetDisplay = {
-  host: string;
-  user: string;
-  sshKeyPath: string;
-  port?: number;
-  managedWorkspaces?: boolean;
-  remoteInvokerHome?: string;
-  provisionCommand?: string;
-  use_api_key?: boolean;
-  secretsFile?: string;
-  remoteHeartbeatIntervalSeconds?: number;
-};
+export type { LaunchOutboxAck, LaunchDispatchOptions } from './task-runner-phases/types.js';
 
 export interface ReviewGateCiFailureTrigger {
   taskId: string;
@@ -149,18 +99,6 @@ export interface ReviewGateCiFailureTrigger {
   statusText: string;
 }
 
-function nextLeaseExpiry(from: Date): Date {
-  return new Date(from.getTime() + ATTEMPT_LEASE_MS);
-}
-
-function getExecutorStartTimeoutMs(): number {
-  const raw = process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS?.trim();
-  if (!raw) return DEFAULT_EXECUTOR_START_TIMEOUT_MS;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_EXECUTOR_START_TIMEOUT_MS;
-  return parsed;
-}
-
 const NOOP_LOGGER: Logger = {
   debug: () => {},
   info: () => {},
@@ -168,31 +106,6 @@ const NOOP_LOGGER: Logger = {
   error: () => {},
   child: () => NOOP_LOGGER,
 };
-
-// ── Launch outbox ─────────────────────────────────────────
-
-/**
- * Narrow interface for the launch-handoff outbox surface that
- * `executeTask` calls into. Defined here (rather than imported from
- * `@invoker/app`) to avoid a layering cycle: the execution engine
- * never depends on the app shell, the app provides this implementation
- * via the LaunchDispatcher.
- *
- * Each method MUST be safe to call even if the dispatch row was reaped
- * between the dispatcher's lease and the runner's call — the
- * persistence layer returns false in that case and the runner bails
- * out without starting the executor.
- */
-export interface LaunchOutboxAck {
-  ackDispatch(dispatchId: number, runnerId: string): boolean;
-  completeDispatch(dispatchId: number): boolean;
-  failDispatch(dispatchId: number, error: unknown): boolean;
-}
-
-export interface LaunchDispatchOptions {
-  dispatchId: number;
-  launchOutbox: LaunchOutboxAck;
-}
 
 // ── Config ────────────────────────────────────────────────
 
@@ -506,41 +419,21 @@ export class TaskRunner {
       phase: task.execution.phase,
       generation: startGeneration,
     });
-    if (this.launchingAttemptIds.has(attemptId) || this.activeExecutions.has(attemptId)) {
-      traceExecution(
-        `[TaskRunner] executeTask skipping duplicate launch for task=${task.id} attempt=${attemptId}`,
-      );
-      bench('executeTask.duplicateSkipped');
-      if (dispatchOpts) {
-        // Another runner already owns this attempt — release the dispatch
-        // row so the dispatcher can re-queue if needed instead of orphaning.
-        dispatchOpts.launchOutbox.failDispatch(
-          dispatchOpts.dispatchId,
-          new Error('Duplicate launch suppressed in TaskRunner'),
-        );
-      }
+    const launchAccepted = beginExecuteTaskLaunch({
+      task,
+      attemptId,
+      startGeneration,
+      dispatchOpts,
+      launchingAttemptIds: this.launchingAttemptIds,
+      activeExecutions: this.activeExecutions,
+      runnerInstanceId: this.runnerInstanceId,
+      callbacks: this.callbacks,
+      logger: this.logger,
+      bench,
+    });
+    if (!launchAccepted) {
       return;
     }
-    if (dispatchOpts) {
-      const accepted = dispatchOpts.launchOutbox.ackDispatch(
-        dispatchOpts.dispatchId,
-        this.runnerInstanceId,
-      );
-      if (!accepted) {
-        this.logger.warn(
-          `[TaskRunner] launch dispatch ack rejected (lease reaped?) for task=${task.id} attempt=${attemptId} dispatchId=${dispatchOpts.dispatchId}`,
-        );
-        bench('executeTask.dispatchAckRejected');
-        return;
-      }
-    }
-    this.logger.info(
-      `[TaskRunner] launch accepted task=${task.id} attempt=${attemptId} status=${task.status} ` +
-        `phase=${task.execution.phase ?? 'none'} generation=${startGeneration} ` +
-        `dispatchId=${dispatchOpts?.dispatchId ?? 'none'}`,
-    );
-    this.launchingAttemptIds.add(attemptId);
-    this.callbacks.onLaunchAccepted?.(task.id);
     try {
       await this.executeTaskInner(task, attemptId, bench, dispatchOpts);
       bench('executeTask.innerReturned');
@@ -565,61 +458,21 @@ export class TaskRunner {
         return;
       }
 
-      // Guard: if the task lineage has advanced past this attempt, the
-      // startup failure belongs to a superseded launch.  Drop the
-      // metadata write and the failed WorkResponse so we don't clobber
-      // the live attempt's state.
-      if (this.isLaunchStale(task.id, attemptId, startGeneration)) {
-        this.logger.warn(
-          `[TaskRunner] suppressing stale startup-failure metadata/response for task=${task.id} attemptId=${attemptId}`,
-        );
-        await this.cleanupPerTaskDockerExecutor(task);
-        return;
-      }
-
-      this.logger.error(`[TaskRunner] executeTask failed for task=${task.id}`, { err });
-      if (dispatchOpts) {
-        dispatchOpts.launchOutbox.failDispatch(dispatchOpts.dispatchId, err);
-      }
-      const launchFailedAt = new Date();
-      try {
-        const latest = this.orchestrator.getTask(task.id);
-        if (
-          latest
-          && (
-            latest.status === 'running'
-            || latest.status === 'fixing_with_ai'
-            || (latest.status === 'pending' && latest.execution.phase === 'launching')
-          )
-        ) {
-          this.persistence.updateTask(task.id, {
-            execution: {
-              phase: latest.execution.phase ?? 'launching',
-              launchStartedAt: latest.execution.launchStartedAt ?? latest.execution.startedAt ?? launchFailedAt,
-              launchCompletedAt: launchFailedAt,
-              lastHeartbeatAt: launchFailedAt,
-            },
-          });
-        }
-      } catch {
-        // best effort; preserve original startup/execution failure flow
-      }
-      // Clean up per-task Docker executor on startup/execution failure
-      await this.cleanupPerTaskDockerExecutor(task);
-      const response: WorkResponse = {
-        requestId: `err-${task.id}`,
-        actionId: task.id,
+      await finalizeStartupFailure({
+        task,
         attemptId,
-        executionGeneration: task.execution.generation ?? 0,
-        status: 'failed',
-        outputs: {
-          exitCode: 1,
-          error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-        },
-      };
-      this.callbacks.onComplete?.(task.id, response);
-      const newlyStarted = this.orchestrator.handleWorkerResponse(response) ?? [];
-      this.executeNewlyStartedTasks(newlyStarted, dispatchOpts);
+        startGeneration,
+        err,
+        dispatchOpts,
+        orchestrator: this.orchestrator,
+        persistence: this.persistence,
+        callbacks: this.callbacks,
+        logger: this.logger,
+        isLaunchStale: (taskId, candidateAttemptId, candidateGeneration) =>
+          this.isLaunchStale(taskId, candidateAttemptId, candidateGeneration),
+        cleanupPerTaskDockerExecutor: (cleanupTask) => this.cleanupPerTaskDockerExecutor(cleanupTask),
+        executeNewlyStartedTasks: (newlyStarted, opts) => this.executeNewlyStartedTasks(newlyStarted, opts),
+      });
     } finally {
       this.launchingAttemptIds.delete(attemptId);
       bench('executeTask.settled');
@@ -639,56 +492,14 @@ export class TaskRunner {
       poolId: task.config.poolId,
       isMergeNode: task.config.isMergeNode,
     });
-    // Pivot tasks with experimentVariants: synthesize a spawn_experiments
-    // response instead of running through the executor.
-    if (task.config.pivot && task.config.experimentVariants && task.config.experimentVariants.length > 0) {
-      bench('executeTaskInner.pivotResponse');
-      const response: WorkResponse = {
-        requestId: `req-${task.id}`,
-        actionId: task.id,
-        attemptId,
-        executionGeneration: task.execution.generation ?? 0,
-        status: 'spawn_experiments',
-        outputs: {},
-        dagMutation: {
-          spawnExperiments: {
-            description: task.description,
-            variants: task.config.experimentVariants.map((v: ExperimentVariant) => ({
-              id: v.id,
-              description: v.description,
-              prompt: v.prompt,
-              command: v.command,
-            })),
-          },
-        },
-      };
-      const newlyStarted = this.orchestrator.handleWorkerResponse(response) ?? [];
-      this.executeNewlyStartedTasks(newlyStarted, dispatchOpts);
-      // CD.1 / Issue 13: terminate the parent pivot task's outbox row.
-      // Without this, drainScheduler enqueued a launch-dispatch row for
-      // the pivot, but executeTaskInner returns here without ever
-      // calling completeDispatch — so the row stays acknowledged,
-      // gets reaped after DISPATCH_LEASE_MS, and is eventually
-      // abandoned. The spawn_experiments path is the terminal state
-      // for the pivot itself; only the spawned variants should
-      // continue through the outbox.
-      if (dispatchOpts) {
-        try {
-          dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
-        } catch (err) {
-          // completeDispatch is best-effort here — if the row has
-          // already been failed or completed by another path the
-          // failure is benign. Log and continue so the pivot's
-          // observable behaviour (spawning variants) is unaffected.
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[task-runner] pivot completeDispatch failed for dispatchId=${dispatchOpts.dispatchId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-      bench('executeTaskInner.pivotReturned', {
-        newlyStartedCount: newlyStarted.length,
-      });
+    if (handlePivotTask({
+      task,
+      attemptId,
+      dispatchOpts,
+      orchestrator: this.orchestrator,
+      executeNewlyStartedTasks: (newlyStarted, opts) => this.executeNewlyStartedTasks(newlyStarted, opts),
+      bench,
+    })) {
       return;
     }
 
@@ -696,289 +507,65 @@ export class TaskRunner {
       `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} (past pivot check) → gather upstreams + build WorkRequest`,
     );
 
-    // Gather upstream context from completed dependencies
-    bench('buildUpstreamContext.start');
-    const upstreamContext = await this.buildUpstreamContext(task);
-    bench('buildUpstreamContext.end', {
-      upstreamContextCount: upstreamContext.length,
-    });
-    bench('collectUpstreamBranches.start');
-    const upstreamBranches = this.collectUpstreamBranches(task);
-    bench('collectUpstreamBranches.end', {
-      upstreamBranchCount: upstreamBranches.length,
-    });
-    bench('buildAlternatives.start');
-    const alternatives = this.buildAlternatives(task);
-    bench('buildAlternatives.end', {
-      alternativeCount: alternatives.length,
-    });
-
-    // Guard: every completed dependency (local or external) must have branch metadata.
-    // Without it the downstream worktree would run against bare base branch,
-    // silently dropping all upstream implementation changes.
-    // Skip for merge nodes: they collect branches from the full workflow, not just direct deps.
-    if (!task.config.isMergeNode) {
-      for (const depId of task.dependencies) {
-        const dep = this.orchestrator.getTask(depId);
-        if (dep && dep.status === 'completed' && !dep.execution.branch) {
-          throw new Error(
-            `Task "${task.id}": dependency "${depId}" completed without branch metadata` +
-            ` — upstream changes would be silently dropped. The plan may need to be restarted.`,
-          );
-        }
-      }
-      for (const depRef of task.config.externalDependencies ?? []) {
-        const dep = this.resolveExternalDependencyTask(depRef.workflowId, depRef.taskId);
-        if (dep && dep.status === 'completed' && !dep.execution.branch) {
-          throw new Error(
-            `Task "${task.id}": external dependency "${depRef.workflowId}/${depRef.taskId}" completed without branch metadata` +
-            ` — upstream changes would be silently dropped. The plan may need to be restarted.`,
-          );
-        }
-      }
-    }
-    bench('dependencyBranchGuard.end');
-
-    // Read workflow + task generations to build the visible lifecycle tag that
-    // is appended to every experiment branch name. Lifecycle uniqueness lives
-    // in the branch *name* (via `formatLifecycleTag`), not in the content hash
-    // — so two recreates of the same spec produce the same content fingerprint
-    // (cache-equivalent) but distinct branch names (collision-free).
-    const workflow = task.config.workflowId ? this.persistence.loadWorkflow?.(task.config.workflowId) : undefined;
-    const workflowGeneration = (workflow as any)?.generation ?? 0;
-    const taskExecutionGeneration = task.execution.generation ?? 0;
-    const lifecycleTag = formatLifecycleTag({
-      wfGen: workflowGeneration,
-      taskGen: taskExecutionGeneration,
-      attemptShort: extractAttemptSuffix(attemptId, task.id),
-    });
-    const baseBranch = workflow?.baseBranch ?? this.defaultBranch;
-    const repoUrl = workflow?.repoUrl;
-    const branchRepoUrl = workflow?.intermediateRepoUrl?.trim() || undefined;
-    const freshBase = task.config.workflowId ? this.freshBaseCommits.get(task.config.workflowId) : undefined;
-    const baseCommit = freshBase && freshBase.branch === baseBranch ? freshBase.commit : undefined;
-
-    // Persist the experiment branch as soon as the executor knows it — well
-    // before `git worktree add` could leak a worktree without a recorded branch
-    // on the attempt row. Reconciliation paths can then observe the branch
-    // even if the executor crashes mid-startup.
-    let branchPersistedEarly = false;
-    const startGeneration = task.execution.generation ?? 0;
-    const onBranchResolved = (branch: string): void => {
-      if (!branch || branchPersistedEarly) return;
-      // Skip if the task has moved to a newer attempt/generation.
-      if (this.isLaunchStale(task.id, attemptId, startGeneration)) return;
-      branchPersistedEarly = true;
-      try {
-        this.persistence.updateAttempt?.(attemptId, { branch } as any);
-        this.persistence.updateTask(task.id, {
-          execution: { branch } as any,
-        });
-        traceExecution(
-          `${RESTART_TO_BRANCH_TRACE} task=${task.id} attempt=${attemptId} branch persisted early branch=${branch}`,
-        );
-      } catch (err) {
-        // Early persistence is best-effort: the post-start path persists the
-        // same field again, so a transient failure here is not fatal.
-        traceExecution(
-          `${RESTART_TO_BRANCH_TRACE} task=${task.id} attempt=${attemptId} early branch persist failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    };
-
-    const actionType = this.determineActionType(task);
-    const executionAgent = task.config.executionAgent?.trim() || DEFAULT_EXECUTION_AGENT;
-    const request: WorkRequest = {
-      requestId: randomUUID(),
-      actionId: task.id,
-      attemptId,
-      executionGeneration: task.execution.generation ?? 0,
+    const {
+      request,
       actionType,
-      inputs: {
-        description: task.description,
-        command: task.config.command,
-        prompt: task.config.prompt,
-        executionAgent,
-        repoUrl,
-        branchRepoUrl,
-        featureBranch: task.config.featureBranch,
-        upstreamContext: upstreamContext.length > 0 ? upstreamContext : undefined,
-        alternatives: alternatives.length > 0 ? alternatives : undefined,
-        upstreamBranches: upstreamBranches.length > 0 ? upstreamBranches : undefined,
-        lifecycleTag,
-        baseBranch,
-        baseCommit,
-        freshWorkspace: this.shouldUseFreshWorkspace(task),
-        reusableWorktree: task.execution.branch && task.execution.workspacePath
-          ? {
-            branch: task.execution.branch,
-            workspacePath: task.execution.workspacePath,
-          }
-          : undefined,
-      },
-      callbackUrl: '',
-      timestamps: {
-        createdAt: new Date().toISOString(),
-      },
-      onBranchResolved,
-    };
-    bench('workRequest.built', {
-      actionType: request.actionType,
-      hasRepoUrl: Boolean(request.inputs.repoUrl),
-      upstreamBranchCount: upstreamBranches.length,
+      executionAgent,
+      upstreamBranches,
+    } = await prepareWorkRequest({
+      task,
+      attemptId,
+      orchestrator: this.orchestrator,
+      persistence: this.persistence,
+      defaultBranch: this.defaultBranch,
+      freshBaseCommits: this.freshBaseCommits,
+      buildUpstreamContext: (contextTask) => this.buildUpstreamContext(contextTask),
+      collectUpstreamBranches: (contextTask) => this.collectUpstreamBranches(contextTask),
+      buildAlternatives: (contextTask) => this.buildAlternatives(contextTask),
+      resolveExternalDependencyTask: (workflowId, depTaskId) =>
+        this.resolveExternalDependencyTask(workflowId, depTaskId),
+      determineActionType: (actionTask) => this.determineActionType(actionTask),
+      shouldUseFreshWorkspace: (workspaceTask) => this.shouldUseFreshWorkspace(workspaceTask),
+      isLaunchStale: (taskId, candidateAttemptId, candidateGeneration) =>
+        this.isLaunchStale(taskId, candidateAttemptId, candidateGeneration),
+      bench,
     });
 
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} WorkRequest built actionType=${request.actionType} repoUrl=${request.inputs.repoUrl ?? '(none)'} upstreamBranches=${JSON.stringify(request.inputs.upstreamBranches ?? [])}`,
     );
-    const startT0 = Date.now();
-    const attemptedPoolMemberKeys = new Set<string>();
-    let executor!: Executor;
-    let handle!: ExecutorHandle;
-    while (true) {
-      bench('selectExecutor.start');
-      executor = this.selectExecutor(task, attemptedPoolMemberKeys);
-      const poolSelectionForStart = this.pendingPoolSelections.get(task.id);
-      if (!this.acquirePoolSelectionLease(task, attemptId, poolSelectionForStart)) {
-        if (poolSelectionForStart) {
-          attemptedPoolMemberKeys.add(poolSelectionForStart.memberKey);
-          this.pendingPoolSelections.delete(task.id);
-        }
-        continue;
-      }
-      bench('selectExecutor.end', {
-        executorType: executor.type,
-      });
-      traceExecution(
-        `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} selectExecutor → type=${executor.type} calling executor.start()`,
-      );
-      traceExecution(`[trace] TaskRunner: task=${task.id} calling executor.start() type=${executor.type}`);
-      this.logger.info(
-        `[TaskRunner] executor.start begin task=${task.id} attempt=${attemptId} executor=${executor.type} ` +
-          `generation=${task.execution.generation ?? 0}`,
-      );
-      bench('onLaunchStart.before', {
-        executorType: executor.type,
-      });
-      this.callbacks.onLaunchStart?.(task.id, executor);
-      bench('executor.start.before', {
-        executorType: executor.type,
-      });
-      const startTimeoutMs = getExecutorStartTimeoutMs();
-      const preStartHeartbeatTimer = setInterval(() => {
-        const now = new Date();
-        this.renewPoolSelectionLease(poolSelectionForStart);
-        this.persistence.updateAttempt?.(attemptId, {
-          lastHeartbeatAt: now,
-          leaseExpiresAt: nextLeaseExpiry(now),
-        } as any);
-        this.callbacks.onHeartbeat?.(task.id, { at: now, source: 'executor' });
-      }, PRE_START_HEARTBEAT_INTERVAL_MS);
-      let preStartTimeout: ReturnType<typeof setTimeout> | undefined;
-      try {
-        handle = await Promise.race<ExecutorHandle>([
-          executor.start(request),
-          new Promise<ExecutorHandle>((_resolve, reject) => {
-            preStartTimeout = setTimeout(() => {
-              reject(new Error(`Executor startup timed out after ${startTimeoutMs}ms (${executor.type})`));
-            }, startTimeoutMs);
-          }),
-        ]);
-        break;
-      } catch (err) {
-        const meta = err as StartupFailureMetadata;
-        if (
-          executor.type === 'ssh'
-          && poolSelectionForStart?.member.type === 'ssh'
-          && !meta.workspacePath
-          && !meta.branch
-          && isRetryableSshStartupTransportError(err)
-        ) {
-          attemptedPoolMemberKeys.add(poolSelectionForStart.memberKey);
-          const pool = this.getExecutionPools()[poolSelectionForStart.poolId];
-          const hasAnotherSshMember = pool?.members.some((member) =>
-            member.type === 'ssh' && !attemptedPoolMemberKeys.has(this.poolMemberKey(member)),
-          ) ?? false;
-          if (hasAnotherSshMember) {
-            const retryMessage =
-              `Executor startup failed (${executor.type}) on pool member ${poolSelectionForStart.member.id}; ` +
-              `retrying another SSH pool member: ${err instanceof Error ? err.message : String(err)}\n`;
-            this.callbacks.onOutput?.(task.id, retryMessage);
-            try {
-              this.persistence.appendTaskOutput(task.id, retryMessage);
-            } catch {
-              // Preserve the original startup failure if output persistence also fails.
-            }
-            this.persistence.logEvent?.(task.id, 'task.executor.startup-retry', {
-              runnerKind: executor.type,
-              poolId: poolSelectionForStart.poolId,
-              poolMemberId: poolSelectionForStart.member.id,
-              reason: 'ssh-startup-transport-failure',
-              error: err instanceof Error ? err.message : String(err),
-            });
-            this.pendingPoolSelections.delete(task.id);
-            this.releasePoolSelectionLease(poolSelectionForStart);
-            continue;
-          }
-        }
-        const startupErrorMessage = `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}\n`;
-        this.callbacks.onOutput?.(task.id, startupErrorMessage);
-        try {
-          this.persistence.appendTaskOutput(task.id, startupErrorMessage);
-        } catch {
-          // Preserve the original startup failure if output persistence also fails.
-        }
-        // Only persist startup-failure metadata when the launch is still
-        // current.  If the task has moved to a newer attempt or generation
-        // (e.g. via recreate-task), writing old workspace/branch metadata
-        // would corrupt the live attempt's state.
-        if (
-          (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-          && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
-        ) {
-          const execution: Record<string, string> = {};
-          if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
-          if (meta.branch) execution.branch = meta.branch;
-          if (meta.agentSessionId) {
-            execution.agentSessionId = meta.agentSessionId;
-            execution.lastAgentSessionId = meta.agentSessionId;
-          }
-          if (meta.containerId) execution.containerId = meta.containerId;
-          const poolSelection = this.pendingPoolSelections.get(task.id);
-          const selectedSshTargetId = executor.type === 'ssh'
-            ? this.selectedRemoteTargetId(task, poolSelection)
-            : undefined;
-          this.persistence.updateTask(task.id, {
-            config: {
-              runnerKind: executor.type as RunnerKind,
-              ...(selectedSshTargetId ? { poolMemberId: selectedSshTargetId } : {}),
-            },
-            execution: execution as any,
-          });
-        }
-        this.pendingPoolSelections.delete(task.id);
-        this.releasePoolSelectionLease(poolSelectionForStart);
-        const wrapped = new Error(
-          `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}`,
-          { cause: err },
-        );
-        this.callbacks.onLaunchFailed?.(task.id, wrapped, executor);
-        throw wrapped;
-      } finally {
-        clearInterval(preStartHeartbeatTimer);
-        if (preStartTimeout) clearTimeout(preStartTimeout);
-      }
-    }
-    traceExecution(`[trace] TaskRunner: task=${task.id} executor.start() returned after ${Date.now() - startT0}ms executor=${executor.type} sessionId=${handle.agentSessionId ?? 'none'} workspace=${handle.workspacePath ?? 'default'}`);
+    const { executor, handle, startMs } = await startExecutorForTask({
+      task,
+      attemptId,
+      request,
+      selectExecutor: (selectTask, excludedPoolMemberKeys) =>
+        this.selectExecutor(selectTask, excludedPoolMemberKeys),
+      pendingPoolSelections: this.pendingPoolSelections,
+      acquirePoolSelectionLease: (leaseTask, leaseAttemptId, selection) =>
+        this.acquirePoolSelectionLease(leaseTask, leaseAttemptId, selection),
+      renewPoolSelectionLease: (selection) => this.renewPoolSelectionLease(selection),
+      releasePoolSelectionLease: (selection) => this.releasePoolSelectionLease(selection),
+      getExecutionPools: () => this.getExecutionPools(),
+      poolMemberKey: (member) => this.poolMemberKey(member as ExecutionPoolMember),
+      isLaunchStale: (taskId, candidateAttemptId, candidateGeneration) =>
+        this.isLaunchStale(taskId, candidateAttemptId, candidateGeneration),
+      selectedRemoteTargetId: (remoteTask, poolSelection) =>
+        this.selectedRemoteTargetId(remoteTask, poolSelection),
+      persistence: this.persistence,
+      callbacks: this.callbacks,
+      logger: this.logger,
+      bench,
+    });
+    traceExecution(`[trace] TaskRunner: task=${task.id} executor.start() returned after ${startMs}ms executor=${executor.type} sessionId=${handle.agentSessionId ?? 'none'} workspace=${handle.workspacePath ?? 'default'}`);
     this.logger.info(
       `[TaskRunner] executor.start returned task=${task.id} attempt=${attemptId} executor=${executor.type} ` +
-        `elapsedMs=${Date.now() - startT0} executionId=${handle.executionId} ` +
+        `elapsedMs=${startMs} executionId=${handle.executionId} ` +
         `workspace=${handle.workspacePath ?? 'none'} branch=${handle.branch ?? 'none'} ` +
         `agentSessionId=${handle.agentSessionId ?? 'none'}`,
     );
     bench('executor.start.after', {
       executorType: executor.type,
-      executorStartMs: Date.now() - startT0,
+      executorStartMs: startMs,
       hasWorkspacePath: Boolean(handle.workspacePath),
       hasAgentSessionId: Boolean(handle.agentSessionId),
     });
@@ -1125,61 +712,21 @@ export class TaskRunner {
       });
     });
 
-    // Wait for completion and feed response to orchestrator.
-    // The callback is serialized through completionChain so that concurrent
-    // onComplete firings never overlap inside orchestrator mutations.
-    return new Promise<void>((resolvePromise) => {
-      executor.onComplete(handle, async (response: WorkResponse) => {
-        const work = async () => {
-          const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
-          const activeExecution = this.activeExecutions.get(normalizedResponse.attemptId ?? attemptId);
-          if (activeExecution?.leaseResourceKey && activeExecution.leaseHolderId) {
-            this.persistence.releaseExecutionResourceLease?.(activeExecution.leaseResourceKey, activeExecution.leaseHolderId);
-          }
-          this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
-          this.logger.info(
-            `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
-              `status=${normalizedResponse.status} exitCode=${normalizedResponse.outputs.exitCode ?? 'none'} ` +
-              `executionId=${handle.executionId} activeExecutions=${this.activeExecutions.size}`,
-          );
-          try {
-            traceExecution(
-              `[task-runner] onComplete taskId=${task.id} responseStatus=${response.status} ` +
-                `responseAttemptId=${normalizedResponse.attemptId ?? attemptId} responseGeneration=${response.executionGeneration} executionId=${handle.executionId}`,
-            );
-            traceExecution(
-              `${RESTART_TO_BRANCH_TRACE} resolvePromise | task.config.isMergeNode = ${task.config.isMergeNode}`,
-            );
-            this.callbacks.onComplete?.(task.id, normalizedResponse);
-
-            const newlyStarted = this.orchestrator.handleWorkerResponse(normalizedResponse) ?? [];
-            this.executeNewlyStartedTasks(newlyStarted, dispatchOpts);
-          } catch (err) {
-            this.logger.error(`[TaskRunner] onComplete handler failed for task=${task.id}`, { err });
-            const errResponse: WorkResponse = {
-              requestId: response.requestId,
-              actionId: task.id,
-              attemptId,
-              executionGeneration: task.execution.generation ?? 0,
-              status: 'failed',
-              outputs: {
-                exitCode: 1,
-                error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-              },
-            };
-            this.callbacks.onComplete?.(task.id, errResponse);
-            this.orchestrator.handleWorkerResponse(errResponse);
-          } finally {
-            // Clean up per-task Docker executor to avoid resource leaks
-            await this.cleanupPerTaskDockerExecutor(task);
-          }
-        };
-
-        const prev = this.completionChain;
-        this.completionChain = prev.then(work, work);
-        await this.completionChain;
-        resolvePromise();
-      });
+    return waitForExecutorCompletion({
+      task,
+      attemptId,
+      handle,
+      executor,
+      dispatchOpts,
+      orchestrator: this.orchestrator,
+      activeExecutions: this.activeExecutions,
+      persistence: this.persistence,
+      callbacks: this.callbacks,
+      logger: this.logger,
+      getCompletionChain: () => this.completionChain,
+      setCompletionChain: (chain) => { this.completionChain = chain; },
+      cleanupPerTaskDockerExecutor: (cleanupTask) => this.cleanupPerTaskDockerExecutor(cleanupTask),
+      executeNewlyStartedTasks: (newlyStarted, opts) => this.executeNewlyStartedTasks(newlyStarted, opts),
     });
   }
 
