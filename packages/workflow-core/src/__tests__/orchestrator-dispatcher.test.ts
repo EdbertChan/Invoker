@@ -7,8 +7,10 @@ import type {
   OrchestratorMessageBus,
   OrchestratorPersistence,
   PlanDefinition,
+  TaskLaunchReadiness,
+  TaskLineageExpectation,
 } from '../orchestrator.js';
-import type { TaskState, TaskStateChanges } from '../task-types.js';
+import type { TaskDelta, TaskState, TaskStateChanges } from '../task-types.js';
 import type { WorkResponse } from '@invoker/contracts';
 
 interface LoggedEvent {
@@ -175,7 +177,10 @@ class InMemoryPersistence implements OrchestratorPersistence {
 }
 
 class InMemoryBus implements OrchestratorMessageBus {
-  publish(): void {}
+  messages: Array<{ channel: string; message: unknown }> = [];
+  publish<T>(channel: string, message: T): void {
+    this.messages.push({ channel, message });
+  }
   subscribe(): () => void {
     return () => {};
   }
@@ -203,17 +208,18 @@ function makeOrchestrator(
     launchOutboxMode?: 'disabled' | 'observe' | 'active';
     enqueueLaunchDispatchEnabled?: boolean;
   } = {},
-): { orchestrator: Orchestrator; persistence: InMemoryPersistence } {
+): { orchestrator: Orchestrator; persistence: InMemoryPersistence; bus: InMemoryBus } {
   const persistence = new InMemoryPersistence();
   persistence.enqueueLaunchDispatchEnabled = opts.enqueueLaunchDispatchEnabled ?? false;
+  const bus = new InMemoryBus();
   const orchestrator = new Orchestrator({
     persistence,
-    messageBus: new InMemoryBus(),
+    messageBus: bus,
     maxConcurrency: opts.maxConcurrency ?? 4,
     deferRunningUntilLaunch: opts.deferRunningUntilLaunch,
     launchOutboxMode: opts.launchOutboxMode,
   });
-  return { orchestrator, persistence };
+  return { orchestrator, persistence, bus };
 }
 
 function taskIdBySuffix(orchestrator: Orchestrator, suffix: string): string {
@@ -253,6 +259,28 @@ function seedStaleLaunchMetadata(
 }
 
 describe('Orchestrator launch claims', () => {
+  it('keeps public scheduling and transition method signatures stable', () => {
+    const { orchestrator } = makeOrchestrator();
+    const api: {
+      startExecution(): TaskState[];
+      handleWorkerResponse(response: WorkResponse): TaskState[];
+      getTaskLaunchReadiness(
+        taskId: string,
+        opts?: { bypassLocalDependencyReadiness?: boolean },
+      ): TaskLaunchReadiness;
+      markTaskRunningAfterLaunch(taskId: string, attemptId: string, launchedAt?: Date): boolean;
+      setTaskAwaitingApproval(taskId: string, additionalChanges?: TaskStateChanges): void;
+      approve(taskId: string): Promise<TaskState[]>;
+      reject(taskId: string, reason?: string): void;
+      beginConflictResolution(
+        taskId: string,
+        expectedLineage?: TaskLineageExpectation,
+      ): { savedError: string };
+    } = orchestrator;
+
+    expect(api.startExecution()).toEqual([]);
+  });
+
   it('startExecution returns each started task exactly once', () => {
     const { orchestrator } = makeOrchestrator();
     const plan: PlanDefinition = {
@@ -360,6 +388,60 @@ describe('Orchestrator launch claims', () => {
     expect(orchestrator.markTaskRunningAfterLaunch(taskId, replacementAttemptId)).toBe(true);
     expect(orchestrator.getTask(taskId)?.status).toBe('running');
     expect(persistence.loadAttempt(replacementAttemptId)?.status).toBe('running');
+  });
+
+  it('preserves launch claim, outbox enqueue, attempt, and delta order for ready tasks', () => {
+    const { orchestrator, persistence, bus } = makeOrchestrator({
+      deferRunningUntilLaunch: true,
+      enqueueLaunchDispatchEnabled: true,
+      launchOutboxMode: 'observe',
+      maxConcurrency: 4,
+    });
+    orchestrator.loadPlan({
+      name: 'claim-order',
+      onFinish: 'none',
+      tasks: [
+        { id: 'first', description: 'first', command: 'echo first' },
+        { id: 'second', description: 'second', command: 'echo second' },
+      ],
+    });
+
+    bus.messages = [];
+    const started = orchestrator.startExecution();
+
+    expect(started.map((task) => task.id)).toEqual([
+      taskIdBySuffix(orchestrator, 'first'),
+      taskIdBySuffix(orchestrator, 'second'),
+    ]);
+    expect(started.every((task) => task.status === 'pending')).toBe(true);
+    expect(started.every((task) => task.execution.phase === 'launching')).toBe(true);
+    expect(
+      started.every((task) => persistence.loadAttempt(task.execution.selectedAttemptId!)?.status === 'claimed'),
+    ).toBe(true);
+    expect(persistence.launchDispatchRows.map((row) => row.attemptId)).toEqual(
+      started.map((task) => task.execution.selectedAttemptId),
+    );
+
+    for (const task of started) {
+      const taskEvents = persistence.events
+        .map((event, index) => ({ ...event, index }))
+        .filter((event) => event.taskId === task.id);
+      const claimedAt = taskEvents.find((event) => event.eventType === 'task.launch_claimed')?.index;
+      const dispatchedAt = taskEvents.find((event) => event.eventType === 'task.dispatch_enqueued')?.index;
+      expect(claimedAt).toBeDefined();
+      expect(dispatchedAt).toBeDefined();
+      expect(claimedAt!).toBeLessThan(dispatchedAt!);
+    }
+
+    const updateDeltas = bus.messages
+      .filter((entry) => entry.channel === 'task.delta')
+      .map((entry) => entry.message)
+      .filter((message): message is Extract<TaskDelta, { type: 'updated' }> =>
+        typeof message === 'object' &&
+        message !== null &&
+        (message as { type?: string }).type === 'updated',
+      );
+    expect(updateDeltas.map((delta) => delta.taskId)).toEqual(started.map((task) => task.id));
   });
 
   it('rejects stale attempt completions after recreate advances lineage', () => {
@@ -760,6 +842,49 @@ describe('Orchestrator launch claims', () => {
       }
     });
 
+    it('schedules and dispatches a downstream task after a completed transition', () => {
+      const { orchestrator, persistence } = makeOrchestrator({
+        deferRunningUntilLaunch: true,
+        enqueueLaunchDispatchEnabled: true,
+        launchOutboxMode: 'observe',
+        maxConcurrency: 1,
+      });
+      orchestrator.loadPlan({
+        name: 'transition-schedules-downstream',
+        onFinish: 'none',
+        tasks: [
+          { id: 'a', description: 'upstream', command: 'echo a' },
+          { id: 'b', description: 'downstream', command: 'echo b', dependencies: ['a'] },
+        ],
+      });
+      const upstreamId = taskIdBySuffix(orchestrator, 'a');
+      const downstreamId = taskIdBySuffix(orchestrator, 'b');
+
+      const [upstreamClaim] = orchestrator.startExecution();
+      expect(upstreamClaim!.id).toBe(upstreamId);
+      expect(orchestrator.markTaskRunningAfterLaunch(upstreamId, upstreamClaim!.execution.selectedAttemptId!)).toBe(true);
+
+      const started = orchestrator.handleWorkerResponse({
+        ...makeResponse(upstreamId, 'completed', upstreamClaim!.execution.generation ?? 0),
+        attemptId: upstreamClaim!.execution.selectedAttemptId,
+      });
+
+      expect(started.map((task) => task.id)).toEqual([downstreamId]);
+      expect(orchestrator.getTask(downstreamId)?.status).toBe('pending');
+      const downstreamAttemptId = orchestrator.getTask(downstreamId)!.execution.selectedAttemptId!;
+      expect(persistence.loadAttempt(downstreamAttemptId)?.status).toBe('claimed');
+      expect(persistence.launchDispatchRows.map((row) => row.taskId)).toEqual([upstreamId, downstreamId]);
+
+      const completedEventIndex = persistence.events.findIndex(
+        (event) => event.taskId === upstreamId && event.eventType === 'task.completed',
+      );
+      const downstreamDispatchEventIndex = persistence.events.findIndex(
+        (event) => event.taskId === downstreamId && event.eventType === 'task.dispatch_enqueued',
+      );
+      expect(completedEventIndex).toBeGreaterThanOrEqual(0);
+      expect(downstreamDispatchEventIndex).toBeGreaterThan(completedEventIndex);
+    });
+
     it("treats launchOutboxMode='active' the same as observe in Phase A (active behavior lands in CB)", () => {
       const { orchestrator, persistence } = makeOrchestrator({
         deferRunningUntilLaunch: true,
@@ -814,5 +939,64 @@ describe('Orchestrator launch claims', () => {
     orchestrator.syncAllFromDb();
     const startedAfterApprove = await orchestrator.approve(approvalRootId);
     expect(startedAfterApprove.map((task) => task.id)).toContain(approvalDownstreamId);
+  });
+
+  it('preserves approval transition task, attempt, event, and delta semantics', () => {
+    const { orchestrator, persistence, bus } = makeOrchestrator();
+    orchestrator.loadPlan({
+      name: 'approval-transition-regression',
+      onFinish: 'none',
+      tasks: [{ id: 'gate', description: 'gate', command: 'echo gate' }],
+    });
+    const taskId = taskIdBySuffix(orchestrator, 'gate');
+    const [started] = orchestrator.startExecution();
+    const attemptId = started!.execution.selectedAttemptId!;
+
+    bus.messages = [];
+    orchestrator.setTaskAwaitingApproval(taskId, {
+      config: { summary: 'ready for approval' },
+      execution: {
+        branch: 'feature/approval',
+        commit: 'abc123',
+        agentSessionId: 'sess-approval',
+        workspacePath: '/tmp/approval',
+      },
+    });
+
+    const task = orchestrator.getTask(taskId)!;
+    expect(task.status).toBe('awaiting_approval');
+    expect(task.config.summary).toBe('ready for approval');
+    expect(task.execution.branch).toBe('feature/approval');
+    expect(task.execution.commit).toBe('abc123');
+    expect(task.execution.agentSessionId).toBe('sess-approval');
+    expect(task.execution.workspacePath).toBe('/tmp/approval');
+    expect(task.execution.completedAt).toBeInstanceOf(Date);
+    expect(persistence.loadAttempt(attemptId)).toMatchObject({
+      status: 'needs_input',
+      branch: 'feature/approval',
+      commit: 'abc123',
+      summary: 'ready for approval',
+      workspacePath: '/tmp/approval',
+      agentSessionId: 'sess-approval',
+    });
+    expect(persistence.events.map((event) => event.eventType)).toContain('task.awaiting_approval');
+
+    const delta = bus.messages
+      .filter((entry) => entry.channel === 'task.delta')
+      .map((entry) => entry.message)
+      .find((message): message is {
+        type: 'updated';
+        taskId: string;
+        taskStateVersion: number;
+        previousTaskStateVersion: number;
+      } =>
+        typeof message === 'object' &&
+        message !== null &&
+        (message as { type?: string; taskId?: string }).type === 'updated' &&
+        (message as { taskId?: string }).taskId === taskId,
+      );
+    expect(delta).toBeDefined();
+    expect(delta!.taskStateVersion).toBe(delta!.previousTaskStateVersion + 1);
+    expect(delta!.taskStateVersion).toBe(task.taskStateVersion);
   });
 });
