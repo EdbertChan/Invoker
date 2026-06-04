@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
@@ -442,6 +442,30 @@ describe('bashPreserveOrReset', () => {
       expect(result.preserved).toBe(false);
       const currentBranch = gitExec('git branch --show-current', wtDir);
       expect(currentBranch).toBe('invoker/wt-new');
+
+      // Cleanup
+      execSync(`git worktree remove --force "${wtDir}"`, { cwd: repoDir });
+    });
+
+    it('removes an unregistered leftover target directory before worktree add', async () => {
+      const wtDir = join(repoDir, '..', 'wt-leaked-' + Date.now());
+      mkdirSync(wtDir, { recursive: true });
+      writeFileSync(join(wtDir, 'package.json'), '{"leaked":true}');
+
+      const script = bashPreserveOrReset({
+        repoDir,
+        worktreeDir: wtDir,
+        branch: 'invoker/wt-leaked',
+        base: 'master',
+      });
+      const stdout = await runBashLocal(script);
+      const result = parsePreserveResult(stdout);
+
+      expect(result.preserved).toBe(false);
+      expect(existsSync(join(wtDir, 'package.json'))).toBe(false);
+      const currentBranch = gitExec('git branch --show-current', wtDir);
+      expect(currentBranch).toBe('invoker/wt-leaked');
+      expect(readFileSync(join(wtDir, 'initial.txt'), 'utf-8')).toBe('initial content');
 
       // Cleanup
       execSync(`git worktree remove --force "${wtDir}"`, { cwd: repoDir });

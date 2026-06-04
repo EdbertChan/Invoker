@@ -156,6 +156,14 @@ echo "BASE_SHA=$BASE_SHA"
 
 function generateWorktreePreserve(worktreeDir: string): string {
   return `WT_DIR=${worktreeDir}
+if [ -e "$WT_DIR" ]; then
+  # Interrupted launches can leave provisioned files at the deterministic
+  # target path before Git registers it as a worktree. Git cannot add into
+  # that directory, so remove only targets Git does not list as worktrees.
+  if ! git -C "$REPO_DIR" worktree list --porcelain | grep -Fqx "worktree $WT_DIR"; then
+    rm -rf "$WT_DIR"
+  fi
+fi
 if git -C "$REPO_DIR" rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
   AHEAD=$(git -C "$REPO_DIR" rev-list --count "$BASE_SHA..$BRANCH" 2>/dev/null || echo 0)
   if [ "\${AHEAD:-0}" -gt 0 ]; then
