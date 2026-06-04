@@ -5,10 +5,10 @@ import { parseMergeConflictError } from '../merge-conflict-error.js';
 import type { ParsedResponse, ResponseHandler } from '../response-handler.js';
 import { scopePlanTaskId } from '../task-id-scope.js';
 import type { TaskRepository } from '../task-repository.js';
+import type { TaskDeltaPublisher } from './events.js';
 import type {
   GraphMutation,
   GraphMutationNodeDef,
-  OrchestratorMessageBus,
   OrchestratorPersistence,
   TaskLineageExpectation,
 } from '../orchestrator.js';
@@ -33,9 +33,8 @@ export interface OrchestratorTransitionHost {
   responseHandler: ResponseHandler;
   taskRepository: TaskRepository;
   persistence: OrchestratorPersistence;
-  messageBus: OrchestratorMessageBus;
+  events: TaskDeltaPublisher;
   logger: Logger;
-  taskDeltaChannel: string;
 
   refreshFromDb(): void;
   stateGetTask(taskId: string): TaskState | undefined;
@@ -43,7 +42,6 @@ export interface OrchestratorTransitionHost {
   restoreTask(task: TaskState): void;
   writeAndSync(taskId: string, changes: TaskStateChanges): TaskState;
   withBumpedExecutionGeneration(task: TaskState, changes: TaskStateChanges): TaskStateChanges;
-  buildUpdateDelta(before: TaskState, after: TaskState, changes: TaskStateChanges): TaskDelta;
 
   getExecutionGeneration(task: TaskState | undefined): number;
   loadAttemptById(attemptId: string | undefined): Attempt | undefined;
@@ -241,9 +239,8 @@ export class OrchestratorTransitionDomain {
     if (task.execution.selectedAttemptId) {
       this.host.taskRepository.updateAttempt(task.execution.selectedAttemptId, { status: 'running' });
     }
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, updated, changes);
     this.host.persistence.logEvent?.(id, 'task.running', changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, updated, changes);
   }
 
   setTaskAwaitingApproval(taskId: string, additionalChanges?: TaskStateChanges): void {
@@ -303,9 +300,8 @@ export class OrchestratorTransitionDomain {
       error: originalError,
       agentSessionId: task.execution.agentSessionId,
     });
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, updated, changes);
     this.host.persistence.logEvent?.(tid, 'task.awaiting_approval', changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, updated, changes);
   }
 
   setBeforeApproveHook(fn: (task: TaskState) => Promise<void>): void {
@@ -356,9 +352,8 @@ export class OrchestratorTransitionDomain {
       status: 'completed',
       completedAt: changes.execution?.completedAt,
     });
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, updated, changes);
     this.host.persistence.logEvent?.(taskId, 'task.completed', changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, updated, changes);
     this.host.mergeTrace('APPROVE_DONE', { taskId });
 
     const workflowId = task.config.workflowId;
@@ -410,9 +405,8 @@ export class OrchestratorTransitionDomain {
       startedAt: now,
       lastHeartbeatAt: now,
     });
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, updated, changes);
     this.host.persistence.logEvent?.(taskId, 'task.running', changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, updated, changes);
     return [this.host.stateGetTask(taskId)!];
   }
 
@@ -431,9 +425,8 @@ export class OrchestratorTransitionDomain {
       error: reason ?? 'Rejected',
       completedAt: changes.execution?.completedAt,
     });
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, updated, changes);
     this.host.persistence.logEvent?.(taskId, 'task.failed', changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, updated, changes);
 
     this.host.checkWorkflowCompletion();
   }
@@ -479,9 +472,8 @@ export class OrchestratorTransitionDomain {
       error: undefined,
       exitCode: undefined,
     });
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, conflictUpdated, changesWithGeneration);
     this.host.persistence.logEvent?.(id, 'task.fixing_with_ai', changesWithGeneration);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, conflictUpdated, changesWithGeneration);
 
     return { savedError };
   }
@@ -535,9 +527,8 @@ export class OrchestratorTransitionDomain {
       error: undefined,
       exitCode: undefined,
     });
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, updated, changesWithGeneration);
     this.host.persistence.logEvent?.(id, 'task.fixing_with_ai', changesWithGeneration);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, updated, changesWithGeneration);
     return { savedError };
   }
 
@@ -578,9 +569,8 @@ export class OrchestratorTransitionDomain {
       mergeConflict,
       completedAt,
     });
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, revertUpdated, changes);
     this.host.persistence.logEvent?.(id, 'task.failed', changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, revertUpdated, changes);
   }
 
   private setTaskApprovalStatus(
@@ -643,9 +633,8 @@ export class OrchestratorTransitionDomain {
       ...(changes.execution?.workspacePath !== undefined ? { workspacePath: changes.execution.workspacePath } : {}),
       ...(keepAgentSessionId !== undefined ? { agentSessionId: keepAgentSessionId } : {}),
     });
-    const delta: TaskDelta = this.host.buildUpdateDelta(task, updated, changes);
     this.host.persistence.logEvent?.(id, eventName, changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task, updated, changes);
   }
 
   private handleCompleted(
@@ -702,10 +691,9 @@ export class OrchestratorTransitionDomain {
       execution,
     };
     const completedUpdated = this.host.writeAndSync(taskId, changes);
-    const delta: TaskDelta = this.host.buildUpdateDelta(task!, completedUpdated, changes);
     const eventName = needsApproval ? 'task.awaiting_approval' : 'task.completed';
     this.host.persistence.logEvent?.(taskId, eventName, changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(task!, completedUpdated, changes);
 
     // Dual-write: update current selected attempt to completed (best-effort).
     try {
@@ -788,9 +776,8 @@ export class OrchestratorTransitionDomain {
     };
     this.host.restoreTask(updated);
 
-    const delta: TaskDelta = this.host.buildUpdateDelta(existing, updated, changes);
     this.host.persistence.logEvent?.(taskId, eventName, changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(existing, updated, changes);
 
     this.host.checkExperimentCompletion(taskId);
 
@@ -865,9 +852,8 @@ export class OrchestratorTransitionDomain {
     if (currentAttemptId) {
       this.host.taskRepository.updateAttempt(currentAttemptId, { status: 'needs_input' });
     }
-    const delta: TaskDelta = this.host.buildUpdateDelta(needsInputBefore, needsInputUpdated, changes);
     this.host.persistence.logEvent?.(taskId, 'task.needs_input', changes);
-    this.host.messageBus.publish(this.host.taskDeltaChannel, delta);
+    this.host.events.publishUpdated(needsInputBefore, needsInputUpdated, changes);
     return [];
   }
 

@@ -1,11 +1,11 @@
 import { ATTEMPT_LEASE_MS } from '@invoker/contracts';
 import type { Logger } from '@invoker/contracts';
-import type { Attempt, TaskDelta, TaskState, TaskStateChanges } from '@invoker/workflow-graph';
+import type { Attempt, TaskState, TaskStateChanges } from '@invoker/workflow-graph';
 import { isDiscardedAttempt } from '../attempt-policy.js';
 import type { TaskScheduler } from '../scheduler.js';
 import type { TaskRepository } from '../task-repository.js';
+import type { TaskDeltaPublisher } from './events.js';
 import type {
-  OrchestratorMessageBus,
   OrchestratorPersistence,
   TaskLaunchReadiness,
 } from '../orchestrator.js';
@@ -19,16 +19,14 @@ export interface OrchestratorSchedulingHost {
   scheduler: TaskScheduler;
   taskRepository: TaskRepository;
   persistence: OrchestratorPersistence;
-  messageBus: OrchestratorMessageBus;
+  events: TaskDeltaPublisher;
   logger: Logger;
-  taskDeltaChannel: string;
 
   refreshFromDb(): void;
   stateGetTask(taskId: string): TaskState | undefined;
   getAllTasks(): TaskState[];
   getReadyTasks(): TaskState[];
   writeAndSync(taskId: string, changes: TaskStateChanges): TaskState;
-  buildUpdateDelta(before: TaskState, after: TaskState, changes: TaskStateChanges): TaskDelta;
 
   getExternalDependencyBlocker(task: TaskState): string | undefined;
   getLocalDependencyBlocker(task: TaskState): string | undefined;
@@ -343,10 +341,7 @@ export class OrchestratorSchedulingDomain {
           });
         }
       }
-      this.host.messageBus.publish(
-        this.host.taskDeltaChannel,
-        this.host.buildUpdateDelta(task, updated, changes),
-      );
+      this.host.events.publishUpdated(task, updated, changes);
       started.push(updated);
       this.host.logger.info('[orchestrator] drainScheduler: started', {
         taskId: job.taskId,
@@ -429,10 +424,7 @@ export class OrchestratorSchedulingDomain {
 
       const launchUpdated = this.host.writeAndSync(taskId, changes);
       this.host.persistence.logEvent?.(taskId, 'task.running', changes);
-      this.host.messageBus.publish(
-        this.host.taskDeltaChannel,
-        this.host.buildUpdateDelta(task, launchUpdated, changes),
-      );
+      this.host.events.publishUpdated(task, launchUpdated, changes);
       this.host.logger.info('[orchestrator] markTaskRunningAfterLaunch: executing', {
         taskId,
         attemptId,
