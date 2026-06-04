@@ -106,6 +106,10 @@ export interface WorkflowMutationFacadeDeps {
   autoApproveAIFixes?: boolean;
   /** Optional pre-kill hook for active task executions. */
   killRunningTask?: (taskId: string) => Promise<void>;
+  /** Optional serialized admin mutation hook; defaults to orchestrator.deleteWorkflow. */
+  deleteWorkflow?: (workflowId: string) => Promise<void> | void;
+  /** Optional serialized admin mutation hook; defaults to orchestrator.detachWorkflow. */
+  detachWorkflow?: (workflowId: string, upstreamWorkflowId: string) => Promise<void> | void;
 }
 
 // ── Facade ───────────────────────────────────────────────────
@@ -290,7 +294,11 @@ export class WorkflowMutationFacade {
       }
     }
     await this.deps.taskExecutor?.closeWorkflowReview?.(workflowId);
-    this.deps.orchestrator.deleteWorkflow(workflowId);
+    if (this.deps.deleteWorkflow) {
+      await this.deps.deleteWorkflow(workflowId);
+    } else {
+      this.deps.orchestrator.deleteWorkflow(workflowId);
+    }
   }
 
   async deleteAllWorkflows(): Promise<DeleteAllResult> {
@@ -302,7 +310,11 @@ export class WorkflowMutationFacade {
   }
 
   async detachWorkflow(workflowId: string, upstreamWorkflowId: string): Promise<void> {
-    this.deps.orchestrator.detachWorkflow(workflowId, upstreamWorkflowId);
+    if (this.deps.detachWorkflow) {
+      await this.deps.detachWorkflow(workflowId, upstreamWorkflowId);
+    } else {
+      this.deps.orchestrator.detachWorkflow(workflowId, upstreamWorkflowId);
+    }
   }
 
   async forkWorkflow(workflowId: string): Promise<ForkMutationResult> {

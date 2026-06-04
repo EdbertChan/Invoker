@@ -85,8 +85,11 @@ describe('Context menu (component)', () => {
     });
     expect(screen.queryByText('Recreate Workflow')).not.toBeInTheDocument();
     fireEvent.click(screen.getByText('More'));
+    expect(await screen.findByText('Recreate Workflow')).toBeInTheDocument();
     expect(await screen.findByText('Rebase and Retry')).toBeInTheDocument();
     expect(screen.getByText('Rebase and Recreate')).toBeInTheDocument();
+    expect(screen.getByText('Cancel Workflow')).toBeInTheDocument();
+    expect(screen.getByText('Delete Workflow')).toBeInTheDocument();
   });
 
   it('task context menu still works in mini DAG', async () => {
