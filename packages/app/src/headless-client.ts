@@ -299,6 +299,17 @@ function parseArgs(argv: string[]): { args: string[]; waitForApproval?: boolean;
       args.push(arg);
     }
   }
+  if (args[0] === '--install-skills') {
+    const mode = args[1];
+    return {
+      args: [
+        'install-skills',
+        ...(mode === 'install' || mode === 'update' || mode === 'reinstall' ? [mode] : []),
+      ],
+      waitForApproval,
+      noTrack,
+    };
+  }
   return { args, waitForApproval, noTrack };
 }
 
@@ -444,6 +455,10 @@ export async function runHeadlessClientCommand(
   if (!standaloneMode && !internalOwnerServe && await delegateReadOnlyQuery(args, deps.messageBus, deps.refreshMessageBus)) {
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
+  }
+
+  if (args[0] === 'install-skills') {
+    return deps.runElectronHeadless(args);
   }
 
   if (!isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {

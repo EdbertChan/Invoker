@@ -111,4 +111,65 @@ describe('bundled-skills', () => {
       }
     }
   });
+
+  it('removes stale managed skill copies when bundled skill names change', () => {
+    const resourcesRoot = makeTempRoot('invoker-bundled-resources-');
+    const invokerHomeRoot = makeTempRoot('invoker-bundled-home-');
+    const repoRoot = makeTempRoot('invoker-bundled-repo-');
+    const codexHome = makeTempRoot('invoker-codex-home-');
+    const originalHome = process.env.HOME;
+    process.env.HOME = codexHome;
+
+    try {
+      writeSkill(resourcesRoot, 'plan-to-invoker');
+      writeSkill(resourcesRoot, 'make-pr');
+
+      installBundledSkills({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+
+      rmSync(join(resourcesRoot, 'skills', 'plan-to-invoker'), { recursive: true, force: true });
+
+      const staleStatus = resolveBundledSkillsStatus({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+
+      expect(staleStatus.targets.every((target) => target.installed)).toBe(true);
+      expect(staleStatus.targets.every((target) => target.upToDate)).toBe(false);
+
+      const refreshed = installBundledSkills({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      }, 'update');
+
+      const expectedTargets = [
+        join(codexHome, '.codex', 'skills'),
+        join(codexHome, '.claude', 'skills'),
+        join(codexHome, '.cursor', 'skills-cursor'),
+      ];
+
+      for (const targetRoot of expectedTargets) {
+        expect(existsSync(join(targetRoot, 'invoker-make-pr', 'SKILL.md'))).toBe(true);
+        expect(existsSync(join(targetRoot, 'invoker-plan-to-invoker'))).toBe(false);
+      }
+
+      expect(refreshed.targets.every((target) => target.installed)).toBe(true);
+      expect(refreshed.targets.every((target) => target.upToDate)).toBe(true);
+      expect(refreshed.targets.every((target) => target.installedSkillNames.length === 1)).toBe(true);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
 });
