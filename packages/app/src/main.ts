@@ -202,15 +202,29 @@ declare const __BUILD_VERSION__: string | undefined;
 // Electron passes extra args after `--` or interleaves them.
 // We look for `--headless` anywhere in process.argv.
 const headlessIndex = process.argv.indexOf('--headless');
-const directInstallSkills = process.argv.includes('--install-skills') || process.argv.slice(2).includes('install-skills');
+const BUNDLED_SKILLS_INSTALL_MODES = new Set(['install', 'update', 'reinstall']);
+function resolveDirectInstallSkillsArgs(args: string[]): string[] | null {
+  const installIndex = args.findIndex((arg) => arg === '--install-skills' || arg === 'install-skills');
+  if (installIndex === -1) return null;
+  const mode = args[installIndex + 1];
+  return [
+    'install-skills',
+    ...(mode && BUNDLED_SKILLS_INSTALL_MODES.has(mode) ? [mode] : []),
+  ];
+}
+const directInstallSkillsArgs = resolveDirectInstallSkillsArgs(process.argv.slice(2));
+const directInstallSkills = directInstallSkillsArgs !== null;
 const isHeadless = headlessIndex !== -1 || directInstallSkills;
 
 // In headless mode, extract the CLI args after --headless
 let cliArgs = headlessIndex !== -1
   ? process.argv.slice(headlessIndex + 1)
   : directInstallSkills
-    ? ['install-skills']
+    ? directInstallSkillsArgs ?? []
     : [];
+cliArgs = cliArgs[0] === '--install-skills'
+  ? resolveDirectInstallSkillsArgs(cliArgs) ?? cliArgs
+  : cliArgs;
 
 // Parse --wait-for-approval flag
 const waitForApprovalIndex = cliArgs.indexOf('--wait-for-approval');

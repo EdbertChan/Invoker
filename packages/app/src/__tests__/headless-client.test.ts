@@ -365,6 +365,18 @@ describe('headless-client', () => {
     expect(runElectronHeadless).toHaveBeenCalledWith(['query', 'workflows']);
   });
 
+  it('normalizes direct skill install flags before launching the host runtime', async () => {
+    const runElectronHeadless = vi.fn(async () => 0);
+    const exitCode = await runHeadlessClientCommand(['--install-skills', 'update'], {
+      messageBus: new LocalBus(),
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      runElectronHeadless,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(runElectronHeadless).toHaveBeenCalledWith(['install-skills', 'update']);
+  });
+
   it('delegates query ui-perf to a reachable owner endpoint', async () => {
     const bus = new LocalBus();
     bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'gui' }));

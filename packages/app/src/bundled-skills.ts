@@ -106,6 +106,19 @@ function resolveManagedTargets(): BundledSkillTargetStatus[] {
   return [resolveCodexTarget(), resolveClaudeTarget(), resolveCursorTarget()];
 }
 
+function listManagedSkillDirs(targetPath: string): string[] {
+  if (!existsSync(targetPath)) return [];
+  return readdirSync(targetPath, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(MANAGED_PREFIX))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function listInstalledManagedSkillNames(targetPath: string): string[] {
+  return listManagedSkillDirs(targetPath)
+    .filter((name) => existsSync(path.join(targetPath, name, 'SKILL.md')));
+}
+
 function resolveManifestPath(invokerHomeRoot: string): string {
   return path.join(invokerHomeRoot, MANIFEST_FILE);
 }
@@ -132,13 +145,19 @@ function buildTargetStatus(
   bundledHash: string,
   manifest: BundledSkillsManifest | null,
 ): BundledSkillTargetStatus {
-  const installedSkillNames = expectedInstalledNames.filter((name) => existsSync(path.join(target.path, name, 'SKILL.md')));
-  const installed = installedSkillNames.length === expectedInstalledNames.length;
+  const installedSkillNames = listInstalledManagedSkillNames(target.path);
+  const installed = expectedInstalledNames.every((name) => installedSkillNames.includes(name));
+  const exactInstalledNames = installed
+    && installedSkillNames.length === expectedInstalledNames.length;
   const manifestTarget = manifest?.targets[target.id];
+  const manifestSkillNames = manifestTarget?.installedSkillNames ?? [];
+  const exactManifestNames = manifestSkillNames.length === expectedInstalledNames.length
+    && expectedInstalledNames.every((name) => manifestSkillNames.includes(name));
   const upToDate = installed
+    && exactInstalledNames
     && manifest?.bundledHash === bundledHash
     && manifestTarget?.path === target.path
-    && expectedInstalledNames.every((name) => manifestTarget.installedSkillNames.includes(name));
+    && exactManifestNames;
 
   return {
     ...target,
@@ -203,6 +222,9 @@ export function installBundledSkills(
 
   for (const target of targets) {
     mkdirSync(target.path, { recursive: true });
+    for (const managedName of listManagedSkillDirs(target.path)) {
+      rmSync(path.join(target.path, managedName), { recursive: true, force: true });
+    }
     for (const skillName of bundledSkillNames) {
       const sourceDir = path.join(sourceRoot, skillName);
       const targetDir = path.join(target.path, `${MANAGED_PREFIX}${skillName}`);
