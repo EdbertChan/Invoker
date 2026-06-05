@@ -70,6 +70,8 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
 For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`. When validating a plan against a separate policy source, pass `--source-file`, `--coverage-map`, and `--stack-manifest`; policy-matrix inputs now fail without a coverage map and a real authored stack manifest.
 
+**INV-63 proof contract:** `docs/context/inv-63/experiment-brief.md` selected this full-doctor path over schema-only or skipped-atomicity validation. Do not treat `validate-plan.sh` alone as sufficient for implementation plans; the doctor must distinguish a schema-valid plan from one that fails `lint-task-atomicity`. Keep `.cursor/skills/plan-to-invoker` as a symlink to this canonical skill directory so Cursor resolves the same instructions instead of a forked copy.
+
 ### Fallback commands (for debugging individual checks)
 
 If `skill-doctor.sh` fails, run individual checks to isolate the problem:

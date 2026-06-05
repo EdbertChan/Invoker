@@ -5,8 +5,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 VALIDATE_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/validate-plan.sh"
-POSITIVE_FIXTURE="$REPO_ROOT/plans/plan-to-invoker-deterministic-step-1-validator.yaml"
-NEGATIVE_FIXTURE="$REPO_ROOT/plans/plan-to-invoker-deterministic-step-1-validator-negative.yaml"
+POSITIVE_FIXTURE="$REPO_ROOT/skills/plan-to-invoker/fixtures/positive/07-prompt-edit-layered-split-with-dormant.yaml"
+NEGATIVE_FIXTURE="$REPO_ROOT/skills/plan-to-invoker/fixtures/validator/comprehensive-negative.yaml"
 
 fail() {
   echo "FAIL: $*" >&2
