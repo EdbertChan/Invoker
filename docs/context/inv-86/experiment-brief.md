@@ -2,7 +2,7 @@
 
 **Date**: 2026-06-05
 **Branch**: `experiment/wf-1778431100602-49/experiment-inv-86/g92.t191.a-af26ae159-4cf2d8d2`
-**Status**: Research complete, deterministic proof captured
+**Status**: Research complete, package regression proof captured
 
 ## Problem
 
@@ -151,8 +151,8 @@ rg -c "\\bit\\(" packages/app/src/__tests__/headless-client.test.ts packages/app
 Expected output:
 
 ```text
-packages/app/src/__tests__/bundled-skills.test.ts:2
-packages/app/src/__tests__/headless-client.test.ts:18
+packages/app/src/__tests__/bundled-skills.test.ts:3
+packages/app/src/__tests__/headless-client.test.ts:19
 ```
 
 Threshold:
@@ -162,34 +162,33 @@ Threshold:
 
 Verdict: Pass in this checkout.
 
-### 5. Run the focused unit tests when the TypeScript base config is present
+### 5. Run package-level app regression tests
 
 ```bash
-pnpm --filter @invoker/app exec vitest run src/__tests__/headless-client.test.ts src/__tests__/bundled-skills.test.ts
+cd packages/app && pnpm test
 ```
 
-Expected green output in a complete checkout:
+Expected green output:
 
 ```text
-Test Files  2 passed
-Tests  20 passed
+Test Files  65 passed
+Tests  1007 passed | 1 skipped
 ```
 
 Observed in this checkout:
 
 ```text
-TSConfckParseError: failed to resolve "extends":"../../tsconfig.base.json" in packages/app/tsconfig.json
-Caused by: Error: Cannot find module '../../tsconfig.base.json'
-Test Files  2 failed (2)
-Tests  no tests
+Test Files  65 passed (65)
+Tests  1007 passed | 1 skipped (1008)
 ```
 
 Threshold:
 
-- This command is blocked until root `tsconfig.base.json` exists.
-- Once that precondition is satisfied, failure is any nonzero exit, fewer than 2 passed files, or fewer than 20 passed tests.
+- Root `tsconfig.base.json` must exist because `packages/app/tsconfig.json` extends it.
+- Failure is any nonzero exit from `cd packages/app && pnpm test`.
+- Failure is fewer than 65 passed files or fewer than 1007 passed tests in this checkout.
 
-Verdict: Blocked by repository setup in this checkout, not by the selected module behavior.
+Verdict: Pass after restoring the shared root TypeScript base config.
 
 ## Decision Matrix
 
@@ -208,4 +207,4 @@ Keep the selected split-owner approach. The deterministic source probes pass in 
 - `headless-client.ts` keeps mutating commands on the shared-owner path and bounds bootstrap retries.
 - `bundled-skills.ts` provides deterministic managed install/status behavior.
 
-The focused unit-test command is documented but currently blocked by the missing root `tsconfig.base.json` precondition.
+Package-level app regression now passes with `cd packages/app && pnpm test`.
