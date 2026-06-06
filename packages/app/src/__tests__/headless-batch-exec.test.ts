@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { executeNoTrackHeadlessBatch, type HeadlessExecMutationPayload } from '../headless-batch-exec.js';
+import {
+  classifyHeadlessExecMutation,
+  type HeadlessExecMutationPayload,
+  type HeadlessTargetLookup,
+} from '../headless-command-classification.js';
+import { executeNoTrackHeadlessBatch } from '../headless-batch-exec.js';
 
 describe('executeNoTrackHeadlessBatch', () => {
   it('queues multiple no-track workflow mutations and returns per-item acknowledgements', () => {
@@ -56,10 +61,13 @@ describe('executeNoTrackHeadlessBatch', () => {
   });
 
   it('reports per-item failures without aborting the rest of the batch', () => {
-    const classify = vi.fn((payload: HeadlessExecMutationPayload) => ({
-      workflowId: payload.args[1]?.startsWith('wf-') ? payload.args[1] : undefined,
-      priority: 'high' as const,
-    }));
+    const targetLookup: HeadlessTargetLookup = {
+      loadWorkflow: (workflowId) => workflowId === 'wf-1' ? { id: workflowId } as any : undefined,
+      listWorkflows: () => [{ id: 'wf-1' } as any],
+      loadTasks: () => [],
+    };
+    const classify = vi.fn((payload: HeadlessExecMutationPayload) =>
+      classifyHeadlessExecMutation(payload, targetLookup, { strictQueueAdmission: true }));
     const submit = vi.fn(() => 42);
 
     const results = executeNoTrackHeadlessBatch(
@@ -87,7 +95,7 @@ describe('executeNoTrackHeadlessBatch', () => {
         workflowId: undefined,
         args: ['rebase-recreate', 'missing'],
         ok: false,
-        error: 'Fire-and-forget headless.exec could not be queued: workflow-not-resolved',
+        error: 'Could not resolve existing workflow-or-task target for headless.exec queue admission: "missing"',
       },
       {
         label: 'good',

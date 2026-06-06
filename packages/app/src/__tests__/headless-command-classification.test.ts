@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  classifyHeadlessExecMutation,
   isHeadlessMutatingCommand,
   isHeadlessReadOnlyCommand,
   resolveHeadlessTarget,
   resolveHeadlessTargetWorkflowId,
+  type HeadlessExecMutationPayload,
   type HeadlessTargetLookup,
 } from '../headless-command-classification.js';
 
@@ -21,6 +23,8 @@ describe('headless-command-classification', () => {
       return [];
     },
   };
+  const classifyNoTrack = (args: string[]) =>
+    classifyHeadlessExecMutation({ args, noTrack: true } satisfies HeadlessExecMutationPayload, targetLookup);
 
   it('classifies read-only commands', () => {
     expect(isHeadlessReadOnlyCommand([])).toBe(true);
@@ -89,5 +93,53 @@ describe('headless-command-classification', () => {
     expect(() => resolveHeadlessTargetWorkflowId('missing-target', targetLookup)).toThrow(
       'Could not resolve headless target workflow for "missing-target"',
     );
+  });
+
+  it('classifies canonical no-track commands from a shared command schema', () => {
+    expect(classifyNoTrack(['retry', 'wf-1'])).toEqual({ workflowId: 'wf-1', priority: 'high' });
+    expect(classifyNoTrack(['retry-task', 'wf-2/task-1'])).toEqual({ workflowId: 'wf-2', priority: 'high' });
+    expect(classifyNoTrack(['rebase-retry', '__merge__wf-1'])).toEqual({ workflowId: 'wf-1', priority: 'high' });
+    expect(classifyNoTrack(['approve', 'wf-2/task-1'])).toEqual({ workflowId: 'wf-2', priority: 'normal' });
+    expect(classifyNoTrack(['set', 'executor', 'wf-2/task-1', 'worktree'])).toEqual({
+      workflowId: 'wf-2',
+      priority: 'high',
+    });
+  });
+
+  it('classifies deprecated no-track aliases through the same schema', () => {
+    expect(classifyNoTrack(['edit', 'wf-2/task-1', 'echo ok'])).toEqual({ workflowId: 'wf-2', priority: 'high' });
+    expect(classifyNoTrack(['edit-executor', 'wf-2/task-1', 'docker'])).toEqual({ workflowId: 'wf-2', priority: 'high' });
+    expect(classifyNoTrack(['edit-type', 'wf-2/task-1', 'ssh', 'remote-a'])).toEqual({ workflowId: 'wf-2', priority: 'high' });
+    expect(classifyNoTrack(['edit-agent', 'wf-2/task-1', 'codex'])).toEqual({ workflowId: 'wf-2', priority: 'high' });
+    expect(classifyNoTrack(['set-merge-mode', 'wf-1', 'manual'])).toEqual({ workflowId: 'wf-1', priority: 'high' });
+  });
+
+  it('rejects malformed no-track commands before queue admission', () => {
+    expect(() => classifyNoTrack(['retry'])).toThrow('Missing arguments. Usage: --headless retry <workflowId>');
+    expect(() => classifyNoTrack(['retry', 'wf-1', 'extra'])).toThrow('Unexpected arguments. Usage: --headless retry <workflowId>');
+    expect(() => classifyNoTrack(['does-not-exist', 'wf-1'])).toThrow('Unsupported no-track headless.exec command: does-not-exist');
+    expect(() => classifyNoTrack(['set', 'does-not-exist', 'wf-1'])).toThrow(
+      'Unsupported no-track headless.exec set sub-command: does-not-exist',
+    );
+    expect(() => classifyNoTrack(['set', 'gate-policy', 'wf-2/task-1', 'wf-1', 'blocked'])).toThrow(
+      'Invalid gate policy "blocked". Expected completed|review_ready',
+    );
+  });
+
+  it('requires strict no-track queue targets to exist in persistence', () => {
+    expect(() => classifyNoTrack(['retry', 'wf-missing'])).toThrow(
+      'Could not resolve existing workflow target for headless.exec queue admission: "wf-missing"',
+    );
+    expect(() => classifyNoTrack(['retry-task', 'wf-2/missing-task'])).toThrow(
+      'Could not resolve existing task target for headless.exec queue admission: "wf-2/missing-task"',
+    );
+  });
+
+  it('keeps non-strict classification permissive for inline execution paths', () => {
+    expect(classifyHeadlessExecMutation({ args: ['unknown', 'wf-1'] }, targetLookup)).toEqual({ priority: 'normal' });
+    expect(classifyHeadlessExecMutation({ args: ['retry', 'wf-missing'] }, targetLookup)).toEqual({
+      workflowId: 'wf-missing',
+      priority: 'high',
+    });
   });
 });

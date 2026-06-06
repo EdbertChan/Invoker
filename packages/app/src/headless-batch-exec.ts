@@ -1,11 +1,8 @@
+import type {
+  HeadlessExecClassification,
+  HeadlessExecMutationPayload,
+} from './headless-command-classification.js';
 import type { WorkflowMutationPriority } from './workflow-mutation-coordinator.js';
-
-export interface HeadlessExecMutationPayload {
-  args: string[];
-  waitForApproval?: boolean;
-  noTrack?: boolean;
-  traceId?: string;
-}
 
 export interface HeadlessBatchExecItem {
   label?: string;
@@ -28,11 +25,6 @@ export interface HeadlessBatchExecResult {
   response?: { ok: true; intentId: number };
   error?: string;
 }
-
-export type HeadlessExecClassification = {
-  workflowId?: string;
-  priority: WorkflowMutationPriority;
-};
 
 export type HeadlessBatchExecDeps = {
   classify: (payload: HeadlessExecMutationPayload) => HeadlessExecClassification;

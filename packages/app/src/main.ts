@@ -97,10 +97,12 @@ import {
   resolveInvokerHomeRoot,
 } from './delete-all-snapshot.js';
 import {
+  classifyHeadlessExecMutation,
   isHeadlessMutatingCommand,
   isHeadlessReadOnlyCommand,
   resolveHeadlessTarget,
   resolveHeadlessTargetWorkflowId,
+  type HeadlessExecMutationPayload,
 } from './headless-command-classification.js';
 import { backupPlan } from './plan-backup.js';
 // applyPlanDefinitionDefaults removed — parsePlan() applies defaults internally
@@ -186,7 +188,6 @@ import { startReviewGateStatusWorker, type ReviewGateStatusWorker } from './revi
 import {
   executeNoTrackHeadlessBatch,
   type HeadlessBatchExecRequest,
-  type HeadlessExecMutationPayload,
 } from './headless-batch-exec.js';
 import {
   rebuildTaskRunner as rebuildTaskRunnerWiring,
@@ -996,69 +997,6 @@ if (isHeadless) {
           );
         };
 
-        const classifyStandaloneHeadlessExecMutation = (
-          payload: HeadlessExecMutationPayload,
-        ): { workflowId?: string; priority: WorkflowMutationPriority } => {
-          const [command, arg0] = payload.args;
-          if (!command) return { priority: 'normal' };
-
-          const standaloneWorkflowIdForTaskArg = (taskIdArg: unknown): string => {
-            return resolveHeadlessTargetWorkflowId(taskIdArg, persistence);
-          };
-
-          switch (command) {
-            case 'set': {
-              const [, subCommand, targetArg] = payload.args;
-              switch (subCommand) {
-                case 'workflow':
-                case 'merge-mode':
-                  return {
-                    workflowId: targetArg === undefined ? undefined : String(targetArg),
-                    priority: 'high',
-                  };
-                case 'command':
-                case 'prompt':
-                case 'executor':
-                case 'agent':
-                case 'fix-prompt':
-                case 'fix-context':
-                case 'gate-policy':
-                case 'task':
-                  return {
-                    workflowId: targetArg === undefined ? undefined : standaloneWorkflowIdForTaskArg(targetArg),
-                    priority: 'high',
-                  };
-                default:
-                  return { priority: 'normal' };
-              }
-            }
-            case 'resume':
-            case 'retry':
-              return {
-                workflowId: arg0 === undefined ? undefined : standaloneWorkflowIdForTaskArg(arg0),
-                priority: 'high',
-              };
-            case 'recreate':
-            case 'cancel-workflow':
-              return { workflowId: arg0 === undefined ? undefined : String(arg0), priority: 'high' };
-            case 'rebase-retry':
-            case 'rebase-recreate':
-              return { workflowId: standaloneWorkflowIdForTaskArg(arg0), priority: 'high' };
-            case 'cancel':
-            case 'retry-task':
-            case 'recreate-task':
-              return { workflowId: standaloneWorkflowIdForTaskArg(arg0), priority: 'high' };
-            case 'approve':
-            case 'reject':
-            case 'select':
-            case 'fix':
-            case 'resolve-conflict':
-              return { workflowId: standaloneWorkflowIdForTaskArg(arg0), priority: 'normal' };
-            default:
-              return { priority: 'normal' };
-          }
-        };
-
         const runStandaloneWorkflowMutation = async <T>(
           workflowId: string | undefined,
           priority: WorkflowMutationPriority,
@@ -1208,7 +1146,9 @@ if (isHeadless) {
             traceId,
           };
           logHeadlessExecReceived(payload, 'standalone');
-          const { workflowId, priority } = classifyStandaloneHeadlessExecMutation(payload);
+          const { workflowId, priority } = classifyHeadlessExecMutation(payload, persistence, {
+            strictQueueAdmission: Boolean(payload.noTrack),
+          });
           const acknowledgement = acknowledgeNoTrackHeadlessExec(payload, workflowId, priority, 'standalone');
           if (acknowledgement) return acknowledgement;
           await runStandaloneWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => {
@@ -2014,7 +1954,7 @@ function createEmbeddedTerminalBackendFromConfig(
       },
       executionAgentRegistry: registerBuiltinAgents(),
     });
-    const { workflowId } = classifyHeadlessExecMutation(payload);
+    const { workflowId } = classifyHeadlessExecMutation(payload, persistence);
     logger.info(`executeHeadlessExec end args="${payload.args.join(' ')}" workflow="${workflowId ?? 'unknown'}"`, {
       module: 'ipc-delegate',
     });
@@ -2033,59 +1973,6 @@ function createEmbeddedTerminalBackendFromConfig(
 
   function workflowIdForTaskArg(taskIdArg: unknown): string | undefined {
     return workflowIdForTargetArg(taskIdArg);
-  }
-
-  function classifyHeadlessExecMutation(payload: HeadlessExecMutationPayload): {
-    workflowId?: string;
-    priority: WorkflowMutationPriority;
-  } {
-    const [command, arg0] = payload.args;
-    if (!command) return { priority: 'normal' };
-
-    switch (command) {
-      case 'set': {
-        const [, subCommand, targetArg] = payload.args;
-        switch (subCommand) {
-          case 'workflow':
-          case 'merge-mode':
-            return { workflowId: targetArg === undefined ? undefined : String(targetArg), priority: 'high' };
-          case 'command':
-          case 'prompt':
-          case 'executor':
-          case 'agent':
-          case 'fix-prompt':
-          case 'fix-context':
-          case 'gate-policy':
-          case 'task':
-            return { workflowId: workflowIdForTaskArg(targetArg), priority: 'high' };
-          default:
-            return { priority: 'normal' };
-        }
-      }
-      case 'resume':
-      case 'retry':
-        return { workflowId: workflowIdForTargetArg(arg0), priority: 'high' };
-      case 'recreate':
-      case 'cancel-workflow':
-      case 'delete':
-      case 'delete-workflow':
-        return { workflowId: arg0, priority: 'high' };
-      case 'rebase-retry':
-      case 'rebase-recreate':
-        return { workflowId: workflowIdForTargetArg(arg0), priority: 'high' };
-      case 'cancel':
-      case 'retry-task':
-      case 'recreate-task':
-        return { workflowId: workflowIdForTaskArg(arg0), priority: 'high' };
-      case 'approve':
-      case 'reject':
-      case 'select':
-      case 'fix':
-      case 'resolve-conflict':
-        return { workflowId: workflowIdForTaskArg(arg0), priority: 'normal' };
-      default:
-        return { priority: 'normal' };
-    }
   }
 
   async function runWorkflowMutation<T>(
@@ -2739,7 +2626,9 @@ function createEmbeddedTerminalBackendFromConfig(
           traceId,
         };
         logHeadlessExecReceived(payload, 'gui');
-        const { workflowId, priority } = classifyHeadlessExecMutation(payload);
+        const { workflowId, priority } = classifyHeadlessExecMutation(payload, persistence, {
+          strictQueueAdmission: Boolean(payload.noTrack),
+        });
         const acknowledgement = acknowledgeNoTrackHeadlessExec(payload, workflowId, priority, 'gui');
         if (acknowledgement) return acknowledgement;
         return runWorkflowMutation(workflowId, priority, 'headless.exec', [payload], async () => executeHeadlessExec(payload));
@@ -2755,7 +2644,7 @@ function createEmbeddedTerminalBackendFromConfig(
         }
         const coordinator = workflowMutationCoordinator;
         const results = executeNoTrackHeadlessBatch(request, {
-          classify: classifyHeadlessExecMutation,
+          classify: (payload) => classifyHeadlessExecMutation(payload, persistence, { strictQueueAdmission: true }),
           submit: (workflowId, priority, channel, args, options) =>
             coordinator.submit(workflowId, priority, channel, args, options),
         });
