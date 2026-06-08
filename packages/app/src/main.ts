@@ -1054,6 +1054,22 @@ if (isHeadless) {
           if (kind === 'queue') {
             return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
           }
+          if (kind === 'action-graph') {
+            orchestrator.syncAllFromDb();
+            const tasks = orchestrator.getAllTasks();
+            const workflows = persistence.listWorkflows();
+            return buildActionGraphDiagnostics({
+              workflows,
+              tasks,
+              attemptsByTaskId: new Map(tasks.map((task) => [task.id, persistence.loadAttempts(task.id)])),
+              queueStatus: orchestrator.getQueueStatus(),
+              mutationIntents: persistence.listWorkflowMutationIntents(),
+              mutationLeases: persistence.listWorkflowMutationLeases(),
+              eventsByTaskId: new Map(tasks.map((task) => [task.id, persistence.getEvents(task.id)])),
+              activityLogs: persistence.getActivityLogs(0, 200),
+              stallThresholdMs: resolveActionDiagnosticsStallThresholdMs(invokerConfig),
+            }) as unknown as Record<string, unknown>;
+          }
           throw new Error(`Unsupported headless query: ${String(kind)}`);
         });
         messageBus.onRequest('headless.resume', async (req: unknown) => {
@@ -1133,6 +1149,9 @@ if (isHeadless) {
             });
           }
         }
+      }
+      if (ownsHeadlessShutdown && persistence) {
+        persistence.requeueRunningWorkflowMutationIntents();
       }
       if (persistence) persistence.close();
       if (writerLock) writerLock.release();
@@ -2612,6 +2631,22 @@ if (isHeadless) {
         if (kind === 'queue') {
           return orchestrator.getQueueStatus() as unknown as Record<string, unknown>;
         }
+        if (kind === 'action-graph') {
+          orchestrator.syncAllFromDb();
+          const tasks = orchestrator.getAllTasks();
+          const workflows = persistence.listWorkflows();
+          return buildActionGraphDiagnostics({
+            workflows,
+            tasks,
+            attemptsByTaskId: new Map(tasks.map((task) => [task.id, persistence.loadAttempts(task.id)])),
+            queueStatus: orchestrator.getQueueStatus(),
+            mutationIntents: persistence.listWorkflowMutationIntents(),
+            mutationLeases: persistence.listWorkflowMutationLeases(),
+            eventsByTaskId: new Map(tasks.map((task) => [task.id, persistence.getEvents(task.id)])),
+            activityLogs: persistence.getActivityLogs(0, 200),
+            stallThresholdMs: resolveActionDiagnosticsStallThresholdMs(invokerConfig),
+          }) as unknown as Record<string, unknown>;
+        }
         throw new Error(`Unsupported headless query: ${String(kind)}`);
       });
       messageBus.onRequest('headless.run', async (req: unknown) => {
@@ -3927,6 +3962,9 @@ if (isHeadless) {
             });
           }
         }
+      }
+      if (persistence) {
+        persistence.requeueRunningWorkflowMutationIntents();
       }
       if (persistence) persistence.close();
       if (writerLock) writerLock.release();
