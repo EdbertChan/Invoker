@@ -19,6 +19,6 @@ if ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || [ "$CONCURRENCY" -lt 1 ]; then
 fi
 
 echo "==> Running package workspace tests (concurrency=$CONCURRENCY)"
-pnpm -r --workspace-concurrency="$CONCURRENCY" test
+env -u INVOKER_HEADLESS_STANDALONE pnpm -r --workspace-concurrency="$CONCURRENCY" test
 echo "==> Running required package builds"
-bash "$ROOT/scripts/required-builds.sh"
+env -u INVOKER_HEADLESS_STANDALONE bash "$ROOT/scripts/required-builds.sh"
