@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createTestHarness, type TestHarness } from '@invoker/test-kit';
 import type { PlanDefinition } from '@invoker/workflow-core';
 import { dispatchStartedTasksWithGlobalTopup } from '../global-topup.js';
+import { LaunchDispatcher } from '../launch-dispatcher.js';
 
 const LINEAR_PLAN: PlanDefinition = {
   name: 'Linear Handoff Repro',
@@ -28,20 +29,68 @@ const PARALLEL_PLAN: PlanDefinition = {
   ],
 };
 
+async function drainLaunchOutbox(h: TestHarness): Promise<void> {
+  const dispatcher = new LaunchDispatcher({
+    persistence: h.persistence as any,
+    orchestrator: {
+      prepareTaskForNewAttempt: (taskId, reason) =>
+        h.orchestrator.prepareTaskForNewAttempt(taskId, reason),
+      syncFromDb: (workflowId) => h.orchestrator.syncFromDb(workflowId),
+      getTask: (taskId) => h.orchestrator.getTask(taskId),
+      getTaskLaunchReadiness: (taskId) => h.orchestrator.getTaskLaunchReadiness(taskId),
+    },
+    taskRunnerProvider: () => h.executor,
+    ownerId: 'app-layer-handoff-repro',
+    mode: 'active',
+  });
+
+  let idleTicks = 0;
+  for (let i = 0; i < 50; i += 1) {
+    dispatcher.poll();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const live = h.persistence.listLaunchDispatchesByState(['enqueued', 'leased']);
+    if (live.length === 0) {
+      idleTicks += 1;
+      if (idleTicks >= 2) return;
+    } else {
+      idleTicks = 0;
+    }
+  }
+  throw new Error('Timed out draining active launch outbox');
+}
+
 async function dispatchStarted(h: TestHarness, started: Array<any>, context: string) {
-  return dispatchStartedTasksWithGlobalTopup({
+  const result = await dispatchStartedTasksWithGlobalTopup({
     orchestrator: h.orchestrator,
     taskExecutor: h.executor,
     context,
     started,
+    launchOutboxMode: 'active',
   });
+  await drainLaunchOutbox(h);
+  return result;
+}
+
+function expectLaunchClaimed(tasks: Array<any>, predicate: (task: any) => boolean): void {
+  expect(
+    tasks.some(
+      (task) =>
+        predicate(task) &&
+        task.status === 'pending' &&
+        task.execution?.phase === 'launching' &&
+        !!task.execution?.selectedAttemptId,
+    ),
+  ).toBe(true);
 }
 
 describe('app-layer handoff repros', () => {
   let h: TestHarness;
 
   beforeEach(() => {
-    h = createTestHarness();
+    h = createTestHarness({
+      launchOutboxMode: 'active',
+      deferRunningUntilLaunch: true,
+    });
   });
 
   it('edit-task-command launches restarted task and persists workspacePath', async () => {
@@ -49,7 +98,7 @@ describe('app-layer handoff repros', () => {
     h.failTask('A', 'broken');
 
     const started = h.orchestrator.editTaskCommand('A', 'echo fixed');
-    expect(started.some((task) => task.id.endsWith('/A') && task.status === 'running')).toBe(true);
+    expectLaunchClaimed(started, (task) => task.id.endsWith('/A'));
     expect(h.getTask('A')!.execution.workspacePath).toBeUndefined();
 
     await dispatchStarted(h, started, 'test.edit-task-command');
@@ -74,7 +123,7 @@ describe('app-layer handoff repros', () => {
     h.failTask('A', 'broken');
 
     const started = h.orchestrator.editTaskPrompt('A', 'Implement feature Y instead');
-    expect(started.some((task) => task.id.endsWith('/A') && task.status === 'running')).toBe(true);
+    expectLaunchClaimed(started, (task) => task.id.endsWith('/A'));
     expect(h.getTask('A')!.config.prompt).toBe('Implement feature Y instead');
 
     await dispatchStarted(h, started, 'test.edit-task-prompt');
@@ -88,7 +137,7 @@ describe('app-layer handoff repros', () => {
     h.failTask('A', 'broken');
 
     const started = h.orchestrator.editTaskType('A', 'worktree');
-    expect(started.some((task) => task.id.endsWith('/A') && task.status === 'running')).toBe(true);
+    expectLaunchClaimed(started, (task) => task.id.endsWith('/A'));
     expect(h.getTask('A')!.execution.workspacePath).toBeUndefined();
 
     await dispatchStarted(h, started, 'test.edit-task-type');
@@ -102,7 +151,7 @@ describe('app-layer handoff repros', () => {
     h.failTask('A', 'broken');
 
     const started = h.orchestrator.editTaskAgent('A', 'codex');
-    expect(started.some((task) => task.id.endsWith('/A') && task.status === 'running')).toBe(true);
+    expectLaunchClaimed(started, (task) => task.id.endsWith('/A'));
     expect(h.getTask('A')!.execution.workspacePath).toBeUndefined();
 
     await dispatchStarted(h, started, 'test.edit-task-agent');
@@ -146,7 +195,7 @@ describe('app-layer handoff repros', () => {
     const started = h.orchestrator.setTaskExternalGatePolicies(leafId, [
       { workflowId: prereqWorkflowId, gatePolicy: 'review_ready' },
     ]);
-    expect(started.some((task) => task.id === leafId && task.status === 'running')).toBe(true);
+    expectLaunchClaimed(started, (task) => task.id === leafId);
     expect(h.getTask('leaf')!.execution.workspacePath).toBeUndefined();
 
     await dispatchStarted(h, started, 'test.set-task-external-gate-policies');
@@ -173,7 +222,7 @@ describe('app-layer handoff repros', () => {
       { id: 'A-fix-1', description: 'Fix part 1', command: 'echo fix1' },
       { id: 'A-fix-2', description: 'Fix part 2', command: 'echo fix2', dependencies: ['A-fix-1'] },
     ]);
-    expect(started.some((task) => task.id.endsWith('/A-fix-1') && task.status === 'running')).toBe(true);
+    expectLaunchClaimed(started, (task) => task.id.endsWith('/A-fix-1'));
     expect(h.getTask('A-fix-1')!.execution.workspacePath).toBeUndefined();
 
     await dispatchStarted(h, started, 'test.replace-task');
@@ -195,7 +244,7 @@ describe('app-layer handoff repros', () => {
 
     h.persistence.updateWorkflow(workflowId, { baseBranch: 'develop' });
     const started = h.orchestrator.retryTask(mergeTaskId);
-    expect(started.some((task) => task.id === mergeTaskId && task.status === 'running')).toBe(true);
+    expectLaunchClaimed(started, (task) => task.id === mergeTaskId);
     expect(h.getTask(mergeTaskId)!.execution.workspacePath).toBe('/tmp/mock-merge-worktree');
 
     await dispatchStarted(h, started, 'test.set-merge-branch');

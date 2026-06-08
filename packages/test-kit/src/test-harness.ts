@@ -85,6 +85,8 @@ export interface TestHarness {
 export function createTestHarness(opts?: {
   maxConcurrency?: number;
   mergeGateProvider?: MergeGateProvider;
+  launchOutboxMode?: 'disabled' | 'observe' | 'active';
+  deferRunningUntilLaunch?: boolean;
 }): TestHarness {
   const persistence = new InMemoryPersistence();
   const bus = new InMemoryBus();
@@ -92,6 +94,8 @@ export function createTestHarness(opts?: {
     persistence,
     messageBus: bus,
     maxConcurrency: opts?.maxConcurrency ?? 10,
+    launchOutboxMode: opts?.launchOutboxMode,
+    deferRunningUntilLaunch: opts?.deferRunningUntilLaunch,
   });
 
   const executorRegistry = new ExecutorRegistry();

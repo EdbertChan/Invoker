@@ -1,5 +1,26 @@
+import { DISPATCH_LEASE_MS } from '@invoker/contracts';
 import { computeWorkflowRollup } from '@invoker/workflow-core';
 import type { TaskState, TaskStateChanges, OrchestratorPersistence, Attempt, ExternalDependency, ExternalDependencyChange } from '@invoker/workflow-core';
+
+type TaskLaunchDispatchState = 'enqueued' | 'leased' | 'completed' | 'abandoned';
+type TaskLaunchDispatchPriority = 'high' | 'normal' | 'low';
+
+interface TaskLaunchDispatch {
+  id: number;
+  taskId: string;
+  attemptId: string;
+  workflowId: string;
+  state: TaskLaunchDispatchState;
+  priority: TaskLaunchDispatchPriority;
+  dispatchOwner?: string;
+  enqueuedAt: string;
+  leasedAt?: string;
+  completedAt?: string;
+  fencedUntil?: string;
+  attemptsCount: number;
+  lastError?: string;
+  generation: number;
+}
 
 /**
  * In-memory implementation of OrchestratorPersistence for testing.
@@ -17,6 +38,8 @@ export class InMemoryPersistence implements OrchestratorPersistence {
   }>();
   tasks = new Map<string, { workflowId: string; task: TaskState }>();
   private attempts = new Map<string, Attempt[]>();
+  private launchDispatches = new Map<number, TaskLaunchDispatch>();
+  private nextLaunchDispatchId = 1;
 
   saveWorkflow(workflow: {
     id: string; name: string; status: string;
@@ -123,6 +146,204 @@ export class InMemoryPersistence implements OrchestratorPersistence {
   }
 
   logEvent(): void {}
+
+  enqueueLaunchDispatch(input: {
+    taskId: string;
+    attemptId: string;
+    workflowId: string;
+    priority?: TaskLaunchDispatchPriority;
+    generation: number;
+  }): TaskLaunchDispatch {
+    const existing = Array.from(this.launchDispatches.values()).find(
+      (row) =>
+        row.attemptId === input.attemptId &&
+        (row.state === 'enqueued' || row.state === 'leased'),
+    );
+    if (existing) return { ...existing };
+    const row: TaskLaunchDispatch = {
+      id: this.nextLaunchDispatchId,
+      taskId: input.taskId,
+      attemptId: input.attemptId,
+      workflowId: input.workflowId,
+      state: 'enqueued',
+      priority: input.priority ?? 'normal',
+      enqueuedAt: new Date().toISOString(),
+      attemptsCount: 0,
+      generation: input.generation,
+    };
+    this.nextLaunchDispatchId += 1;
+    this.launchDispatches.set(row.id, row);
+    return { ...row };
+  }
+
+  loadLaunchDispatchById(id: number): TaskLaunchDispatch | undefined {
+    const row = this.launchDispatches.get(id);
+    return row ? { ...row } : undefined;
+  }
+
+  loadLaunchDispatchByAttempt(attemptId: string): TaskLaunchDispatch | undefined {
+    const rows = Array.from(this.launchDispatches.values())
+      .filter(
+        (row) =>
+          row.attemptId === attemptId &&
+          (row.state === 'enqueued' || row.state === 'leased'),
+      )
+      .sort((a, b) => b.id - a.id);
+    return rows[0] ? { ...rows[0] } : undefined;
+  }
+
+  listLaunchDispatchesByState(states: readonly TaskLaunchDispatchState[]): TaskLaunchDispatch[] {
+    const wanted = new Set(states);
+    return Array.from(this.launchDispatches.values())
+      .filter((row) => wanted.has(row.state))
+      .sort((a, b) => a.id - b.id)
+      .map((row) => ({ ...row }));
+  }
+
+  claimLaunchDispatchAtomic(options: {
+    ownerId: string;
+    nowIso?: string;
+  }): TaskLaunchDispatch | undefined {
+    const now = options.nowIso ?? new Date().toISOString();
+    const fencedUntil = new Date(new Date(now).getTime() + DISPATCH_LEASE_MS).toISOString();
+    const candidates = Array.from(this.launchDispatches.values())
+      .filter((row) => row.state === 'enqueued')
+      .sort((a, b) => {
+        const priorityRank: Record<TaskLaunchDispatchPriority, number> = { high: 0, normal: 1, low: 2 };
+        return priorityRank[a.priority] - priorityRank[b.priority] || a.id - b.id;
+      });
+    for (const row of candidates) {
+      const task = this.tasks.get(row.taskId)?.task;
+      let staleReason: string | undefined;
+      if (!task) {
+        staleReason = `Launch dispatch ${row.id} is stale: task ${row.taskId} no longer exists`;
+      } else if (task.status !== 'pending') {
+        staleReason = `Launch dispatch ${row.id} is stale: task ${row.taskId} status is ${task.status}`;
+      } else if (task.execution.selectedAttemptId !== row.attemptId) {
+        staleReason =
+          `Launch dispatch ${row.id} is stale: attempt ${row.attemptId} ` +
+          `is not the selected attempt ${task.execution.selectedAttemptId ?? 'none'}`;
+      } else if ((task.execution.generation ?? 0) !== row.generation) {
+        staleReason =
+          `Launch dispatch ${row.id} is stale: generation ${row.generation} ` +
+          `does not match task generation ${task.execution.generation ?? 0}`;
+      }
+      if (staleReason) {
+        this.launchDispatches.set(row.id, {
+          ...row,
+          state: 'abandoned',
+          completedAt: now,
+          lastError: staleReason,
+          dispatchOwner: undefined,
+          fencedUntil: undefined,
+        });
+        continue;
+      }
+
+      const leased: TaskLaunchDispatch = {
+        ...row,
+        state: 'leased',
+        dispatchOwner: options.ownerId,
+        leasedAt: now,
+        fencedUntil,
+        attemptsCount: row.attemptsCount + 1,
+      };
+      this.launchDispatches.set(row.id, leased);
+      return { ...leased };
+    }
+    return undefined;
+  }
+
+  markLaunchDispatchCompleted(id: number, nowIso?: string): boolean {
+    const row = this.launchDispatches.get(id);
+    if (!row || row.state === 'completed' || row.state === 'abandoned') return false;
+    this.launchDispatches.set(id, {
+      ...row,
+      state: 'completed',
+      completedAt: nowIso ?? new Date().toISOString(),
+    });
+    return true;
+  }
+
+  markLaunchDispatchFailed(id: number, errorMessage: string): boolean {
+    const row = this.launchDispatches.get(id);
+    if (!row || row.state === 'completed' || row.state === 'abandoned') return false;
+    this.launchDispatches.set(id, {
+      ...row,
+      state: 'enqueued',
+      lastError: errorMessage,
+      dispatchOwner: undefined,
+      fencedUntil: undefined,
+    });
+    return true;
+  }
+
+  listAbandonableLaunchDispatchLeases(options: {
+    nowIso?: string;
+    maxAttempts: number;
+  }): TaskLaunchDispatch[] {
+    const now = new Date(options.nowIso ?? new Date().toISOString()).getTime();
+    return Array.from(this.launchDispatches.values())
+      .filter(
+        (row) =>
+          row.state === 'leased' &&
+          row.fencedUntil !== undefined &&
+          new Date(row.fencedUntil).getTime() < now &&
+          row.attemptsCount >= options.maxAttempts,
+      )
+      .sort((a, b) => a.id - b.id)
+      .map((row) => ({ ...row }));
+  }
+
+  markLaunchDispatchAbandoned(id: number, errorMessage: string, nowIso?: string): boolean {
+    const row = this.launchDispatches.get(id);
+    if (!row || row.state === 'completed' || row.state === 'abandoned') return false;
+    this.launchDispatches.set(id, {
+      ...row,
+      state: 'abandoned',
+      completedAt: nowIso ?? new Date().toISOString(),
+      lastError: errorMessage,
+      dispatchOwner: undefined,
+      fencedUntil: undefined,
+    });
+    return true;
+  }
+
+  reapExpiredLaunchDispatchLeases(options: {
+    nowIso?: string;
+    maxAttempts?: number;
+  } = {}): TaskLaunchDispatch[] {
+    const now = new Date(options.nowIso ?? new Date().toISOString()).getTime();
+    const maxAttempts = options.maxAttempts ?? Number.MAX_SAFE_INTEGER;
+    const reaped: TaskLaunchDispatch[] = [];
+    for (const row of this.launchDispatches.values()) {
+      if (
+        row.state !== 'leased' ||
+        row.fencedUntil === undefined ||
+        new Date(row.fencedUntil).getTime() >= now ||
+        row.attemptsCount >= maxAttempts
+      ) {
+        continue;
+      }
+      const reset = {
+        ...row,
+        state: 'enqueued' as const,
+        dispatchOwner: undefined,
+        fencedUntil: undefined,
+      };
+      this.launchDispatches.set(row.id, reset);
+      reaped.push({ ...reset });
+    }
+    return reaped;
+  }
+
+  listExecutionResourceLeasesByTask(): Array<{ resourceKey: string; holderId: string; resourceType: string }> {
+    return [];
+  }
+
+  releaseExecutionResourceLease(): boolean {
+    return false;
+  }
 
   saveAttempt(attempt: Attempt): void {
     const list = this.attempts.get(attempt.nodeId) ?? [];

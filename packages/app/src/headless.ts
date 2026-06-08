@@ -2815,7 +2815,7 @@ async function headlessSetGatePolicy(args: string[], deps: HeadlessDeps): Promis
     const runnable = result.data.filter(isDispatchableLaunch);
     if (runnable.length > 0) {
       const taskExecutor = createHeadlessExecutor(deps);
-      await taskExecutor.executeTasks(runnable);
+      await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'set-gate-policies');
     }
     process.stdout.write(
       `Updated gate policy for ${taskId}: ${workflowId}/${depTaskId} -> ${gatePolicy} (${runnable.length} task(s) started)\n`,
