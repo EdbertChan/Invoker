@@ -145,6 +145,7 @@ jobs:
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git update-ref refs/heads/main refs/remotes/origin/master || true
@@ -222,6 +223,7 @@ jobs:
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git update-ref refs/heads/main refs/remotes/origin/master || true
@@ -274,6 +276,7 @@ jobs:
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git update-ref refs/heads/main refs/remotes/origin/master || true
@@ -341,6 +344,7 @@ jobs:
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git update-ref refs/heads/main refs/remotes/origin/master || true
@@ -405,6 +409,7 @@ jobs:
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Run Playwright shard
         env:
@@ -478,6 +483,7 @@ jobs:
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git update-ref refs/heads/main refs/remotes/origin/master || true
@@ -589,6 +595,7 @@ jobs:
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git update-ref refs/heads/main refs/remotes/origin/master || true
