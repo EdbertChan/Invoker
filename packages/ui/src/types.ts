@@ -13,6 +13,7 @@ export type TaskStatus =
   | 'fixing_with_ai'
   | 'completed'
   | 'failed'
+  | 'closed'
   | 'needs_input'
   | 'blocked'
   | 'review_ready'
@@ -40,6 +41,13 @@ export interface ExternalDependency {
   readonly taskId?: string;
   readonly requiredStatus: 'completed';
   readonly gatePolicy?: 'completed' | 'review_ready';
+}
+
+export interface ExternalDependencyChange {
+  readonly before?: ExternalDependency;
+  readonly after?: ExternalDependency;
+  readonly changedAt: string;
+  readonly changedBy?: string;
 }
 
 export interface ExternalGatePolicyUpdate {
@@ -143,9 +151,9 @@ export interface TaskStateChanges {
 // ── Task Delta ──────────────────────────────────────────────
 
 export type TaskDelta =
-  | { readonly type: 'created'; readonly task: TaskState }
-  | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges; readonly taskStateVersion: number; readonly previousTaskStateVersion: number }
-  | { readonly type: 'removed'; readonly taskId: string; readonly previousTaskStateVersion: number };
+  | { readonly type: 'created'; readonly task: TaskState; readonly streamSequence?: number }
+  | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges; readonly taskStateVersion: number; readonly previousTaskStateVersion: number; readonly streamSequence?: number }
+  | { readonly type: 'removed'; readonly taskId: string; readonly previousTaskStateVersion: number; readonly streamSequence?: number };
 
 // ── Workflow Metadata ────────────────────────────────────────
 
@@ -161,6 +169,8 @@ export interface WorkflowMeta {
   repoUrl?: string;
   intermediateRepoUrl?: string;
   reviewProvider?: string;
+  externalDependencies?: readonly ExternalDependency[];
+  externalDependencyChanges?: readonly ExternalDependencyChange[];
   createdAt?: string;
   updatedAt?: string;
 }
@@ -171,6 +181,7 @@ export type WorkflowStatus =
   | 'fixing_with_ai'
   | 'completed'
   | 'failed'
+  | 'closed'
   | 'blocked'
   | 'review_ready'
   | 'awaiting_approval'
@@ -182,6 +193,7 @@ export interface WorkflowStatusCounts {
   total: number;
   completed: number;
   failed: number;
+  closed: number;
   running: number;
   pending: number;
 }
@@ -248,6 +260,7 @@ export interface PlanDefinition {
   onFinish?: 'none' | 'merge' | 'pull_request';
   baseBranch?: string;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
+  externalDependencies?: ExternalDependency[];
 }
 
 // ── Task Replacement ────────────────────────────────────────
@@ -268,7 +281,7 @@ export interface TaskReplacementDef {
 
 export type { InvokerAPI, ClaudeMessage, AgentSessionData } from '@invoker/contracts';
 
-import type { InvokerAPI } from '@invoker/contracts';
+import type { InvokerAPI, TerminalOutputEvent } from '@invoker/contracts';
 
 // ── Augment global Window ───────────────────────────────────
 
@@ -280,6 +293,9 @@ declare global {
       workflows?: WorkflowMeta[];
       initialWorkflowId?: string | null;
       appStartedAtEpochMs?: number;
+      streamSequence?: number;
     };
+    __INVOKER_TEST_OPEN_TERMINAL__?: (taskId: string) => ReturnType<InvokerAPI['openTerminal']>;
+    __INVOKER_TEST_ON_TERMINAL_OUTPUT__?: (cb: (event: TerminalOutputEvent) => void) => () => void;
   }
 }

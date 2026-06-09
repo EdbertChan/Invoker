@@ -95,6 +95,19 @@ export class PersistedWorkflowMutationCoordinator {
     args: unknown[],
     options?: { deferDrain?: boolean },
   ): number {
+    const coalesced = this.findOpenCoalescibleRetryIntent(workflowId, channel, args);
+    if (coalesced) {
+      this.trace(
+        `submit coalesced workflow=${workflowId} channel=${channel} into intent=${coalesced.id} status=${coalesced.status}`,
+      );
+      if (options?.deferDrain) {
+        this.scheduleWorkflowDrainDeferred(workflowId);
+      } else {
+        this.scheduleWorkflowDrain(workflowId);
+      }
+      return coalesced.id;
+    }
+
     const intentId = this.persistence.enqueueWorkflowMutationIntent(workflowId, channel, args, priority);
     this.enqueueStartedAtMs.set(intentId, Date.now());
     this.createTiming(workflowId, channel, intentId, args)
@@ -112,6 +125,35 @@ export class PersistedWorkflowMutationCoordinator {
       this.scheduleWorkflowDrain(workflowId);
     }
     return intentId;
+  }
+
+  private findOpenCoalescibleRetryIntent(
+    workflowId: string,
+    channel: string,
+    args: unknown[],
+  ): WorkflowMutationIntent | undefined {
+    const key = this.coalescibleRetryKey(channel, args);
+    if (!key) return undefined;
+    const open = this.persistence.listWorkflowMutationIntents(workflowId, ['queued', 'running']);
+    return open.find((intent) => this.coalescibleRetryKey(intent.channel, intent.args) === key);
+  }
+
+  private coalescibleRetryKey(channel: string, args: unknown[]): string | null {
+    if (channel === 'invoker:retry-workflow') {
+      const target = typeof args[0] === 'string' ? args[0] : '';
+      return /^wf-[^/]+$/.test(target) ? `retry-workflow:${target}` : null;
+    }
+    if (channel !== 'headless.exec') {
+      return null;
+    }
+    const payload = args[0] as { args?: unknown[] } | undefined;
+    const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
+    const command = typeof rawArgs[0] === 'string' ? rawArgs[0] : '';
+    const target = typeof rawArgs[1] === 'string' ? rawArgs[1] : '';
+    if (command !== 'retry' || !/^wf-[^/]+$/.test(target)) {
+      return null;
+    }
+    return `retry-workflow:${target}`;
   }
 
   async resumePending(): Promise<void> {
@@ -397,7 +439,7 @@ export class PersistedWorkflowMutationCoordinator {
     if (
       channel === 'invoker:recreate-workflow'
       || channel === 'invoker:recreate-task'
-      || channel === 'invoker:recreate-with-rebase'
+      || channel === 'invoker:rebase-recreate'
     ) {
       return 'recreate';
     }
@@ -409,7 +451,7 @@ export class PersistedWorkflowMutationCoordinator {
     }
     const payload = args[0] as { args?: unknown[] } | undefined;
     const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
-    if (rawArgs[0] === 'recreate' || rawArgs[0] === 'recreate-task' || rawArgs[0] === 'recreate-with-rebase') {
+    if (rawArgs[0] === 'recreate' || rawArgs[0] === 'recreate-task' || rawArgs[0] === 'rebase-recreate') {
       return 'recreate';
     }
     if (rawArgs[0] === 'delete' || rawArgs[0] === 'delete-workflow' || rawArgs[0] === 'delete-all') {
@@ -423,7 +465,8 @@ export class PersistedWorkflowMutationCoordinator {
       intent.channel === 'invoker:retry-workflow'
       || intent.channel === 'invoker:recreate-workflow'
       || intent.channel === 'invoker:recreate-task'
-      || intent.channel === 'invoker:recreate-with-rebase'
+      || intent.channel === 'invoker:rebase-retry'
+      || intent.channel === 'invoker:rebase-recreate'
       || intent.channel === 'invoker:delete-workflow'
       || intent.channel === 'invoker:delete-all-workflows'
       || intent.channel === 'invoker:delete-all-workflows-bulk'
@@ -447,7 +490,7 @@ export class PersistedWorkflowMutationCoordinator {
     if (!isWorkflowId) {
       return false;
     }
-    return command === 'recreate' || command === 'recreate-with-rebase' || command === 'retry';
+    return command === 'recreate' || command === 'rebase-retry' || command === 'rebase-recreate' || command === 'retry';
   }
 
   private createTiming(

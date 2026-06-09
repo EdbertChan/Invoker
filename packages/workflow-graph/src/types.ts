@@ -13,6 +13,7 @@ export type TaskStatus =
   | 'fixing_with_ai'
   | 'completed'
   | 'failed'
+  | 'closed'
   | 'needs_input'
   | 'blocked'
   | 'review_ready'
@@ -93,6 +94,13 @@ export interface ExternalDependency {
   readonly requiredStatus: 'completed';
   /** review_ready (default): merge gate review_ready/awaiting_approval/completed count as satisfied. completed: strict — only 'completed' satisfies. */
   readonly gatePolicy?: 'completed' | 'review_ready';
+}
+
+export interface ExternalDependencyChange {
+  readonly before?: ExternalDependency;
+  readonly after?: ExternalDependency;
+  readonly changedAt: string;
+  readonly changedBy?: string;
 }
 
 // ── Task Execution (runtime state) ─────────────────────────
@@ -177,6 +185,7 @@ export interface ExperimentResultEntry {
 // ── Task State Changes (for updates / deltas) ───────────────
 
 export interface TaskStateChanges {
+  readonly description?: string;
   readonly status?: TaskStatus;
   readonly dependencies?: readonly string[];
   readonly config?: Partial<TaskConfig>;
@@ -186,9 +195,9 @@ export interface TaskStateChanges {
 // ── Task Delta (for UI updates) ─────────────────────────────
 
 export type TaskDelta =
-  | { readonly type: 'created'; readonly task: TaskState }
-  | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges; readonly taskStateVersion: number; readonly previousTaskStateVersion: number }
-  | { readonly type: 'removed'; readonly taskId: string; readonly previousTaskStateVersion: number };
+  | { readonly type: 'created'; readonly task: TaskState; readonly streamSequence?: number }
+  | { readonly type: 'updated'; readonly taskId: string; readonly changes: TaskStateChanges; readonly taskStateVersion: number; readonly previousTaskStateVersion: number; readonly streamSequence?: number }
+  | { readonly type: 'removed'; readonly taskId: string; readonly previousTaskStateVersion: number; readonly streamSequence?: number };
 
 // ── Task Create Options (alias for TaskConfig) ──────────────
 

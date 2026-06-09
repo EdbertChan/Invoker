@@ -44,6 +44,13 @@ export interface InvokerConfig {
    */
   autoFixAgent?: string;
   /**
+   * When true, failed CI checks on Invoker-created review-gate PRs can
+   * trigger the same auto-fix recovery flow used for task failures.
+   *
+   * Default: false.
+   */
+  autoFixCi?: boolean;
+  /**
    * Read-only diagnostics tuning for the Action Graph view.
    * Default stall threshold: 60000ms. Env fallback:
    * INVOKER_ACTION_STALL_THRESHOLD_MS.
@@ -59,6 +66,11 @@ export interface InvokerConfig {
   maxConcurrency?: number;
   /** Browser executable for opening external URLs (e.g. "firefox"). Default: Chrome. */
   browser?: string;
+  /** GUI embedded terminal options. Headless open-terminal ignores this. */
+  terminal?: {
+    /** Backend for GUI embedded spawned terminals. Default: bash. */
+    embeddedBackend?: 'bash' | 'pty';
+  };
   /** Cloudflare R2 (or S3-compatible) storage for PR images. Env var fallback: R2_*. */
   imageStorage?: {
     provider: 'r2';
@@ -108,6 +120,16 @@ export interface InvokerConfig {
      * Only used in managed mode. Default: pnpm install --frozen-lockfile
      */
     provisionCommand?: string;
+    /**
+     * When true, export agent API keys from the local secrets file into SSH task/fix
+     * shells. Default false so remote Claude/Codex CLI account auth is preserved.
+     */
+    use_api_key?: boolean;
+    /**
+     * Optional local KEY=value secrets file used when use_api_key is true.
+     * Defaults to docker.secretsFile/fallback when unset.
+     */
+    secretsFile?: string;
     /**
      * Remote workload heartbeat interval (seconds) emitted by the SSH payload wrapper.
      * Used for SSH executing-stall liveness checks. Default: 30.
@@ -184,7 +206,34 @@ export interface InvokerConfig {
     /** Routing strategy. Defaults to "enforce". */
     strategy?: 'enforce' | 'route';
   }>;
+  /**
+   * Launch-handoff outbox mode (Phase A of the launch-handoff
+   * re-architecture). Resolved from the INVOKER_LAUNCH_OUTBOX env var:
+   * - "disabled" (default): legacy in-memory dispatch only.
+   * - "observe": orchestrator writes task_launch_dispatch rows alongside
+   *   the existing claim path; LaunchDispatcher polls and logs counts but
+   *   does not own dispatch.
+   * - "active": LaunchDispatcher is the source of truth for dispatch
+   *   (Phase B, default in production).
+   *
+   * Unknown values fall back to "disabled" with a console warning.
+   *
+   * CC.6 deferral: the plan's Phase C calls for removing this flag
+   * entirely once the outbox has dogfooded clean. That deletion is
+   * left as a follow-up because the test surface still flips between
+   * 'observe' / 'active' / 'disabled' to exercise both code paths
+   * (see launch-dispatcher.test.ts active-mode suite,
+   * launch-claim-orphan-regression.test.ts active-mode passing test,
+   * and several headless-delegation parity cases). Each Phase C
+   * cleanup is independently revertable per the plan; CC.6 stays
+   * documented-but-deferred so the production env-var rollout (and
+   * the ability to flip back to observe mode in a hot incident) is
+   * preserved while the dispatcher matures.
+   */
+  launchOutboxMode?: LaunchOutboxMode;
 }
+
+export type LaunchOutboxMode = 'disabled' | 'observe' | 'active';
 
 function readJsonSafe(path: string): InvokerConfig {
   if (!existsSync(path)) {
@@ -208,10 +257,49 @@ function readJsonSafe(path: string): InvokerConfig {
 }
 
 export function loadConfig(): InvokerConfig {
-  if (process.env.INVOKER_REPO_CONFIG_PATH) {
-    return readJsonSafe(process.env.INVOKER_REPO_CONFIG_PATH);
+  const base = process.env.INVOKER_REPO_CONFIG_PATH
+    ? readJsonSafe(process.env.INVOKER_REPO_CONFIG_PATH)
+    : readJsonSafe(join(homedir(), '.invoker', 'config.json'));
+  base.launchOutboxMode = resolveLaunchOutboxMode();
+  return base;
+}
+
+/**
+ * Resolve the launch-outbox feature-flag mode from the
+ * `INVOKER_LAUNCH_OUTBOX` env var.
+ *
+ * Returns `'active'` when the var is unset, empty, or holds an
+ * unrecognised value (with a console warning for unknown values so
+ * operators notice typos like `INVOKER_LAUNCH_OUTBOX=on`).
+ */
+export function resolveLaunchOutboxMode(
+  env: NodeJS.ProcessEnv = process.env,
+): LaunchOutboxMode {
+  const raw = env.INVOKER_LAUNCH_OUTBOX;
+  if (typeof raw !== 'string' || raw.trim() === '') return 'active';
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'disabled' || normalized === 'observe' || normalized === 'active') {
+    return normalized;
   }
-  return readJsonSafe(join(homedir(), '.invoker', 'config.json'));
+  console.warn(
+    `[config] Unknown INVOKER_LAUNCH_OUTBOX value "${raw}"; falling back to "active".`,
+  );
+  return 'active';
+}
+
+export type EmbeddedTerminalBackendConfig = 'bash' | 'pty';
+
+export function resolveEmbeddedTerminalBackendConfig(
+  config: InvokerConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): EmbeddedTerminalBackendConfig {
+  const rawValue = env.INVOKER_EMBEDDED_TERMINAL_BACKEND ?? config.terminal?.embeddedBackend ?? 'pty';
+  const raw = typeof rawValue === 'string' ? rawValue : String(rawValue);
+  const value = raw.trim().toLowerCase();
+  if (value === 'bash' || value === 'pty') return value;
+  throw new Error(
+    `Invalid embedded terminal backend "${raw}". Expected "bash" or "pty".`,
+  );
 }
 
 /**

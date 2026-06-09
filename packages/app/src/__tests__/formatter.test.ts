@@ -56,6 +56,18 @@ describe('formatTaskStatus', () => {
     expect(output).toContain('[failed]');
   });
 
+  it('shows correct label, icon, and color for closed status', () => {
+    const task = makeTask({ status: 'closed' });
+    const output = formatTaskStatus(task);
+    expect(output).toContain(DIM);
+    expect(output).toContain('◼');
+    expect(output).toContain('[closed]');
+    // Closed is terminal-neutral, not failed: it must not borrow the failed icon/color.
+    expect(output).not.toContain(RED);
+    expect(output).not.toContain('✗');
+    expect(output).not.toContain('[failed]');
+  });
+
   it('shows correct color for running status', () => {
     const task = makeTask({ status: 'running' });
     const output = formatTaskStatus(task);
@@ -93,15 +105,17 @@ describe('formatWorkflowStatus', () => {
       total: 5,
       completed: 2,
       failed: 1,
+      closed: 1,
       running: 1,
-      pending: 1,
+      pending: 0,
     };
     const output = formatWorkflowStatus(status);
     expect(output).toContain('5 total');
     expect(output).toContain('2 completed');
     expect(output).toContain('1 failed');
+    expect(output).toContain('1 closed');
     expect(output).toContain('1 running');
-    expect(output).toContain('1 pending');
+    expect(output).toContain('0 pending');
   });
 
   it('uses colored output', () => {

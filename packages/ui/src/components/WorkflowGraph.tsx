@@ -22,6 +22,7 @@ interface WorkflowGraphProps {
   tasks: Map<string, TaskState>;
   workflows: Map<string, WorkflowMeta>;
   selectedWorkflowId: string | null;
+  centerWorkflowId?: string | null;
   statusFilters: Set<WorkflowStatus>;
   onSelectWorkflow: (workflowId: string) => void;
   onWorkflowContextMenu: (event: MouseEvent, workflowId: string) => void;
@@ -67,11 +68,13 @@ function WorkflowGraphInner({
   tasks,
   workflows,
   selectedWorkflowId,
+  centerWorkflowId,
   statusFilters,
   onSelectWorkflow,
   onWorkflowContextMenu,
 }: WorkflowGraphProps): JSX.Element {
-  const { fitView } = useReactFlow();
+  const { fitView, setCenter } = useReactFlow();
+  const prevNodeCount = useRef(0);
   const reportedVisibleRef = useRef(false);
   const graphMetricsRef = useRef({ deriveMs: 0, layoutMs: 0, objectsMs: 0 });
   const graph = useMemo(() => {
@@ -111,19 +114,22 @@ function WorkflowGraphInner({
   }, [graph.nodes, positions, selectedWorkflowId, statusFilters]);
 
   const edges = useMemo<Edge[]>(() => graph.edges.map((edge) => ({
-    id: `workflow:${edge.source}->${edge.target}`,
+    id: `workflow:${edge.kind}:${edge.source}->${edge.target}`,
     source: edge.source,
     target: edge.target,
     type: 'smoothstep',
     animated: false,
     style: {
-      stroke: 'rgba(148,163,184,0.55)',
-      strokeWidth: 2,
+      stroke: edge.kind === 'historical' ? 'rgba(245,158,11,0.5)' : 'rgba(148,163,184,0.55)',
+      strokeWidth: edge.kind === 'historical' ? 1.5 : 2,
+      strokeDasharray: edge.kind === 'historical' ? '6 6' : undefined,
     },
+    data: { kind: edge.kind },
+    ariaLabel: edge.kind === 'historical' ? 'Historical workflow dependency' : 'Active workflow dependency',
     zIndex: 0,
     markerEnd: {
       type: MarkerType.ArrowClosed,
-      color: 'rgba(148,163,184,0.55)',
+      color: edge.kind === 'historical' ? 'rgba(245,158,11,0.5)' : 'rgba(148,163,184,0.55)',
       width: 16,
       height: 16,
     },
@@ -131,13 +137,22 @@ function WorkflowGraphInner({
 
   const graphSignature = useMemo(() => {
     const nodeIds = graph.nodes.map((node) => node.id).join('|');
-    const edgeIds = graph.edges.map((edge) => `${edge.source}->${edge.target}`).join('|');
+    const edgeIds = graph.edges.map((edge) => `${edge.kind}:${edge.source}->${edge.target}`).join('|');
     return `${nodeIds}::${edgeIds}`;
   }, [graph.edges, graph.nodes]);
 
   const onInitHandler = useCallback(() => {
     requestAnimationFrame(() => fitView({ padding: 0.2 }));
   }, [fitView]);
+
+  useEffect(() => {
+    if (nodes.length !== prevNodeCount.current && nodes.length > 0) {
+      prevNodeCount.current = nodes.length;
+      const frame = requestAnimationFrame(() => fitView({ padding: 0.2 }));
+      return () => cancelAnimationFrame(frame);
+    }
+    return undefined;
+  }, [fitView, nodes.length]);
 
   const onNodeClick = useCallback((_event: MouseEvent, node: Node) => {
     onSelectWorkflow(node.id);
@@ -178,6 +193,37 @@ function WorkflowGraphInner({
     });
     return () => cancelAnimationFrame(frame);
   }, [fitView, graph.nodes.length, graphSignature]);
+
+  useEffect(() => {
+    if (!centerWorkflowId || nodes.length === 0) return;
+    const node = nodes.find((candidate) => candidate.id === centerWorkflowId);
+    if (!node) return;
+    const frame = requestAnimationFrame(() => {
+      if (typeof setCenter === 'function') {
+        setCenter(node.position.x + 110, node.position.y + 45, { zoom: 1, duration: 180 });
+      } else {
+        fitView({ padding: 0.2 });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [centerWorkflowId, fitView, nodes, setCenter]);
+
+  useEffect(() => {
+    if (nodes.length === 0) return;
+    const interval = setInterval(() => {
+      const domNodes = document.querySelectorAll('[data-testid^="workflow-node-"]');
+      const hiddenNodes = document.querySelectorAll(
+        '.react-flow__node[style*="visibility: hidden"] [data-testid^="workflow-node-"]',
+      );
+      if (
+        (domNodes.length === 0 && nodes.length > 0) ||
+        (hiddenNodes.length > 0 && hiddenNodes.length === domNodes.length)
+      ) {
+        fitView({ padding: 0.2 });
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [fitView, nodes.length]);
 
   if (graph.nodes.length === 0) {
     return (

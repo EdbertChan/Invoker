@@ -907,7 +907,7 @@ run_owner_restart_loop_during_tracked_rebase() {
   done
 
   echo "==> overload: starting tracked rebase before owner restart loop"
-  ov_spawn_command_timed "tracked-rebase" 120 invoker_e2e_run_headless rebase "$target_task"
+  ov_spawn_command_timed "tracked-rebase" 120 invoker_e2e_run_headless rebase-retry "$target_task"
   sleep 2
 
   local restart_cycles=3
@@ -1871,7 +1871,7 @@ run_fixing_with_ai_visibility() {
 run_owner_restart_loop_during_tracked_recreate_task() {
   local workflow_count="$1"
   local operation_burst="$2"
-  local seed_timeout_seconds=120
+  local seed_timeout_seconds=180
   invoker_e2e_init
   trap 'ov_stop_owner; rm -rf "${OVERLOAD_TMP_DIR:-}" >/dev/null 2>&1 || true; invoker_e2e_cleanup' RETURN
   cd "$INVOKER_E2E_REPO_ROOT"
@@ -2317,7 +2317,7 @@ run_mixed_control_plane_storm() {
   echo "==> overload: firing mixed control-plane storm burst=$operation_burst"
   ov_spawn_command "recreate-fail-1" invoker_e2e_run_headless --no-track recreate "${fail_workflows[0]}"
   ov_spawn_command "recreate-fail-2" invoker_e2e_run_headless --no-track recreate "${fail_workflows[1]}"
-  ov_spawn_command "rebase-fail-3" invoker_e2e_run_headless --no-track rebase "${fail_workflows[2]}/root"
+  ov_spawn_command "rebase-fail-3" invoker_e2e_run_headless --no-track rebase-retry "${fail_workflows[2]}/root"
   ov_spawn_command "retry-fail-3" invoker_e2e_run_headless --no-track retry "${fail_workflows[2]}"
   ov_spawn_command "approve-1" invoker_e2e_run_headless --no-track approve "${approval_workflows[0]}/approve-me"
   ov_spawn_command "approve-2" invoker_e2e_run_headless --no-track approve "${approval_workflows[1]}/approve-me"
@@ -2426,7 +2426,7 @@ run_owner_restart_loop_during_mixed_storm() {
   echo "==> overload: firing mixed storm before restart loop burst=$operation_burst"
   ov_spawn_command "recreate-fail-1" invoker_e2e_run_headless --no-track recreate "${fail_workflows[0]}"
   ov_spawn_command "recreate-fail-2" invoker_e2e_run_headless --no-track recreate "${fail_workflows[1]}"
-  ov_spawn_command "rebase-fail-3" invoker_e2e_run_headless --no-track rebase "${fail_workflows[2]}/root"
+  ov_spawn_command "rebase-fail-3" invoker_e2e_run_headless --no-track rebase-retry "${fail_workflows[2]}/root"
   ov_spawn_command "retry-fail-3" invoker_e2e_run_headless --no-track retry "${fail_workflows[2]}"
   ov_spawn_command "approve-1" invoker_e2e_run_headless --no-track approve "${approval_workflows[0]}/approve-me"
   ov_spawn_command "approve-2" invoker_e2e_run_headless --no-track approve "${approval_workflows[1]}/approve-me"

@@ -22,6 +22,7 @@ DOCTOR_NEGATIVE_FIXTURES=(
   "anti-pattern-h-layer-order-violation.yaml"
   "anti-pattern-i-final-regression-not-test-all.yaml"
   "anti-pattern-j-zero-context-missing-metadata.yaml"
+  "anti-pattern-k-missing-review-compression.yaml"
 )
 
 is_doctor_negative_fixture() {
@@ -269,6 +270,22 @@ test_stacked_basebranch_master() {
   return 0
 }
 
+test_runner_kind_is_unsupported() {
+  local fixture="$NEGATIVE_DIR/edge-invalid-executor-type.yaml"
+  local output
+  set +e
+  output=$(bash "$VALIDATE_SCRIPT" "$fixture" 2>&1)
+  set -e
+
+  if ! echo "$output" | jq -e '[.[] | select(.errorType == "unsupported_field" and .field == "runnerKind")] | length > 0' &>/dev/null; then
+    echo "Expected unsupported_field error for runnerKind" >&2
+    echo "Output: $output" >&2
+    return 1
+  fi
+
+  return 0
+}
+
 test_lint_valid_final_test_all() {
   local temp_plan
   temp_plan=$(mktemp)
@@ -276,7 +293,10 @@ test_lint_valid_final_test_all() {
 
   cat > "$temp_plan" <<'EOF'
 name: "Valid final test-all gate"
-description: "Implementation plan with terminal full-suite regression"
+description: |
+  Implementation plan with terminal full-suite regression.
+  Standalone workflow waiver:
+  - This fixture intentionally exercises standalone final-gate lint behavior.
 onFinish: pull_request
 mergeMode: github
 repoUrl: git@github.com:example-org/acme-repo.git
@@ -356,6 +376,104 @@ EOF
   bash "$LINT_SCRIPT" "$temp_plan" >/dev/null
 }
 
+test_lint_rejects_multi_prompt_standalone_without_waiver() {
+  local temp_plan
+  temp_plan=$(mktemp)
+  trap "rm -f $temp_plan" RETURN
+
+  cat > "$temp_plan" <<'EOF'
+name: "Invalid multi-prompt standalone workflow"
+description: "Implementation workflow with multiple prompt slices but no stack context."
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+tasks:
+  - id: implement-surface
+    description: |
+      Goal:
+      - Implement the contact surface slice.
+      Motivation:
+      - Keep the first implementation step reviewable.
+      Alternative considerations:
+      - Option A (chosen): implement directly.
+      - Option B: defer implementation.
+      Implementation details:
+      - Update packages/foo/src/surface.ts.
+      Layer: contact_surface
+      Feature state: active
+    prompt: |
+      Goal:
+      - Implement the contact surface slice.
+      Motivation:
+      - Keep execution deterministic.
+      Alternative considerations:
+      - Option A (chosen): update packages/foo/src/surface.ts.
+      - Option B: do nothing.
+      Implementation details:
+      - Modify packages/foo/src/surface.ts for the new behavior.
+      Acceptance criteria:
+      - Verify the first implementation slice is present.
+    dependencies: []
+  - id: implement-bridge
+    description: |
+      Goal:
+      - Implement the bridge slice.
+      Motivation:
+      - Keep the second implementation step reviewable.
+      Alternative considerations:
+      - Option A (chosen): implement directly.
+      - Option B: defer implementation.
+      Implementation details:
+      - Update packages/foo/src/bridge.ts.
+      Layer: app_bridge
+      Feature state: active
+    prompt: |
+      Goal:
+      - Implement the bridge slice.
+      Motivation:
+      - Keep execution deterministic.
+      Alternative considerations:
+      - Option A (chosen): update packages/foo/src/bridge.ts.
+      - Option B: do nothing.
+      Implementation details:
+      - Modify packages/foo/src/bridge.ts for the new behavior.
+      Acceptance criteria:
+      - Verify the second implementation slice is present.
+    dependencies: [implement-surface]
+  - id: final-regression
+    description: |
+      Goal:
+      - Run final full-suite regression gate.
+      Motivation:
+      - Validate all standalone tasks together.
+      Alternative considerations:
+      - Option A (chosen): root full-suite verification.
+      - Option B: package-only checks.
+      Implementation details:
+      - Execute the repository test gate.
+      Layer: e2e_regression
+      Feature state: active
+    command: "pnpm run test:all"
+    dependencies: [implement-surface, implement-bridge]
+EOF
+
+  local output
+  set +e
+  output=$(bash "$LINT_SCRIPT" "$temp_plan" 2>&1)
+  local exit_code=$?
+  set -e
+
+  if [[ $exit_code -eq 0 ]]; then
+    echo "Expected lint to reject multi-prompt standalone workflow without waiver" >&2
+    return 1
+  fi
+
+  if ! grep -q 'Standalone implementation workflow has multiple prompt tasks but no stack context' <<<"$output"; then
+    echo "Expected standalone stack-context lint error, got: $output" >&2
+    return 1
+  fi
+}
+
 test_lint_rejects_non_test_all_final_gate() {
   local temp_plan
   temp_plan=$(mktemp)
@@ -424,10 +542,151 @@ EOF
     return 1
   fi
 
-  if ! grep -q 'must be the final regression gate and run exactly "pnpm run test:all"' <<<"$output"; then
+  if ! grep -q 'must be the final full-suite regression gate and run exactly "pnpm run test:all"' <<<"$output"; then
     echo "Expected final gate command error, got: $output" >&2
     return 1
   fi
+}
+
+test_lint_allows_nonterminal_stack_workflow_without_test_all() {
+  local temp_dir first_plan second_plan stack_manifest
+  temp_dir=$(mktemp -d)
+  trap "rm -rf $temp_dir" RETURN
+  first_plan="$temp_dir/stack-step-1.yaml"
+  second_plan="$temp_dir/stack-step-2.yaml"
+  stack_manifest="$temp_dir/stack-manifest.json"
+
+  cat > "$first_plan" <<'EOF'
+name: "Stack step 1 without full-suite gate"
+description: "First implementation workflow in a stack with focused verification only."
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+featureBranch: plan/stack-step-1
+tasks:
+  - id: implement-surface
+    description: |
+      Goal:
+      - Implement the first stacked workflow surface change.
+      Motivation:
+      - Keep non-terminal stack workflows fast while preserving focused verification.
+      Alternative considerations:
+      - Option A (chosen): focused package verification before the PR gate.
+      - Option B: repeat full-suite verification in every stack layer.
+      Implementation details:
+      - Update packages/foo/src/surface.ts with the stack step one behavior.
+      Layer: contact_surface
+      Feature state: active
+      Files:
+      - packages/foo/src/surface.ts
+      Change types:
+      - Implementation update.
+      Acceptance criteria:
+      - The focused package verification task passes.
+    prompt: |
+      Goal:
+      - Implement the first stacked workflow surface change in packages/foo/src/surface.ts.
+      Motivation:
+      - Keep non-terminal stack workflows fast while preserving focused verification.
+      Alternative considerations:
+      - Option A (chosen): focused package verification before the PR gate.
+      - Option B: repeat full-suite verification in every stack layer.
+      Implementation details:
+      - Assume no prior context. Update packages/foo/src/surface.ts with the stack step one behavior.
+      Acceptance criteria:
+      - Pass condition: focused package tests exit code 0 after this change.
+    dependencies: []
+  - id: verify-surface
+    description: |
+      Goal:
+      - Run focused verification for the first stacked workflow.
+      Motivation:
+      - Catch local regressions without paying for the stack-level full suite.
+      Alternative considerations:
+      - Option A (chosen): package-scoped test command.
+      - Option B: root full-suite test in every stack layer.
+      Implementation details:
+      - Execute the package test lane for packages/foo.
+      Layer: app_regression
+      Feature state: active
+    command: "cd packages/foo && pnpm test"
+    dependencies: [implement-surface]
+EOF
+
+  cat > "$second_plan" <<'EOF'
+name: "Stack step 2 terminal full-suite gate"
+description: "Terminal implementation workflow in a stack with the full regression gate."
+onFinish: pull_request
+mergeMode: github
+repoUrl: git@github.com:example-org/acme-repo.git
+baseBranch: plan/stack-step-1
+featureBranch: plan/stack-step-2
+externalDependencies:
+  - workflowId: wf-upstream
+    taskId: "__merge__"
+    requiredStatus: completed
+    gatePolicy: completed
+tasks:
+  - id: implement-terminal-surface
+    description: |
+      Goal:
+      - Implement the terminal stacked workflow surface change.
+      Motivation:
+      - Validate the integrated stack at the final workflow only.
+      Alternative considerations:
+      - Option A (chosen): one full-suite gate at stack end.
+      - Option B: repeat full-suite verification in every stack layer.
+      Implementation details:
+      - Update packages/foo/src/terminal-surface.ts with the stack terminal behavior.
+      Layer: contact_surface
+      Feature state: active
+      Files:
+      - packages/foo/src/terminal-surface.ts
+      Change types:
+      - Implementation update.
+      Acceptance criteria:
+      - The terminal full-suite gate passes.
+    prompt: |
+      Goal:
+      - Implement the terminal stacked workflow surface change in packages/foo/src/terminal-surface.ts.
+      Motivation:
+      - Validate the integrated stack at the final workflow only.
+      Alternative considerations:
+      - Option A (chosen): one full-suite gate at stack end.
+      - Option B: repeat full-suite verification in every stack layer.
+      Implementation details:
+      - Assume no prior context. Update packages/foo/src/terminal-surface.ts with the stack terminal behavior.
+      Acceptance criteria:
+      - Pass condition: the final full-suite gate exits 0.
+    dependencies: []
+  - id: final-regression
+    description: |
+      Goal:
+      - Run final full-suite regression gate for the stack.
+      Motivation:
+      - Validate all stack layers together before publication.
+      Alternative considerations:
+      - Option A (chosen): root full-suite test only at stack end.
+      - Option B: root full-suite test in every stack layer.
+      Implementation details:
+      - Execute root-level test gate after all earlier terminal-workflow tasks complete.
+      Layer: e2e_regression
+      Feature state: active
+    command: "pnpm run test:all"
+    dependencies: [implement-terminal-surface]
+EOF
+
+  cat > "$stack_manifest" <<EOF
+{
+  "workflows": [
+    { "label": "Stack step 1", "planFile": "$first_plan", "order": 1 },
+    { "label": "Stack step 2", "planFile": "$second_plan", "order": 2 }
+  ]
+}
+EOF
+
+  bash "$LINT_SCRIPT" --stack-manifest "$stack_manifest" "$first_plan" >/dev/null
+  bash "$LINT_SCRIPT" --stack-manifest "$stack_manifest" "$second_plan" >/dev/null
 }
 
 test_lint_rejects_final_gate_missing_dependencies() {
@@ -597,6 +856,29 @@ EOF
   fi
 }
 
+test_lint_requires_review_compression_sections() {
+  local fixture="$NEGATIVE_DIR/anti-pattern-k-missing-review-compression.yaml"
+  local output
+  set +e
+  output=$(bash "$LINT_SCRIPT" --strict-delegation "$fixture" 2>&1)
+  local exit_code=$?
+  set -e
+
+  if [[ $exit_code -eq 0 ]]; then
+    echo "Expected lint to reject missing review-compression sections" >&2
+    return 1
+  fi
+
+  if ! grep -q 'missing required "Review claim:" section' <<<"$output"; then
+    echo "Expected Review claim lint error, got: $output" >&2
+    return 1
+  fi
+  if ! grep -q 'missing required "Safety invariant:" section' <<<"$output"; then
+    echo "Expected Safety invariant lint error, got: $output" >&2
+    return 1
+  fi
+}
+
 test_lint_accepts_design_sections_for_prompt_tasks() {
   local temp_plan
   temp_plan=$(mktemp)
@@ -729,6 +1011,14 @@ repoUrl: git@github.com:example-org/acme-repo.git
 tasks:
   - id: implement-runtime-flow
     description: |
+      Review claim:
+      - Implement deterministic runtime flow updates in task-runner.
+      Safety invariant:
+      - The change is scoped to one execution-engine file and verified by package tests.
+      Slice rationale:
+      - Runtime implementation is separate from terminal full-suite validation.
+      Architectural effect:
+      - Updates the execution-engine runtime path without changing external surfaces.
       Goal:
       - Implement deterministic runtime flow updates.
       Motivation:
@@ -763,6 +1053,14 @@ tasks:
     dependencies: []
   - id: final-regression
     description: |
+      Review claim:
+      - Run the terminal full-suite regression gate for runtime changes.
+      Safety invariant:
+      - This command changes no production code and depends on runtime implementation.
+      Slice rationale:
+      - Terminal validation is separate from implementation work.
+      Architectural effect:
+      - No architecture changes; validates integrated behavior.
       Goal:
       - Run final full-suite regression gate.
       Motivation:
@@ -915,10 +1213,14 @@ run_test "Edge: empty_required_field for tasks" test_edge_empty_tasks
 run_test "Edge: invalid_dependency_reference" test_edge_invalid_dependency
 run_test "Edge: unrendered_template_placeholder" test_unrendered_template_placeholder
 run_test "Edge: stacked_basebranch_default" test_stacked_basebranch_master
+run_test "Edge: unsupported runnerKind field" test_runner_kind_is_unsupported
 run_test "Lint: valid final pnpm run test:all gate" test_lint_valid_final_test_all
+run_test "Lint: reject multi-prompt standalone without waiver" test_lint_rejects_multi_prompt_standalone_without_waiver
 run_test "Lint: reject non-test:all final gate" test_lint_rejects_non_test_all_final_gate
+run_test "Lint: allow non-terminal stack workflow without test:all" test_lint_allows_nonterminal_stack_workflow_without_test_all
 run_test "Lint: reject final gate missing dependencies" test_lint_rejects_final_gate_missing_dependencies
 run_test "Lint: reject missing design sections for prompt tasks" test_lint_requires_design_sections_for_prompt_tasks
+run_test "Lint: reject missing review-compression sections" test_lint_requires_review_compression_sections
 run_test "Lint: accept prompt tasks with design sections" test_lint_accepts_design_sections_for_prompt_tasks
 run_test "Lint: reject missing design sections for command tasks" test_lint_requires_design_sections_for_command_tasks
 run_test "Lint strict: accept zero-context prompt contract" test_lint_strict_accepts_zero_context_prompt_contract

@@ -130,6 +130,20 @@ async function execGitInMergeSafe(
   return host.execGitIn(args, dir);
 }
 
+async function syncGateWorkspaceToFeatureBranch(
+  host: MergeRunnerHost,
+  gateWorkspacePath: string | undefined,
+  featureBranch: string,
+): Promise<void> {
+  if (!gateWorkspacePath) return;
+  await execGitInMergeSafe(
+    host,
+    ['fetch', 'origin', `+refs/heads/${featureBranch}:refs/heads/${featureBranch}`],
+    gateWorkspacePath,
+  );
+  await execGitInMergeSafe(host, ['checkout', featureBranch], gateWorkspacePath);
+}
+
 // ── Host interface ───────────────────────────────────────
 
 /**
@@ -164,7 +178,6 @@ export interface MergeRunnerHost {
   detectDefaultBranch(): Promise<string>;
   gitLogMessage(commitHash: string, cwd?: string): Promise<string>;
   gitDiffStat(branch: string, cwd?: string): Promise<string>;
-  startPrPolling(taskId: string, reviewId: string, workflowId: string): void;
   executeTasks(tasks: TaskState[]): Promise<void>;
   buildMergeSummary(workflowId: string): Promise<string>;
   runVisualProofCapture?(baseBranch: string, featureBranch: string, slug: string, repoUrl?: string): Promise<string | undefined>;
@@ -390,8 +403,6 @@ export function collectDirectNonMergeTaskIds(
 export interface MergeGateActionResult {
   response: WorkResponse;
   taskChanges: TaskStateChanges;
-  reviewIdForPolling?: string;
-  workflowIdForPolling?: string;
 }
 
 export async function runMergeGateActionImpl(
@@ -507,6 +518,11 @@ export async function runMergeGateActionImpl(
           throw new Error('mergeMode is "external_review" but no review provider configured');
         }
 
+        // The PR branch is pushed from the separate consolidation clone above.
+        // Fetch it into the persistent gate workspace and check it out before
+        // persisting the workspace handoff used by review terminals.
+        await syncGateWorkspaceToFeatureBranch(host, gateWorkspacePath, featureBranch);
+
         let fullSummary = summary;
         let vpMarkdownCapture: string | undefined;
         if (visualProof && host.runVisualProofCapture) {
@@ -517,13 +533,6 @@ export async function runMergeGateActionImpl(
             fullSummary = (summary ?? '') + '\n\n' + vpMarkdown;
           }
         }
-
-        // Fetch the feature branch from origin into the gate clone.
-        // consolidateAndMerge() pushed it from a separate (now removed) clone.
-        await host.execGitIn(
-          ['fetch', 'origin', `+refs/heads/${featureBranch}:refs/heads/${featureBranch}`],
-          gateWorkspacePath!,
-        );
 
         // Route through shared PR-authoring helper for consistent PR bodies.
         const structuredCtx = workflowId
@@ -589,8 +598,6 @@ export async function runMergeGateActionImpl(
               reviewStatus,
             },
           },
-          reviewIdForPolling: reviewId,
-          workflowIdForPolling: workflowId,
         };
       }
       response = {
@@ -697,9 +704,6 @@ export async function executeMergeNodeImpl(
   if (response.status === 'review_ready') {
     setMergeGateReviewReady(host, task.id, legacyChanges);
     await startReviewReadyDependents(host);
-    if (result.reviewIdForPolling && result.workflowIdForPolling) {
-      host.startPrPolling(task.id, result.reviewIdForPolling, result.workflowIdForPolling);
-    }
   } else {
     const newlyStarted = host.orchestrator.handleWorkerResponse(response) ?? [];
     if (newlyStarted.length > 0) {
@@ -783,7 +787,7 @@ export async function approveMergeImpl(
     try {
       mergeTrace('GIT_PUSH', { featureBranch, worktreeDir });
       // Push feature branch directly to origin (GitHub) from the clone
-      await execGitInMergeSafe(host, ['push', '--force', '-u', 'origin', featureBranch], worktreeDir);
+      await execGitInMergeSafe(host, ['push', '--force', 'origin', `${featureBranch}:refs/heads/${featureBranch}`], worktreeDir);
       const prBody = await authorPrBodyForMerge(host, {
         workflowId,
         mergeNodeTaskId: mergeTaskId,
@@ -1031,7 +1035,7 @@ export async function publishAfterFixImpl(
     }
 
     // Push feature branch directly to origin (GitHub) from the gate clone
-    await execGitInMergeSafe(host, ['push', '--force', '-u', 'origin', featureBranch], consolidateDir);
+    await execGitInMergeSafe(host, ['push', '--force', 'origin', `${featureBranch}:refs/heads/${featureBranch}`], consolidateDir);
 
     let fullSummary = summary;
     let vpMarkdownCapture2: string | undefined;
@@ -1089,7 +1093,6 @@ export async function publishAfterFixImpl(
         },
       });
       await startReviewReadyDependents(host);
-      host.startPrPolling(task.id, result.identifier, workflowId!);
       return;
     }
 
@@ -1166,8 +1169,9 @@ export async function buildMergeSummaryImpl(
 
   const completed = workflowTasks.filter((t) => t.status === 'completed');
   const failed = workflowTasks.filter((t) => t.status === 'failed');
+  const closed = workflowTasks.filter((t) => t.status === 'closed');
   const skipped = workflowTasks.filter(
-    (t) => t.status !== 'completed' && t.status !== 'failed',
+    (t) => t.status !== 'completed' && t.status !== 'failed' && t.status !== 'closed',
   );
   const claudeResolved = completed.filter(
     (t) => t.config.isReconciliation,
@@ -1189,7 +1193,7 @@ export async function buildMergeSummaryImpl(
   }
 
   lines.push(
-    `${workflowName} — ${completed.length} tasks completed, ${failed.length} failed, ${skipped.length} skipped`,
+    `${workflowName} — ${completed.length} tasks completed, ${failed.length} failed, ${closed.length} closed, ${skipped.length} skipped`,
   );
   lines.push('');
 
@@ -1254,6 +1258,14 @@ export async function buildMergeSummaryImpl(
       lines.push(
         `- **${t.id}**: ${t.description} — ${t.execution.error ?? 'unknown error'}`,
       );
+    }
+    lines.push('');
+  }
+
+  if (closed.length > 0) {
+    lines.push('## Closed Tasks');
+    for (const t of closed) {
+      lines.push(`- **${t.id}**: ${t.description}`);
     }
     lines.push('');
   }
@@ -1382,7 +1394,7 @@ export async function consolidateAndMergeImpl(
     // Push feature branch to origin so other clones (e.g., the gate clone used
     // by external review providers can access it. The consolidation clone is removed
     // in the finally block, so without this push the branch would be lost.
-    await execGitInMergeSafe(host, ['push', '--force', '-u', 'origin', featureBranch], worktreeDir);
+    await execGitInMergeSafe(host, ['push', '--force', 'origin', `${featureBranch}:refs/heads/${featureBranch}`], worktreeDir);
 
     if (visualProof && onFinish === 'pull_request' && host.runVisualProofCapture) {
       const slug = (featureBranch ?? 'workflow').replace(/\//g, '-');
@@ -1414,7 +1426,7 @@ export async function consolidateAndMergeImpl(
       }
     } else if (onFinish === 'pull_request') {
       // Push feature branch directly to origin (GitHub) from the clone
-      await execGitInMergeSafe(host, ['push', '--force', '-u', 'origin', featureBranch], worktreeDir);
+      await execGitInMergeSafe(host, ['push', '--force', 'origin', `${featureBranch}:refs/heads/${featureBranch}`], worktreeDir);
       const structuredCtx3 = workflowId
         ? await buildPrAuthoringContext(host, workflowId)
         : undefined;

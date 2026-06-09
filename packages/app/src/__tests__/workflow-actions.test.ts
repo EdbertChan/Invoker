@@ -16,8 +16,8 @@ import {
   retryTask,
   retryWorkflow,
   recreateWorkflowFromFreshBase,
-  recreateWithRebase,
-  rebaseAndRetry,
+  rebaseRetry,
+  rebaseRecreate,
   approveTask,
   rejectTask,
   provideInput,
@@ -29,6 +29,7 @@ import {
   fixWithAgentAction,
   finalizeAppliedFix,
   autoFixOnFailure,
+  autoFixOnReviewGateFailure,
   buildCancelInFlight,
   buildInvalidationDeps,
   selectFailureRecoveryRoute,
@@ -274,56 +275,52 @@ describe('recreateWorkflowFromFreshBase', () => {
   });
 });
 
-describe('rebaseAndRetry', () => {
-  it('translates taskId → workflowId and delegates to recreateWorkflowFromFreshBase', async () => {
+describe('rebaseRetry', () => {
+  it('translates target → workflowId, prepares fresh base, and delegates to retryWorkflow', async () => {
     const tasks = [makeRunningTask()];
     const orchestrator = {
       getTask: vi.fn(() => makeTask({ config: { workflowId: 'wf-1' } })),
-      recreateWorkflowFromFreshBase: vi.fn(async () => tasks),
+      retryWorkflow: vi.fn(() => tasks),
     };
     const persistence = {
       loadWorkflow: vi.fn(() => ({ id: 'wf-1', generation: 1, repoUrl: 'https://example/repo.git', baseBranch: 'master' })),
+      listWorkflows: vi.fn(() => [{ id: 'wf-1' }]),
+      loadTasks: vi.fn(() => []),
       updateWorkflow: vi.fn(),
     };
 
-    const result = await rebaseAndRetry('wf-1/task-a', {
+    const result = await rebaseRetry('wf-1/task-a', {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
     });
 
-    expect(orchestrator.getTask).toHaveBeenCalledWith('wf-1/task-a');
-    expect(persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { generation: 2 });
-    expect(orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
-      'wf-1',
-      expect.objectContaining({ refreshBase: expect.any(Function) }),
-    );
+    expect(orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
+    expect(persistence.updateWorkflow).not.toHaveBeenCalled();
     expect(result).toBe(tasks);
   });
 
-  it('throws when task not found', async () => {
+  it('throws when target cannot resolve to a workflow', async () => {
     const orchestrator = {
       getTask: vi.fn(() => undefined),
-      recreateWorkflowFromFreshBase: vi.fn(),
+      retryWorkflow: vi.fn(),
     };
-    const persistence = { loadWorkflow: vi.fn(), updateWorkflow: vi.fn() };
+    const persistence = { loadWorkflow: vi.fn(), listWorkflows: vi.fn(() => []), loadTasks: vi.fn(() => []), updateWorkflow: vi.fn() };
 
     await expect(
-      rebaseAndRetry('missing-task', {
+      rebaseRetry('missing-task', {
         orchestrator: orchestrator as unknown as Orchestrator,
         persistence: persistence as unknown as SQLiteAdapter,
       }),
-    ).rejects.toThrow('Task missing-task not found or has no workflow');
+    ).rejects.toThrow('Could not resolve workflow for rebase target "missing-task"');
   });
 });
 
-describe('recreateWithRebase', () => {
-  it('delegates directly to recreateWorkflowFromFreshBase with the provided workflowId', async () => {
+describe('rebaseRecreate', () => {
+  it('prepares fresh base, then delegates to recreateWorkflow', async () => {
     const tasks = [makeRunningTask()];
     const orchestrator = {
-      recreateWorkflowFromFreshBase: vi.fn(async (_id: string, opts?: { refreshBase?: () => Promise<unknown> }) => {
-        await opts?.refreshBase?.();
-        return tasks;
-      }),
+      getTask: vi.fn(() => undefined),
+      recreateWorkflow: vi.fn(() => tasks),
     };
     const persistence = {
       loadWorkflow: vi.fn(() => ({
@@ -333,22 +330,21 @@ describe('recreateWithRebase', () => {
         baseBranch: 'main',
       })),
       updateWorkflow: vi.fn(),
+      listWorkflows: vi.fn(() => [{ id: 'wf-1' }]),
+      loadTasks: vi.fn(() => []),
     };
     const taskExecutor = {
       preparePoolForRebaseRetry: vi.fn(async () => undefined),
     } as unknown as TaskRunner;
 
-    const result = await recreateWithRebase('wf-1', {
+    const result = await rebaseRecreate('wf-1', {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor,
     });
 
     expect(persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', { generation: 3 });
-    expect(orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
-      'wf-1',
-      expect.objectContaining({ refreshBase: expect.any(Function) }),
-    );
+    expect(orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
     expect(taskExecutor.preparePoolForRebaseRetry).toHaveBeenCalledWith(
       'wf-1',
       'https://example/repo.git',
@@ -358,15 +354,15 @@ describe('recreateWithRebase', () => {
   });
 
   it('throws when workflow not found', async () => {
-    const orchestrator = { recreateWorkflowFromFreshBase: vi.fn(async () => []) };
-    const persistence = { loadWorkflow: vi.fn(() => undefined), updateWorkflow: vi.fn() };
+    const orchestrator = { getTask: vi.fn(() => undefined), recreateWorkflow: vi.fn(() => []) };
+    const persistence = { loadWorkflow: vi.fn(() => undefined), listWorkflows: vi.fn(() => []), loadTasks: vi.fn(() => []), updateWorkflow: vi.fn() };
 
     await expect(
-      recreateWithRebase('missing', {
+      rebaseRecreate('missing', {
         orchestrator: orchestrator as unknown as Orchestrator,
         persistence: persistence as unknown as SQLiteAdapter,
       }),
-    ).rejects.toThrow('Workflow missing not found');
+    ).rejects.toThrow('Could not resolve workflow for rebase target "missing"');
   });
 });
 
@@ -524,7 +520,11 @@ describe('approveTask', () => {
       status: 'awaiting_approval',
       config: { workflowId: 'wf-1' },
       execution: {
-        pendingFixError: JSON.stringify({ type: 'merge_conflict', conflictFiles: ['a.ts'] }),
+        pendingFixError: JSON.stringify({
+          type: 'merge_conflict',
+          failedBranch: 'experiment/foo',
+          conflictFiles: ['a.ts'],
+        }),
         workspacePath: '/tmp/task-a',
         branch: 'task-a',
       },
@@ -1272,6 +1272,30 @@ describe('selectFailureRecoveryRoute', () => {
     expect(route).toEqual({ kind: 'resolveConflict' });
   });
 
+  it('uses resolveConflict for parseable text merge conflicts when a workspace exists', () => {
+    const route = selectFailureRecoveryRoute(
+      makeTask({
+        config: { workflowId: 'wf-1' },
+        execution: { workspacePath: '/tmp/task-a' },
+      }) as any,
+      'Executor startup failed (ssh): Merge conflict merging experiment/foo: packages/app/src/headless.ts',
+    );
+
+    expect(route).toEqual({ kind: 'resolveConflict' });
+  });
+
+  it('uses fixWithAgent for conflict-looking text without recoverable metadata', () => {
+    const route = selectFailureRecoveryRoute(
+      makeTask({
+        config: { workflowId: 'wf-1' },
+        execution: { workspacePath: '/tmp/task-a' },
+      }) as any,
+      'CONFLICT (content): Merge conflict in src/foo.ts\nAutomatic merge failed; fix conflicts and commit.',
+    );
+
+    expect(route).toEqual({ kind: 'fixWithAgent' });
+  });
+
   it('uses fixWithAgent for non-merge failures', () => {
     const route = selectFailureRecoveryRoute(
       makeTask({
@@ -1354,6 +1378,41 @@ describe('fixWithAgentAction', () => {
     });
 
     expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'claude');
+    expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError);
+    expect(result).toEqual({ kind: 'resolveConflict', autoApproved: false, started: [] });
+  });
+
+  it('dispatches text merge conflicts with a stale workspace to taskExecutor.resolveConflict', async () => {
+    const mergeError = 'Executor startup failed (ssh): Merge conflict merging experiment/foo: packages/app/src/headless.ts';
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: mergeError, workspacePath: '/tmp/stale-task-a' },
+      })),
+      beginConflictResolution: vi.fn(() => ({ savedError: mergeError })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn(),
+      resolveConflict: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+    }, {
+      agentName: 'codex',
+    });
+
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex');
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError);
     expect(result).toEqual({ kind: 'resolveConflict', autoApproved: false, started: [] });
@@ -1998,6 +2057,73 @@ describe('buildInvalidationDeps', () => {
       taskExecutor.killActiveExecution.mock.invocationCallOrder[0],
     );
   });
+
+  // Cross-workflow cascade wiring: a task-scoped id resolves to its
+  // owning workflowId via `orchestrator.getTask(id)?.config.workflowId`,
+  // then delegates to `Orchestrator.cascadeInvalidationToDownstream`.
+  it('exposes cascadeDownstream that delegates to orchestrator.cascadeInvalidationToDownstream for workflow scope', async () => {
+    const cascaded = [makeRunningTask({ id: 'wf-2/leaf' })];
+    const orchestrator = {
+      ...makeBaseOrchestrator(),
+      cascadeInvalidationToDownstream: vi.fn(() => cascaded),
+      getTask: vi.fn(() => undefined),
+    };
+    const persistence = makePersistence();
+
+    const deps = buildInvalidationDeps({
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+    });
+
+    expect(deps.cascadeDownstream).toBeDefined();
+    const result = await deps.cascadeDownstream!('workflow', 'wf-1');
+
+    expect(orchestrator.cascadeInvalidationToDownstream).toHaveBeenCalledWith('wf-1');
+    expect(orchestrator.getTask).not.toHaveBeenCalled();
+    expect(result).toEqual(cascaded);
+  });
+
+  it('cascadeDownstream resolves task scope to workflowId via orchestrator.getTask', async () => {
+    const orchestrator = {
+      ...makeBaseOrchestrator(),
+      cascadeInvalidationToDownstream: vi.fn(() => []),
+      getTask: vi.fn(() => ({
+        id: 'task-a',
+        config: { workflowId: 'wf-resolved' },
+      })),
+    };
+    const persistence = makePersistence();
+
+    const deps = buildInvalidationDeps({
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+    });
+
+    await deps.cascadeDownstream!('task', 'task-a');
+
+    expect(orchestrator.getTask).toHaveBeenCalledWith('task-a');
+    expect(orchestrator.cascadeInvalidationToDownstream).toHaveBeenCalledWith('wf-resolved');
+  });
+
+  it('cascadeDownstream returns [] without calling orchestrator when task is not found', async () => {
+    const orchestrator = {
+      ...makeBaseOrchestrator(),
+      cascadeInvalidationToDownstream: vi.fn(() => []),
+      getTask: vi.fn(() => undefined),
+    };
+    const persistence = makePersistence();
+
+    const deps = buildInvalidationDeps({
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+    });
+
+    const result = await deps.cascadeDownstream!('task', 'unknown-task');
+
+    expect(orchestrator.getTask).toHaveBeenCalledWith('unknown-task');
+    expect(orchestrator.cascadeInvalidationToDownstream).not.toHaveBeenCalled();
+    expect(result).toEqual([]);
+  });
 });
 
 describe('deleteAllWorkflows', () => {
@@ -2144,10 +2270,7 @@ describe('fixWithAgentAction lineage guard', () => {
     const orchestrator = {
       getTask: vi.fn(() => {
         fixCallCount++;
-        // First call: entry point reads task
-        // Second call: lineage capture after beginConflictResolution
-        // Third call: lineage check after async fix returns (lineage changed)
-        if (fixCallCount <= 2) {
+        if (fixCallCount <= 4) {
           return makeTask({
             status: 'failed',
             config: { workflowId: 'wf-1' },
@@ -2227,7 +2350,7 @@ describe('fixWithAgentAction lineage guard', () => {
     const orchestrator = {
       getTask: vi.fn(() => {
         getTaskCallCount++;
-        if (getTaskCallCount <= 2) {
+        if (getTaskCallCount <= 4) {
           return makeTask({
             status: 'failed',
             config: { workflowId: 'wf-1' },
@@ -2258,10 +2381,11 @@ describe('fixWithAgentAction lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('agent crashed');
+    })).rejects.toThrow(StaleLineageError);
 
     // revertConflictResolution must NOT be called when lineage is stale
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
   });
 
   it('proceeds normally when lineage is current', async () => {
@@ -2307,7 +2431,7 @@ describe('resolveConflictAction lineage guard', () => {
     const orchestrator = {
       getTask: vi.fn(() => {
         getTaskCallCount++;
-        if (getTaskCallCount <= 1) {
+        if (getTaskCallCount <= 3) {
           return makeTask({
             status: 'fixing_with_ai',
             config: { workflowId: 'wf-1' },
@@ -2347,7 +2471,7 @@ describe('resolveConflictAction lineage guard', () => {
     const orchestrator = {
       getTask: vi.fn(() => {
         getTaskCallCount++;
-        if (getTaskCallCount <= 1) {
+        if (getTaskCallCount <= 3) {
           return makeTask({
             status: 'fixing_with_ai',
             config: { workflowId: 'wf-1' },
@@ -2375,9 +2499,13 @@ describe('resolveConflictAction lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('resolution failed');
+    })).rejects.toThrow(StaleLineageError);
 
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalledWith(
+      'task-a',
+      expect.stringContaining('[Auto-fix] Agent failed'),
+    );
   });
 });
 
@@ -2388,7 +2516,7 @@ describe('autoFixOnFailure lineage guard', () => {
       shouldAutoFix: vi.fn(() => true),
       getTask: vi.fn(() => {
         getTaskCallCount++;
-        if (getTaskCallCount <= 2) {
+        if (getTaskCallCount <= 4) {
           return makeTask({
             status: 'failed',
             config: { workflowId: 'wf-1' },
@@ -2442,7 +2570,7 @@ describe('autoFixOnFailure lineage guard', () => {
       shouldAutoFix: vi.fn(() => true),
       getTask: vi.fn(() => {
         getTaskCallCount++;
-        if (getTaskCallCount <= 2) {
+        if (getTaskCallCount <= 4) {
           return makeTask({
             status: 'failed',
             config: { workflowId: 'wf-1' },
@@ -2483,9 +2611,13 @@ describe('autoFixOnFailure lineage guard', () => {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow('agent crashed');
+    })).rejects.toThrow(StaleLineageError);
 
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).not.toHaveBeenCalledWith(
+      'task-a',
+      expect.stringContaining('[Auto-fix] Agent failed'),
+    );
   });
 
   it('throws StaleLineageError when signal is aborted during auto-fix', async () => {
@@ -2532,6 +2664,107 @@ describe('autoFixOnFailure lineage guard', () => {
 
     expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
     expect(orchestrator.retryTask).not.toHaveBeenCalled();
+  });
+});
+
+describe('autoFixOnReviewGateFailure', () => {
+  const trigger = {
+    taskId: 'merge-a',
+    workflowId: 'wf-1',
+    reviewId: '123',
+    reviewUrl: 'https://github.com/owner/repo/pull/123',
+    headSha: 'abc123',
+    headRef: 'feature/ci-red',
+    branch: 'feature/ci-red',
+    selectedAttemptId: 'att-1',
+    generation: 7,
+    statusText: 'CI failed',
+    failedChecks: [
+      { name: 'test-all', conclusion: 'FAILURE', detailsUrl: 'https://github.com/owner/repo/actions/runs/1' },
+    ],
+  };
+
+  it('starts a review-gate fix session and passes CI context to the fix agent', async () => {
+    const task = makeTask({
+      id: 'merge-a',
+      status: 'review_ready',
+      config: { workflowId: 'wf-1', isMergeNode: true },
+      execution: {
+        autoFixAttempts: 0,
+        workspacePath: '/tmp/merge-a',
+        branch: 'feature/ci-red',
+        reviewId: '123',
+        selectedAttemptId: 'att-1',
+        generation: 7,
+      },
+    });
+    const orchestrator = {
+      getTask: vi.fn(() => task),
+      getAutoFixRetryBudget: vi.fn(() => 3),
+      beginAutoFixSession: vi.fn(() => ({ savedError: 'Review-gate CI failed' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertConflictResolution: vi.fn(),
+    };
+    const persistence = {
+      updateTask: vi.fn(),
+      getTaskOutput: vi.fn(() => 'prior task output'),
+      appendTaskOutput: vi.fn(),
+      logEvent: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockResolvedValue(undefined),
+      execGitIn: vi.fn().mockResolvedValue('fixed-sha\n'),
+    };
+
+    await autoFixOnReviewGateFailure(trigger, {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+      getAutoFixAgent: () => 'codex',
+      getAutoApproveAIFixes: () => false,
+    });
+
+    expect(orchestrator.beginAutoFixSession).toHaveBeenCalledWith(
+      'merge-a',
+      expect.objectContaining({ savedError: expect.stringContaining('Review-gate CI failed') }),
+    );
+    expect(taskExecutor.fixWithAgent).toHaveBeenCalledWith(
+      'merge-a',
+      'prior task output',
+      'codex',
+      'Review-gate CI failed',
+      expect.stringContaining('This auto-fix was triggered by failed CI'),
+    );
+    expect(taskExecutor.fixWithAgent.mock.calls[0]?.[4]).toContain('test-all');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('merge-a', 'Review-gate CI failed');
+  });
+
+  it('does not start when review-gate lineage is stale', async () => {
+    const staleTask = makeTask({
+      id: 'merge-a',
+      status: 'review_ready',
+      config: { workflowId: 'wf-1', isMergeNode: true },
+      execution: {
+        branch: 'feature/ci-red',
+        reviewId: '123',
+        selectedAttemptId: 'att-2',
+        generation: 8,
+      },
+    });
+    const orchestrator = {
+      getTask: vi.fn(() => staleTask),
+      getAutoFixRetryBudget: vi.fn(() => 3),
+      beginAutoFixSession: vi.fn(),
+      setFixAwaitingApproval: vi.fn(),
+    };
+
+    await expect(autoFixOnReviewGateFailure(trigger, {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: { updateTask: vi.fn() } as unknown as SQLiteAdapter,
+      taskExecutor: { fixWithAgent: vi.fn() } as unknown as TaskRunner,
+    })).rejects.toThrow(StaleLineageError);
+
+    expect(orchestrator.beginAutoFixSession).not.toHaveBeenCalled();
   });
 });
 

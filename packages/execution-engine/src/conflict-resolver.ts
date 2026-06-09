@@ -12,15 +12,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import type { Orchestrator } from '@invoker/workflow-core';
-import { OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
+import { OrchestratorError, OrchestratorErrorCode, parseMergeConflictError } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import { cleanElectronEnv } from './process-utils.js';
+import { cleanElectronEnv, resolveExecutableOnCurrentPath } from './process-utils.js';
 import type { ExecutionAgent } from './agent.js';
 import type { SessionDriver } from './session-driver.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { buildWorktreeListScript, createSshRemoteScriptError } from './ssh-git-exec.js';
 import { buildSshConnectionArgs } from './ssh-transport-options.js';
 import { findManagedWorktreeForBranch } from './worktree-discovery.js';
+import { buildRemoteAgentEnvExports } from './remote-agent-env.js';
 
 // ── Host interface ───────────────────────────────────────
 
@@ -31,6 +32,8 @@ export interface RemoteTargetConfig {
   port?: number;
   managedWorkspaces?: boolean;
   remoteInvokerHome?: string;
+  use_api_key?: boolean;
+  secretsFile?: string;
 }
 
 /**
@@ -137,7 +140,7 @@ function deriveRemoteManagedWorkspaceInfo(
   };
 }
 
-async function resolveRemoteBranchOwnerPath(
+export async function resolveRemoteBranchOwnerPath(
   branch: string | undefined,
   workspacePath: string,
   target: RemoteTargetConfig,
@@ -182,12 +185,8 @@ export async function resolveConflictImpl(
   const errorStr = savedError ?? task.execution.error;
   if (!errorStr) throw new Error(`Task ${taskId} has no error information`);
 
-  let conflictInfo: { failedBranch: string; conflictFiles: string[] };
-  try {
-    const parsed = JSON.parse(errorStr);
-    if (parsed?.type !== 'merge_conflict') throw new Error('not a merge conflict');
-    conflictInfo = { failedBranch: parsed.failedBranch, conflictFiles: parsed.conflictFiles };
-  } catch {
+  const conflictInfo = parseMergeConflictError(errorStr);
+  if (!conflictInfo) {
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'resolve-conflict-parse-failed',
       errorPreview: String(errorStr).slice(0, 400),
@@ -206,7 +205,7 @@ export async function resolveConflictImpl(
   }
 
   // SSH tasks: run conflict resolution on the remote host
-  const poolMemberId = (task.config as { poolMemberId?: string }).poolMemberId;
+  const poolMemberId = resolveSelectedRemoteTargetId(host, taskId, task);
   if (task.config.runnerKind === 'ssh' && poolMemberId && !existsSync(rawCwd)) {
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'resolve-conflict-remote-path',
@@ -330,6 +329,27 @@ function buildRemoteAgentCommand(
   };
 }
 
+export function resolveSelectedRemoteTargetId(host: ConflictResolverHost, taskId: string, task: ReturnType<Orchestrator['getTask']> & {}): string | undefined {
+  const direct = (task.config as { poolMemberId?: string }).poolMemberId;
+  if (direct) return direct;
+
+  const events = host.persistence.getEvents?.(taskId) ?? [];
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event?.eventType !== 'task.executor.selected' || !event.payload) continue;
+    try {
+      const payload = JSON.parse(event.payload) as { poolMemberId?: unknown };
+      if (typeof payload.poolMemberId === 'string' && payload.poolMemberId.trim()) {
+        return payload.poolMemberId;
+      }
+    } catch {
+      // Ignore malformed historical diagnostics.
+    }
+  }
+
+  return undefined;
+}
+
 async function resolveConflictRemote(
   host: ConflictResolverHost,
   task: ReturnType<Orchestrator['getTask']> & {},
@@ -360,11 +380,13 @@ async function resolveConflictRemote(
   const { shellCommand: agentCmd } = buildRemoteAgentCommand(prompt, host.agentRegistry, agentName);
   const agentCmdB64 = Buffer.from(agentCmd).toString('base64');
   const mergeMsgB64 = Buffer.from(conflictMergeMsg).toString('base64');
+  const envExports = buildRemoteAgentEnvExports(target.secretsFile, target.use_api_key === true);
 
   const script = `set -euo pipefail
 WT="${remoteCwd}"
 if [[ "$WT" == '~' ]]; then WT="$HOME"; elif [[ "\${WT:0:2}" == '~/' ]]; then WT="$HOME/\${WT:2}"; fi
 cd "$WT"
+${envExports}
 git checkout "${taskBranch}"
 MERGE_MSG=$(echo "${mergeMsgB64}" | base64 -d)
 if git merge --no-edit -m "$MERGE_MSG" "${conflictInfo.failedBranch}" 2>/dev/null; then
@@ -439,6 +461,7 @@ export async function fixWithAgentImpl(
   taskOutput: string,
   agentName?: string,
   savedError?: string,
+  fixContext?: string,
 ): Promise<void> {
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'fix-with-agent-start',
@@ -455,11 +478,14 @@ export async function fixWithAgentImpl(
   const taskForPrompt = savedError
     ? { ...task, execution: { ...task.execution, error: savedError } }
     : task;
-  const prompt = buildFixPrompt(taskForPrompt, taskOutput);
+  const basePrompt = buildFixPrompt(taskForPrompt, taskOutput);
+  const prompt = fixContext?.trim()
+    ? `${basePrompt}\n\nAdditional fix context:\n${fixContext.trim()}`
+    : basePrompt;
   const workspacePath = task.execution.workspacePath;
 
   // SSH tasks: run agent on the remote host
-  const poolMemberId = (task.config as { poolMemberId?: string }).poolMemberId;
+  const poolMemberId = resolveSelectedRemoteTargetId(host, taskId, task);
   if (task.config.runnerKind === 'ssh' && poolMemberId && workspacePath && !existsSync(workspacePath)) {
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'fix-with-agent-remote-path',
@@ -612,11 +638,13 @@ export function spawnRemoteAgentFixImpl(
         `trap 'rm -f "$PROMPT_FILE"' EXIT`,
       ].join('\n') + '\n'
     : '';
+  const envExports = buildRemoteAgentEnvExports(target.secretsFile, target.use_api_key === true);
 
 const script = `set -euo pipefail
 WT="${remoteCwd}"
 if [[ "$WT" == '~' ]]; then WT="$HOME"; elif [[ "\${WT:0:2}" == '~/' ]]; then WT="$HOME/\${WT:2}"; fi
 cd "$WT"
+${envExports}
 ${promptWrite}
 eval "$(echo "${agentCmdB64}" | base64 -d)"
 `;
@@ -680,10 +708,11 @@ export function spawnAgentFixViaRegistry(
     throw new Error(`Agent "${agent.name}" does not support fix commands`);
   }
   const sessionId = spec.sessionId ?? randomUUID();
-  console.log(`[spawnAgentFix] cmd: ${spec.cmd} ${spec.args.map(a => JSON.stringify(a)).join(' ')}`);
+  const cmd = resolveExecutableOnCurrentPath(spec.cmd) ?? spec.cmd;
+  console.log(`[spawnAgentFix] cmd: ${cmd} ${spec.args.map(a => JSON.stringify(a)).join(' ')}`);
   console.log(`[spawnAgentFix] cwd: ${cwd}`);
   return new Promise<{ stdout: string; sessionId: string }>((resolve, reject) => {
-    const child = spawn(spec.cmd, spec.args, {
+    const child = spawn(cmd, spec.args, {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanElectronEnv(),

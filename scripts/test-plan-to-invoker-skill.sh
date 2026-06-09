@@ -4,12 +4,14 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SKILL_DIR="$REPO_ROOT/.claude/skills/plan-to-invoker"
+SKILL_DIR="$REPO_ROOT/skills/plan-to-invoker"
 SKILL_MD="$SKILL_DIR/SKILL.md"
 PLAYBOOK="$SKILL_DIR/playbooks/verify-then-build.md"
 TASK_PATTERNS="$SKILL_DIR/references/task-patterns.md"
-CURSOR_LINK="$REPO_ROOT/.cursor/skills/plan-to-invoker"
-CODEX_LINK="$HOME/.codex/skills/plan-to-invoker"
+CLAUDE_COMMAND="$REPO_ROOT/.claude/commands/plan-to-invoker.md"
+CLAUDE_MD="$REPO_ROOT/CLAUDE.md"
+CODEX_INSTALLED="$HOME/.codex/skills/invoker-plan-to-invoker"
+CLAUDE_INSTALLED="$HOME/.claude/skills/invoker-plan-to-invoker"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -25,46 +27,93 @@ must_contain() {
   fi
 }
 
+must_output_contain() {
+  local output="$1"
+  local needle="$2"
+  local hint="$3"
+  if ! printf '%s\n' "$output" | grep -qF -- "$needle"; then
+    fail "$hint — missing in command output: $needle"
+  fi
+}
+
 [[ -f "$SKILL_MD" ]] || fail "expected $SKILL_MD"
 [[ -f "$PLAYBOOK" ]] || fail "expected $PLAYBOOK"
 [[ -f "$TASK_PATTERNS" ]] || fail "expected $TASK_PATTERNS"
+[[ -f "$CLAUDE_COMMAND" ]] || fail "expected $CLAUDE_COMMAND"
+[[ -f "$CLAUDE_MD" ]] || fail "expected $CLAUDE_MD"
 
-# Cursor skill symlink points at canonical copy (optional but catches drift)
-if [[ -e "$CURSOR_LINK" ]]; then
-  if [[ ! -L "$CURSOR_LINK" ]]; then
-    fail ".cursor/skills/plan-to-invoker should be a symlink to the canonical skill"
+# Installed agent skills use managed invoker-* copies, not legacy unprefixed symlinks.
+for installed in "$CODEX_INSTALLED" "$CLAUDE_INSTALLED"; do
+  if [[ -e "$installed" ]]; then
+    [[ -d "$installed" ]] || fail "$installed should be an installed skill directory"
+    [[ ! -L "$installed" ]] || fail "$installed should not be a symlink"
+    [[ -f "$installed/SKILL.md" ]] || fail "expected $installed/SKILL.md"
   fi
-  resolved="$(cd "$(dirname "$CURSOR_LINK")" && cd "$(readlink plan-to-invoker)" && pwd)"
-  case "$resolved" in
-    *"/.claude/skills/plan-to-invoker"|*"/skills/plan-to-invoker") ;;
-    *) fail "symlink $CURSOR_LINK should resolve to .claude/skills/... or skills/... plan-to-invoker (got: $resolved)" ;;
-  esac
-fi
-
-# Codex skill symlink points at canonical copy (optional but catches drift)
-if [[ -e "$CODEX_LINK" ]]; then
-  if [[ ! -L "$CODEX_LINK" ]]; then
-    fail "~/.codex/skills/plan-to-invoker should be a symlink to the canonical skill"
-  fi
-  resolved="$(cd "$(dirname "$CODEX_LINK")" && cd "$(readlink plan-to-invoker)" && pwd)"
-  case "$resolved" in
-    *"/.claude/skills/plan-to-invoker"|*"/skills/plan-to-invoker") ;;
-    *) fail "symlink $CODEX_LINK should resolve to .claude/skills/... or skills/... plan-to-invoker (got: $resolved)" ;;
-  esac
-fi
+done
 
 # SKILL.md — runtime verification + Invoker headless as complementary lane
 must_contain "$SKILL_MD" "## Intended flow (do not skip steps)" "SKILL must document the full flow"
 must_contain "$SKILL_MD" "Runtime verification (Phase 1b)" "SKILL must require runtime behavioral verification"
 must_contain "$SKILL_MD" "Invoker headless" "SKILL must mention Invoker headless as a verification lane"
 must_contain "$SKILL_MD" "pnpm test" "SKILL must mention pnpm test for behavioral proof"
-must_contain "$SKILL_MD" "pnpm run test:all" "SKILL must require the final full-suite regression gate for implementation plans"
+must_contain "$SKILL_MD" "terminal stack workflows must end with" "SKILL must require the final full-suite regression gate for standalone plans and terminal stack workflows"
 must_contain "$SKILL_MD" "Grep-only checks" "SKILL must separate grep from behavioral verification"
 must_contain "$SKILL_MD" "see playbook" "SKILL Execution must reference the playbook"
 must_contain "$SKILL_MD" "Phase 1b" "SKILL must reference Phase 1b"
 must_contain "$SKILL_MD" "Policy-matrix documents" "SKILL must document policy-matrix coverage mode"
 must_contain "$SKILL_MD" "verify-noop" "SKILL must explain policy-matrix degradation checks"
 must_contain "$SKILL_MD" "zero-context executable" "SKILL must require zero-context executable prompt instructions"
+must_contain "$SKILL_MD" "Review compression" "SKILL must require review compression for implementation plans"
+must_contain "$SKILL_MD" "Review claim:" "SKILL must require review claim metadata"
+must_contain "$SKILL_MD" "Safety invariant:" "SKILL must require safety invariant metadata"
+must_contain "$SKILL_MD" "For benchmark/direct-output prompts with" "SKILL frontmatter must expose benchmark mode before body loading"
+must_contain "$SKILL_MD" "never version or metadata wrappers" "SKILL frontmatter must reject legacy benchmark YAML wrappers"
+must_contain "$SKILL_MD" "## Benchmark/direct-output mode" "SKILL must document benchmark/direct-output mode"
+must_contain "$SKILL_MD" "Treat the literal absolute output path" "SKILL must require literal output path handling"
+must_contain "$SKILL_MD" "Do not run \`env\`, \`printenv\`, \`set\`, repeated shell probes, or \`AskUserQuestion\` to discover \`GENERATED_PLAN\`" "SKILL must forbid env discovery for GENERATED_PLAN"
+must_contain "$SKILL_MD" "Do not scan the repository, schema, examples, references, or scripts unless the prompt explicitly asks for those files." "SKILL must avoid repo scan requirements in benchmark mode"
+must_contain "$SKILL_MD" "Do not self-run \`skill-doctor\`, validation loops, or submit commands." "SKILL must avoid self-validation loops in benchmark mode"
+must_contain "$SKILL_MD" "Compact YAML skeleton for common benchmark plans" "SKILL must include a compact benchmark YAML skeleton"
+must_contain "$SKILL_MD" "Always include the skeleton's required top-level fields" "SKILL must require complete top-level YAML fields in benchmark mode"
+must_contain "$SKILL_MD" "The YAML must start with \`name:\`" "SKILL must require benchmark YAML to start with name"
+must_contain "$SKILL_MD" "Treat any YAML found in the session text as source material only" "SKILL must not treat session YAML as direct-output YAML"
+must_contain "$SKILL_MD" "The first byte of the file must be the \`n\` in top-level \`name:\`." "SKILL must require a complete top-level benchmark plan"
+must_contain "$SKILL_MD" "A benchmark output that begins with \`version:\`, wraps fields under \`metadata:\`, or omits top-level \`repoUrl:\` is invalid." "SKILL must reject the legacy benchmark YAML envelope"
+must_contain "$SKILL_MD" "first five non-comment top-level keys exactly this envelope order" "SKILL must require the benchmark YAML envelope order"
+must_contain "$SKILL_MD" "generate a command-only verification plan" "SKILL must keep isolated benchmark plans command-only"
+must_contain "$SKILL_MD" "Do not generate prompt tasks, nested \`steps:\`, or implementation tasks that would call an agent or autofix." "SKILL must prevent autofix-triggering benchmark tasks"
+must_contain "$SKILL_MD" "deterministic local smoke commands" "SKILL must require local benchmark commands"
+must_contain "$SKILL_MD" "https://github.com/Neko-Catpital-Labs/Invoker.git" "SKILL must provide a non-probing Invoker repoUrl fallback"
+
+# Claude slash command — must load the skill before acting and preserve direct-output contract.
+must_contain "$CLAUDE_COMMAND" "Read \`skills/plan-to-invoker/SKILL.md\` before doing anything else." "Claude command must force skill loading before execution"
+must_contain "$CLAUDE_COMMAND" "benchmark/direct-output signals" "Claude command must route benchmark prompts to direct-output mode"
+must_contain "$CLAUDE_COMMAND" "The file must start with top-level \`name:\`" "Claude command must preserve benchmark YAML top-level name contract"
+must_contain "$CLAUDE_COMMAND" "do not write \`version:\` or \`metadata:\` wrappers." "Claude command must reject legacy benchmark YAML wrappers"
+
+# Claude initial repo context — must block first-turn benchmark probes before skill listing is loaded.
+must_contain "$CLAUDE_MD" "Benchmark direct output" "CLAUDE.md must document benchmark direct-output behavior"
+must_contain "$CLAUDE_MD" "Do not run \`git remote\`, \`env\`, \`printenv\`, \`set\`" "CLAUDE.md must forbid benchmark discovery probes"
+must_contain "$CLAUDE_MD" "Do not write \`version:\` or \`metadata:\` wrappers." "CLAUDE.md must reject legacy benchmark YAML wrappers"
+must_contain "$CLAUDE_MD" "anything that can trigger an agent/autofix" "CLAUDE.md must prevent benchmark autofix-triggering tasks"
+
+must_contain "$SKILL_MD" "Deterministic validation gate" "SKILL must document the primary deterministic proof gate"
+must_contain "$SKILL_MD" 'Use `skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>` as the primary deterministic proof surface' "SKILL must record the primary doctor gate"
+must_contain "$SKILL_MD" "Schema-only validation or ad hoc individual script checks are not sufficient as the review gate" "SKILL must reject incomplete primary gates"
+must_contain "$SKILL_MD" "Individual validator scripts remain fallback diagnostics only" "SKILL must preserve fallback diagnostics"
+
+DOCTOR_SCRIPT="$REPO_ROOT/skills/plan-to-invoker/scripts/skill-doctor.sh"
+DOCTOR_HELP="$(bash "$DOCTOR_SCRIPT" --help)"
+must_output_contain "$DOCTOR_HELP" "skill-doctor.sh: Deterministic orchestrator for plan validation scripts" "skill-doctor --help must expose the deterministic command contract"
+must_output_contain "$DOCTOR_HELP" "Usage: bash skill-doctor.sh [OPTIONS] <plan-file>" "skill-doctor --help must expose usage"
+must_output_contain "$DOCTOR_HELP" "--source-file FILE" "skill-doctor --help must expose source-file option"
+must_output_contain "$DOCTOR_HELP" "--coverage-map FILE" "skill-doctor --help must expose coverage-map option"
+must_output_contain "$DOCTOR_HELP" "--stack-manifest FILE" "skill-doctor --help must expose stack-manifest option"
+must_output_contain "$DOCTOR_HELP" "Exit codes:" "skill-doctor --help must expose exit-code contract"
+must_output_contain "$DOCTOR_HELP" "  0 = all checks passed" "skill-doctor --help must expose success exit code"
+must_output_contain "$DOCTOR_HELP" "  1 = one or more checks failed" "skill-doctor --help must expose failure exit code"
+must_output_contain "$DOCTOR_HELP" "  2 = usage/argument error" "skill-doctor --help must expose usage-error exit code"
+must_output_contain "$DOCTOR_HELP" "Output: JSON summary of all checks with pass/fail status" "skill-doctor --help must expose JSON output contract"
 
 # Playbook — Phase 1a / 1b (three lanes) and anti-patterns
 must_contain "$PLAYBOOK" "### Phase 1a — Static analysis" "Playbook must define Phase 1a"
@@ -79,6 +128,7 @@ must_contain "$PLAYBOOK" "assume no prior context" "Playbook must require zero-c
 # Task patterns — strict prompt handoff requirements
 must_contain "$TASK_PATTERNS" "Assume zero context" "Task patterns must define zero-context prompt requirement"
 must_contain "$TASK_PATTERNS" "deterministic pass/fail expectations" "Task patterns must require deterministic prompt outcomes"
+must_contain "$TASK_PATTERNS" "Review compression contract" "Task patterns must define review compression metadata"
 
 echo "OK: plan-to-invoker skill contract checks passed"
 

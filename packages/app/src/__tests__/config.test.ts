@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { loadConfig } from '../config.js';
+import {
+  loadConfig,
+  resolveEmbeddedTerminalBackendConfig,
+  resolveLaunchOutboxMode,
+} from '../config.js';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -24,9 +28,9 @@ vi.mock('node:os', async (importOriginal) => {
 });
 
 describe('loadConfig', () => {
-  it('returns empty config when no files exist', () => {
+  it('returns config with default launchOutboxMode when no files exist', () => {
     const config = loadConfig();
-    expect(config).toEqual({});
+    expect(config).toEqual({ launchOutboxMode: 'active' });
   });
 
   it('reads user-level ~/.invoker/config.json', () => {
@@ -109,6 +113,15 @@ describe('loadConfig', () => {
     );
     const config = loadConfig();
     expect(config.autoFixAgent).toBe('codex');
+  });
+
+  it('reads autoFixCi from user config', () => {
+    writeFileSync(
+      join(fakeHome, '.invoker', 'config.json'),
+      JSON.stringify({ autoFixCi: true }),
+    );
+    const config = loadConfig();
+    expect(config.autoFixCi).toBe(true);
   });
 
   it('loadConfig picks up browser field', () => {
@@ -207,4 +220,80 @@ describe('loadConfig', () => {
     expect(config.defaultPoolId).toBe('mixed-local-ssh');
   });
 
+});
+
+describe('resolveEmbeddedTerminalBackendConfig', () => {
+  it('defaults GUI embedded terminals to the PTY backend', () => {
+    expect(resolveEmbeddedTerminalBackendConfig({}, {})).toBe('pty');
+  });
+
+  it('reads the configured GUI embedded terminal backend', () => {
+    expect(resolveEmbeddedTerminalBackendConfig({
+      terminal: { embeddedBackend: 'pty' },
+    }, {})).toBe('pty');
+  });
+
+  it('lets the environment override config', () => {
+    expect(resolveEmbeddedTerminalBackendConfig(
+      { terminal: { embeddedBackend: 'pty' } },
+      { INVOKER_EMBEDDED_TERMINAL_BACKEND: 'bash' },
+    )).toBe('bash');
+  });
+
+  it('normalizes backend values', () => {
+    expect(resolveEmbeddedTerminalBackendConfig(
+      {},
+      { INVOKER_EMBEDDED_TERMINAL_BACKEND: ' PTY ' },
+    )).toBe('pty');
+  });
+
+  it('rejects invalid backend values', () => {
+    expect(() => resolveEmbeddedTerminalBackendConfig(
+      {},
+      { INVOKER_EMBEDDED_TERMINAL_BACKEND: 'external' },
+    )).toThrow(/Invalid embedded terminal backend/);
+  });
+});
+
+describe('resolveLaunchOutboxMode', () => {
+  it('defaults to active when INVOKER_LAUNCH_OUTBOX is unset', () => {
+    expect(resolveLaunchOutboxMode({})).toBe('active');
+  });
+
+  it('returns disabled when INVOKER_LAUNCH_OUTBOX=disabled', () => {
+    expect(
+      resolveLaunchOutboxMode({ INVOKER_LAUNCH_OUTBOX: 'disabled' }),
+    ).toBe('disabled');
+  });
+
+  it('returns observe when INVOKER_LAUNCH_OUTBOX=observe', () => {
+    expect(
+      resolveLaunchOutboxMode({ INVOKER_LAUNCH_OUTBOX: 'observe' }),
+    ).toBe('observe');
+  });
+
+  it('returns active when INVOKER_LAUNCH_OUTBOX=active', () => {
+    expect(
+      resolveLaunchOutboxMode({ INVOKER_LAUNCH_OUTBOX: 'active' }),
+    ).toBe('active');
+  });
+
+  it('falls back to active with a warning for unknown values', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(
+        resolveLaunchOutboxMode({ INVOKER_LAUNCH_OUTBOX: 'on' }),
+      ).toBe('active');
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy.mock.calls[0]?.[0]).toMatch(/Unknown INVOKER_LAUNCH_OUTBOX/);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('is case- and whitespace-insensitive', () => {
+    expect(
+      resolveLaunchOutboxMode({ INVOKER_LAUNCH_OUTBOX: '  Observe  ' }),
+    ).toBe('observe');
+  });
 });

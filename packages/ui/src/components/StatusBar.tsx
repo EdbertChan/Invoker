@@ -12,13 +12,15 @@ import { getStatusVisual } from '../lib/status-colors.js';
 interface StatusBarProps {
   tasks: Map<string, TaskState>;
   activeFilters?: Set<string>;
+  keyboardActiveKey?: string | null;
   onStatusClick?: (filterKey: string, event: React.MouseEvent) => void;
 }
 
-export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProps) {
+export function StatusBar({ tasks, activeFilters, keyboardActiveKey, onStatusClick }: StatusBarProps) {
   let completed = 0;
   let running = 0;
   let failed = 0;
+  let closed = 0;
   let pending = 0;
   let needsInput = 0;
   let reviewReady = 0;
@@ -44,6 +46,9 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
         break;
       case 'failed':
         failed++;
+        break;
+      case 'closed':
+        closed++;
         break;
       case 'pending':
         pending++;
@@ -72,11 +77,12 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
   const hasFilters = activeFilters && activeFilters.size > 0;
   const filterClass = (key: string) => {
     const baseClasses = 'px-2 py-0.5 text-xs rounded-full cursor-pointer select-none transition-opacity duration-75';
-    if (!hasFilters) return `${baseClasses} hover:brightness-125`;
+    const keyboardClass = keyboardActiveKey === key ? ' ring-2 ring-blue-300/90 ring-offset-1 ring-offset-gray-800' : '';
+    if (!hasFilters) return `${baseClasses}${keyboardClass} hover:brightness-125`;
     const isActive = activeFilters!.has(key);
     return `${baseClasses} ${
       isActive ? 'ring-1 ring-current' : 'opacity-60'
-    }`;
+    }${keyboardClass}`;
   };
   const statusTextClass = (key: string) => getStatusVisual(key).text;
 
@@ -87,6 +93,7 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       </span>
       <span
         data-testid="status-bar-pill-completed"
+        data-status-key="completed"
         className={`${statusTextClass('completed')} ${filterClass('completed')}`}
         onClick={(e) => onStatusClick?.('completed', e)}
       >
@@ -95,6 +102,7 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       </span>
       <span
         data-testid="status-bar-pill-running"
+        data-status-key="running"
         className={`${statusTextClass('running')} ${filterClass('running')}`}
         onClick={(e) => onStatusClick?.('running', e)}
       >
@@ -103,14 +111,26 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       </span>
       <span
         data-testid="status-bar-pill-failed"
+        data-status-key="failed"
         className={`${statusTextClass('failed')} ${filterClass('failed')}`}
         onClick={(e) => onStatusClick?.('failed', e)}
       >
         <span data-testid="workflow-status-pill-failed" className="sr-only" />
         Failed: <span className="font-medium">{failed}</span>
       </span>
+      {closed > 0 && (
+        <span
+          data-testid="status-bar-pill-closed"
+          data-status-key="closed"
+          className={`${statusTextClass('closed')} ${filterClass('closed')}`}
+          onClick={(e) => onStatusClick?.('closed', e)}
+        >
+          Closed: <span className="font-medium">{closed}</span>
+        </span>
+      )}
       <span
         data-testid="status-bar-pill-pending"
+        data-status-key="pending"
         className={`${statusTextClass('pending')} ${filterClass('pending')}`}
         onClick={(e) => onStatusClick?.('pending', e)}
       >
@@ -120,6 +140,7 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       {needsInput > 0 && (
         <span
           data-testid="status-bar-pill-needs_input"
+          data-status-key="needs_input"
           className={`${statusTextClass('needs_input')} ${filterClass('needs_input')}`}
           onClick={(e) => onStatusClick?.('needs_input', e)}
         >
@@ -129,6 +150,7 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       {reviewReady > 0 && (
         <span
           data-testid="status-bar-pill-review_ready"
+          data-status-key="review_ready"
           className={`${statusTextClass('review_ready')} ${filterClass('review_ready')}`}
           onClick={(e) => onStatusClick?.('review_ready', e)}
         >
@@ -138,6 +160,7 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       {awaitingApproval > 0 && (
         <span
           data-testid="status-bar-pill-awaiting_approval"
+          data-status-key="awaiting_approval"
           className={`${statusTextClass('awaiting_approval')} ${filterClass('awaiting_approval')}`}
           onClick={(e) => onStatusClick?.('awaiting_approval', e)}
         >
@@ -147,6 +170,7 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       {blocked > 0 && (
         <span
           data-testid="status-bar-pill-blocked"
+          data-status-key="blocked"
           className={`${statusTextClass('blocked')} ${filterClass('blocked')}`}
           onClick={(e) => onStatusClick?.('blocked', e)}
         >
@@ -156,6 +180,7 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       {fixing > 0 && (
         <span
           data-testid="status-bar-pill-fixing_with_ai"
+          data-status-key="fixing_with_ai"
           className={`${statusTextClass('fixing_with_ai')} ${filterClass('fixing_with_ai')}`}
           onClick={(e) => onStatusClick?.('fixing_with_ai', e)}
         >
@@ -165,6 +190,7 @@ export function StatusBar({ tasks, activeFilters, onStatusClick }: StatusBarProp
       {fixApproval > 0 && (
         <span
           data-testid="status-bar-pill-fix_approval"
+          data-status-key="fix_approval"
           className={`${statusTextClass('fix_approval')} ${filterClass('fix_approval')}`}
           onClick={(e) => onStatusClick?.('fix_approval', e)}
         >

@@ -37,7 +37,7 @@ Positive fixtures demonstrate valid plan patterns:
 - **05-ui-change-with-visual-proof.yaml** - UI workflow that pairs visual proof with a final full-suite regression gate
 - **06-invoker-dogfood-mergify-stack.yaml** - Invoker-on-Invoker PR publication example with a final full-suite regression gate
 - **07-prompt-edit-layered-split-with-dormant.yaml** - Dependency-first layer split for prompt-edit bridge work, including a dormant activation slice
-- Implementation fixtures with `onFinish != none` end with a final `pnpm run test:all` task
+- Standalone implementation fixtures with `onFinish != none` end with a final `pnpm run test:all` task. In authored stacks, only the terminal workflow requires that full-suite gate; non-terminal workflows must be validated with a stack manifest.
 
 All positive fixtures are extracted from `references/examples.md` sections 1-4.
 
@@ -55,7 +55,9 @@ Negative fixtures demonstrate anti-patterns and validation errors:
 - **anti-pattern-f-dangerous-commands.yaml** - Dangerous commands (rm -rf, force push, etc.)
 - **anti-pattern-g-monolithic-prompt-edit-bridge.yaml** - Monolithic `wf-1777929074509-8`-shaped workflow missing required layer/state decomposition metadata (**fails `skill-doctor` lint, not YAML schema**)
 - **anti-pattern-h-layer-order-violation.yaml** - Lower architectural layer depends on a higher layer without `Layer exception: allowed` (**fails `skill-doctor` lint, not YAML schema**)
-- **anti-pattern-i-final-regression-not-test-all.yaml** - Implementation workflow missing the terminal `pnpm run test:all` regression gate (**fails `skill-doctor` lint, not YAML schema**)
+- **anti-pattern-i-final-regression-not-test-all.yaml** - Standalone implementation workflow missing the terminal `pnpm run test:all` regression gate (**fails `skill-doctor` lint, not YAML schema**)
+- **anti-pattern-j-zero-context-missing-metadata.yaml** - Prompt task omits strict zero-context handoff metadata (**fails `skill-doctor` lint, not YAML schema**)
+- **anti-pattern-k-missing-review-compression.yaml** - Implementation task omits review-compression metadata (**fails `skill-doctor` lint, not YAML schema**)
 
 ### Edge Cases (specific validation errors)
 
@@ -67,7 +69,7 @@ Negative fixtures demonstrate anti-patterns and validation errors:
 - **edge-neither-command-nor-prompt.yaml** - Task with neither command nor prompt
 - **edge-invalid-merge-mode.yaml** - Invalid `mergeMode` enum value
 - **edge-invalid-on-finish.yaml** - Invalid `onFinish` enum value
-- **edge-invalid-runner-kind.yaml** - Invalid `runnerKind` enum value
+- **edge-invalid-runner-kind.yaml** - Obsolete `runnerKind` routing field
 - **edge-invalid-dependency-reference.yaml** - Dependency on non-existent task
 - **edge-missing-description-for-pr.yaml** - Missing description when `onFinish: pull_request`
 - **edge-cyclic-dependency.yaml** - Cyclic dependency (may require cycle detection)
@@ -80,6 +82,7 @@ Negative fixtures expect these error types from the validator:
 - `missing_required_field` - Required field is missing
 - `empty_required_field` - Required array/list is empty
 - `invalid_enum_value` - Enum field has invalid value
+- `unsupported_field` - Field is obsolete or not accepted by the current Invoker CLI
 - `command_prompt_exclusive` - Task has both command and prompt
 - `missing_command_or_prompt` - Task has neither command nor prompt
 - `banned_pattern` - Command contains banned pattern (e.g., `npx vitest run`)

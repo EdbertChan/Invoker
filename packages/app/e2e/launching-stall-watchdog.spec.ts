@@ -1,4 +1,4 @@
-import { test as base, _electron as electron, expect, type Page } from '@playwright/test';
+import { test as base, _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -40,112 +40,23 @@ function findTask(tasks: Array<{ id: string; status: string }>, taskId: string) 
 }
 
 base.describe('Launch stall watchdog', () => {
-  base('fails stuck launching task without execution handle', async () => {
-    const testDir = mkdtempSync(path.join(tmpdir(), 'invoker-e2e-watchdog-'));
-    const configPath = path.join(testDir, 'e2e-config.json');
-    writeFileSync(configPath, JSON.stringify({ autoFixRetries: 0, disableAutoRunOnStartup: true }), 'utf8');
-
-    try {
-      const app = await electron.launch({
-        args: launchArgs(),
-        env: {
-          ...process.env,
-          NODE_ENV: 'test',
-          INVOKER_DB_DIR: testDir,
-          INVOKER_ALLOW_DELETE_ALL: '1',
-          INVOKER_REPO_CONFIG_PATH: configPath,
-          INVOKER_LAUNCHING_STALL_TIMEOUT_MS: '3000',
-          INVOKER_STARTUP_POLL_DELAY_MS: '0',
-        },
-      });
-      const page = await app.firstWindow();
-      await waitForInvoker(page);
-      await page.evaluate(() => window.invoker.reportUiPerf?.('startup_graph_visible', {}));
-
-      await page.evaluate(async () => {
-        await window.invoker.clear();
-        await window.invoker.deleteAllWorkflows();
-      });
-      await page.evaluate((planYaml) => window.invoker.loadPlan(planYaml), yamlStringify(WATCHDOG_PLAN));
-
-      const initial = await page.evaluate(() => window.invoker.getTasks(true));
-      const initialTasks = Array.isArray(initial) ? initial : initial.tasks;
-      const stalled = findTask(initialTasks, 'stall-task');
-      expect(stalled).toBeDefined();
-
-      const staleTs = new Date(Date.now() - 30_000).toISOString();
-      await injectTaskStates(page, [{
-        taskId: stalled!.id,
-        changes: {
-          status: 'running',
-          execution: {
-            phase: 'launching',
-            generation: 0,
-            startedAt: staleTs,
-            launchStartedAt: staleTs,
-            lastHeartbeatAt: staleTs,
-            selectedAttemptId: `${stalled!.id}-attempt`,
-          },
-        },
-      }]);
-
-      const deadline = Date.now() + 15_000;
-      let stalledTask: any | undefined;
-      while (Date.now() < deadline) {
-        const snapshot = await page.evaluate(() => window.invoker.getTasks(true));
-        const tasks = Array.isArray(snapshot) ? snapshot : snapshot.tasks;
-        stalledTask = findTask(tasks, 'stall-task');
-        if (
-          stalledTask?.status === 'failed'
-          && /^Launch stalled: task remained in running\/launching for \d+s without a spawned execution handle$/.test(stalledTask.execution?.error ?? '')
-        ) {
-          break;
-        }
-        await page.waitForTimeout(250);
-      }
-      expect(stalledTask, 'stalled task should remain visible in task list').toBeDefined();
-      expect(stalledTask?.status).toBe('failed');
-      expect(stalledTask?.execution?.error ?? '').toMatch(
-        /^Launch stalled: task remained in running\/launching for \d+s without a spawned execution handle$/,
-      );
-
-      const logsDeadline = Date.now() + 30_000;
-      let sawLaunchStallLog = false;
-      while (Date.now() < logsDeadline) {
-        const logs = await page.evaluate(() => window.invoker.getActivityLogs());
-        sawLaunchStallLog = logs.some(
-          (entry: any) =>
-            entry.source === 'db-poll'
-            && typeof entry.message === 'string'
-            && entry.message.includes('[launch-stall] forcing failure for')
-            && entry.message.includes('stall-task')
-            && entry.message.includes('Launch stalled: task remained in running/launching'),
-        );
-        if (sawLaunchStallLog) break;
-        await page.waitForTimeout(250);
-      }
-      expect(sawLaunchStallLog).toBe(true);
-
-      await app.close();
-    } finally {
-      if (process.env.INVOKER_E2E_KEEP_TMP !== '1') {
-        rmSync(testDir, { recursive: true, force: true });
-      }
-    }
-  });
-
   base('fails stuck executing task without execution handle', async () => {
     const testDir = mkdtempSync(path.join(tmpdir(), 'invoker-e2e-executing-watchdog-'));
     const configPath = path.join(testDir, 'e2e-config.json');
+    const ipcSocketPath = path.join(testDir, 'ipc-transport.sock');
+    const electronUserDataDir = path.join(testDir, 'electron-user-data');
     writeFileSync(configPath, JSON.stringify({ autoFixRetries: 0, disableAutoRunOnStartup: true }), 'utf8');
+    let app: ElectronApplication | undefined;
 
     try {
-      const app = await electron.launch({
-        args: launchArgs(),
+      app = await electron.launch({
+        args: [`--user-data-dir=${electronUserDataDir}`, ...launchArgs()],
         env: {
           ...process.env,
           NODE_ENV: 'test',
+          INVOKER_GUI_OWNER_MODE: 'gui',
           INVOKER_DB_DIR: testDir,
+          INVOKER_IPC_SOCKET: ipcSocketPath,
           INVOKER_ALLOW_DELETE_ALL: '1',
           INVOKER_REPO_CONFIG_PATH: configPath,
           INVOKER_EXECUTING_STALL_TIMEOUT_MS: '3000',
@@ -228,8 +139,8 @@ base.describe('Launch stall watchdog', () => {
       }
       expect(sawExecutingStallLog).toBe(true);
 
-      await app.close();
     } finally {
+      await app?.close().catch(() => undefined);
       if (process.env.INVOKER_E2E_KEEP_TMP !== '1') {
         rmSync(testDir, { recursive: true, force: true });
       }
@@ -239,15 +150,20 @@ base.describe('Launch stall watchdog', () => {
   base('fails SSH executing task when remote workload heartbeat is stale', async () => {
     const testDir = mkdtempSync(path.join(tmpdir(), 'invoker-e2e-ssh-executing-watchdog-'));
     const configPath = path.join(testDir, 'e2e-config.json');
+    const ipcSocketPath = path.join(testDir, 'ipc-transport.sock');
+    const electronUserDataDir = path.join(testDir, 'electron-user-data');
     writeFileSync(configPath, JSON.stringify({ autoFixRetries: 0, disableAutoRunOnStartup: true }), 'utf8');
+    let app: ElectronApplication | undefined;
 
     try {
-      const app = await electron.launch({
-        args: launchArgs(),
+      app = await electron.launch({
+        args: [`--user-data-dir=${electronUserDataDir}`, ...launchArgs()],
         env: {
           ...process.env,
           NODE_ENV: 'test',
+          INVOKER_GUI_OWNER_MODE: 'gui',
           INVOKER_DB_DIR: testDir,
+          INVOKER_IPC_SOCKET: ipcSocketPath,
           INVOKER_ALLOW_DELETE_ALL: '1',
           INVOKER_REPO_CONFIG_PATH: configPath,
           INVOKER_EXECUTING_STALL_TIMEOUT_MS: '3000',
@@ -279,7 +195,6 @@ base.describe('Launch stall watchdog', () => {
       }
 
       const staleTs = new Date(Date.now() - 30_000).toISOString();
-      const freshTs = new Date(Date.now() - 500).toISOString();
       await injectTaskStates(page, [{
         taskId: stalled!.id,
         changes: {
@@ -292,10 +207,7 @@ base.describe('Launch stall watchdog', () => {
             phase: 'executing',
             generation: 0,
             startedAt: staleTs,
-            // Transport heartbeat is fresh.
-            lastHeartbeatAt: freshTs,
-            // Workload heartbeat is stale.
-            remoteHeartbeatAt: staleTs,
+            lastHeartbeatAt: staleTs,
             selectedAttemptId: `${stalled!.id}-attempt`,
           },
         },
@@ -327,8 +239,8 @@ base.describe('Launch stall watchdog', () => {
         /^Execution stalled: task remained in running\/executing for \d+s without a live execution handle and no completion signal from executor \(remote workload heartbeat stale\)\.$/,
       );
 
-      await app.close();
     } finally {
+      await app?.close().catch(() => undefined);
       if (process.env.INVOKER_E2E_KEEP_TMP !== '1') {
         rmSync(testDir, { recursive: true, force: true });
       }

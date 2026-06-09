@@ -115,6 +115,23 @@ describe('SQLiteAdapter', () => {
       expect(loaded[0].status).toBe('pending');
     });
 
+    it('persists poolMemberId through updateTask and getPoolMemberId', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('ssh-task', {
+        config: { runnerKind: 'ssh' },
+      }));
+
+      adapter.updateTask('ssh-task', {
+        config: { poolMemberId: 'remote-1' },
+      });
+
+      expect(adapter.getPoolMemberId('ssh-task')).toBe('remote-1');
+      expect(adapter.loadTask('ssh-task')?.config).toMatchObject({
+        runnerKind: 'ssh',
+        poolMemberId: 'remote-1',
+      });
+    });
+
     it('loads all workflows and tasks in one startup snapshot', () => {
       const wf2: Workflow = {
         ...testWorkflow,
@@ -152,6 +169,713 @@ describe('SQLiteAdapter', () => {
       const result = (adapter as any).db.exec('PRAGMA index_list(tasks)') as Array<{ values: unknown[][] }>;
       const indexNames = (result[0]?.values ?? []).map((row) => String(row[1]));
       expect(indexNames).toContain('idx_tasks_workflow_id');
+    });
+  });
+
+  describe('execution resource leases', () => {
+    it('allows only one live holder per resource key', () => {
+      const acquired = adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-1',
+        taskId: 'task-1',
+        poolId: 'ssh-pool',
+        poolMemberId: 'remote-a',
+      });
+      const blocked = adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-2',
+        taskId: 'task-2',
+        poolId: 'ssh-pool',
+        poolMemberId: 'remote-a',
+      });
+
+      expect(acquired).toBe(true);
+      expect(blocked).toBe(false);
+      expect(adapter.listExecutionResourceLeases()).toHaveLength(1);
+    });
+
+    it('reclaims expired resource leases', () => {
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-1',
+        leaseMs: -1,
+      })).toBe(true);
+
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-2',
+      })).toBe(true);
+
+      const leases = adapter.listExecutionResourceLeases();
+      expect(leases).toHaveLength(1);
+      expect(leases[0].holderId).toBe('holder-2');
+    });
+
+    it('renews and releases resource leases by holder', () => {
+      adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-1',
+      });
+
+      expect(adapter.renewExecutionResourceLease('ssh:invoker@example.com:22', 'holder-1')).toBe(true);
+      adapter.releaseExecutionResourceLease('ssh:invoker@example.com:22', 'holder-1');
+
+      expect(adapter.listExecutionResourceLeases()).toHaveLength(0);
+    });
+  });
+
+  describe('task_launch_dispatch outbox', () => {
+    function setupWorkflowAndTask(
+      workflowId = 'wf-launch',
+      taskId = 'wf-launch/t1',
+      opts: {
+        selectedAttemptId?: string;
+        generation?: number;
+        status?: TaskState['status'];
+      } = {},
+    ): void {
+      adapter.saveWorkflow({ ...testWorkflow, id: workflowId });
+      adapter.saveTask(workflowId, makeTask(taskId, {
+        status: opts.status ?? 'pending',
+        config: { workflowId },
+        execution: {
+          generation: opts.generation ?? 0,
+        },
+      }));
+      if (opts.selectedAttemptId) {
+        adapter.updateTask(taskId, {
+          execution: { selectedAttemptId: opts.selectedAttemptId },
+        });
+      }
+    }
+
+    function saveLaunchTask(
+      workflowId: string,
+      taskId: string,
+      attemptId: string,
+      opts: { generation?: number; status?: TaskState['status'] } = {},
+    ): void {
+      adapter.saveTask(workflowId, makeTask(taskId, {
+        status: opts.status ?? 'pending',
+        config: { workflowId },
+        execution: {
+          generation: opts.generation ?? 0,
+        },
+      }));
+      adapter.updateTask(taskId, {
+        execution: { selectedAttemptId: attemptId },
+      });
+    }
+
+    it('round-trips enqueueLaunchDispatch + load by id and attempt', () => {
+      setupWorkflowAndTask();
+      const inserted = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-1',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+
+      expect(inserted.id).toBeGreaterThan(0);
+      expect(inserted.state).toBe('enqueued');
+      expect(inserted.priority).toBe('normal');
+      expect(inserted.attemptsCount).toBe(0);
+
+      const byId = adapter.loadLaunchDispatchById(inserted.id);
+      expect(byId).toMatchObject({
+        id: inserted.id,
+        attemptId: 'attempt-1',
+        taskId: 'wf-launch/t1',
+        workflowId: 'wf-launch',
+        state: 'enqueued',
+      });
+
+      const byAttempt = adapter.loadLaunchDispatchByAttempt('attempt-1');
+      expect(byAttempt?.id).toBe(inserted.id);
+
+      const events = adapter.getEvents('wf-launch/t1');
+      const enqueuedEvent = events.find((event) => event.eventType === 'task.launch_dispatch_enqueued');
+      expect(enqueuedEvent).toBeDefined();
+      expect(JSON.parse(enqueuedEvent!.payload!)).toMatchObject({
+        dispatchId: inserted.id,
+        attemptId: 'attempt-1',
+        workflowId: 'wf-launch',
+        generation: 0,
+        priority: 'normal',
+      });
+    });
+
+    it('returns existing row instead of creating a duplicate active dispatch for the same attempt', () => {
+      setupWorkflowAndTask();
+      const first = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-dup',
+        workflowId: 'wf-launch',
+        priority: 'high',
+        generation: 0,
+      });
+      const second = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-dup',
+        workflowId: 'wf-launch',
+        priority: 'low',
+        generation: 0,
+      });
+
+      expect(second.id).toBe(first.id);
+      expect(second.priority).toBe('high');
+      expect(
+        adapter.listLaunchDispatchesByState(['enqueued', 'leased']),
+      ).toHaveLength(1);
+    });
+
+    it('filters listLaunchDispatchesByState by the requested states', () => {
+      setupWorkflowAndTask();
+      const a = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-a',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const b = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-b',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-c',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      adapter.markLaunchDispatchCompleted(a.id);
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'leased', fenced_until = datetime('now', '+30 seconds') WHERE id = ?`,
+        [b.id],
+      );
+
+      const enqueuedOnly = adapter
+        .listLaunchDispatchesByState(['enqueued'])
+        .map((row) => row.attemptId);
+      expect(enqueuedOnly).toEqual(['attempt-c']);
+      const leasedOnly = adapter
+        .listLaunchDispatchesByState(['leased'])
+        .map((row) => row.attemptId);
+      expect(leasedOnly).toEqual(['attempt-b']);
+      const completedOnly = adapter
+        .listLaunchDispatchesByState(['completed'])
+        .map((row) => row.attemptId);
+      expect(completedOnly).toEqual(['attempt-a']);
+    });
+
+    it('runCompatibilityMigration normalizes legacy acknowledged rows', () => {
+      adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+      saveLaunchTask('wf-launch', 'wf-launch/t-future', 'attempt-future');
+      saveLaunchTask('wf-launch', 'wf-launch/t-expired', 'attempt-expired');
+      saveLaunchTask('wf-launch', 'wf-launch/t-stale', 'attempt-current');
+      const future = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t-future',
+        attemptId: 'attempt-future',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const expired = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t-expired',
+        attemptId: 'attempt-expired',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const stale = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t-stale',
+        attemptId: 'attempt-stale',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const now = Date.now();
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'acknowledged', dispatch_owner = 'owner-future',
+            leased_at = ?, acknowledged_at = ?, fenced_until = ?
+         WHERE id = ?`,
+        [
+          new Date(now - 1_000).toISOString(),
+          new Date(now - 1_000).toISOString(),
+          new Date(now + 60_000).toISOString(),
+          future.id,
+        ],
+      );
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'acknowledged', dispatch_owner = 'owner-expired',
+            leased_at = ?, acknowledged_at = ?, fenced_until = ?
+         WHERE id = ?`,
+        [
+          new Date(now - 120_000).toISOString(),
+          new Date(now - 120_000).toISOString(),
+          new Date(now - 60_000).toISOString(),
+          expired.id,
+        ],
+      );
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'acknowledged', dispatch_owner = 'owner-stale',
+            leased_at = ?, acknowledged_at = ?, fenced_until = ?
+         WHERE id = ?`,
+        [
+          new Date(now - 120_000).toISOString(),
+          new Date(now - 120_000).toISOString(),
+          new Date(now + 60_000).toISOString(),
+          stale.id,
+        ],
+      );
+
+      const report = adapter.runCompatibilityMigration();
+
+      expect(report.normalizedLegacyAcknowledgedLaunchDispatches).toBe(3);
+      expect(adapter.loadLaunchDispatchById(future.id)?.state).toBe('leased');
+      expect(adapter.loadLaunchDispatchById(expired.id)?.state).toBe('enqueued');
+      const staleAfter = adapter.loadLaunchDispatchById(stale.id);
+      expect(staleAfter?.state).toBe('abandoned');
+      expect(staleAfter?.lastError).toMatch(/Legacy acknowledged launch dispatch is stale/);
+      const legacyCount = sqliteScalar(
+        adapter,
+        `SELECT COUNT(*) AS count FROM task_launch_dispatch WHERE state = 'acknowledged'`,
+      );
+      expect(legacyCount).toBe(0);
+    });
+
+    it('markLaunchDispatchCompleted transitions to completed and rejects already-terminal rows', () => {
+      setupWorkflowAndTask();
+      const row = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-complete',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+
+      expect(adapter.markLaunchDispatchCompleted(row.id)).toBe(true);
+      const after = adapter.loadLaunchDispatchById(row.id);
+      expect(after?.state).toBe('completed');
+      expect(after?.completedAt).toBeDefined();
+
+      expect(adapter.markLaunchDispatchCompleted(row.id)).toBe(false);
+    });
+
+    it('markLaunchDispatchFailed re-enqueues the row and clears the owner / fence', () => {
+      setupWorkflowAndTask();
+      const row = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-failed',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'leased', dispatch_owner = 'runner-x', fenced_until = datetime('now', '+30 seconds') WHERE id = ?`,
+        [row.id],
+      );
+
+      expect(adapter.markLaunchDispatchFailed(row.id, 'boom')).toBe(true);
+      const after = adapter.loadLaunchDispatchById(row.id);
+      expect(after?.state).toBe('enqueued');
+      expect(after?.lastError).toBe('boom');
+      expect(after?.dispatchOwner).toBeUndefined();
+      expect(after?.fencedUntil).toBeUndefined();
+
+      adapter.markLaunchDispatchCompleted(row.id);
+      expect(adapter.markLaunchDispatchFailed(row.id, 'too late')).toBe(false);
+    });
+
+    it('reapExpiredLaunchDispatchLeases resets leased rows whose fence has passed', () => {
+      setupWorkflowAndTask();
+      const expired = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-expired',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const live = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-live',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const now = new Date();
+      const pastIso = new Date(now.getTime() - 60_000).toISOString();
+      const futureIso = new Date(now.getTime() + 60_000).toISOString();
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'leased', dispatch_owner = 'runner-x', fenced_until = ? WHERE id = ?`,
+        [pastIso, expired.id],
+      );
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'leased', dispatch_owner = 'runner-y', fenced_until = ? WHERE id = ?`,
+        [futureIso, live.id],
+      );
+
+      const reaped = adapter.reapExpiredLaunchDispatchLeases({ nowIso: now.toISOString() });
+      expect(reaped.map((row) => row.attemptId)).toEqual(['attempt-expired']);
+      const expiredAfter = adapter.loadLaunchDispatchById(expired.id);
+      expect(expiredAfter?.state).toBe('enqueued');
+      expect(expiredAfter?.dispatchOwner).toBeUndefined();
+      const liveAfter = adapter.loadLaunchDispatchById(live.id);
+      expect(liveAfter?.state).toBe('leased');
+    });
+
+    describe('claimLaunchDispatchAtomic', () => {
+      it('leases the only enqueued row when capacity allows', () => {
+        setupWorkflowAndTask('wf-launch', 'wf-launch/t1', {
+          selectedAttemptId: 'attempt-claim-1',
+        });
+        const enqueued = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t1',
+          attemptId: 'attempt-claim-1',
+          workflowId: 'wf-launch',
+          generation: 0,
+        });
+
+        const claimed = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-1',
+        });
+
+        expect(claimed?.id).toBe(enqueued.id);
+        expect(claimed?.state).toBe('leased');
+        expect(claimed?.dispatchOwner).toBe('runner-1');
+        expect(claimed?.attemptsCount).toBe(1);
+        expect(claimed?.fencedUntil).toBeDefined();
+        expect(claimed?.leasedAt).toBeDefined();
+        const events = adapter.getEvents('wf-launch/t1');
+        const claimedEvent = events.find((event) => event.eventType === 'task.launch_dispatch_claimed');
+        expect(claimedEvent).toBeDefined();
+        expect(JSON.parse(claimedEvent!.payload!)).toMatchObject({
+          dispatchId: enqueued.id,
+          ownerId: 'runner-1',
+          attemptId: 'attempt-claim-1',
+          workflowId: 'wf-launch',
+          generation: 0,
+          fencedUntil: claimed?.fencedUntil,
+        });
+      });
+
+      it('returns undefined when no enqueued rows exist', () => {
+        setupWorkflowAndTask();
+        const claimed = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-1',
+        });
+        expect(claimed).toBeUndefined();
+      });
+
+      it('does not double-lease an already-leased row', () => {
+        setupWorkflowAndTask('wf-launch', 'wf-launch/t1', {
+          selectedAttemptId: 'attempt-conflict',
+        });
+        adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t1',
+          attemptId: 'attempt-conflict',
+          workflowId: 'wf-launch',
+          generation: 0,
+        });
+
+        const first = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-a',
+        });
+        const second = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-b',
+        });
+
+        expect(first?.dispatchOwner).toBe('runner-a');
+        expect(second).toBeUndefined();
+      });
+
+      it('orders by priority (high, normal, low) then by insertion order', () => {
+        adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+        saveLaunchTask('wf-launch', 'wf-launch/t-normal', 'attempt-normal-1');
+        saveLaunchTask('wf-launch', 'wf-launch/t-low', 'attempt-low');
+        saveLaunchTask('wf-launch', 'wf-launch/t-high', 'attempt-high');
+        const normal1 = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t-normal',
+          attemptId: 'attempt-normal-1',
+          workflowId: 'wf-launch',
+          generation: 0,
+        });
+        adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t-low',
+          attemptId: 'attempt-low',
+          workflowId: 'wf-launch',
+          priority: 'low',
+          generation: 0,
+        });
+        const high = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t-high',
+          attemptId: 'attempt-high',
+          workflowId: 'wf-launch',
+          priority: 'high',
+          generation: 0,
+        });
+
+        const firstClaim = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-pri',
+        });
+        const secondClaim = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-pri',
+        });
+        const thirdClaim = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-pri',
+        });
+
+        expect(firstClaim?.id).toBe(high.id);
+        expect(secondClaim?.id).toBe(normal1.id);
+        expect(thirdClaim?.attemptId).toBe('attempt-low');
+      });
+
+      it('leases queued work even when legacy acknowledged rows exist', () => {
+        adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+        for (let i = 0; i < 12; i += 1) {
+          const taskId = `wf-launch/t-legacy-${i}`;
+          const attemptId = `attempt-legacy-${i}`;
+          saveLaunchTask('wf-launch', taskId, attemptId);
+          const legacy = adapter.enqueueLaunchDispatch({
+            taskId,
+            attemptId,
+            workflowId: 'wf-launch',
+            generation: 0,
+          });
+          (adapter as any).db.run(
+            `UPDATE task_launch_dispatch
+               SET state = 'acknowledged', dispatch_owner = 'old-owner',
+                   fenced_until = ?, attempts_count = 1
+             WHERE id = ?`,
+            [new Date(Date.now() - 60_000).toISOString(), legacy.id],
+          );
+        }
+        saveLaunchTask('wf-launch', 'wf-launch/t-target', 'attempt-target');
+        const target = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t-target',
+          attemptId: 'attempt-target',
+          workflowId: 'wf-launch',
+          generation: 0,
+        });
+
+        const claimed = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-c',
+        });
+
+        expect(claimed?.id).toBe(target.id);
+        expect(claimed?.state).toBe('leased');
+      });
+
+      it('abandons a stale selected-attempt candidate and scans to the next valid row', () => {
+        adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+        saveLaunchTask('wf-launch', 'wf-launch/t-stale', 'attempt-current');
+        saveLaunchTask('wf-launch', 'wf-launch/t-valid', 'attempt-valid');
+        const stale = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t-stale',
+          attemptId: 'attempt-stale',
+          workflowId: 'wf-launch',
+          priority: 'high',
+          generation: 0,
+        });
+        const valid = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t-valid',
+          attemptId: 'attempt-valid',
+          workflowId: 'wf-launch',
+          priority: 'normal',
+          generation: 0,
+        });
+
+        const claimed = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-scan',
+          nowIso: '2026-06-03T00:00:00.000Z',
+        });
+
+        expect(claimed?.id).toBe(valid.id);
+        const staleAfter = adapter.loadLaunchDispatchById(stale.id);
+        expect(staleAfter?.state).toBe('abandoned');
+        expect(staleAfter?.lastError).toMatch(/not the selected attempt/);
+      });
+
+      it('abandons stale generation candidates', () => {
+        setupWorkflowAndTask('wf-launch', 'wf-launch/t1', {
+          selectedAttemptId: 'attempt-generation',
+          generation: 2,
+        });
+        const row = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t1',
+          attemptId: 'attempt-generation',
+          workflowId: 'wf-launch',
+          generation: 1,
+        });
+
+        const claimed = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-generation',
+          nowIso: '2026-06-03T00:01:00.000Z',
+        });
+
+        expect(claimed).toBeUndefined();
+        const after = adapter.loadLaunchDispatchById(row.id);
+        expect(after?.state).toBe('abandoned');
+        expect(after?.lastError).toMatch(/does not match task generation/);
+      });
+
+      it('abandons non-pending task candidates', () => {
+        setupWorkflowAndTask('wf-launch', 'wf-launch/t1', {
+          selectedAttemptId: 'attempt-failed-task',
+          status: 'failed',
+        });
+        const row = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t1',
+          attemptId: 'attempt-failed-task',
+          workflowId: 'wf-launch',
+          generation: 0,
+        });
+
+        const claimed = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-status',
+          nowIso: '2026-06-03T00:02:00.000Z',
+        });
+
+        expect(claimed).toBeUndefined();
+        const after = adapter.loadLaunchDispatchById(row.id);
+        expect(after?.state).toBe('abandoned');
+        expect(after?.lastError).toMatch(/status is failed/);
+      });
+
+      it('abandons missing-task candidates', () => {
+        adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+        (adapter as any).db.run('PRAGMA foreign_keys = OFF');
+        (adapter as any).db.run(
+          `INSERT INTO task_launch_dispatch (
+            task_id, attempt_id, workflow_id, state, priority, generation
+          ) VALUES ('wf-launch/missing', 'attempt-missing-task', 'wf-launch', 'enqueued', 'normal', 0)`,
+        );
+        (adapter as any).db.run('PRAGMA foreign_keys = ON');
+        const row = adapter.loadLaunchDispatchByAttempt('attempt-missing-task')!;
+
+        const claimed = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-missing',
+          nowIso: '2026-06-03T00:03:00.000Z',
+        });
+
+        expect(claimed).toBeUndefined();
+        const after = adapter.loadLaunchDispatchById(row.id);
+        expect(after?.state).toBe('abandoned');
+        expect(after?.lastError).toMatch(/no longer exists/);
+      });
+    });
+
+    it('abandonLaunchDispatchesForTasks abandons active rows for the selected task set', () => {
+      adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+      saveLaunchTask('wf-launch', 'wf-launch/t1', 'attempt-live-1');
+      saveLaunchTask('wf-launch', 'wf-launch/t2', 'attempt-live-2');
+      const enqueued = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-live-1',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const leased = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-live-1b',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const completed = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-completed',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      const unrelated = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t2',
+        attemptId: 'attempt-live-2',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'leased', dispatch_owner = 'owner-1', fenced_until = '2026-06-03T00:05:00.000Z' WHERE id = ?`,
+        [leased.id],
+      );
+      adapter.markLaunchDispatchCompleted(completed.id, '2026-06-03T00:04:00.000Z');
+
+      const invalidated = adapter.abandonLaunchDispatchesForTasks(
+        ['wf-launch/t1'],
+        'reset invalidated launch dispatch',
+        '2026-06-03T00:06:00.000Z',
+      );
+
+      expect(invalidated.map((row) => ({ id: row.id, state: row.state }))).toEqual([
+        { id: enqueued.id, state: 'enqueued' },
+        { id: leased.id, state: 'leased' },
+      ]);
+      for (const row of [enqueued, leased]) {
+        const after = adapter.loadLaunchDispatchById(row.id);
+        expect(after?.state).toBe('abandoned');
+        expect(after?.completedAt).toBe('2026-06-03T00:06:00.000Z');
+        expect(after?.lastError).toBe('reset invalidated launch dispatch');
+        expect(after?.dispatchOwner).toBeUndefined();
+        expect(after?.fencedUntil).toBeUndefined();
+      }
+      expect(adapter.loadLaunchDispatchById(completed.id)?.state).toBe('completed');
+      expect(adapter.loadLaunchDispatchById(unrelated.id)?.state).toBe('enqueued');
+    });
+
+    it('releaseExecutionResourceLeasesForTasks releases only leases held by the selected task set', () => {
+      adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+      saveLaunchTask('wf-launch', 'wf-launch/t1', 'attempt-lease-1');
+      saveLaunchTask('wf-launch', 'wf-launch/t2', 'attempt-lease-2');
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:lifecycle-1',
+        resourceType: 'ssh',
+        holderId: 'holder-lifecycle-1',
+        taskId: 'wf-launch/t1',
+      })).toBe(true);
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:lifecycle-2',
+        resourceType: 'ssh',
+        holderId: 'holder-lifecycle-2',
+        taskId: 'wf-launch/t2',
+      })).toBe(true);
+
+      const released = adapter.releaseExecutionResourceLeasesForTasks(
+        ['wf-launch/t1'],
+        'reset invalidated resource lease',
+        '2026-06-03T00:07:00.000Z',
+      );
+
+      expect(released).toEqual([
+        {
+          resourceKey: 'ssh:lifecycle-1',
+          resourceType: 'ssh',
+          holderId: 'holder-lifecycle-1',
+          taskId: 'wf-launch/t1',
+        },
+      ]);
+      expect(adapter.listExecutionResourceLeasesByTask('wf-launch/t1')).toEqual([]);
+      expect(adapter.listExecutionResourceLeasesByTask('wf-launch/t2')).toHaveLength(1);
+    });
+
+    it('deleteWorkflow removes launch dispatches and execution resource leases for deleted tasks', () => {
+      setupWorkflowAndTask('wf-launch', 'wf-launch/t1', {
+        selectedAttemptId: 'attempt-delete-cleanup',
+      });
+      adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-delete-cleanup',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:delete-cleanup',
+        resourceType: 'ssh',
+        holderId: 'holder-delete-cleanup',
+        taskId: 'wf-launch/t1',
+      })).toBe(true);
+
+      adapter.deleteWorkflow('wf-launch');
+
+      expect(adapter.listLaunchDispatchesByState(['enqueued', 'leased'])).toEqual([]);
+      expect(adapter.listExecutionResourceLeases()).toEqual([]);
     });
   });
 
@@ -474,6 +1198,59 @@ describe('SQLiteAdapter', () => {
       expect(loaded!.updatedAt).toBe(newTime);
     });
 
+    it('updates workflow metadata fields including repoUrl', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.updateWorkflow('wf-1', {
+        name: 'Renamed',
+        description: 'new description',
+        visualProof: true,
+        planFile: '/tmp/plan.yaml',
+        repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+        intermediateRepoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker-Intermediate.git',
+        branch: 'main',
+        onFinish: 'pull_request',
+        baseBranch: 'master',
+        featureBranch: 'feature/generic-setters',
+        mergeMode: 'external_review',
+        reviewProvider: 'github',
+      });
+
+      expect(adapter.loadWorkflow('wf-1')).toMatchObject({
+        name: 'Renamed',
+        description: 'new description',
+        visualProof: true,
+        planFile: '/tmp/plan.yaml',
+        repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+        intermediateRepoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker-Intermediate.git',
+        branch: 'main',
+        onFinish: 'pull_request',
+        baseBranch: 'master',
+        featureBranch: 'feature/generic-setters',
+        mergeMode: 'external_review',
+        reviewProvider: 'github',
+      });
+    });
+
+    it('updates task description and representative config metadata', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('task-1'));
+      adapter.updateTask('task-1', {
+        description: 'Updated task',
+        config: {
+          poolId: 'some-pool',
+          fixPrompt: 'fix this',
+        },
+      });
+
+      expect(adapter.loadTask('task-1')).toMatchObject({
+        description: 'Updated task',
+        config: {
+          poolId: 'some-pool',
+          fixPrompt: 'fix this',
+        },
+      });
+    });
+
     it('auto-sets updatedAt when not provided', () => {
       adapter.saveWorkflow(testWorkflow);
       const before = new Date().toISOString();
@@ -647,6 +1424,36 @@ describe('SQLiteAdapter', () => {
 
       expect(adapter.replayOutputFrom('t-spool-1', 0)).toEqual([]);
       expect(adapter.getOutputTail('t-spool-1')).toEqual([]);
+    });
+
+    it('removes durable workflow coordinator rows before deleting tasks', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      const attempt = createAttempt('t1', { status: 'running' });
+      adapter.saveAttempt(attempt);
+
+      const intentId = adapter.enqueueWorkflowMutationIntent(
+        'wf-1', 'test-channel', [{ action: 'delete' }], 'normal',
+      );
+      adapter.claimWorkflowMutationLease('wf-1', 'owner-1', {
+        activeIntentId: intentId,
+        activeMutationKind: 'delete',
+      });
+      adapter.enqueueLaunchDispatch({
+        taskId: 't1',
+        attemptId: attempt.id,
+        workflowId: 'wf-1',
+        generation: 1,
+      });
+
+      expect(() => adapter.deleteAllTasks('wf-1')).not.toThrow();
+
+      expect(adapter.loadWorkflow('wf-1')).toBeDefined();
+      expect(adapter.loadTasks('wf-1')).toEqual([]);
+      expect(sqliteScalar(adapter, "SELECT COUNT(*) FROM workflow_mutation_intents WHERE workflow_id = 'wf-1'")).toBe(0);
+      expect(sqliteScalar(adapter, "SELECT COUNT(*) FROM workflow_mutation_leases WHERE workflow_id = 'wf-1'")).toBe(0);
+      expect(sqliteScalar(adapter, "SELECT COUNT(*) FROM task_launch_dispatch WHERE workflow_id = 'wf-1'")).toBe(0);
     });
   });
 
@@ -1032,6 +1839,36 @@ describe('SQLiteAdapter', () => {
       expect(adapter.listWorkflows()).toHaveLength(1);
     });
 
+    it('deletes workflow with mutation intents, leases, and launch dispatch rows', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      const attempt = createAttempt('t1', { status: 'running' });
+      adapter.saveAttempt(attempt);
+
+      const intentId = adapter.enqueueWorkflowMutationIntent(
+        'wf-1', 'test-channel', [{ action: 'delete' }], 'normal',
+      );
+      adapter.claimWorkflowMutationLease('wf-1', 'owner-1', {
+        activeIntentId: intentId,
+        activeMutationKind: 'delete',
+      });
+      adapter.enqueueLaunchDispatch({
+        taskId: 't1',
+        attemptId: attempt.id,
+        workflowId: 'wf-1',
+        generation: 1,
+      });
+
+      expect(() => adapter.deleteWorkflow('wf-1')).not.toThrow();
+
+      expect(adapter.loadWorkflow('wf-1')).toBeUndefined();
+      expect(adapter.loadTasks('wf-1')).toEqual([]);
+      expect(sqliteScalar(adapter, "SELECT COUNT(*) FROM workflow_mutation_intents WHERE workflow_id = 'wf-1'")).toBe(0);
+      expect(sqliteScalar(adapter, "SELECT COUNT(*) FROM workflow_mutation_leases WHERE workflow_id = 'wf-1'")).toBe(0);
+      expect(sqliteScalar(adapter, "SELECT COUNT(*) FROM task_launch_dispatch WHERE workflow_id = 'wf-1'")).toBe(0);
+    });
+
     it('removes output spool rows and tail cache only for deleted workflow tasks', () => {
       adapter.saveWorkflow({
         id: 'wf-delete-target',
@@ -1156,6 +1993,137 @@ describe('SQLiteAdapter', () => {
         db.appendTaskOutput('t-legacy-output', 'file\n');
 
         expect(db.getTaskOutput('t-legacy-output')).toBe('legacy\nfile\n');
+
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('prefers output_spool chunks over task_output rows when both exist', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-output-prefer-spool-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+        db.saveTask('wf-1', makeTask('t-both'));
+
+        // Legacy duplicated history in task_output (this would have been written
+        // by the old flush path that double-wrote runner output).
+        (db as any).db.run(
+          'INSERT INTO task_output (task_id, data) VALUES (?, ?)',
+          ['t-both', 'duplicate stream\n'],
+        );
+
+        // Canonical spool data is what should be returned.
+        db.appendOutputChunk('t-both', 'spool line 1\n');
+        db.appendOutputChunk('t-both', 'spool line 2\n');
+
+        expect(db.getTaskOutput('t-both')).toBe('spool line 1\nspool line 2\n');
+
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('falls back to task_output when no output_spool chunks exist', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-output-fallback-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+        db.saveTask('wf-1', makeTask('t-fallback'));
+
+        (db as any).db.run(
+          'INSERT INTO task_output (task_id, data) VALUES (?, ?)',
+          ['t-fallback', 'diagnostic-only\n'],
+        );
+        // No appendOutputChunk calls — only a diagnostic write to task_output.
+
+        expect(db.getTaskOutput('t-fallback')).toBe('diagnostic-only\n');
+
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('pruneDuplicateTaskOutputRows', () => {
+    it('deletes task_output rows only for tasks that have output_spool rows', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-prune-dup-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+        db.saveTask('wf-1', makeTask('t-dup'));
+        db.saveTask('wf-1', makeTask('t-diag-only'));
+
+        // Duplicated stream: both tables contain rows for t-dup.
+        (db as any).db.run(
+          'INSERT INTO task_output (task_id, data) VALUES (?, ?)',
+          ['t-dup', 'duplicate row 1\n'],
+        );
+        (db as any).db.run(
+          'INSERT INTO task_output (task_id, data) VALUES (?, ?)',
+          ['t-dup', 'duplicate row 2\n'],
+        );
+        (db as any).db.run(
+          'INSERT INTO output_spool (task_id, offset, data) VALUES (?, ?, ?)',
+          ['t-dup', 0, 'spool stream\n'],
+        );
+
+        // Diagnostic-only task with no spool row — must be preserved.
+        (db as any).db.run(
+          'INSERT INTO task_output (task_id, data) VALUES (?, ?)',
+          ['t-diag-only', 'shutdown diagnostic\n'],
+        );
+
+        const result = db.pruneDuplicateTaskOutputRows();
+
+        expect(result.deletedTaskOutputRows).toBe(2);
+        expect(result.backupPath).toBeTruthy();
+        expect(existsSync(result.backupPath!)).toBe(true);
+
+        expect(sqliteScalar(db, "SELECT COUNT(*) FROM task_output WHERE task_id = 't-dup'"))
+          .toBe(0);
+        expect(sqliteScalar(db, "SELECT COUNT(*) FROM task_output WHERE task_id = 't-diag-only'"))
+          .toBe(1);
+
+        // t-dup now reads from spool; t-diag-only still reads from task_output.
+        expect(db.getTaskOutput('t-dup')).toBe('spool stream\n');
+        expect(db.getTaskOutput('t-diag-only')).toBe('shutdown diagnostic\n');
+
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('skips backup file when backup option is false', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-prune-nobackup-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+        db.saveTask('wf-1', makeTask('t-x'));
+        (db as any).db.run(
+          'INSERT INTO task_output (task_id, data) VALUES (?, ?)',
+          ['t-x', 'dup\n'],
+        );
+        (db as any).db.run(
+          'INSERT INTO output_spool (task_id, offset, data) VALUES (?, ?, ?)',
+          ['t-x', 0, 'spool\n'],
+        );
+
+        const result = db.pruneDuplicateTaskOutputRows({ backup: false });
+        expect(result.backupPath).toBeNull();
+        expect(result.deletedTaskOutputRows).toBe(1);
 
         db.close();
       } finally {
@@ -1662,6 +2630,8 @@ describe('SQLiteAdapter', () => {
         normalizedMergeModes: 1,
         staleAutoFixExperimentTasks: 2,
         normalizedStaleLaunchMetadata: 0,
+        normalizedLegacyAcknowledgedLaunchDispatches: 0,
+        backfilledMissingSshPoolMemberIds: 0,
       });
       const taskById = new Map(adapter.loadTasks('wf-1').map((task) => [task.id, task]));
       expect(adapter.loadWorkflow('wf-1')?.mergeMode).toBe('external_review');
@@ -1677,7 +2647,43 @@ describe('SQLiteAdapter', () => {
         normalizedMergeModes: 0,
         staleAutoFixExperimentTasks: 0,
         normalizedStaleLaunchMetadata: 0,
+        normalizedLegacyAcknowledgedLaunchDispatches: 0,
+        backfilledMissingSshPoolMemberIds: 0,
       });
+    });
+
+    it('repairs missing SSH pool member ids from the latest executor-selected event', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('ssh-old', {
+        status: 'completed',
+        config: { runnerKind: 'ssh' },
+        execution: { workspacePath: '~/.invoker/worktrees/ssh-old', branch: 'experiment/ssh-old' },
+      }));
+      adapter.logEvent('ssh-old', 'task.executor.selected', { runnerKind: 'ssh', poolMemberId: 'remote-old' });
+      adapter.logEvent('ssh-old', 'task.executor.selected', { runnerKind: 'ssh', poolMemberId: 'remote-new' });
+
+      const report = adapter.runCompatibilityMigration();
+
+      expect(report.backfilledMissingSshPoolMemberIds).toBe(1);
+      expect(adapter.getPoolMemberId('ssh-old')).toBe('remote-new');
+      expect(adapter.loadTask('ssh-old')?.config).toMatchObject({ runnerKind: 'ssh', poolMemberId: 'remote-new' });
+      expect(adapter.runCompatibilityMigration().backfilledMissingSshPoolMemberIds).toBe(0);
+    });
+
+    it('does not repair missing SSH pool member ids from malformed or empty event payloads', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('ssh-empty', { config: { runnerKind: 'ssh' } }));
+      adapter.logEvent('ssh-empty', 'task.executor.selected', { runnerKind: 'ssh', poolMemberId: '  ' });
+      adapter.saveTask('wf-1', makeTask('ssh-bad', { config: { runnerKind: 'ssh' } }));
+      (adapter as any).db.run(
+        `INSERT INTO events (task_id, event_type, payload) VALUES ('ssh-bad', 'task.executor.selected', '{')`,
+      );
+
+      const report = adapter.runCompatibilityMigration();
+
+      expect(report.backfilledMissingSshPoolMemberIds).toBe(0);
+      expect(adapter.getPoolMemberId('ssh-empty')).toBeNull();
+      expect(adapter.getPoolMemberId('ssh-bad')).toBeNull();
     });
 
     it('normalizes stale terminal launch metadata without touching legitimate long executions', () => {
@@ -1717,6 +2723,87 @@ describe('SQLiteAdapter', () => {
       const secondRun = adapter.runCompatibilityMigration();
       expect(secondRun.normalizedStaleLaunchMetadata).toBe(0);
     });
+
+    it('normalizes stale pending launch claims when their dispatch is no longer active', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const expiredAt = new Date(Date.now() - 60_000);
+      const claimedAt = new Date(expiredAt.getTime() - 60_000);
+      const liveClaimedAt = new Date();
+      const liveExpiresAt = new Date(Date.now() + 60_000);
+      const expiredAttempt = createAttempt('stale-pending-launch', {
+        status: 'claimed',
+        claimedAt,
+        lastHeartbeatAt: claimedAt,
+        leaseExpiresAt: expiredAt,
+      });
+      const liveAttempt = createAttempt('live-pending-launch', {
+        status: 'claimed',
+        claimedAt: liveClaimedAt,
+        lastHeartbeatAt: liveClaimedAt,
+        leaseExpiresAt: liveExpiresAt,
+      });
+      adapter.saveTask('wf-1', makeTask('stale-pending-launch', {
+        status: 'pending',
+        execution: {
+          phase: 'launching',
+          selectedAttemptId: expiredAttempt.id,
+          launchStartedAt: claimedAt,
+          lastHeartbeatAt: claimedAt,
+        },
+      }));
+      adapter.saveTask('wf-1', makeTask('live-pending-launch', {
+        status: 'pending',
+        execution: {
+          phase: 'launching',
+          selectedAttemptId: liveAttempt.id,
+          launchStartedAt: new Date(),
+          lastHeartbeatAt: new Date(),
+        },
+      }));
+      adapter.updateTask('stale-pending-launch', {
+        execution: { selectedAttemptId: expiredAttempt.id },
+      });
+      adapter.updateTask('live-pending-launch', {
+        execution: { selectedAttemptId: liveAttempt.id },
+      });
+      adapter.saveAttempt(expiredAttempt);
+      adapter.saveAttempt(liveAttempt);
+      const staleDispatch = adapter.enqueueLaunchDispatch({
+        taskId: 'stale-pending-launch',
+        attemptId: expiredAttempt.id,
+        workflowId: 'wf-1',
+        generation: 0,
+      });
+      adapter.markLaunchDispatchAbandoned(
+        staleDispatch.id,
+        'task is no longer launch-ready',
+        '2026-06-04T01:57:45.435Z',
+      );
+      const liveDispatch = adapter.enqueueLaunchDispatch({
+        taskId: 'live-pending-launch',
+        attemptId: liveAttempt.id,
+        workflowId: 'wf-1',
+        generation: 0,
+      });
+
+      const report = adapter.runCompatibilityMigration();
+
+      expect(report.normalizedStaleLaunchMetadata).toBe(1);
+      const staleTask = adapter.loadTask('stale-pending-launch');
+      expect(staleTask?.status).toBe('pending');
+      expect(staleTask?.execution.phase).toBeUndefined();
+      expect(staleTask?.execution.launchStartedAt).toBeUndefined();
+      expect(staleTask?.execution.lastHeartbeatAt).toBeUndefined();
+      expect(adapter.loadAttempt(expiredAttempt.id)?.status).toBe('pending');
+      expect(adapter.loadAttempt(expiredAttempt.id)?.claimedAt).toBeUndefined();
+      expect(adapter.loadAttempt(expiredAttempt.id)?.leaseExpiresAt).toBeUndefined();
+
+      const liveTask = adapter.loadTask('live-pending-launch');
+      expect(liveTask?.execution.phase).toBe('launching');
+      expect(adapter.loadAttempt(liveAttempt.id)?.status).toBe('claimed');
+      expect(adapter.loadLaunchDispatchById(liveDispatch.id)?.state).toBe('enqueued');
+      expect(adapter.runCompatibilityMigration().normalizedStaleLaunchMetadata).toBe(0);
+    });
   });
 
   describe('getExecutionAgent — agent_name vs execution_agent', () => {
@@ -1734,7 +2821,7 @@ describe('SQLiteAdapter', () => {
       adapter.saveWorkflow(testWorkflow);
       // Task created with executionAgent: 'claude' in config
       const task = makeTask('t-agent-2', {
-        config: { workflowId: 'wf-1', executionAgent: 'claude' },
+        config: { workflowId: 'wf-1', command: 'pnpm test', executionAgent: 'claude' },
       });
       adapter.saveTask('wf-1', task);
 
@@ -1745,6 +2832,26 @@ describe('SQLiteAdapter', () => {
 
       // getExecutionAgent should return 'codex' (agent_name) not 'claude' (execution_agent)
       expect(adapter.getExecutionAgent('t-agent-2')).toBe('codex');
+    });
+
+    it('returns execution_agent for prompt tasks when stale agent_name disagrees', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const task = makeTask('t-agent-prompt-stale', {
+        status: 'completed',
+        config: {
+          workflowId: 'wf-1',
+          prompt: 'Design experiment and alternative proof task for INV-130.',
+          executionAgent: 'codex',
+        },
+        execution: {
+          agentName: 'claude',
+          lastAgentName: 'claude',
+          agentSessionId: '019e386c-87c7-71e1-80bb-eb649ae99b82',
+        },
+      });
+      adapter.saveTask('wf-1', task);
+
+      expect(adapter.getExecutionAgent('t-agent-prompt-stale')).toBe('codex');
     });
 
     it('returns agent_name when execution_agent is null', () => {
@@ -1825,6 +2932,22 @@ describe('SQLiteAdapter', () => {
   });
 
   describe('read-only / flush safety', () => {
+    it('opens file-backed databases in WAL mode with durable pragmas', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-wal-'));
+      const dbPath = join(dir, 'invoker.db');
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        expect((db as any).db.exec('PRAGMA journal_mode')[0].values[0][0]).toBe('wal');
+        expect(sqliteScalar(db, 'PRAGMA synchronous')).toBe(2);
+        expect(sqliteScalar(db, 'PRAGMA foreign_keys')).toBe(1);
+        expect(sqliteScalar(db, 'PRAGMA busy_timeout')).toBe(5000);
+        expect(sqliteScalar(db, 'PRAGMA wal_autocheckpoint')).toBe(1000);
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('persists file-backed writes before close so restart recovery can read them', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-durable-'));
       const dbPath = join(dir, 'invoker.db');
@@ -1838,6 +2961,48 @@ describe('SQLiteAdapter', () => {
         expect(loaded.map((task) => task.id)).toContain('t-durable-before-close');
         reader.close();
         writer.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not leave file-backed read cursors holding locks before later writes', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-read-cursor-'));
+      const dbPath = join(dir, 'invoker.db');
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+
+        expect(db.loadWorkflow(testWorkflow.id)).toBeDefined();
+
+        db.enqueueWorkflowMutationIntent(testWorkflow.id, 'headless.exec', [{ args: ['rebase-recreate', testWorkflow.id] }], 'high');
+        expect(db.listWorkflowMutationIntents(testWorkflow.id, ['queued'])).toHaveLength(1);
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('commits successful transactions and rolls back failed transactions across reopen', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-transaction-'));
+      const dbPath = join(dir, 'invoker.db');
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.runInTransaction(() => {
+          db.saveWorkflow({ ...testWorkflow, id: 'wf-commit' });
+        });
+        expect(() =>
+          db.runInTransaction(() => {
+            db.saveWorkflow({ ...testWorkflow, id: 'wf-rollback' });
+            throw new Error('rollback sentinel');
+          }),
+        ).toThrow(/rollback sentinel/);
+        db.close();
+
+        const reopened = await SQLiteAdapter.create(dbPath, { readOnly: true });
+        expect(reopened.loadWorkflow('wf-commit')).toBeDefined();
+        expect(reopened.loadWorkflow('wf-rollback')).toBeUndefined();
+        reopened.close();
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -2362,26 +3527,24 @@ describe('SQLiteAdapter', () => {
 
   // ── Data Integrity Hardening Tests ──────────────────────
 
-  describe('atomic flush (write-to-temp + rename)', () => {
-    it('does not leave a .tmp file after successful flush', async () => {
+  describe('native WAL durability', () => {
+    it('does not create legacy .tmp flush files', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-atomic-'));
       const dbPath = join(dir, 'invoker.db');
 
       try {
         const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
         db.saveWorkflow(testWorkflow);
-        db.close(); // close triggers flush
+        db.close();
 
-        // The .tmp file should not persist after a successful flush
         expect(existsSync(`${dbPath}.tmp`)).toBe(false);
-        // The main DB file should exist
         expect(existsSync(dbPath)).toBe(true);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     });
 
-    it('persists data correctly through atomic flush cycle', async () => {
+    it('persists data correctly through native WAL commits', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-atomic-roundtrip-'));
       const dbPath = join(dir, 'invoker.db');
 
@@ -2391,7 +3554,6 @@ describe('SQLiteAdapter', () => {
         db1.saveTask('wf-1', makeTask('t-atomic'));
         db1.close();
 
-        // Reopen and verify data survived the atomic write
         const db2 = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
         const tasks = db2.loadTasks('wf-1');
         expect(tasks).toHaveLength(1);
@@ -2402,14 +3564,13 @@ describe('SQLiteAdapter', () => {
       }
     });
 
-    it('no stale .tmp files left in directory after multiple flushes', async () => {
+    it('leaves no stale .tmp files after multiple writes', async () => {
       const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-atomic-multi-'));
       const dbPath = join(dir, 'invoker.db');
 
       try {
         const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
 
-        // Perform multiple writes that each trigger a flush on close
         db.saveWorkflow(testWorkflow);
         db.saveTask('wf-1', makeTask('t1'));
         db.saveTask('wf-1', makeTask('t2'));
@@ -2633,7 +3794,7 @@ describe('SQLiteAdapter', () => {
       }
     });
 
-    it('sets dirty flag so scheduled flush actually writes', async () => {
+    it('marks deletion mutations as dirty for diagnostics', async () => {
       // Use in-memory adapter to verify the dirty flag is set
       // by checking the internal state after deleteConversationsOlderThan
       const old = new Date();
@@ -2649,14 +3810,13 @@ describe('SQLiteAdapter', () => {
         updatedAt: old.toISOString(),
       });
 
-      // Reset dirty flag to false (simulating a clean state after flush)
+      // Reset dirty flag to false to verify the mutation path marks it.
       (adapter as any).dirty = false;
 
       const cutoff = new Date();
       cutoff.setDate(cutoff.getDate() - 7);
       adapter.deleteConversationsOlderThan(cutoff.toISOString());
 
-      // dirty flag should now be true
       expect((adapter as any).dirty).toBe(true);
     });
   });
@@ -2696,6 +3856,140 @@ describe('SQLiteAdapter', () => {
       adapter.saveWorkflow(testWorkflow);
       const fence = adapter.enqueueWorkflowMutationIntent('wf-1', 'headless.exec', [{ args: ['recreate', 'wf-1'] }], 'high');
       expect(adapter.evictQueuedWorkflowMutationIntentsBefore('wf-1', fence)).toEqual([]);
+    });
+  });
+
+  describe('queryOne / queryAll statement cleanup', () => {
+    type PreparedHook = (stmt: any) => void;
+
+    function instrumentPrepare(adapter: SQLiteAdapter, hook: PreparedHook = () => {}): {
+      restore: () => void;
+      freeCallsFor: (stmt: any) => number;
+    } {
+      const db = (adapter as any).db;
+      const originalPrepare = db.prepare.bind(db);
+      const freeCounts = new WeakMap<object, number>();
+      db.prepare = (sql: string, ...rest: any[]) => {
+        const stmt = originalPrepare(sql, ...rest);
+        freeCounts.set(stmt, 0);
+        const originalFree = stmt.free.bind(stmt);
+        stmt.free = () => {
+          freeCounts.set(stmt, (freeCounts.get(stmt) ?? 0) + 1);
+          return originalFree();
+        };
+        hook(stmt);
+        return stmt;
+      };
+      return {
+        restore: () => {
+          db.prepare = originalPrepare;
+        },
+        freeCallsFor: (stmt: any) => freeCounts.get(stmt) ?? 0,
+      };
+    }
+
+    it('frees the prepared statement after a successful queryOne', () => {
+      let captured: any;
+      const handle = instrumentPrepare(adapter, (stmt) => {
+        captured = stmt;
+      });
+      try {
+        const row = (adapter as any).queryOne('SELECT 1 AS x') as Record<string, unknown> | undefined;
+        expect(row).toEqual({ x: 1 });
+        expect(handle.freeCallsFor(captured)).toBe(1);
+      } finally {
+        handle.restore();
+      }
+    });
+
+    it('frees the prepared statement after a successful queryAll', () => {
+      let captured: any;
+      const handle = instrumentPrepare(adapter, (stmt) => {
+        captured = stmt;
+      });
+      try {
+        const rows = (adapter as any).queryAll(
+          'SELECT value FROM (SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 3) ORDER BY value',
+        ) as Array<Record<string, unknown>>;
+        expect(rows.map((r) => r.value)).toEqual([1, 2, 3]);
+        expect(handle.freeCallsFor(captured)).toBe(1);
+      } finally {
+        handle.restore();
+      }
+    });
+
+    it('frees the prepared statement when stmt.get throws inside queryOne', () => {
+      let captured: any;
+      const handle = instrumentPrepare(adapter, (stmt) => {
+        captured = stmt;
+        stmt.get = () => {
+          throw new Error('simulated OOM during get');
+        };
+      });
+      try {
+        expect(() => (adapter as any).queryOne('SELECT 1 AS x')).toThrow('simulated OOM during get');
+        expect(handle.freeCallsFor(captured)).toBe(1);
+      } finally {
+        handle.restore();
+      }
+    });
+
+    it('frees the prepared statement when stmt.get throws with params inside queryOne', () => {
+      let captured: any;
+      const handle = instrumentPrepare(adapter, (stmt) => {
+        captured = stmt;
+        stmt.get = () => {
+          throw new Error('simulated OOM during parameterized get');
+        };
+      });
+      try {
+        expect(() => (adapter as any).queryOne('SELECT ? AS x', ['v'])).toThrow(
+          'simulated OOM during parameterized get',
+        );
+        expect(handle.freeCallsFor(captured)).toBe(1);
+      } finally {
+        handle.restore();
+      }
+    });
+
+    it('frees the prepared statement when stmt.all throws inside queryAll', () => {
+      let captured: any;
+      const handle = instrumentPrepare(adapter, (stmt) => {
+        captured = stmt;
+        stmt.all = () => {
+          throw new Error('simulated OOM during all');
+        };
+      });
+      try {
+        expect(() =>
+          (adapter as any).queryAll(
+            'SELECT value FROM (SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 3) ORDER BY value',
+          ),
+        ).toThrow(
+          'simulated OOM during all',
+        );
+        expect(handle.freeCallsFor(captured)).toBe(1);
+      } finally {
+        handle.restore();
+      }
+    });
+
+    it('frees the prepared statement when stmt.all throws with params inside queryAll', () => {
+      let captured: any;
+      const handle = instrumentPrepare(adapter, (stmt) => {
+        captured = stmt;
+        stmt.all = () => {
+          throw new Error('simulated OOM during parameterized all');
+        };
+      });
+      try {
+        expect(() => (adapter as any).queryAll('SELECT ? AS x', ['v'])).toThrow(
+          'simulated OOM during parameterized all',
+        );
+        expect(handle.freeCallsFor(captured)).toBe(1);
+      } finally {
+        handle.restore();
+      }
     });
   });
 });

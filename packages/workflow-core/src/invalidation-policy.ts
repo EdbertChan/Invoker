@@ -1,5 +1,5 @@
 
-import type { TaskState } from '@invoker/workflow-graph';
+import { getTransitiveDependents, type TaskState } from '@invoker/workflow-graph';
 export type InvalidationAction =
   | 'none'
   | 'scheduleOnly'
@@ -53,26 +53,11 @@ export const MUTATION_POLICIES: Readonly<Record<MutationKey, TaskMutationPolicy>
   mergeMode:             { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   fixContext:            { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'retryTask' as const },
   rebaseAndRetry:        { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'recreateWorkflowFromFreshBase' as const },
-  // Step 15 (`docs/architecture/task-invalidation-roadmap.md`): the
-  // chart's Decision Table row "Change external gate policy" is the
-  // intentional non-invalidating outlier — it's a scheduling policy
-  // edit, not an execution-spec edit. Action is now the explicit
-  // `'scheduleOnly'` (was `'none'` in Step 1) so the lock-in is
-  // encoded in the policy table itself: `applyInvalidation` skips
-  // `cancelInFlight` for this action and routes to a `scheduleOnly`
-  // dep that triggers an unblock-pass (e.g.
-  // `Orchestrator.autoStartExternallyUnblockedReadyTasks`). Per chart:
-  //   - `invalidatesExecutionSpec: false` (no ABI change)
-  //   - `invalidateIfActive: false`       (in-flight work survives)
+  // Non-invalidating: scheduling-policy edit, not execution-spec edit.
   externalGatePolicy:    { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'scheduleOnly' as const },
   fixApprove:            { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'fixApprove' as const },
   fixReject:             { invalidatesExecutionSpec: false, invalidateIfActive: false, action: 'fixReject' as const },
-  // Step 11 (`docs/architecture/task-invalidation-roadmap.md`): graph
-  // topology mutations (e.g. `replaceTask`, `addTask` that changes
-  // parent edges) are fork-class / workflow scope. They must NOT
-  // mutate a live workflow in place; they fork a new workflow rooted
-  // from the relevant node/result. Step 12 wires the matching
-  // `forkWorkflow*` lifecycle dep on `applyInvalidation`.
+  // Topology mutations fork rather than mutate live workflows.
   topology:              { invalidatesExecutionSpec: true,  invalidateIfActive: true,  action: 'workflowFork' as const },
 });
 
@@ -88,122 +73,314 @@ export interface InvalidationDeps {
   retryWorkflow: (workflowId: string) => TaskState[] | Promise<TaskState[]>;
   recreateWorkflow: (workflowId: string) => TaskState[] | Promise<TaskState[]>;
   recreateWorkflowFromFreshBase?: (workflowId: string) => TaskState[] | Promise<TaskState[]>;
-  /**
-   * Step 11 surfaced `'workflowFork'` as the topology-class action;
-   * Step 14 (`docs/architecture/task-invalidation-roadmap.md`) wires
-   * the implementation. Production callers (`buildInvalidationDeps`
-   * in `packages/app/src/workflow-actions.ts`) supply
-   * `Orchestrator.forkWorkflow` here, so the "not yet wired" error
-   * path below is now dead code in production — it only fires for
-   * focused unit tests that build a partial `InvalidationDeps`.
-   */
   workflowFork?: (workflowId: string) => TaskState[] | Promise<TaskState[]>;
-  /**
-   * Step 15 (`docs/architecture/task-invalidation-roadmap.md`):
-   * scheduling-only unblock pass for the chart's "Change external
-   * gate policy" row. Production callers wire this to a scheduler
-   * entrypoint (e.g.
-   * `Orchestrator.autoStartExternallyUnblockedReadyTasks`) via
-   * `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`).
-   * Unlike retry/recreate deps, this is invoked WITHOUT a
-   * preceding `cancelInFlight` call — gate-policy edits MUST NOT
-   * cancel active work. The dep takes the affected task id so it
-   * can scope the scheduling pass if desired; today's
-   * implementation re-evaluates all externally-unblocked ready
-   * tasks across the orchestrator.
-   */
+  /** Scheduling-only unblock pass; invoked WITHOUT a preceding `cancelInFlight`. */
   scheduleOnly?: (taskId: string) => TaskState[] | Promise<TaskState[]>;
   fixApprove?: (taskId: string) => TaskState[] | Promise<TaskState[]>;
   fixReject?: (taskId: string) => TaskState[] | Promise<TaskState[]>;
+  /**
+   * Cross-workflow cascade hook. Invoked only for actions that change
+   * execution state:
+   *   - task scope:     `retryTask`, `recreateTask`
+   *   - workflow scope: `retryWorkflow`, `recreateWorkflow`,
+   *                     `recreateWorkflowFromFreshBase`, `workflowFork`
+   *
+   * Skipped for `'none'`, `'scheduleOnly'`, `'fixApprove'`, and
+   * `'fixReject'` — these are non-invalidating per `MUTATION_POLICIES`
+   * and must not reset downstream lineage.
+   */
+  cascadeDownstream?: (
+    scope: InvalidationScope,
+    id: string,
+  ) => TaskState[] | Promise<TaskState[]>;
 }
 
-const TASK_ACTIONS = new Set<InvalidationAction>(['retryTask', 'recreateTask']);
-const WORKFLOW_ACTIONS = new Set<InvalidationAction>([
-  'retryWorkflow',
-  'recreateWorkflow',
-  'recreateWorkflowFromFreshBase',
-  'workflowFork',
-]);
+// `applyInvalidation` is a reducer over a per-action ordered list of
+// `Stage`s declared in `ACTION_SPECS`. Adding a new
+// `InvalidationAction` is a single table entry; "cancel-first" and
+// "every invalidating action cascades across workflows" are asserted
+// as property tests over the spec table.
+//
+//   validateScope            → reject mismatched (scope, action) combos
+//   cancelInFlight           → run `deps.cancelInFlight(scope, id)`
+//   applyPrimitive           → dispatch to the matching dep and capture
+//                              its returned `TaskState[]`
+//   cascadeAcrossWorkflows   → run `deps.cascadeDownstream` if provided
 
-export async function applyInvalidation(
-  scope: InvalidationScope,
-  action: InvalidationAction,
-  id: string,
+export type InvalidationStage =
+  | 'validateScope'
+  | 'cancelInFlight'
+  | 'applyPrimitive'
+  | 'cascadeAcrossWorkflows';
+
+export type InvalidationMode = 'retry' | 'recreate' | 'scheduleOnly';
+
+export interface InvalidationPlanningContext {
+  targetId: string;
+  tasks: readonly TaskState[];
+  retryStatuses?: ReadonlySet<TaskState['status']>;
+}
+
+export interface ActionSpec {
+  /** Required `scope` for this action. */
+  readonly scope: InvalidationScope;
+  /** Ordered list of stages executed by `applyInvalidation`. */
+  readonly stages: readonly InvalidationStage[];
+  /**
+   * True iff this action propagates to transitive downstream
+   * workflows. Asserted to be equivalent to
+   * `stages.includes('cascadeAcrossWorkflows')` by the property tests
+   * in `invalidation-policy.test.ts`.
+   */
+  readonly cascadesAcrossWorkflows: boolean;
+  /**
+   * Planning fields used by `planInvalidation` (in `invalidation-plan.ts`).
+   * Set on actions with planning support; absent for `'none'`,
+   * `'fixApprove'`, `'fixReject'`, `'workflowFork'`. `planInvalidation`
+   * throws when called with an action that lacks `selectAffectedTasks`.
+   */
+  readonly mode?: InvalidationMode;
+  readonly reason?: string;
+  readonly selectAffectedTasks?: (context: InvalidationPlanningContext) => TaskState[];
+  readonly selectInitialEnqueueCandidates?: (
+    context: InvalidationPlanningContext,
+    affectedTasks: readonly TaskState[],
+  ) => string[];
+}
+
+const NON_INVALIDATING_TASK_STAGES: readonly InvalidationStage[] = [
+  'validateScope',
+  'applyPrimitive',
+];
+
+const INVALIDATING_STAGES: readonly InvalidationStage[] = [
+  'validateScope',
+  'cancelInFlight',
+  'applyPrimitive',
+  'cascadeAcrossWorkflows',
+];
+
+// ── Planning helpers (used by `selectAffectedTasks` callbacks below) ──
+
+function taskMap(tasks: readonly TaskState[]): Map<string, TaskState> {
+  return new Map(tasks.map((task) => [task.id, task]));
+}
+
+function descendantsOf(
+  taskId: string,
+  tasksById: ReadonlyMap<string, TaskState>,
+  stop?: (task: TaskState) => boolean,
+): TaskState[] {
+  return getTransitiveDependents(taskId, tasksById, stop ?? (() => false))
+    .map((id) => tasksById.get(id))
+    .filter((task): task is TaskState => !!task);
+}
+
+function taskAndDescendants(
+  taskId: string,
+  tasks: readonly TaskState[],
+  stop?: (task: TaskState) => boolean,
+): TaskState[] {
+  const byId = taskMap(tasks);
+  const root = byId.get(taskId);
+  if (!root) return [];
+  return [root, ...descendantsOf(taskId, byId, stop)];
+}
+
+function retryStop(task: TaskState): boolean {
+  return task.status === 'completed' || task.status === 'stale';
+}
+
+function defaultRetryStatuses(): ReadonlySet<TaskState['status']> {
+  return new Set<TaskState['status']>([
+    'failed',
+    'needs_input',
+    'blocked',
+    'stale',
+    'fixing_with_ai',
+    'awaiting_approval',
+    'review_ready',
+  ]);
+}
+
+export const ACTION_SPECS: Readonly<Record<InvalidationAction, ActionSpec>> = Object.freeze({
+  none: {
+    scope: 'none',
+    stages: ['validateScope'] as const,
+    cascadesAcrossWorkflows: false,
+  },
+  scheduleOnly: {
+    scope: 'task',
+    stages: NON_INVALIDATING_TASK_STAGES,
+    cascadesAcrossWorkflows: false,
+    mode: 'scheduleOnly',
+    reason: 'externalGatePolicy',
+    selectAffectedTasks: ({ targetId, tasks }) => {
+      const task = tasks.find((item) => item.id === targetId);
+      return task ? [task] : [];
+    },
+    selectInitialEnqueueCandidates: (_context, affectedTasks) => affectedTasks.map((task) => task.id),
+  },
+  fixApprove: {
+    scope: 'task',
+    stages: NON_INVALIDATING_TASK_STAGES,
+    cascadesAcrossWorkflows: false,
+  },
+  fixReject: {
+    scope: 'task',
+    stages: NON_INVALIDATING_TASK_STAGES,
+    cascadesAcrossWorkflows: false,
+  },
+  retryTask: {
+    scope: 'task',
+    stages: INVALIDATING_STAGES,
+    cascadesAcrossWorkflows: true,
+    mode: 'retry',
+    reason: 'task.retry',
+    selectAffectedTasks: ({ targetId, tasks }) => taskAndDescendants(targetId, tasks, retryStop),
+  },
+  recreateTask: {
+    scope: 'task',
+    stages: INVALIDATING_STAGES,
+    cascadesAcrossWorkflows: true,
+    mode: 'recreate',
+    reason: 'task.recreate',
+    selectAffectedTasks: ({ targetId, tasks }) => taskAndDescendants(targetId, tasks),
+  },
+  retryWorkflow: {
+    scope: 'workflow',
+    stages: INVALIDATING_STAGES,
+    cascadesAcrossWorkflows: true,
+    mode: 'retry',
+    reason: 'workflow.retry',
+    selectAffectedTasks: ({ targetId, tasks, retryStatuses }) => {
+      const statuses = retryStatuses ?? defaultRetryStatuses();
+      const byId = taskMap(tasks);
+      const affectedIds = new Set<string>();
+      for (const task of tasks) {
+        if (task.config.workflowId !== targetId || !statuses.has(task.status)) continue;
+        affectedIds.add(task.id);
+        for (const descendant of descendantsOf(task.id, byId, retryStop)) {
+          affectedIds.add(descendant.id);
+        }
+      }
+      return Array.from(affectedIds)
+        .map((id) => byId.get(id))
+        .filter((task): task is TaskState => !!task);
+    },
+  },
+  recreateWorkflow: {
+    scope: 'workflow',
+    stages: INVALIDATING_STAGES,
+    cascadesAcrossWorkflows: true,
+    mode: 'recreate',
+    reason: 'workflow.recreate',
+    selectAffectedTasks: ({ targetId, tasks }) => tasks.filter((task) => task.config.workflowId === targetId),
+  },
+  recreateWorkflowFromFreshBase: {
+    scope: 'workflow',
+    stages: INVALIDATING_STAGES,
+    cascadesAcrossWorkflows: true,
+    mode: 'recreate',
+    reason: 'workflow.recreateFromFreshBase',
+    selectAffectedTasks: ({ targetId, tasks }) => tasks.filter((task) => task.config.workflowId === targetId),
+  },
+  workflowFork: {
+    scope: 'workflow',
+    stages: INVALIDATING_STAGES,
+    cascadesAcrossWorkflows: true,
+  },
+});
+
+interface PipelineCtx {
+  readonly scope: InvalidationScope;
+  readonly action: InvalidationAction;
+  readonly id: string;
+  /**
+   * Holds the array reference returned by `applyPrimitive`. Stays a
+   * mutable array (the type the public `applyInvalidation` returns
+   * verbatim) so callers that compare via `===` to the dep's return
+   * value keep observing the same reference, matching the historical
+   * imperative implementation.
+   */
+  readonly started: TaskState[];
+}
+
+type StageHandler = (ctx: PipelineCtx, deps: InvalidationDeps) => Promise<PipelineCtx>;
+
+const STAGE_HANDLERS: Readonly<Record<InvalidationStage, StageHandler>> = Object.freeze({
+  validateScope: async (ctx) => {
+    const expected = ACTION_SPECS[ctx.action].scope;
+    if (ctx.scope === expected) return ctx;
+    // Preserve the historical 'none' message so existing tests keep
+    // matching it verbatim.
+    if (ctx.action === 'none') {
+      throw new Error(
+        `applyInvalidation: scope must be 'none' when action is 'none' (got scope='${ctx.scope}')`,
+      );
+    }
+    throw new Error(
+      `applyInvalidation: action '${ctx.action}' requires scope '${expected}' (got '${ctx.scope}')`,
+    );
+  },
+  cancelInFlight: async (ctx, deps) => {
+    await deps.cancelInFlight(ctx.scope, ctx.id);
+    return ctx;
+  },
+  applyPrimitive: async (ctx, deps) => {
+    const started = await invokePrimitive(ctx, deps);
+    // Preserve referential identity with the dep's return value:
+    // tests (and callers) rely on `out === deps.<action>(id)`.
+    return { ...ctx, started: started as TaskState[] };
+  },
+  cascadeAcrossWorkflows: async (ctx, deps) => {
+    if (deps.cascadeDownstream) {
+      await deps.cascadeDownstream(ctx.scope, ctx.id);
+    }
+    return ctx;
+  },
+});
+
+async function invokePrimitive(
+  ctx: PipelineCtx,
   deps: InvalidationDeps,
 ): Promise<TaskState[]> {
-  if (action === 'none') {
-    if (scope !== 'none') {
-      throw new Error(
-        `applyInvalidation: scope must be 'none' when action is 'none' (got scope='${scope}')`,
-      );
+  switch (ctx.action) {
+    case 'none':
+      // `'none'` declares no `applyPrimitive` stage in `ACTION_SPECS`,
+      // so this branch is unreachable. Keep it for exhaustiveness.
+      return [];
+    case 'scheduleOnly': {
+      if (!deps.scheduleOnly) {
+        throw new Error(
+          "applyInvalidation: 'scheduleOnly' dep is missing. " +
+            'Production callers wire this via buildInvalidationDeps in ' +
+            '@invoker/app/workflow-actions; tests must supply ' +
+            'deps.scheduleOnly to use this action.',
+        );
+      }
+      return await deps.scheduleOnly(ctx.id);
     }
-    return [];
-  }
-
-  if (action === 'scheduleOnly') {
-    if (scope !== 'task') {
-      throw new Error(
-        `applyInvalidation: action 'scheduleOnly' requires scope 'task' (got '${scope}')`,
-      );
+    case 'fixApprove':
+    case 'fixReject': {
+      const dep = ctx.action === 'fixApprove' ? deps.fixApprove : deps.fixReject;
+      if (!dep) {
+        throw new Error(
+          `applyInvalidation: '${ctx.action}' dep is missing. ` +
+            'Production callers wire this via buildInvalidationDeps in ' +
+            '@invoker/app/workflow-actions; tests must supply the dep to use this action.',
+        );
+      }
+      return await dep(ctx.id);
     }
-    if (!deps.scheduleOnly) {
-      // Step 15: production callers wire this dep via
-      // `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`)
-      // to `Orchestrator.autoStartExternallyUnblockedReadyTasks`. This
-      // branch is reachable only from focused unit tests that build a
-      // partial `InvalidationDeps` without the scheduler dep.
-      throw new Error(
-        "applyInvalidation: 'scheduleOnly' dep is missing. " +
-          'Production callers wire this via buildInvalidationDeps in ' +
-          '@invoker/app/workflow-actions; tests must supply ' +
-          'deps.scheduleOnly to use this action.',
-      );
-    }
-    // Per chart's "Change external gate policy" row: scheduling
-    // edits do NOT cancel active work and do NOT bump generation.
-    // We deliberately skip `deps.cancelInFlight` here.
-    return await deps.scheduleOnly(id);
-  }
-
-  if (action === 'fixApprove' || action === 'fixReject') {
-    if (scope !== 'task') {
-      throw new Error(
-        `applyInvalidation: action '${action}' requires scope 'task' (got '${scope}')`,
-      );
-    }
-    const dep = action === 'fixApprove' ? deps.fixApprove : deps.fixReject;
-    if (!dep) {
-      throw new Error(
-        `applyInvalidation: '${action}' dep is missing. ` +
-          'Production callers wire this via buildInvalidationDeps in ' +
-          '@invoker/app/workflow-actions; tests must supply the dep to use this action.',
-      );
-    }
-    return await dep(id);
-  }
-
-  if (TASK_ACTIONS.has(action) && scope !== 'task') {
-    throw new Error(
-      `applyInvalidation: action '${action}' requires scope 'task' (got '${scope}')`,
-    );
-  }
-  if (WORKFLOW_ACTIONS.has(action) && scope !== 'workflow') {
-    throw new Error(
-      `applyInvalidation: action '${action}' requires scope 'workflow' (got '${scope}')`,
-    );
-  }
-
-  await deps.cancelInFlight(scope, id);
-
-  switch (action) {
     case 'retryTask':
-      return await deps.retryTask(id);
+      return await deps.retryTask(ctx.id);
     case 'recreateTask':
-      return await deps.recreateTask(id);
+      return await deps.recreateTask(ctx.id);
     case 'retryWorkflow':
-      return await deps.retryWorkflow(id);
+      return await deps.retryWorkflow(ctx.id);
     case 'recreateWorkflow':
-      return await deps.recreateWorkflow(id);
+      return await deps.recreateWorkflow(ctx.id);
     case 'recreateWorkflowFromFreshBase': {
       if (!deps.recreateWorkflowFromFreshBase) {
         throw new Error(
@@ -211,14 +388,10 @@ export async function applyInvalidation(
             'Provide deps.recreateWorkflowFromFreshBase to use this action.',
         );
       }
-      return await deps.recreateWorkflowFromFreshBase(id);
+      return await deps.recreateWorkflowFromFreshBase(ctx.id);
     }
     case 'workflowFork': {
       if (!deps.workflowFork) {
-        // Step 14 wires this dep in production via
-        // `buildInvalidationDeps` (`packages/app/src/workflow-actions.ts`).
-        // This branch is reachable only from focused unit tests that
-        // build a partial `InvalidationDeps` without the topology dep.
         throw new Error(
           "applyInvalidation: 'workflowFork' dep is missing. " +
             'Production callers wire this via buildInvalidationDeps in ' +
@@ -226,7 +399,112 @@ export async function applyInvalidation(
             'deps.workflowFork to use this action.',
         );
       }
-      return await deps.workflowFork(id);
+      return await deps.workflowFork(ctx.id);
     }
   }
+}
+
+export async function applyInvalidation(
+  scope: InvalidationScope,
+  action: InvalidationAction,
+  id: string,
+  deps: InvalidationDeps,
+): Promise<TaskState[]> {
+  const spec = ACTION_SPECS[action];
+  let ctx: PipelineCtx = { scope, action, id, started: [] };
+  for (const stage of spec.stages) {
+    ctx = await STAGE_HANDLERS[stage](ctx, deps);
+  }
+  return ctx.started;
+}
+
+// Structural type to avoid a circular import on the full
+// `Orchestrator` class (which imports `applyInvalidation` from here).
+export interface InvalidationDepsOrchestrator {
+  cancelTask(taskId: string): { runningCancelled: string[] };
+  cancelWorkflow(workflowId: string): { runningCancelled: string[] };
+  retryTask(taskId: string): TaskState[];
+  recreateTask(taskId: string): TaskState[];
+  retryWorkflow(workflowId: string): TaskState[];
+  recreateWorkflow(workflowId: string): TaskState[];
+  recreateWorkflowFromFreshBase(workflowId: string): Promise<TaskState[]>;
+  forkWorkflow(workflowId: string): { started: TaskState[] };
+  autoStartExternallyUnblockedReadyTasks(): TaskState[];
+  approve(taskId: string): Promise<TaskState[]>;
+  reject(taskId: string, reason?: string): void;
+  getTask(taskId: string): { config?: { workflowId?: string } } | undefined;
+  cascadeInvalidationToDownstream(workflowId: string): TaskState[];
+}
+
+const TERMINAL_CANCEL_ERROR_CODES = new Set([
+  'TASK_ALREADY_TERMINAL',
+  'WORKFLOW_ALREADY_TERMINAL',
+]);
+
+export interface BuildCancelInFlightDeps {
+  orchestrator: Pick<InvalidationDepsOrchestrator, 'cancelTask' | 'cancelWorkflow'>;
+  /**
+   * Optional hook to kill the active executor handle for each running
+   * task that was cancelled. Production callers wire this to
+   * `TaskRunner.killActiveExecution`; the orchestrator-only fallback
+   * omits it (the orchestrator state machine still transitions the
+   * tasks, but the in-flight process keeps running until it self-exits).
+   */
+  killActiveExecution?: (taskId: string) => void | Promise<void>;
+}
+
+/**
+ * Single cancel-in-flight implementation shared by the orchestrator-only
+ * fallback and the production `buildInvalidationDeps`. Tolerates
+ * already-terminal targets (the rest of the pipeline still runs) and
+ * fans out the optional executor-kill hook for every running task that
+ * was cancelled.
+ */
+export function buildCancelInFlight(deps: BuildCancelInFlightDeps): CancelInFlightFn {
+  return async (scope, id) => {
+    if (scope === 'none') return;
+    let result: { runningCancelled: string[] };
+    try {
+      result = scope === 'task'
+        ? deps.orchestrator.cancelTask(id)
+        : deps.orchestrator.cancelWorkflow(id);
+    } catch (e) {
+      const code = (e as { code?: string })?.code;
+      if (code && TERMINAL_CANCEL_ERROR_CODES.has(code)) return;
+      throw e;
+    }
+    if (!deps.killActiveExecution) return;
+    for (const runningId of result.runningCancelled) {
+      await deps.killActiveExecution(runningId);
+    }
+  };
+}
+
+export function buildOrchestratorOnlyInvalidationDeps(
+  orchestrator: InvalidationDepsOrchestrator,
+): InvalidationDeps {
+  return {
+    cancelInFlight: buildCancelInFlight({ orchestrator }),
+    retryTask: (taskId) => orchestrator.retryTask(taskId),
+    recreateTask: (taskId) => orchestrator.recreateTask(taskId),
+    retryWorkflow: (workflowId) => orchestrator.retryWorkflow(workflowId),
+    recreateWorkflow: (workflowId) => orchestrator.recreateWorkflow(workflowId),
+    recreateWorkflowFromFreshBase: (workflowId) =>
+      orchestrator.recreateWorkflowFromFreshBase(workflowId),
+    workflowFork: (workflowId) => orchestrator.forkWorkflow(workflowId).started,
+    scheduleOnly: () => orchestrator.autoStartExternallyUnblockedReadyTasks(),
+    fixApprove: (taskId) => orchestrator.approve(taskId),
+    fixReject: (taskId) => {
+      orchestrator.reject(taskId);
+      return [];
+    },
+    cascadeDownstream: (scope, id) => {
+      const workflowId =
+        scope === 'workflow'
+          ? id
+          : orchestrator.getTask(id)?.config?.workflowId;
+      if (!workflowId) return [];
+      return orchestrator.cascadeInvalidationToDownstream(workflowId);
+    },
+  };
 }

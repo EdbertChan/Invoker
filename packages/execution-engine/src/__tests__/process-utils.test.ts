@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
@@ -23,6 +26,7 @@ const originalShell = process.env.SHELL;
 const originalElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
 const originalElectronNoAsar = process.env.ELECTRON_NO_ASAR;
 const originalElectronNoAttachConsole = process.env.ELECTRON_NO_ATTACH_CONSOLE;
+const originalInvokerRepoConfigPath = process.env.INVOKER_REPO_CONFIG_PATH;
 
 function setPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, 'platform', { value: platform, configurable: true });
@@ -51,6 +55,8 @@ describe('process-utils shell environment resolution', () => {
     else process.env.ELECTRON_NO_ASAR = originalElectronNoAsar;
     if (originalElectronNoAttachConsole === undefined) delete process.env.ELECTRON_NO_ATTACH_CONSOLE;
     else process.env.ELECTRON_NO_ATTACH_CONSOLE = originalElectronNoAttachConsole;
+    if (originalInvokerRepoConfigPath === undefined) delete process.env.INVOKER_REPO_CONFIG_PATH;
+    else process.env.INVOKER_REPO_CONFIG_PATH = originalInvokerRepoConfigPath;
   });
 
   afterEach(() => {
@@ -71,7 +77,7 @@ describe('process-utils shell environment resolution', () => {
     setPlatform('darwin');
     const { processUtils } = await loadProcessUtils();
     expect(processUtils.applyMacOSPathFallback('/usr/bin:/bin:/usr/local/bin')).toBe(
-      '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+      '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin',
     );
   });
 
@@ -82,6 +88,7 @@ describe('process-utils shell environment resolution', () => {
     process.env.ELECTRON_RUN_AS_NODE = '1';
     process.env.ELECTRON_NO_ASAR = '1';
     process.env.ELECTRON_NO_ATTACH_CONSOLE = '1';
+    process.env.INVOKER_REPO_CONFIG_PATH = '/tmp/operator-only-repo-config.json';
 
     const { processUtils, mockedSpawn } = await loadProcessUtils();
     const proc = createMockProcess();
@@ -98,7 +105,7 @@ describe('process-utils shell environment resolution', () => {
 
     const result = await initPromise;
     expect(result.status).toBe('resolved');
-    expect(result.path).toBe('/opt/homebrew/bin:/usr/local/bin:/Users/test/.local/bin:/usr/bin');
+    expect(result.path).toBe('/usr/bin:/bin:/opt/homebrew/bin:/Users/test/.local/bin:/usr/local/bin');
     expect(process.env.PATH).toBe(result.path);
     expect(processUtils.getEffectivePath()).toBe(result.path);
     expect(processUtils.cleanElectronEnv()).toMatchObject({
@@ -107,6 +114,7 @@ describe('process-utils shell environment resolution', () => {
     expect(processUtils.cleanElectronEnv()).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
     expect(processUtils.cleanElectronEnv()).not.toHaveProperty('ELECTRON_NO_ASAR');
     expect(processUtils.cleanElectronEnv()).not.toHaveProperty('ELECTRON_NO_ATTACH_CONSOLE');
+    expect(processUtils.cleanElectronEnv()).not.toHaveProperty('INVOKER_REPO_CONFIG_PATH');
 
     const second = await processUtils.initializeShellEnvironment();
     expect(second).toEqual(result);
@@ -135,5 +143,21 @@ describe('process-utils shell environment resolution', () => {
     expect(result.status).toBe('skipped');
     expect(result.path).toBe('/usr/local/bin:/usr/bin:/bin');
     expect(mockedSpawn).not.toHaveBeenCalled();
+  });
+
+  it('resolves executables from the current runtime PATH before cleaned child env is applied', async () => {
+    const { processUtils } = await loadProcessUtils();
+    const dir = mkdtempSync(join(tmpdir(), 'invoker-codex-path-'));
+    const codex = join(dir, 'codex');
+    try {
+      writeFileSync(codex, '#!/usr/bin/env bash\nexit 0\n');
+      chmodSync(codex, 0o755);
+      process.env.PATH = `${dir}${process.env.PATH ? `:${process.env.PATH}` : ''}`;
+
+      expect(processUtils.resolveExecutableOnCurrentPath('codex')).toBe(codex);
+      expect(processUtils.resolveExecutableOnCurrentPath('/explicit/codex')).toBe('/explicit/codex');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

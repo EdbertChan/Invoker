@@ -15,6 +15,7 @@ import { scopePlanTaskId } from '@invoker/workflow-core';
 import type { Orchestrator, TaskState, ExperimentVariant, RunnerKind } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { WorkRequest, WorkResponse, ActionType, Logger } from '@invoker/contracts';
+import { ATTEMPT_LEASE_MS } from '@invoker/contracts';
 import type { Executor, ExecutorHandle } from './executor.js';
 import type { TaskRunnerCallbacks } from './task-runner-callbacks.js';
 import { BaseExecutor } from './base-executor.js';
@@ -23,7 +24,7 @@ import { createExecutionBench } from './execution-bench.js';
 import { ResourceLimitError, type RepoPoolTiming } from './repo-pool.js';
 import type { ExecutorRegistry } from './registry.js';
 import type { AgentRegistry } from './agent-registry.js';
-import type { MergeGateProvider } from './merge-gate-provider.js';
+import type { MergeGateProvider, MergeGateApprovalStatus } from './merge-gate-provider.js';
 import type { ReviewProviderRegistry } from './review-provider-registry.js';
 import { DockerExecutor } from './docker-executor.js';
 import { WorktreeExecutor } from './worktree-executor.js';
@@ -45,6 +46,8 @@ import {
   resolveConflictImpl,
   fixWithAgentImpl,
   spawnAgentFixViaRegistry,
+  resolveRemoteBranchOwnerPath,
+  resolveSelectedRemoteTargetId,
 } from './conflict-resolver.js';
 import { DEFAULT_EXECUTION_AGENT } from './agent.js';
 import {
@@ -55,13 +58,15 @@ import {
   validateCanonicalPrBody,
   type PrAuthoringContext,
 } from './pr-authoring.js';
+import { assertNotGitConfigMutation, ensureRemoteUrl } from './git-config-mutation.js';
+import { killProcessGroup, SIGKILL_TIMEOUT_MS } from './process-utils.js';
 
-export type { TaskRunnerCallbacks } from './task-runner-callbacks.js';
+export type { TaskHeartbeatEvent, TaskRunnerCallbacks } from './task-runner-callbacks.js';
 
-/** Keeps `lastHeartbeatAt` fresh while `executor.start()` is awaited (SSH remote setup/provision can take minutes). Matches BaseExecutor default heartbeat cadence. */
+/** Keeps launch metadata fresh while `executor.start()` is awaited (SSH remote setup/provision can take minutes). */
 const PRE_START_HEARTBEAT_INTERVAL_MS = 30_000;
-const ATTEMPT_LEASE_MS = 20 * 60 * 1000;
 const DEFAULT_EXECUTOR_START_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_GIT_OPERATION_TIMEOUT_MS = 15 * 60 * 1000;
 
 type StartupFailureMetadata = {
   workspacePath?: string;
@@ -77,6 +82,8 @@ type ActiveExecutionEntry = {
   taskId: string;
   poolId?: string;
   poolMemberKey?: string;
+  leaseResourceKey?: string;
+  leaseHolderId?: string;
 };
 
 type ExecutionPoolMember =
@@ -94,6 +101,27 @@ type PoolSelection = {
   member: ExecutionPoolMember;
   memberKey: string;
   selectionStrategy: 'roundRobin' | 'leastLoaded';
+  leaseResourceKey?: string;
+  leaseHolderId?: string;
+};
+
+function isRetryableSshStartupTransportError(err: unknown): boolean {
+  const message = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
+  const lower = message.toLowerCase();
+  return lower.includes('exit=255')
+    || lower.includes('ssh transport failed')
+    || lower.includes('connection timed out')
+    || lower.includes('operation timed out')
+    || lower.includes('connection reset')
+    || lower.includes('broken pipe')
+    || lower.includes('banner exchange')
+    || lower.includes('kex_exchange_identification')
+    || lower.includes('remote session terminated unexpectedly');
+}
+
+type FreshBaseCommit = {
+  branch: string;
+  commit: string;
 };
 
 type RemoteTargetDisplay = {
@@ -104,8 +132,24 @@ type RemoteTargetDisplay = {
   managedWorkspaces?: boolean;
   remoteInvokerHome?: string;
   provisionCommand?: string;
+  use_api_key?: boolean;
+  secretsFile?: string;
   remoteHeartbeatIntervalSeconds?: number;
 };
+
+export interface ReviewGateCiFailureTrigger {
+  taskId: string;
+  workflowId: string;
+  reviewId: string;
+  reviewUrl: string;
+  headSha?: string;
+  headRef?: string;
+  branch?: string;
+  selectedAttemptId?: string;
+  generation: number;
+  failedChecks: NonNullable<MergeGateApprovalStatus['checks']>['failed'];
+  statusText: string;
+}
 
 function nextLeaseExpiry(from: Date): Date {
   return new Date(from.getTime() + ATTEMPT_LEASE_MS);
@@ -119,6 +163,70 @@ function getExecutorStartTimeoutMs(): number {
   return parsed;
 }
 
+function getGitOperationTimeoutMs(): number {
+  const raw = process.env.INVOKER_GIT_NETWORK_TIMEOUT_MS?.trim();
+  if (raw === '0') return 0;
+  if (!raw) return DEFAULT_GIT_OPERATION_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_GIT_OPERATION_TIMEOUT_MS;
+  return parsed;
+}
+
+function execGitWithTimeout(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn('git', args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    });
+    const timeoutMs = getGitOperationTimeoutMs();
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      fn();
+    };
+
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        killProcessGroup(child, 'SIGTERM');
+        const forceKill = setTimeout(() => {
+          killProcessGroup(child, 'SIGKILL');
+        }, SIGKILL_TIMEOUT_MS);
+        forceKill.unref?.();
+        finish(() => reject(new Error(
+          `git ${args.join(' ')} exceeded git operation timeout (${timeoutMs}ms) in ${cwd}. ` +
+          'Set INVOKER_GIT_NETWORK_TIMEOUT_MS to adjust (0 = unbounded).',
+        )));
+      }, timeoutMs);
+      timeout.unref?.();
+    }
+
+    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    child.on('error', (err) => {
+      finish(() => reject(new Error(`Failed to spawn git: ${err.message}`)));
+    });
+    child.on('close', (code, signal) => {
+      finish(() => {
+        if (code === 0) {
+          resolvePromise(stdout.trim());
+          return;
+        }
+        reject(new Error(
+          `git ${args.join(' ')} failed (code ${code ?? 'null'}${signal ? ` signal ${signal}` : ''}): ` +
+          `${stderr.trim()}${stdout.trim() ? '\n' + stdout.trim() : ''}`,
+        ));
+      });
+    });
+  });
+}
+
 const NOOP_LOGGER: Logger = {
   debug: () => {},
   info: () => {},
@@ -126,6 +234,30 @@ const NOOP_LOGGER: Logger = {
   error: () => {},
   child: () => NOOP_LOGGER,
 };
+
+// ── Launch outbox ─────────────────────────────────────────
+
+/**
+ * Narrow interface for the launch-handoff outbox surface that
+ * `executeTask` calls into. Defined here (rather than imported from
+ * `@invoker/app`) to avoid a layering cycle: the execution engine
+ * never depends on the app shell, the app provides this implementation
+ * via the LaunchDispatcher.
+ *
+ * Each method MUST be safe to call even if the dispatch row was
+ * reaped between the dispatcher's lease and the runner's call — the
+ * persistence layer returns false in that case and the runner treats
+ * it as a benign race.
+ */
+export interface LaunchOutboxAck {
+  completeDispatch(dispatchId: number): boolean;
+  failDispatch(dispatchId: number, error: unknown): boolean;
+}
+
+export interface LaunchDispatchOptions {
+  dispatchId: number;
+  launchOutbox: LaunchOutboxAck;
+}
 
 // ── Config ────────────────────────────────────────────────
 
@@ -142,6 +274,7 @@ export interface TaskRunnerConfig {
   callbacks?: TaskRunnerCallbacks;
   mergeGateProvider?: MergeGateProvider;
   reviewProviderRegistry?: ReviewProviderRegistry;
+  onReviewGateCiFailure?: (trigger: ReviewGateCiFailureTrigger) => Promise<void>;
   /**
    * Provider that returns remote SSH targets keyed by target ID.
    * Called at task-execution time so config file changes take effect on retry.
@@ -154,6 +287,8 @@ export interface TaskRunnerConfig {
     managedWorkspaces?: boolean;
     remoteInvokerHome?: string;
     provisionCommand?: string;
+    use_api_key?: boolean;
+    secretsFile?: string;
     remoteHeartbeatIntervalSeconds?: number;
   }>;
   executionPoolsProvider?: () => Record<string, {
@@ -187,16 +322,19 @@ export class TaskRunner {
   /** @internal */ callbacks: TaskRunnerCallbacks;
   /** @internal */ mergeGateProvider?: MergeGateProvider;
   /** @internal */ reviewProviderRegistry?: ReviewProviderRegistry;
-  private activePrPollers = new Map<string, ReturnType<typeof setInterval>>();
+  private onReviewGateCiFailure?: (trigger: ReviewGateCiFailureTrigger) => Promise<void>;
+  private reviewGateCiFixInFlight = new Set<string>();
   private getRemoteTargets: () => Record<string, RemoteTargetDisplay>;
   private getExecutionPools: () => Record<string, ExecutionPoolConfig>;
   private dockerConfig: { imageName?: string; secretsFile?: string };
   private executionAgentRegistry?: AgentRegistry;
   private logger: Logger;
+  private readonly runnerInstanceId = randomUUID();
   /** Cache for SSH executors, keyed by poolMemberId. One instance per target for correct git locking. */
   private sshExecutorCache = new Map<string, SshExecutor>();
   private poolRoundRobinCursor = new Map<string, number>();
   private pendingPoolSelections = new Map<string, PoolSelection>();
+  private freshBaseCommits = new Map<string, FreshBaseCommit>();
 
   /** In-flight executions keyed by attemptId (with taskId retained for external kill resolution). */
   private activeExecutions = new Map<string, ActiveExecutionEntry>();
@@ -218,13 +356,15 @@ export class TaskRunner {
     repoUrl: string | undefined,
     baseBranchHint: string | undefined,
     timing?: RepoPoolTiming,
-  ): Promise<void> {
-    if (!repoUrl) return;
+  ): Promise<{ branch: string; commit: string } | undefined> {
+    if (!repoUrl) return undefined;
     const executor = this.executorRegistry.get('worktree');
-    if (!(executor instanceof WorktreeExecutor)) return;
+    if (!(executor instanceof WorktreeExecutor)) return undefined;
     const pool = executor.getRepoPool();
     const baseBranch = baseBranchHint?.trim() || this.defaultBranch || 'master';
     await pool.refreshMirrorForRebase(repoUrl, baseBranch, timing);
+    const commit = await pool.resolveBaseCommit(repoUrl, baseBranch, timing);
+    this.freshBaseCommits.set(workflowId, { branch: baseBranch, commit });
     const collectStartedAtMs = Date.now();
     timing?.mark('TaskRunner.preparePoolForRebaseRetry.collectManagedWorkflowBranches', 'started', {
       workflowId,
@@ -236,6 +376,7 @@ export class TaskRunner {
       durationMs: Date.now() - collectStartedAtMs,
     });
     await pool.removeManagedBranchesInMirror(repoUrl, branches, timing);
+    return { branch: baseBranch, commit };
   }
 
   /**
@@ -247,7 +388,7 @@ export class TaskRunner {
     const executor = this.executorRegistry.get('worktree');
     if (!(executor instanceof WorktreeExecutor)) return undefined;
     try {
-      return await executor.getRepoPool().ensureClone(trimmed);
+      return await executor.getRepoPool().ensureCloneThroughRepoQueue(trimmed);
     } catch (err) {
       this.logger.warn(`[merge] ensureRepoMirrorPath failed for ${trimmed}`, { err });
       return undefined;
@@ -255,11 +396,24 @@ export class TaskRunner {
   }
 
   private collectManagedWorkflowBranches(workflowId: string): string[] {
-    return this.orchestrator
-      .getAllTasks()
-      .filter((t) => t.config.workflowId === workflowId && !t.config.isMergeNode)
-      .map((t) => t.execution.branch ?? `invoker/${t.id}`)
-      .filter((b) => isInvokerManagedPoolBranch(b));
+    const branches: string[] = [];
+    const seen = new Set<string>();
+    const addBranch = (branch: string | undefined): void => {
+      const trimmed = branch?.trim();
+      if (!trimmed || !isInvokerManagedPoolBranch(trimmed) || seen.has(trimmed)) return;
+      seen.add(trimmed);
+      branches.push(trimmed);
+    };
+
+    for (const task of this.orchestrator.getAllTasks()) {
+      if (task.config.workflowId !== workflowId || task.config.isMergeNode) continue;
+      addBranch(task.execution.branch);
+      for (const attempt of this.persistence.loadAttempts?.(task.id) ?? []) {
+        addBranch(attempt.branch);
+      }
+    }
+
+    return branches;
   }
 
   constructor(config: TaskRunnerConfig) {
@@ -272,6 +426,7 @@ export class TaskRunner {
     this.callbacks = config.callbacks ?? {};
     this.mergeGateProvider = config.mergeGateProvider;
     this.reviewProviderRegistry = config.reviewProviderRegistry;
+    this.onReviewGateCiFailure = config.onReviewGateCiFailure;
     this.getRemoteTargets = config.remoteTargetsProvider ?? (() => ({}));
     this.getExecutionPools = config.executionPoolsProvider ?? (() => ({}));
     this.dockerConfig = config.dockerConfig ?? {};
@@ -286,6 +441,9 @@ export class TaskRunner {
     const resolved = this.resolveActiveExecution(taskId);
     if (!resolved) return;
     this.activeExecutions.delete(resolved.attemptId);
+    if (resolved.entry.leaseResourceKey && resolved.entry.leaseHolderId) {
+      this.persistence.releaseExecutionResourceLease?.(resolved.entry.leaseResourceKey, resolved.entry.leaseHolderId);
+    }
     try {
       await resolved.entry.executor.kill(resolved.entry.handle);
     } catch {
@@ -309,22 +467,23 @@ export class TaskRunner {
   }
 
   private resolveActiveExecution(taskId: string): { attemptId: string; entry: ActiveExecutionEntry } | undefined {
-    for (const [attemptId, entry] of this.activeExecutions) {
-      if (entry.taskId === taskId || entry.handle.taskId === taskId) {
-        return { attemptId, entry };
-      }
-    }
-
     const selectedAttemptId = this.orchestrator.getTask(taskId)?.execution.selectedAttemptId;
     if (selectedAttemptId) {
       const entry = this.activeExecutions.get(selectedAttemptId);
       if (entry) return { attemptId: selectedAttemptId, entry };
+      return undefined;
     }
 
     const latestAttemptId = this.loadLatestAttemptId(taskId);
     if (latestAttemptId) {
       const entry = this.activeExecutions.get(latestAttemptId);
       if (entry) return { attemptId: latestAttemptId, entry };
+    }
+
+    for (const [attemptId, entry] of this.activeExecutions) {
+      if (entry.taskId === taskId || entry.handle.taskId === taskId) {
+        return { attemptId, entry };
+      }
     }
 
     return undefined;
@@ -351,6 +510,20 @@ export class TaskRunner {
       );
     }
     await Promise.all(tasks.map((task) => this.executeTask(task)));
+  }
+
+  private executeNewlyStartedTasks(
+    tasks: TaskState[],
+    dispatchOpts?: LaunchDispatchOptions,
+  ): void {
+    if (tasks.length === 0) return;
+    if (dispatchOpts) {
+      this.logger.debug(
+        `[TaskRunner] durable launch outbox owns ${tasks.length} newly-started task(s); skipping recursive executeTasks`,
+      );
+      return;
+    }
+    void this.executeTasks(tasks);
   }
 
   /**
@@ -386,7 +559,7 @@ export class TaskRunner {
     return false;
   }
 
-  async executeTask(task: TaskState): Promise<void> {
+  async executeTask(task: TaskState, dispatchOpts?: LaunchDispatchOptions): Promise<void> {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} TaskRunner.executeTask BEGIN taskId=${task.id} isMergeNode=${Boolean(task.config.isMergeNode)} status=${task.status}`,
     );
@@ -403,11 +576,25 @@ export class TaskRunner {
         `[TaskRunner] executeTask skipping duplicate launch for task=${task.id} attempt=${attemptId}`,
       );
       bench('executeTask.duplicateSkipped');
+      if (dispatchOpts) {
+        // Another runner already owns this attempt — release the dispatch
+        // row so the dispatcher can re-queue if needed instead of orphaning.
+        dispatchOpts.launchOutbox.failDispatch(
+          dispatchOpts.dispatchId,
+          new Error('Duplicate launch suppressed in TaskRunner'),
+        );
+      }
       return;
     }
+    this.logger.info(
+      `[TaskRunner] launch accepted task=${task.id} attempt=${attemptId} status=${task.status} ` +
+        `phase=${task.execution.phase ?? 'none'} generation=${startGeneration} ` +
+        `dispatchId=${dispatchOpts?.dispatchId ?? 'none'}`,
+    );
     this.launchingAttemptIds.add(attemptId);
+    this.callbacks.onLaunchAccepted?.(task.id);
     try {
-      await this.executeTaskInner(task, attemptId, bench);
+      await this.executeTaskInner(task, attemptId, bench, dispatchOpts);
       bench('executeTask.innerReturned');
     } catch (err) {
       bench('executeTask.failed', {
@@ -418,6 +605,15 @@ export class TaskRunner {
       if (cause instanceof ResourceLimitError) {
         traceExecution(`[TaskRunner] executeTask deferred for task=${task.id}: ${cause.message}`);
         this.orchestrator.deferTask(task.id);
+        if (dispatchOpts) {
+          const completed = dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
+          bench('executeTask.dispatchCompletedAfterDeferral', { accepted: completed });
+          if (!completed) {
+            this.logger.warn(
+              `[TaskRunner] launch dispatch complete rejected after resource-limit defer for task=${task.id} attempt=${attemptId} dispatchId=${dispatchOpts.dispatchId}`,
+            );
+          }
+        }
         return;
       }
 
@@ -434,6 +630,9 @@ export class TaskRunner {
       }
 
       this.logger.error(`[TaskRunner] executeTask failed for task=${task.id}`, { err });
+      if (dispatchOpts) {
+        dispatchOpts.launchOutbox.failDispatch(dispatchOpts.dispatchId, err);
+      }
       const launchFailedAt = new Date();
       try {
         const latest = this.orchestrator.getTask(task.id);
@@ -472,9 +671,7 @@ export class TaskRunner {
       };
       this.callbacks.onComplete?.(task.id, response);
       const newlyStarted = this.orchestrator.handleWorkerResponse(response) ?? [];
-      if (newlyStarted.length > 0) {
-        this.executeTasks(newlyStarted);
-      }
+      this.executeNewlyStartedTasks(newlyStarted, dispatchOpts);
     } finally {
       this.launchingAttemptIds.delete(attemptId);
       bench('executeTask.settled');
@@ -485,6 +682,7 @@ export class TaskRunner {
     task: TaskState,
     attemptId: string,
     bench: (phase: string, metadata?: Record<string, unknown>) => void = () => {},
+    dispatchOpts?: LaunchDispatchOptions,
   ): Promise<void> {
     bench('executeTaskInner.begin', {
       dependencyCount: task.dependencies.length,
@@ -517,8 +715,27 @@ export class TaskRunner {
         },
       };
       const newlyStarted = this.orchestrator.handleWorkerResponse(response) ?? [];
-      if (newlyStarted.length > 0) {
-        this.executeTasks(newlyStarted);
+      this.executeNewlyStartedTasks(newlyStarted, dispatchOpts);
+      // CD.1 / Issue 13: terminate the parent pivot task's outbox row.
+      // Without this, drainScheduler enqueued a launch-dispatch row for
+      // the pivot, but executeTaskInner returns here without ever
+      // calling completeDispatch, so the row stays leased and is retried
+      // or abandoned. The spawn_experiments path is the terminal state
+      // for the pivot itself; only the spawned variants should continue
+      // through the outbox.
+      if (dispatchOpts) {
+        try {
+          dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
+        } catch (err) {
+          // completeDispatch is best-effort here — if the row has
+          // already been failed or completed by another path the
+          // failure is benign. Log and continue so the pivot's
+          // observable behaviour (spawning variants) is unaffected.
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[task-runner] pivot completeDispatch failed for dispatchId=${dispatchOpts.dispatchId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
       bench('executeTaskInner.pivotReturned', {
         newlyStartedCount: newlyStarted.length,
@@ -589,6 +806,8 @@ export class TaskRunner {
     const baseBranch = workflow?.baseBranch ?? this.defaultBranch;
     const repoUrl = workflow?.repoUrl;
     const branchRepoUrl = workflow?.intermediateRepoUrl?.trim() || undefined;
+    const freshBase = task.config.workflowId ? this.freshBaseCommits.get(task.config.workflowId) : undefined;
+    const baseCommit = freshBase && freshBase.branch === baseBranch ? freshBase.commit : undefined;
 
     // Persist the experiment branch as soon as the executor knows it — well
     // before `git worktree add` could leak a worktree without a recorded branch
@@ -618,17 +837,19 @@ export class TaskRunner {
       }
     };
 
+    const actionType = this.determineActionType(task);
+    const executionAgent = task.config.executionAgent?.trim() || DEFAULT_EXECUTION_AGENT;
     const request: WorkRequest = {
       requestId: randomUUID(),
       actionId: task.id,
       attemptId,
       executionGeneration: task.execution.generation ?? 0,
-      actionType: this.determineActionType(task),
+      actionType,
       inputs: {
         description: task.description,
         command: task.config.command,
         prompt: task.config.prompt,
-        executionAgent: task.config.executionAgent?.trim() || DEFAULT_EXECUTION_AGENT,
+        executionAgent,
         repoUrl,
         branchRepoUrl,
         featureBranch: task.config.featureBranch,
@@ -637,7 +858,14 @@ export class TaskRunner {
         upstreamBranches: upstreamBranches.length > 0 ? upstreamBranches : undefined,
         lifecycleTag,
         baseBranch,
+        baseCommit,
         freshWorkspace: this.shouldUseFreshWorkspace(task),
+        reusableWorktree: task.execution.branch && task.execution.workspacePath
+          ? {
+            branch: task.execution.branch,
+            workspacePath: task.execution.workspacePath,
+          }
+          : undefined,
       },
       callbackUrl: '',
       timestamps: {
@@ -654,85 +882,158 @@ export class TaskRunner {
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} WorkRequest built actionType=${request.actionType} repoUrl=${request.inputs.repoUrl ?? '(none)'} upstreamBranches=${JSON.stringify(request.inputs.upstreamBranches ?? [])}`,
     );
-    bench('selectExecutor.start');
-    const executor = this.selectExecutor(task);
-    bench('selectExecutor.end', {
-      executorType: executor.type,
-    });
-    traceExecution(
-      `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} selectExecutor → type=${executor.type} calling executor.start()`,
-    );
-    traceExecution(`[trace] TaskRunner: task=${task.id} calling executor.start() type=${executor.type}`);
-    bench('onLaunchStart.before', {
-      executorType: executor.type,
-    });
-    this.callbacks.onLaunchStart?.(task.id, executor);
-    bench('executor.start.before', {
-      executorType: executor.type,
-    });
     const startT0 = Date.now();
-    const startTimeoutMs = getExecutorStartTimeoutMs();
-    const preStartHeartbeatTimer = setInterval(() => {
-      const now = new Date();
-      this.persistence.updateAttempt?.(attemptId, {
-        lastHeartbeatAt: now,
-        leaseExpiresAt: nextLeaseExpiry(now),
-      } as any);
-      this.callbacks.onHeartbeat?.(task.id);
-    }, PRE_START_HEARTBEAT_INTERVAL_MS);
-    let preStartTimeout: ReturnType<typeof setTimeout> | undefined;
-    let handle: ExecutorHandle;
-    try {
-      handle = await Promise.race<ExecutorHandle>([
-        executor.start(request),
-        new Promise<ExecutorHandle>((_resolve, reject) => {
-          preStartTimeout = setTimeout(() => {
-            reject(new Error(`Executor startup timed out after ${startTimeoutMs}ms (${executor.type})`));
-          }, startTimeoutMs);
-        }),
-      ]);
-    } catch (err) {
-      this.pendingPoolSelections.delete(task.id);
-      const meta = err as StartupFailureMetadata;
-      const startupErrorMessage = `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}\n`;
-      this.callbacks.onOutput?.(task.id, startupErrorMessage);
-      try {
-        this.persistence.appendTaskOutput(task.id, startupErrorMessage);
-      } catch {
-        // Preserve the original startup failure if output persistence also fails.
-      }
-      // Only persist startup-failure metadata when the launch is still
-      // current.  If the task has moved to a newer attempt or generation
-      // (e.g. via recreate-task), writing old workspace/branch metadata
-      // would corrupt the live attempt's state.
-      if (
-        (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-        && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
-      ) {
-        const execution: Record<string, string> = {};
-        if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
-        if (meta.branch) execution.branch = meta.branch;
-        if (meta.agentSessionId) {
-          execution.agentSessionId = meta.agentSessionId;
-          execution.lastAgentSessionId = meta.agentSessionId;
+    const attemptedPoolMemberKeys = new Set<string>();
+    let executor!: Executor;
+    let handle!: ExecutorHandle;
+    while (true) {
+      bench('selectExecutor.start');
+      executor = this.selectExecutor(task, attemptedPoolMemberKeys);
+      const poolSelectionForStart = this.pendingPoolSelections.get(task.id);
+      if (!this.acquirePoolSelectionLease(task, attemptId, poolSelectionForStart)) {
+        if (poolSelectionForStart) {
+          attemptedPoolMemberKeys.add(poolSelectionForStart.memberKey);
+          this.pendingPoolSelections.delete(task.id);
         }
-        if (meta.containerId) execution.containerId = meta.containerId;
-        this.persistence.updateTask(task.id, {
-          config: { runnerKind: executor.type as RunnerKind },
-          execution: execution as any,
-        });
+        continue;
       }
-      const wrapped = new Error(
-        `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}`,
-        { cause: err },
+      bench('selectExecutor.end', {
+        executorType: executor.type,
+      });
+      traceExecution(
+        `${RESTART_TO_BRANCH_TRACE} executeTaskInner taskId=${task.id} selectExecutor → type=${executor.type} calling executor.start()`,
       );
-      this.callbacks.onLaunchFailed?.(task.id, wrapped, executor);
-      throw wrapped;
-    } finally {
-      clearInterval(preStartHeartbeatTimer);
-      if (preStartTimeout) clearTimeout(preStartTimeout);
+      traceExecution(`[trace] TaskRunner: task=${task.id} calling executor.start() type=${executor.type}`);
+      this.logger.info(
+        `[TaskRunner] executor.start begin task=${task.id} attempt=${attemptId} executor=${executor.type} ` +
+          `generation=${task.execution.generation ?? 0}`,
+      );
+      this.persistence.logEvent?.(task.id, 'task.executor.start_begin', {
+        dispatchId: dispatchOpts?.dispatchId,
+        attemptId,
+        executorType: executor.type,
+        poolId: poolSelectionForStart?.poolId,
+        poolMemberId: poolSelectionForStart?.member.id,
+      });
+      bench('onLaunchStart.before', {
+        executorType: executor.type,
+      });
+      this.callbacks.onLaunchStart?.(task.id, executor);
+      bench('executor.start.before', {
+        executorType: executor.type,
+      });
+      const startTimeoutMs = getExecutorStartTimeoutMs();
+      const preStartHeartbeatTimer = setInterval(() => {
+        const now = new Date();
+        this.renewPoolSelectionLease(poolSelectionForStart);
+        this.persistence.updateAttempt?.(attemptId, {
+          lastHeartbeatAt: now,
+          leaseExpiresAt: nextLeaseExpiry(now),
+        } as any);
+        this.callbacks.onHeartbeat?.(task.id, { at: now, source: 'executor' });
+      }, PRE_START_HEARTBEAT_INTERVAL_MS);
+      let preStartTimeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        handle = await Promise.race<ExecutorHandle>([
+          executor.start(request),
+          new Promise<ExecutorHandle>((_resolve, reject) => {
+            preStartTimeout = setTimeout(() => {
+              reject(new Error(`Executor startup timed out after ${startTimeoutMs}ms (${executor.type})`));
+            }, startTimeoutMs);
+          }),
+        ]);
+        break;
+      } catch (err) {
+        const meta = err as StartupFailureMetadata;
+        if (
+          executor.type === 'ssh'
+          && poolSelectionForStart?.member.type === 'ssh'
+          && !meta.workspacePath
+          && !meta.branch
+          && isRetryableSshStartupTransportError(err)
+        ) {
+          attemptedPoolMemberKeys.add(poolSelectionForStart.memberKey);
+          const pool = this.getExecutionPools()[poolSelectionForStart.poolId];
+          const hasAnotherSshMember = pool?.members.some((member) =>
+            member.type === 'ssh' && !attemptedPoolMemberKeys.has(this.poolMemberKey(member)),
+          ) ?? false;
+          if (hasAnotherSshMember) {
+            const retryMessage =
+              `Executor startup failed (${executor.type}) on pool member ${poolSelectionForStart.member.id}; ` +
+              `retrying another SSH pool member: ${err instanceof Error ? err.message : String(err)}\n`;
+            this.callbacks.onOutput?.(task.id, retryMessage);
+            try {
+              this.persistence.appendTaskOutput(task.id, retryMessage);
+            } catch {
+              // Preserve the original startup failure if output persistence also fails.
+            }
+            this.persistence.logEvent?.(task.id, 'task.executor.startup-retry', {
+              runnerKind: executor.type,
+              poolId: poolSelectionForStart.poolId,
+              poolMemberId: poolSelectionForStart.member.id,
+              reason: 'ssh-startup-transport-failure',
+              error: err instanceof Error ? err.message : String(err),
+            });
+            this.pendingPoolSelections.delete(task.id);
+            this.releasePoolSelectionLease(poolSelectionForStart);
+            continue;
+          }
+        }
+        const startupErrorMessage = `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}\n`;
+        this.callbacks.onOutput?.(task.id, startupErrorMessage);
+        try {
+          this.persistence.appendTaskOutput(task.id, startupErrorMessage);
+        } catch {
+          // Preserve the original startup failure if output persistence also fails.
+        }
+        // Only persist startup-failure metadata when the launch is still
+        // current.  If the task has moved to a newer attempt or generation
+        // (e.g. via recreate-task), writing old workspace/branch metadata
+        // would corrupt the live attempt's state.
+        if (
+          (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
+          && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
+        ) {
+          const execution: Record<string, string> = {};
+          if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
+          if (meta.branch) execution.branch = meta.branch;
+          if (meta.agentSessionId) {
+            execution.agentSessionId = meta.agentSessionId;
+            execution.lastAgentSessionId = meta.agentSessionId;
+          }
+          if (meta.containerId) execution.containerId = meta.containerId;
+          const poolSelection = this.pendingPoolSelections.get(task.id);
+          const selectedSshTargetId = executor.type === 'ssh'
+            ? this.selectedRemoteTargetId(task, poolSelection)
+            : undefined;
+          this.persistence.updateTask(task.id, {
+            config: {
+              runnerKind: executor.type as RunnerKind,
+              ...(selectedSshTargetId ? { poolMemberId: selectedSshTargetId } : {}),
+            },
+            execution: execution as any,
+          });
+        }
+        this.pendingPoolSelections.delete(task.id);
+        this.releasePoolSelectionLease(poolSelectionForStart);
+        const wrapped = new Error(
+          `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+        this.callbacks.onLaunchFailed?.(task.id, wrapped, executor);
+        throw wrapped;
+      } finally {
+        clearInterval(preStartHeartbeatTimer);
+        if (preStartTimeout) clearTimeout(preStartTimeout);
+      }
     }
     traceExecution(`[trace] TaskRunner: task=${task.id} executor.start() returned after ${Date.now() - startT0}ms executor=${executor.type} sessionId=${handle.agentSessionId ?? 'none'} workspace=${handle.workspacePath ?? 'default'}`);
+    this.logger.info(
+      `[TaskRunner] executor.start returned task=${task.id} attempt=${attemptId} executor=${executor.type} ` +
+        `elapsedMs=${Date.now() - startT0} executionId=${handle.executionId} ` +
+        `workspace=${handle.workspacePath ?? 'none'} branch=${handle.branch ?? 'none'} ` +
+        `agentSessionId=${handle.agentSessionId ?? 'none'}`,
+    );
     bench('executor.start.after', {
       executorType: executor.type,
       executorStartMs: Date.now() - startT0,
@@ -750,8 +1051,15 @@ export class TaskRunner {
       } catch (killErr) {
         this.logger.warn(`[TaskRunner] failed to kill rejected launch for task=${task.id}`, { killErr });
       }
+      this.releasePoolSelectionLease(this.pendingPoolSelections.get(task.id));
       this.pendingPoolSelections.delete(task.id);
       await this.cleanupPerTaskDockerExecutor(task);
+      if (dispatchOpts) {
+        dispatchOpts.launchOutbox.failDispatch(
+          dispatchOpts.dispatchId,
+          new Error('Launch rejected as stale or non-executable after executor start'),
+        );
+      }
       bench('markTaskRunningAfterLaunch.rejected');
       return;
     }
@@ -761,6 +1069,7 @@ export class TaskRunner {
     {
       // Fail-fast: workspacePath must be provided by all executors
       if (!handle.workspacePath) {
+        this.releasePoolSelectionLease(this.pendingPoolSelections.get(task.id));
         throw new Error(
           `Executor "${executor.type}" did not provide workspacePath for task "${task.id}". ` +
           `All executors must set workspacePath; refusing to fall back to host repo.`,
@@ -775,14 +1084,22 @@ export class TaskRunner {
         this.pendingPoolSelections.get(task.id),
       );
 
+      const poolSelection = this.pendingPoolSelections.get(task.id);
+      const selectedSshTargetId = executor.type === 'ssh'
+        ? this.selectedRemoteTargetId(task, poolSelection)
+        : undefined;
       const changes = {
-        config: { runnerKind: executor.type as RunnerKind },
+        config: {
+          runnerKind: executor.type as RunnerKind,
+          ...(selectedSshTargetId ? { poolMemberId: selectedSshTargetId } : {}),
+        },
         execution: {
           workspacePath: handle.workspacePath,
           branch: handle.branch ?? undefined,  // Explicit undefined when branch is not applicable (e.g., BYO mode)
           agentSessionId: handle.agentSessionId ?? undefined,
           lastAgentSessionId: handle.agentSessionId ?? undefined,
-          lastAgentName: task.execution.agentName ?? undefined,
+          agentName: actionType === 'ai_task' ? executionAgent : undefined,
+          lastAgentName: actionType === 'ai_task' ? executionAgent : undefined,
           containerId: handle.containerId ?? undefined,
         },
       };
@@ -829,7 +1146,13 @@ export class TaskRunner {
       taskId: task.id,
       poolId: poolSelection?.poolId,
       poolMemberKey: poolSelection?.memberKey,
+      leaseResourceKey: poolSelection?.leaseResourceKey,
+      leaseHolderId: poolSelection?.leaseHolderId,
     });
+    this.logger.info(
+      `[TaskRunner] active execution registered task=${task.id} attempt=${attemptId} ` +
+        `executor=${executor.type} executionId=${handle.executionId} activeExecutions=${this.activeExecutions.size}`,
+    );
     bench('onSpawned.before');
     this.callbacks.onSpawned?.(task.id, handle, executor);
     bench('onSpawned.after');
@@ -843,29 +1166,43 @@ export class TaskRunner {
     executor.onHeartbeat(handle, () => {
       const now = new Date();
       const isRemoteWorkloadHeartbeat = executor.type === 'ssh';
+      if (isRemoteWorkloadHeartbeat) {
+        this.logger.info(
+          `[TaskRunner] ssh heartbeat received task=${task.id} attempt=${attemptId} executionId=${handle.executionId} ` +
+            `at=${now.toISOString()}`,
+        );
+      }
+      const activeLease = this.activeExecutions.get(attemptId);
+      if (activeLease?.leaseResourceKey && activeLease.leaseHolderId) {
+        this.persistence.renewExecutionResourceLease?.(activeLease.leaseResourceKey, activeLease.leaseHolderId);
+      }
       this.persistence.updateAttempt?.(attemptId, {
         lastHeartbeatAt: now,
         leaseExpiresAt: nextLeaseExpiry(now),
       } as any);
-      this.persistence.updateTask(task.id, {
-        execution: {
-          lastHeartbeatAt: now,
-          ...(isRemoteWorkloadHeartbeat
-            ? { remoteHeartbeatAt: now, heartbeatSource: 'remote_workload' as const }
-            : { heartbeatSource: 'executor' as const }),
-        },
-      } as any);
-      this.callbacks.onHeartbeat?.(task.id);
+      this.callbacks.onHeartbeat?.(task.id, {
+        at: now,
+        source: isRemoteWorkloadHeartbeat ? 'remote_workload' : 'executor',
+      });
     });
 
     // Wait for completion and feed response to orchestrator.
     // The callback is serialized through completionChain so that concurrent
     // onComplete firings never overlap inside orchestrator mutations.
-    return new Promise<void>((resolvePromise) => {
+    const completionPromise = new Promise<void>((resolvePromise) => {
       executor.onComplete(handle, async (response: WorkResponse) => {
         const work = async () => {
           const normalizedResponse = response.attemptId ? response : { ...response, attemptId };
+          const activeExecution = this.activeExecutions.get(normalizedResponse.attemptId ?? attemptId);
+          if (activeExecution?.leaseResourceKey && activeExecution.leaseHolderId) {
+            this.persistence.releaseExecutionResourceLease?.(activeExecution.leaseResourceKey, activeExecution.leaseHolderId);
+          }
           this.activeExecutions.delete(normalizedResponse.attemptId ?? attemptId);
+          this.logger.info(
+            `[TaskRunner] completion callback task=${task.id} attempt=${normalizedResponse.attemptId ?? attemptId} ` +
+              `status=${normalizedResponse.status} exitCode=${normalizedResponse.outputs.exitCode ?? 'none'} ` +
+              `executionId=${handle.executionId} activeExecutions=${this.activeExecutions.size}`,
+          );
           try {
             traceExecution(
               `[task-runner] onComplete taskId=${task.id} responseStatus=${response.status} ` +
@@ -877,10 +1214,7 @@ export class TaskRunner {
             this.callbacks.onComplete?.(task.id, normalizedResponse);
 
             const newlyStarted = this.orchestrator.handleWorkerResponse(normalizedResponse) ?? [];
-
-            if (newlyStarted.length > 0) {
-              this.executeTasks(newlyStarted);
-            }
+            this.executeNewlyStartedTasks(newlyStarted, dispatchOpts);
           } catch (err) {
             this.logger.error(`[TaskRunner] onComplete handler failed for task=${task.id}`, { err });
             const errResponse: WorkResponse = {
@@ -908,6 +1242,10 @@ export class TaskRunner {
         resolvePromise();
       });
     });
+    if (dispatchOpts) {
+      dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
+    }
+    return completionPromise;
   }
 
   /**
@@ -941,27 +1279,131 @@ export class TaskRunner {
     return load;
   }
 
-  private selectPoolMember(poolId: string, pool: ExecutionPoolConfig): ExecutionPoolMember | undefined {
+  private poolMemberLimit(pool: ExecutionPoolConfig, member: ExecutionPoolMember): number | undefined {
+    return member.maxConcurrentTasks ?? pool.maxConcurrentTasksPerMember;
+  }
+
+  private poolMemberHasCapacity(poolId: string, pool: ExecutionPoolConfig, member: ExecutionPoolMember): boolean {
+    const limit = this.poolMemberLimit(pool, member);
+    return limit === undefined || this.poolMemberLoad(poolId, this.poolMemberKey(member)) < limit;
+  }
+
+  private selectPoolMember(
+    poolId: string,
+    pool: ExecutionPoolConfig,
+    excludedMemberKeys: Set<string> = new Set(),
+  ): ExecutionPoolMember | undefined {
     if (pool.members.length === 0) return undefined;
 
     if (pool.selectionStrategy === 'roundRobin') {
       const cursor = this.poolRoundRobinCursor.get(poolId) ?? 0;
-      const member = pool.members[cursor % pool.members.length];
-      this.poolRoundRobinCursor.set(poolId, (cursor + 1) % pool.members.length);
-      return member;
+      for (let offset = 0; offset < pool.members.length; offset += 1) {
+        const index = (cursor + offset) % pool.members.length;
+        const member = pool.members[index];
+        if (excludedMemberKeys.has(this.poolMemberKey(member))) continue;
+        if (!this.poolMemberHasCapacity(poolId, pool, member)) continue;
+        this.poolRoundRobinCursor.set(poolId, (index + 1) % pool.members.length);
+        return member;
+      }
+      return undefined;
     }
 
-    const scored = pool.members.map((member, index) => {
+    const scored = pool.members.filter((member) => !excludedMemberKeys.has(this.poolMemberKey(member))).map((member, index) => {
       const memberKey = this.poolMemberKey(member);
       const load = this.poolMemberLoad(poolId, memberKey);
-      const limit = member.maxConcurrentTasks ?? pool.maxConcurrentTasksPerMember;
+      const limit = this.poolMemberLimit(pool, member);
       return { member, index, load, hasCapacity: limit === undefined || load < limit };
     });
-    const candidates = scored.some((entry) => entry.hasCapacity)
-      ? scored.filter((entry) => entry.hasCapacity)
-      : scored;
+    const candidates = scored.filter((entry) => entry.hasCapacity);
     candidates.sort((a, b) => a.load - b.load || a.index - b.index);
     return candidates[0]?.member;
+  }
+
+  private poolCapacitySnapshot(poolId: string, pool: ExecutionPoolConfig): Array<{
+    memberId: string;
+    memberType: string;
+    load: number;
+    limit: number | undefined;
+  }> {
+    return pool.members.map((member) => {
+      const memberKey = this.poolMemberKey(member);
+      return {
+        memberId: member.id,
+        memberType: member.type,
+        load: this.poolMemberLoad(poolId, memberKey),
+        limit: this.poolMemberLimit(pool, member),
+      };
+    });
+  }
+
+  private poolCapacityError(taskId: string, poolId: string, pool: ExecutionPoolConfig, excludedMemberKeys: Set<string>): Error {
+    const snapshot = this.poolCapacitySnapshot(poolId, pool);
+    const message = `Execution pool "${poolId}" has no member capacity available`;
+    const resourceLimit = new ResourceLimitError(message);
+    this.persistence.logEvent?.(taskId, 'task.executor.deferred', {
+      reason: 'execution-pool-capacity',
+      poolId,
+      excludedMemberKeys: [...excludedMemberKeys],
+      members: snapshot,
+    });
+    this.logger.info(`[TaskRunner] deferring task: ${message}`, {
+      poolId,
+      excludedMemberKeys: [...excludedMemberKeys],
+      members: snapshot,
+    });
+    return new Error(message, { cause: resourceLimit });
+  }
+
+  private sshResourceKey(target: RemoteTargetDisplay): string {
+    return `ssh:${target.user}@${target.host}:${target.port ?? 22}`;
+  }
+
+  private leaseHolderId(taskId: string, attemptId: string): string {
+    return `${this.runnerInstanceId}:${process.pid}:${taskId}:${attemptId}`;
+  }
+
+  private acquirePoolSelectionLease(task: TaskState, attemptId: string, selection: PoolSelection | undefined): boolean {
+    if (!selection || selection.member.type !== 'ssh') return true;
+    const target = this.getRemoteTargets()[selection.member.id];
+    if (!target) return true;
+    const resourceKey = this.sshResourceKey(target);
+    const holderId = this.leaseHolderId(task.id, attemptId);
+    const acquired = this.persistence.claimExecutionResourceLease?.({
+      resourceKey,
+      resourceType: 'ssh',
+      holderId,
+      taskId: task.id,
+      poolId: selection.poolId,
+      poolMemberId: selection.member.id,
+      metadata: {
+        runnerInstanceId: this.runnerInstanceId,
+        pid: process.pid,
+      },
+    }) ?? true;
+    if (!acquired) {
+      this.persistence.logEvent?.(task.id, 'task.executor.deferred', {
+        reason: 'ssh-resource-lease-held',
+        poolId: selection.poolId,
+        poolMemberId: selection.member.id,
+        resourceKey,
+      });
+      return false;
+    }
+    selection.leaseResourceKey = resourceKey;
+    selection.leaseHolderId = holderId;
+    return true;
+  }
+
+  private renewPoolSelectionLease(selection: PoolSelection | undefined): void {
+    if (!selection?.leaseResourceKey || !selection.leaseHolderId) return;
+    this.persistence.renewExecutionResourceLease?.(selection.leaseResourceKey, selection.leaseHolderId);
+  }
+
+  private releasePoolSelectionLease(selection: PoolSelection | undefined): void {
+    if (!selection?.leaseResourceKey || !selection.leaseHolderId) return;
+    this.persistence.releaseExecutionResourceLease?.(selection.leaseResourceKey, selection.leaseHolderId);
+    selection.leaseResourceKey = undefined;
+    selection.leaseHolderId = undefined;
   }
 
   private logExecutorSelected(
@@ -1038,14 +1480,34 @@ export class TaskRunner {
       ?? (task.config.poolId && this.getRemoteTargets()[task.config.poolId] ? task.config.poolId : undefined);
   }
 
-  selectExecutor(task: TaskState): Executor {
+  selectExecutor(task: TaskState, excludedPoolMemberKeys: Set<string> = new Set()): Executor {
     let effectiveType = task.config.runnerKind ?? (task.config.isMergeNode ? 'merge' : undefined);
     let selectedPoolMemberId: string | undefined;
+    const explicitPoolMemberId = (task.config as { poolMemberId?: string }).poolMemberId;
     this.pendingPoolSelections.delete(task.id);
 
-    if (task.config.poolId) {
+    if (task.config.poolId && explicitPoolMemberId) {
       const pool = this.getExecutionPools()[task.config.poolId];
-      const member = pool ? this.selectPoolMember(task.config.poolId, pool) : undefined;
+      const member = pool?.members.find((candidate) => candidate.type === 'ssh' && candidate.id === explicitPoolMemberId);
+      if (pool && member) {
+        if (
+          excludedPoolMemberKeys.has(this.poolMemberKey(member))
+          || !this.poolMemberHasCapacity(task.config.poolId, pool, member)
+        ) {
+          throw this.poolCapacityError(task.id, task.config.poolId, pool, excludedPoolMemberKeys);
+        }
+        effectiveType = member.type;
+        selectedPoolMemberId = member.id;
+        this.pendingPoolSelections.set(task.id, {
+          poolId: task.config.poolId,
+          member,
+          memberKey: this.poolMemberKey(member),
+          selectionStrategy: pool.selectionStrategy ?? 'roundRobin',
+        });
+      }
+    } else if (task.config.poolId) {
+      const pool = this.getExecutionPools()[task.config.poolId];
+      const member = pool ? this.selectPoolMember(task.config.poolId, pool, excludedPoolMemberKeys) : undefined;
       if (member) {
         effectiveType = member.type;
         selectedPoolMemberId = member.type === 'ssh' ? member.id : undefined;
@@ -1055,13 +1517,15 @@ export class TaskRunner {
           memberKey: this.poolMemberKey(member),
           selectionStrategy: pool.selectionStrategy ?? 'roundRobin',
         });
+      } else if (pool) {
+        throw this.poolCapacityError(task.id, task.config.poolId, pool, excludedPoolMemberKeys);
       }
     }
     if (
       effectiveType === 'ssh'
       && task.config.poolId
       && !selectedPoolMemberId
-      && !(task.config as { poolMemberId?: string }).poolMemberId
+      && !explicitPoolMemberId
       && !this.getRemoteTargets()[task.config.poolId]
     ) {
       effectiveType = 'worktree';
@@ -1139,6 +1603,8 @@ export class TaskRunner {
           managedWorkspaces: target.managedWorkspaces,
           remoteInvokerHome: target.remoteInvokerHome,
           provisionCommand: target.provisionCommand,
+          use_api_key: target.use_api_key === true,
+          secretsFile: target.secretsFile ?? this.dockerConfig.secretsFile,
           remoteHeartbeatIntervalSeconds: target.remoteHeartbeatIntervalSeconds,
         });
         const cacheKey = `${targetId}|${configFingerprint}`;
@@ -1166,6 +1632,8 @@ export class TaskRunner {
           managedWorkspaces: target.managedWorkspaces,
           remoteInvokerHome: target.remoteInvokerHome,
           provisionCommand: target.provisionCommand,
+          useApiKey: target.use_api_key === true,
+          secretsFile: target.secretsFile ?? this.dockerConfig.secretsFile,
           remoteHeartbeatIntervalSeconds: target.remoteHeartbeatIntervalSeconds,
         });
 
@@ -1244,12 +1712,34 @@ export class TaskRunner {
       },
     };
 
+    let publishWorkspacePath = workspacePath;
+    if (task.config.runnerKind === 'ssh') {
+      const poolMemberId = resolveSelectedRemoteTargetId(this, task.id, task);
+      const target = poolMemberId ? this.getRemoteTargetConfig(poolMemberId) : undefined;
+      if (target) {
+        const repairedWorkspacePath = await resolveRemoteBranchOwnerPath(branch, workspacePath, target);
+        if (repairedWorkspacePath && repairedWorkspacePath !== workspacePath) {
+          publishWorkspacePath = repairedWorkspacePath;
+          this.persistence.updateTask(task.id, {
+            execution: {
+              workspacePath: repairedWorkspacePath,
+            },
+          });
+          this.persistence.logEvent?.(task.id, 'debug.approved-fix', {
+            phase: 'publish-approved-fix-remote-path-repaired',
+            previousWorkspacePath: workspacePath,
+            repairedWorkspacePath,
+          });
+        }
+      }
+    }
+
     const executor = this.selectExecutor(task);
     let result: { commitHash?: string; error?: string };
     if (executor instanceof SshExecutor) {
-      result = await executor.publishApprovedFix(workspacePath, request, branch);
+      result = await executor.publishApprovedFix(publishWorkspacePath, request, branch);
     } else if (executor instanceof BaseExecutor) {
-      result = await executor.publishApprovedFix(workspacePath, request, branch);
+      result = await executor.publishApprovedFix(publishWorkspacePath, request, branch);
     } else {
       throw new Error(
         `Executor ${executor.type} does not support approved-fix publish for task ${task.id}`,
@@ -1446,50 +1936,16 @@ export class TaskRunner {
   }
 
   /**
-   * @internal Read-only git queries only. For mutations, use execGitIn.
+   * @internal Read-only git queries only. Config mutations must use git-config-mutation helpers.
    */
   execGitReadonly(args: string[], cwd?: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', args, {
-        cwd: cwd ?? this.cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(
-          `git ${args.join(' ')} failed (code ${code}): ${stderr.trim()}${stdout.trim() ? '\n' + stdout.trim() : ''}`
-        ));
-      });
-    });
+    assertNotGitConfigMutation(args, 'TaskRunner.execGitReadonly');
+    return execGitWithTimeout(args, cwd ?? this.cwd);
   }
 
   /** @internal */ execGitIn(args: string[], dir: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn('git', args, {
-        cwd: dir,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-      child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
-      child.on('error', (err) => {
-        reject(new Error(`Failed to spawn git: ${err.message}`));
-      });
-      child.on('close', (code) => {
-        if (code === 0) resolvePromise(stdout.trim());
-        else reject(new Error(
-          `git ${args.join(' ')} failed (code ${code}): ${stderr.trim()}${stdout.trim() ? '\n' + stdout.trim() : ''}`
-        ));
-      });
-    });
+    assertNotGitConfigMutation(args, 'TaskRunner.execGitIn');
+    return execGitWithTimeout(args, dir);
   }
 
   /** @internal */ async createMergeWorktree(ref: string, label: string, repoUrl?: string): Promise<string> {
@@ -1527,7 +1983,12 @@ export class TaskRunner {
       // Fallback: read origin from the host repo (old behavior)
       originUrl = (await this.execGitReadonly(['remote', 'get-url', 'origin'])).trim();
     }
-    await this.execGitIn(['remote', 'set-url', 'origin', originUrl], clonePath);
+    await ensureRemoteUrl({
+      cwd: clonePath,
+      remote: 'origin',
+      url: originUrl,
+      context: { caller: 'TaskRunner.createMergeWorktree', detail: `${label}:${ref}` },
+    });
 
     // Refresh the requested base branch from the real remote. The pool mirror's
     // local refs/heads/* can go stale after force-pushes or history rewrites,
@@ -1776,8 +2237,17 @@ export class TaskRunner {
    * Fix a failed task by spawning an agent with the error output.
    * The agent's output is captured and appended to the task's output stream for auditing.
    */
-  async fixWithAgent(taskId: string, taskOutput: string, agentName?: string, savedError?: string): Promise<void> {
-    return this.withAttemptHeartbeat(taskId, () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError));
+  async fixWithAgent(
+    taskId: string,
+    taskOutput: string,
+    agentName?: string,
+    savedError?: string,
+    fixContext?: string,
+  ): Promise<void> {
+    return this.withAttemptHeartbeat(
+      taskId,
+      () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError, fixContext),
+    );
   }
 
   private async withAttemptHeartbeat<T>(taskId: string, work: () => Promise<T>): Promise<T> {
@@ -1792,7 +2262,7 @@ export class TaskRunner {
         lastHeartbeatAt: now,
         leaseExpiresAt: nextLeaseExpiry(now),
       } as any);
-      this.callbacks.onHeartbeat?.(taskId);
+      this.callbacks.onHeartbeat?.(taskId, { at: now, source: 'executor' });
     };
 
     const heartbeatTimer = setInterval(heartbeat, PRE_START_HEARTBEAT_INTERVAL_MS);
@@ -1803,19 +2273,21 @@ export class TaskRunner {
     }
   }
 
-  resumeMergeGatePolling(): void {
-    if (!this.mergeGateProvider) return;
-    for (const task of this.orchestrator.getAllTasks()) {
-      if (
-        task.config.isMergeNode &&
-        (task.status === 'review_ready' || task.status === 'awaiting_approval') &&
-        task.execution.reviewId &&
-        !this.activePrPollers.has(task.id)
-      ) {
-        this.logger.info(`[merge-gate] Resuming PR polling for ${task.id} (PR ${task.execution.reviewId})`);
-        this.startPrPolling(task.id, task.execution.reviewId, task.config.workflowId!);
-      }
-    }
+  async closeWorkflowReview(workflowId: string): Promise<void> {
+    if (!this.mergeGateProvider?.closeReview) return;
+    const getAllTasks = this.orchestrator.getAllTasks?.bind(this.orchestrator);
+    if (!getAllTasks) return;
+    const mergeTask = getAllTasks().find((task) =>
+      task.config.workflowId === workflowId
+      && task.config.isMergeNode
+      && !!task.execution.reviewId
+    );
+    if (!mergeTask?.execution.reviewId) return;
+
+    await this.mergeGateProvider.closeReview({
+      identifier: mergeTask.execution.reviewId,
+      cwd: mergeTask.execution.workspacePath ?? this.cwd,
+    });
   }
 
   private async handleApprovedMergeGate(
@@ -1825,11 +2297,24 @@ export class TaskRunner {
   ): Promise<void> {
     const sourceSuffix = source ? ` (${source})` : '';
     this.logger.info(`[merge-gate] PR ${reviewId} approved${sourceSuffix}, completing merge gate`);
-    this.stopPrPolling(taskId);
     const newlyStarted = await this.orchestrator.approve(taskId);
     if (newlyStarted.length > 0) {
       await this.executeTasks(newlyStarted);
     }
+  }
+
+  private handleClosedMergeGate(
+    taskId: string,
+    reviewId: string,
+    statusText: string,
+    source?: 'refresh' | 'manual check',
+  ): void {
+    const sourceSuffix = source ? ` (${source})` : '';
+    this.logger.info(`[merge-gate] PR ${reviewId} closed${sourceSuffix}: ${statusText}`);
+    this.persistence.updateTask(taskId, {
+      status: 'closed',
+      execution: { reviewStatus: statusText },
+    });
   }
 
   async checkMergeGateStatuses(): Promise<void> {
@@ -1846,59 +2331,28 @@ export class TaskRunner {
             identifier: task.execution.reviewId,
             cwd: gateCwd,
           });
-          this.persistence.updateTask(task.id, {
-            execution: { reviewStatus: status.statusText },
-          });
-          if (status.approved) {
+          if (status.closed) {
+            this.handleClosedMergeGate(task.id, task.execution.reviewId, status.statusText, 'refresh');
+          } else if (status.approved) {
+            this.persistence.updateTask(task.id, {
+              execution: { reviewStatus: status.statusText },
+            });
             await this.handleApprovedMergeGate(task.id, task.execution.reviewId, 'refresh');
           } else if (status.rejected) {
+            this.persistence.updateTask(task.id, {
+              execution: { reviewStatus: status.statusText },
+            });
             this.logger.info(`[merge-gate] PR ${task.execution.reviewId} rejected (refresh): ${status.statusText}`);
-            this.stopPrPolling(task.id);
+          } else {
+            this.persistence.updateTask(task.id, {
+              execution: { reviewStatus: status.statusText },
+            });
+            await this.maybeTriggerReviewGateCiFix(task, status);
           }
         } catch (err) {
           this.logger.error(`[merge-gate] PR status check error for ${task.id}`, { err });
         }
       }
-    }
-  }
-
-  /** @internal */ startPrPolling(taskId: string, reviewId: string, workflowId: string): void {
-    const pollIntervalMs = 30_000;
-    const interval = setInterval(async () => {
-      try {
-        if (!this.mergeGateProvider) return;
-        const pollTask = this.orchestrator.getTask(taskId);
-        const pollCwd = pollTask?.execution.workspacePath ?? this.cwd;
-        const status = await this.mergeGateProvider.checkApproval({
-          identifier: reviewId,
-          cwd: pollCwd,
-        });
-
-        // Update PR status on task
-        this.persistence.updateTask(taskId, {
-          execution: { reviewStatus: status.statusText },
-        });
-
-        if (status.approved) {
-          await this.handleApprovedMergeGate(taskId, reviewId);
-        } else if (status.rejected) {
-          this.logger.info(`[merge-gate] PR ${reviewId} rejected: ${status.statusText}`);
-          this.stopPrPolling(taskId);
-          // Leave in review_ready/awaiting_approval — user can retry
-        }
-      } catch (err) {
-        this.logger.error(`[merge-gate] PR poll error for ${taskId}`, { err });
-        // Continue polling on transient errors
-      }
-    }, pollIntervalMs);
-    this.activePrPollers.set(taskId, interval);
-  }
-
-  private stopPrPolling(taskId: string): void {
-    const interval = this.activePrPollers.get(taskId);
-    if (interval) {
-      clearInterval(interval);
-      this.activePrPollers.delete(taskId);
     }
   }
 
@@ -1916,18 +2370,62 @@ export class TaskRunner {
         cwd: manualCwd,
       });
 
-      this.persistence.updateTask(taskId, {
-        execution: { reviewStatus: status.statusText },
-      });
-
-      if (status.approved) {
+      if (status.closed) {
+        this.handleClosedMergeGate(taskId, reviewId, status.statusText, 'manual check');
+      } else if (status.approved) {
+        this.persistence.updateTask(taskId, {
+          execution: { reviewStatus: status.statusText },
+        });
         await this.handleApprovedMergeGate(taskId, reviewId, 'manual check');
       } else if (status.rejected) {
+        this.persistence.updateTask(taskId, {
+          execution: { reviewStatus: status.statusText },
+        });
         this.logger.info(`[merge-gate] PR ${reviewId} rejected (manual check): ${status.statusText}`);
-        this.stopPrPolling(taskId);
+      } else {
+        this.persistence.updateTask(taskId, {
+          execution: { reviewStatus: status.statusText },
+        });
+        await this.maybeTriggerReviewGateCiFix(task, status);
       }
     } catch (err) {
       this.logger.error(`[merge-gate] Manual PR check error for ${taskId}`, { err });
+    }
+  }
+
+  private async maybeTriggerReviewGateCiFix(
+    task: TaskState,
+    status: MergeGateApprovalStatus,
+  ): Promise<void> {
+    if (!this.onReviewGateCiFailure) return;
+    if (!task.config.workflowId || !task.execution.reviewId) return;
+    if (status.checks?.state !== 'failure' || status.checks.failed.length === 0) return;
+
+    const key = [
+      task.id,
+      task.execution.selectedAttemptId ?? 'no-attempt',
+      task.execution.generation ?? 0,
+      status.headSha ?? 'no-head-sha',
+    ].join(':');
+    if (this.reviewGateCiFixInFlight.has(key)) return;
+
+    this.reviewGateCiFixInFlight.add(key);
+    try {
+      await this.onReviewGateCiFailure({
+        taskId: task.id,
+        workflowId: task.config.workflowId,
+        reviewId: task.execution.reviewId,
+        reviewUrl: status.url,
+        headSha: status.headSha,
+        headRef: status.headRef,
+        branch: task.execution.branch,
+        selectedAttemptId: task.execution.selectedAttemptId,
+        generation: task.execution.generation ?? 0,
+        failedChecks: status.checks.failed,
+        statusText: status.statusText,
+      });
+    } finally {
+      this.reviewGateCiFixInFlight.delete(key);
     }
   }
 
@@ -2097,9 +2595,16 @@ export class TaskRunner {
     managedWorkspaces?: boolean;
     remoteInvokerHome?: string;
     provisionCommand?: string;
+    use_api_key?: boolean;
+    secretsFile?: string;
     remoteHeartbeatIntervalSeconds?: number;
   } | undefined {
-    return this.getRemoteTargets()[targetId];
+    const target = this.getRemoteTargets()[targetId];
+    if (!target) return undefined;
+    return {
+      ...target,
+      secretsFile: target.secretsFile ?? this.dockerConfig.secretsFile,
+    };
   }
 
   /**
@@ -2292,10 +2797,7 @@ export class TaskRunner {
     workflowId: string,
     baseBranch: string,
   ): Promise<{ success: boolean; rebasedBranches: string[]; errors: string[] }> {
-    const allTasks = this.orchestrator.getAllTasks();
-    const taskBranches = allTasks
-      .filter((t) => t.config.workflowId === workflowId && t.status === 'completed' && t.execution.branch && !t.config.isMergeNode)
-      .map((t) => t.execution.branch!);
+    const taskBranches = this.collectManagedWorkflowBranches(workflowId);
 
     const rebaseWorkflow = this.persistence.loadWorkflow?.(workflowId);
     const rebaseRepoUrl = rebaseWorkflow?.repoUrl;
@@ -2338,17 +2840,12 @@ export class TaskRunner {
   ): Promise<void> {
     const trimmedBranchRepoUrl = branchRepoUrl?.trim();
     if (trimmedBranchRepoUrl) {
-      try {
-        await this.execGitIn(
-          ['remote', 'set-url', TaskRunner.BRANCH_REMOTE_NAME, trimmedBranchRepoUrl],
-          worktreeDir,
-        );
-      } catch {
-        await this.execGitIn(
-          ['remote', 'add', TaskRunner.BRANCH_REMOTE_NAME, trimmedBranchRepoUrl],
-          worktreeDir,
-        );
-      }
+      await ensureRemoteUrl({
+        cwd: worktreeDir,
+        remote: TaskRunner.BRANCH_REMOTE_NAME,
+        url: trimmedBranchRepoUrl,
+        context: { caller: 'TaskRunner.pushBranchFromMergeWorktree', detail: branch },
+      });
       await this.execGitIn(
         ['push', '--force', TaskRunner.BRANCH_REMOTE_NAME, `${branch}:refs/heads/${branch}`],
         worktreeDir,

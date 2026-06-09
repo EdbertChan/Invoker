@@ -380,7 +380,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     ]);
   });
 
-  it('evicts older queued workflow intents when recreate-with-rebase fence starts', async () => {
+  it('evicts older queued workflow intents when rebase-recreate fence starts', async () => {
     const adapter = await SQLiteAdapter.create(':memory:');
     adapters.push(adapter);
     adapter.saveWorkflow({
@@ -408,22 +408,22 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     void running.catch(() => {});
     const olderQueued = coordinator.enqueue<void>('wf-1', 'normal', 'invoker:edit-task-agent', ['old-queued']);
     void olderQueued.catch(() => {});
-    const recreateWithRebase = coordinator.enqueue<void>('wf-1', 'high', 'invoker:recreate-with-rebase', ['wf-1']);
+    const rebaseRecreate = coordinator.enqueue<void>('wf-1', 'high', 'invoker:rebase-recreate', ['wf-1']);
     const newerQueued = coordinator.enqueue<void>('wf-1', 'normal', 'invoker:edit-task-agent', ['new-queued']);
 
-    await recreateWithRebase;
+    await rebaseRecreate;
     await newerQueued;
     await expect(running).rejects.toThrow(/superseded by recreate intent/i);
     await expect(olderQueued).rejects.toThrow(/evicted/i);
 
     expect(order).toEqual([
       'invoker:fix-with-agent:wf-1/blocker-task',
-      'invoker:recreate-with-rebase:wf-1',
+      'invoker:rebase-recreate:wf-1',
       'invoker:edit-task-agent:new-queued',
     ]);
   });
 
-  it('invalidates an older running workflow intent when recreate-with-rebase is enqueued', async () => {
+  it('invalidates an older running workflow intent when rebase-recreate is enqueued', async () => {
     const adapter = await SQLiteAdapter.create(':memory:');
     adapters.push(adapter);
     adapter.saveWorkflow({
@@ -456,13 +456,13 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     void olderRunning.catch(() => {});
     await waitFor(() => adapter.listWorkflowMutationIntents('wf-1', ['running']).length === 1);
 
-    const recreateWithRebase = coordinator.enqueue<void>(
+    const rebaseRecreate = coordinator.enqueue<void>(
       'wf-1',
       'high',
-      'invoker:recreate-with-rebase',
+      'invoker:rebase-recreate',
       ['wf-1'],
     );
-    await recreateWithRebase;
+    await rebaseRecreate;
     await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
 
     const intentsAfterRecreate = adapter.listWorkflowMutationIntents('wf-1');
@@ -471,11 +471,11 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(intentsAfterRecreate.find((intent) => intent.id === 2)?.status).toBe('completed');
     expect(order).toEqual([
       'invoker:fix-with-agent:wf-1/blocker-task',
-      'invoker:recreate-with-rebase:wf-1',
+      'invoker:rebase-recreate:wf-1',
     ]);
   });
 
-  it('treats headless recreate-with-rebase as a recreate fence', async () => {
+  it('treats headless rebase-recreate as a recreate fence', async () => {
     const adapter = await SQLiteAdapter.create(':memory:');
     adapters.push(adapter);
     adapter.saveWorkflow({
@@ -504,22 +504,22 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     void running.catch(() => {});
     const olderQueued = coordinator.enqueue<void>('wf-1', 'normal', 'invoker:edit-task-agent', ['old-queued']);
     void olderQueued.catch(() => {});
-    const recreateWithRebase = coordinator.enqueue<void>(
+    const rebaseRecreate = coordinator.enqueue<void>(
       'wf-1',
       'high',
       'headless.exec',
-      [{ args: ['recreate-with-rebase', 'wf-1'], noTrack: true }],
+      [{ args: ['rebase-recreate', 'wf-1'], noTrack: true }],
     );
     const newerQueued = coordinator.enqueue<void>('wf-1', 'normal', 'invoker:edit-task-agent', ['new-queued']);
 
-    await recreateWithRebase;
+    await rebaseRecreate;
     await newerQueued;
     await expect(running).rejects.toThrow(/superseded by recreate intent/i);
     await expect(olderQueued).rejects.toThrow(/evicted/i);
 
     expect(order).toEqual([
       'invoker:fix-with-agent:wf-1/blocker-task',
-      'headless.exec:recreate-with-rebase wf-1',
+      'headless.exec:rebase-recreate wf-1',
       'invoker:edit-task-agent:new-queued',
     ]);
   });
@@ -567,6 +567,85 @@ describe('PersistedWorkflowMutationCoordinator', () => {
       'invoker:retry-workflow:wf-1',
       'invoker:edit-task-agent:new-queued',
     ]);
+  });
+
+  it('coalesces duplicate fire-and-forget headless workflow retries while queued or running', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({
+      id: 'wf-1',
+      name: 'wf-1',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    adapter.saveWorkflow({
+      id: 'wf-2',
+      name: 'wf-2',
+      status: 'running',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const runningGate = deferred();
+    const order: string[] = [];
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (_channel, args) => {
+        const payload = args[0] as { args?: string[] } | undefined;
+        const command = payload?.args?.join(' ') ?? String(args[0]);
+        order.push(command);
+        if (command === 'retry wf-2') {
+          await runningGate.promise;
+        }
+      },
+    );
+
+    const firstQueued = coordinator.submit(
+      'wf-1',
+      'high',
+      'headless.exec',
+      [{ args: ['retry', 'wf-1'], noTrack: true }],
+      { deferDrain: true },
+    );
+    const queuedDuplicates = Array.from({ length: 25 }, () =>
+      coordinator.submit(
+        'wf-1',
+        'high',
+        'headless.exec',
+        [{ args: ['retry', 'wf-1'], noTrack: true }],
+        { deferDrain: true },
+      ),
+    );
+
+    expect(new Set([firstQueued, ...queuedDuplicates])).toEqual(new Set([firstQueued]));
+
+    const firstRunning = coordinator.submit(
+      'wf-2',
+      'high',
+      'headless.exec',
+      [{ args: ['retry', 'wf-2'], noTrack: true }],
+    );
+    await waitFor(() => order.includes('retry wf-2'));
+
+    const runningDuplicates = Array.from({ length: 25 }, () =>
+      coordinator.submit(
+        'wf-2',
+        'high',
+        'headless.exec',
+        [{ args: ['retry', 'wf-2'], noTrack: true }],
+      ),
+    );
+
+    expect(new Set([firstRunning, ...runningDuplicates])).toEqual(new Set([firstRunning]));
+    runningGate.resolve();
+
+    await waitFor(() => adapter.listWorkflowMutationIntents(undefined, ['completed']).length === 2);
+
+    expect(order.sort()).toEqual(['retry wf-1', 'retry wf-2']);
+    expect(adapter.listWorkflowMutationIntents('wf-1')).toHaveLength(1);
+    expect(adapter.listWorkflowMutationIntents('wf-2')).toHaveLength(1);
   });
 
   it('requeues interrupted running workflow mutations on restart and drains persisted queued work', async () => {
@@ -1433,7 +1512,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
   });
 
-  it('aborts the dispatch AbortSignal when recreate-with-rebase preempts a running fix mutation', async () => {
+  it('aborts the dispatch AbortSignal when rebase-recreate preempts a running fix mutation', async () => {
     const adapter = await SQLiteAdapter.create(':memory:');
     adapters.push(adapter);
     adapter.saveWorkflow({
@@ -1471,7 +1550,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     const recreateRebase = coordinator.enqueue<void>(
       'wf-1',
       'high',
-      'invoker:recreate-with-rebase',
+      'invoker:rebase-recreate',
       ['wf-1'],
     );
     await recreateRebase;

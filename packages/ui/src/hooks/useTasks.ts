@@ -72,6 +72,8 @@ export function useTasks(): UseTasksResult {
   const getTasksGenerationRef = useRef(0);
   const reportedStartupBootstrapRef = useRef(false);
   const reportedStartupSnapshotRef = useRef(false);
+  const lastSeenSequenceRef = useRef<number>(bootstrapState?.streamSequence ?? 0);
+  const isResyncInFlightRef = useRef<boolean>(false);
 
   const fetchAll = useCallback((forceRefresh = false) => {
     if (typeof window === 'undefined' || !window.invoker) return;
@@ -84,16 +86,6 @@ export function useTasks(): UseTasksResult {
       }
       const taskList = result.tasks ?? [];
       const wfList = result.workflows ?? [];
-      const bootstrapTaskCount = bootstrapState?.tasks?.length ?? 0;
-      if (!forceRefresh && bootstrapTaskCount > taskList.length) {
-        void window.invoker?.reportUiPerf?.('startup_snapshot_skipped_smaller_than_bootstrap', {
-          bootstrapTaskCount,
-          snapshotTaskCount: taskList.length,
-          workflowCount: wfList.length,
-          requestDurationMs,
-        });
-        return;
-      }
       const replaceStartedAt = performance.now();
       // Always replace from server snapshot — empty lists mean "no tasks/workflows" (e.g. after delete).
       setTasks(() => {
@@ -111,6 +103,10 @@ export function useTasks(): UseTasksResult {
         }
         return wfMap;
       });
+      if (typeof result.streamSequence === 'number') {
+        lastSeenSequenceRef.current = result.streamSequence;
+      }
+      isResyncInFlightRef.current = false;
       const replaceDurationMs = performance.now() - replaceStartedAt;
       void window.invoker.reportUiPerf?.('useTasks_snapshot_replace', {
         taskCount: taskList.length,
@@ -139,15 +135,15 @@ export function useTasks(): UseTasksResult {
   useEffect(() => {
     if (typeof window === 'undefined' || !window.invoker) return;
 
-    if (
-      !reportedStartupBootstrapRef.current &&
-      bootstrapState &&
-      ((bootstrapState.tasks?.length ?? 0) > 0 || (bootstrapState.workflows?.length ?? 0) > 0)
-    ) {
+    const bootstrapTaskCount = bootstrapState?.tasks?.length ?? 0;
+    const bootstrapWorkflowCount = bootstrapState?.workflows?.length ?? 0;
+    const bootstrapHasState = bootstrapTaskCount > 0 || bootstrapWorkflowCount > 0;
+
+    if (!reportedStartupBootstrapRef.current && bootstrapState && bootstrapHasState) {
       reportedStartupBootstrapRef.current = true;
       void window.invoker.reportUiPerf?.('startup_bootstrap_state', {
-        taskCount: bootstrapState.tasks?.length ?? 0,
-        workflowCount: bootstrapState.workflows?.length ?? 0,
+        taskCount: bootstrapTaskCount,
+        workflowCount: bootstrapWorkflowCount,
         elapsedMs: Math.round(performance.now()),
         processElapsedMs: bootstrapState.appStartedAtEpochMs
           ? Date.now() - bootstrapState.appStartedAtEpochMs
@@ -155,10 +151,33 @@ export function useTasks(): UseTasksResult {
       });
     }
 
-    fetchAll();
+    // Preload bootstrap already hydrated tasks/workflows synchronously, so
+    // the immediate non-forced snapshot would be a redundant full payload.
+    // Skip it when bootstrap is populated; deltas keep state live, and
+    // explicit refreshTasks() / refreshTasks(true) callers still run fetchAll.
+    if (bootstrapHasState) {
+      reportedStartupSnapshotRef.current = true;
+      void window.invoker.reportUiPerf?.('startup_snapshot_skipped_bootstrap_complete', {
+        bootstrapTaskCount,
+        bootstrapWorkflowCount,
+        elapsedMs: Math.round(performance.now()),
+        processElapsedMs: bootstrapState?.appStartedAtEpochMs
+          ? Date.now() - bootstrapState.appStartedAtEpochMs
+          : undefined,
+      });
+    } else {
+      fetchAll();
+    }
 
     deltaPipelineRef.current = createTaskDeltaPipeline({
       flushMs: 100,
+      maxBatchSize: 200,
+      onLargeBatch: ({ batchSize, remaining }) => {
+        void window.invoker?.reportUiPerf?.('ui_delta_large_batch_chunked', {
+          batchSize,
+          remaining,
+        });
+      },
       onBatch: (batch) => {
         let shouldRefreshWorkflows = false;
 
@@ -214,6 +233,26 @@ export function useTasks(): UseTasksResult {
               `execPatchKeys=${ex ? Object.keys(ex).join(',') : '—'}`,
           );
         }
+      }
+
+      const seq = delta.streamSequence;
+      if (typeof seq === 'number') {
+        const lastSeen = lastSeenSequenceRef.current;
+        if (seq <= lastSeen) return;
+        if (isResyncInFlightRef.current) return;
+        if (seq !== lastSeen + 1) {
+          const gapSize = seq - (lastSeen + 1);
+          window.invoker.reportUiPerf?.('ui_delta_stream_gap_detected', {
+            expected: lastSeen + 1,
+            actual: seq,
+            gapSize,
+          });
+          isResyncInFlightRef.current = true;
+          deltaPipelineRef.current?.clear();
+          fetchAll(true);
+          return;
+        }
+        lastSeenSequenceRef.current = seq;
       }
 
       deltaPipelineRef.current?.push(delta);

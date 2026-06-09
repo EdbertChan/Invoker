@@ -6,6 +6,7 @@ import { bashPreserveOrReset, bashMergeUpstreams, bashFetchNodeRemotes, parsePre
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { checkStaleness } from './git-staleness-detector.js';
+import { assertNotGitConfigMutation, ensureRemoteUrl } from './git-config-mutation.js';
 
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -65,6 +66,23 @@ export interface SemanticFailure {
   message: string;
   syntheticExitCode?: number;
 }
+
+const TRANSIENT_GIT_TRANSPORT_ERROR_PATTERNS = [
+  /could not resolve host/i,
+  /could not resolve hostname/i,
+  /could not resolve proxy/i,
+  /temporary failure in name resolution/i,
+  /name or service not known/i,
+  /nodename nor servname provided/i,
+  /network is unreachable/i,
+  /no route to host/i,
+  /connection timed out/i,
+  /operation timed out/i,
+  /connection reset by peer/i,
+  /connection refused/i,
+  /failed to connect to .* port \d+/i,
+  /the requested url returned error: 5\d\d/i,
+];
 
 export class MergeConflictError extends Error {
   constructor(
@@ -430,6 +448,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     cwd: string,
     opts?: { signal?: AbortSignal },
   ): Promise<string> {
+    assertNotGitConfigMutation(args, `${this.type}.execGitSimple`);
     const stack = new Error().stack;
     const callerFrames = stack?.split('\n').slice(1, 5).map(l => l.trim()).join('\n    ') ?? '(no stack)';
     traceExecution(`[git-trace] git ${args.join(' ')}  cwd=${cwd}\n    ${callerFrames}`);
@@ -529,8 +548,12 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     setupBranchExplicitBase?: string,
   ): Promise<void> {
     const upstreams = request.inputs.upstreamBranches ?? [];
+    const upstreamsToMerge = this.selectUpstreamBranchesToMerge(
+      upstreams,
+      request.inputs.baseBranch,
+      setupBranchExplicitBase,
+    );
     const baseFromUpstream = !setupBranchExplicitBase && upstreams.length > 0;
-    const upstreamsToMerge = baseFromUpstream ? upstreams.slice(1) : upstreams;
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} [mergeRequestUpstreamBranches] upstreamsToMerge=${JSON.stringify(upstreamsToMerge)} ` +
         `(baseFromUpstream=${baseFromUpstream}) mergeCwd=${mergeCwd}`,
@@ -570,6 +593,26 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       }
       throw err;
     }
+  }
+
+  private selectUpstreamBranchesToMerge(
+    upstreamBranches: string[],
+    requestBaseBranch?: string,
+    setupBranchExplicitBase?: string,
+  ): string[] {
+    const requestBase = requestBaseBranch?.trim();
+    // Contract: upstreamBranches may be shaped as
+    // [workflowBase, dependencyBranch, ...]. When the workflow base was already
+    // resolved and supplied explicitly, do not merge that marker again.
+    if (setupBranchExplicitBase && requestBase && upstreamBranches[0] === requestBase) {
+      return upstreamBranches.slice(1);
+    }
+
+    if (!setupBranchExplicitBase && upstreamBranches.length > 0) {
+      return upstreamBranches.slice(1);
+    }
+
+    return upstreamBranches;
   }
 
   protected async setupTaskBranch(
@@ -812,23 +855,18 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
         : undefined);
       const branchRepoUrl = requestBranchRepoUrl?.trim();
       if (branchRepoUrl) {
-        try {
-          await this.execGitSimple(
-            ['remote', 'set-url', BaseExecutor.BRANCH_REMOTE_NAME, branchRepoUrl],
-            cwd,
-          );
-        } catch {
-          await this.execGitSimple(
-            ['remote', 'add', BaseExecutor.BRANCH_REMOTE_NAME, branchRepoUrl],
-            cwd,
-          );
-        }
+        await ensureRemoteUrl({
+          cwd,
+          remote: BaseExecutor.BRANCH_REMOTE_NAME,
+          url: branchRepoUrl,
+          context: { caller: `${this.type}.pushBranchToRemote`, detail: branch },
+        });
         await this.execGitSimpleWithNetworkTimeout(
-          ['push', '--force-with-lease', '-u', BaseExecutor.BRANCH_REMOTE_NAME, branch],
+          ['push', '--force-with-lease', BaseExecutor.BRANCH_REMOTE_NAME, `${branch}:refs/heads/${branch}`],
           cwd,
         );
       } else {
-        await this.execGitSimpleWithNetworkTimeout(['push', '--force-with-lease', '-u', 'origin', branch], cwd);
+        await this.execGitSimpleWithNetworkTimeout(['push', '--force-with-lease', 'origin', `${branch}:refs/heads/${branch}`], cwd);
       }
       return undefined;
     } catch (err) {
@@ -837,6 +875,10 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       if (executionId) this.emitOutput(executionId, msg);
       return err instanceof Error ? err.message : String(err);
     }
+  }
+
+  protected isTransientGitTransportError(error: string): boolean {
+    return TRANSIENT_GIT_TRANSPORT_ERROR_PATTERNS.some((pattern) => pattern.test(error));
   }
 
   // ── Shared command building ─────────────────────────────
@@ -911,7 +953,6 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     },
   ): Promise<void> {
     const entry = this.entries.get(executionId);
-    if (entry) entry.completed = true;
     const bufferedOutput = entry?.outputBuffer.join('') ?? '';
     const semanticFailure = this.detectSemanticFailure(request, bufferedOutput, exitCode);
     const effectiveExitCode = (exitCode === 0 && semanticFailure)
@@ -944,7 +985,14 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       pushError = await this.pushBranchToRemote(cwd, opts.branch, executionId);
     }
     if (effectiveExitCode === 0 && pushError !== undefined && opts?.branch) {
-      status = 'failed';
+      if (this.isTransientGitTransportError(pushError)) {
+        this.emitOutput(
+          executionId,
+          `[${this.type}] Branch push failed due to transient git transport error; preserving successful command result.\n`,
+        );
+      } else {
+        status = 'failed';
+      }
     }
 
     if (opts?.originalBranch) {

@@ -98,6 +98,22 @@ const MERGE_GATE_NO_INLINE_APPROVE_PLAN = {
   ],
 };
 
+/** External-review plan whose merge gate is driven to the terminal `closed` status. */
+const MERGE_GATE_CLOSED_PLAN = {
+  name: 'Merge gate closed status proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'pull_request' as const,
+  mergeMode: 'external_review',
+  tasks: [
+    {
+      id: 'mg-closed-work',
+      description: 'Sole task before closed merge gate',
+      command: 'echo ok',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
 /** Pull-request workflow for proving workflow selection exposes the merge gate PR in the inspector. */
 const REVIEW_READY_WORKFLOW_PR_PLAN = {
   name: 'Review ready workflow PR proof',
@@ -111,6 +127,52 @@ const REVIEW_READY_WORKFLOW_PR_PLAN = {
       command: 'echo review-ready',
       dependencies: [] as string[],
     },
+  ],
+};
+
+const TASK_STATUS_PROOF_SPECS = [
+  { status: 'pending', taskId: 'proof-task-pending', description: 'Pending', label: 'PENDING' },
+  { status: 'running', taskId: 'proof-task-running', description: 'Running', label: 'RUNNING' },
+  { status: 'fixing_with_ai', taskId: 'proof-task-fixing', description: 'Fixing with AI', label: 'FIXING WITH AI' },
+  { status: 'completed', taskId: 'proof-task-completed', description: 'Completed', label: 'COMPLETED' },
+  { status: 'failed', taskId: 'proof-task-failed', description: 'Failed', label: 'FAILED' },
+  { status: 'closed', taskId: 'proof-task-closed', description: 'Closed', label: 'CLOSED' },
+  { status: 'needs_input', taskId: 'proof-task-needs-input', description: 'Needs input', label: 'NEEDS_INPUT' },
+  { status: 'blocked', taskId: 'proof-task-blocked', description: 'Blocked', label: 'BLOCKED' },
+  { status: 'review_ready', taskId: 'proof-task-review-ready', description: 'Review ready', label: 'REVIEW_READY' },
+  { status: 'awaiting_approval', taskId: 'proof-task-awaiting-approval', description: 'Await approval', label: 'APPROVE' },
+  { status: 'stale', taskId: 'proof-task-stale', description: 'Stale', label: 'STALE' },
+] as const;
+
+const WORKFLOW_STATUS_PROOF_STATUSES = [
+  'pending',
+  'running',
+  'fixing_with_ai',
+  'completed',
+  'failed',
+  'closed',
+  'blocked',
+  'review_ready',
+  'awaiting_approval',
+  'stale',
+] as const;
+
+const TASK_STATUS_PROOF_PLAN = {
+  name: 'Task status all states proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    { id: 'proof-task-pending', description: 'Pending', command: 'echo pending', dependencies: [] as string[] },
+    { id: 'proof-task-running', description: 'Running', command: 'echo running', dependencies: [] as string[] },
+    { id: 'proof-task-fixing', description: 'Fixing with AI', command: 'echo fixing', dependencies: [] as string[] },
+    { id: 'proof-task-completed', description: 'Completed', command: 'echo completed', dependencies: ['proof-task-pending'] },
+    { id: 'proof-task-failed', description: 'Failed', command: 'echo failed', dependencies: ['proof-task-running'] },
+    { id: 'proof-task-closed', description: 'Closed', command: 'echo closed', dependencies: ['proof-task-fixing'] },
+    { id: 'proof-task-needs-input', description: 'Needs input', command: 'echo input', dependencies: ['proof-task-completed'] },
+    { id: 'proof-task-blocked', description: 'Blocked', command: 'echo blocked', dependencies: ['proof-task-failed'] },
+    { id: 'proof-task-stale', description: 'Stale', command: 'echo stale', dependencies: ['proof-task-closed'] },
+    { id: 'proof-task-review-ready', description: 'Review ready', command: 'echo review', dependencies: ['proof-task-closed', 'proof-task-stale'] },
+    { id: 'proof-task-awaiting-approval', description: 'Await approval', command: 'echo approval', dependencies: ['proof-task-needs-input'] },
   ],
 };
 
@@ -135,12 +197,96 @@ const MENU_PROOF_PLAN = {
   mergeMode: 'external_review',
 };
 
+const SSH_TERMINAL_RESUME_PLAN = {
+  name: 'SSH Terminal Resume Visual Proof',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'ssh-resume',
+      description: 'Completed SSH resume task',
+      command: 'echo done',
+      dependencies: [] as string[],
+    },
+  ],
+};
+
 function workflowNode(page: Page, workflowId: string) {
   return page.getByTestId(`workflow-node-${workflowId}`);
 }
 
 function taskNodeCard(page: Page, taskIdSuffix: string) {
   return page.locator(`.react-flow__node[data-testid$="${taskIdSuffix}"] > div`).first();
+}
+
+function statusProofWorkflowTaskId(status: string) {
+  return `workflow-status-${status.replaceAll('_', '-')}`;
+}
+
+function statusProofLabel(status: string) {
+  return status.replaceAll('_', ' ');
+}
+
+function taskStatusExecution(status: string, now: Date, earlier: Date) {
+  switch (status) {
+    case 'running':
+      return { startedAt: earlier };
+    case 'fixing_with_ai':
+      return { startedAt: earlier, isFixingWithAI: true };
+    case 'completed':
+      return { startedAt: earlier, completedAt: now, exitCode: 0 };
+    case 'failed':
+      return { startedAt: earlier, completedAt: now, exitCode: 1, error: 'status proof failure' };
+    case 'needs_input':
+      return { startedAt: earlier, inputPrompt: 'Choose a status proof option' };
+    case 'blocked':
+      return { blockedBy: 'proof-task-failed' };
+    case 'review_ready':
+      return { startedAt: earlier, reviewUrl: 'https://example.test/status-proof' };
+    case 'awaiting_approval':
+      return { startedAt: earlier };
+    case 'stale':
+      return { startedAt: earlier, completedAt: now };
+    case 'closed':
+      return { completedAt: now };
+    default:
+      return {};
+  }
+}
+
+async function minimizeInspectorIfVisible(page: Page) {
+  const minimize = page.getByRole('button', { name: 'Minimize inspector' });
+  if (await minimize.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await minimize.click();
+    await expect(page.getByRole('button', { name: 'Maximize inspector' })).toBeVisible({ timeout: 5000 });
+  }
+}
+
+async function expandSelectedWorkflowMiniDagForProof(page: Page) {
+  const panel = page.getByTestId('selected-workflow-mini-dag');
+  await expect(panel).toBeVisible({ timeout: 10000 });
+  await panel.evaluate((element) => {
+    const panelElement = element as HTMLElement;
+    panelElement.style.left = '12px';
+    panelElement.style.right = 'auto';
+    panelElement.style.top = '12px';
+    panelElement.style.width = '1040px';
+    panelElement.style.height = '620px';
+    panelElement.style.backgroundColor = '#111827';
+    const content = panelElement.children.item(1) as HTMLElement | null;
+    if (content) content.style.height = '590px';
+  });
+  await panel.getByRole('button', { name: 'Fit View' }).click();
+  await page.waitForTimeout(300);
+}
+
+async function hideSelectedWorkflowMiniDagIfVisible(page: Page) {
+  const panel = page.getByTestId('selected-workflow-mini-dag');
+  if (await panel.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await panel.evaluate((element) => {
+      (element as HTMLElement).style.display = 'none';
+    });
+  }
 }
 
 async function openContextMenu(page: Page, locator: Locator) {
@@ -202,6 +348,15 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'dag-loaded');
   });
 
+  test('task-graph-keyboard-controls-selected — selected workflow mini DAG framing', async ({ page }) => {
+    await loadPlanAndSelectWorkflow(page, MENU_PROOF_PLAN);
+    const miniDag = page.getByTestId('selected-workflow-mini-dag');
+    await expect(miniDag).toBeVisible();
+    await expect(miniDag.locator('.react-flow__node[data-testid$="task-alpha"]')).toBeVisible();
+    await expect(miniDag.locator('.react-flow__node[data-testid$="task-beta"]')).toBeVisible();
+    await captureScreenshot(page, 'task-graph-keyboard-controls-selected');
+  });
+
   test('task running', async ({ page }) => {
     await loadPlan(page, TEST_PLAN);
     const now = new Date();
@@ -249,6 +404,46 @@ test.describe('Visual proof capture', () => {
     await expect(page.getByText('sleep 5 && echo hello-alpha')).toBeVisible();
     await captureScreenshot(page, 'task-panel');
     await assertPageScreenshot(page, 'task-panel');
+  });
+
+  test('embedded-tabbed-terminal — drawer expands with active task tab', async ({ page, testDir }) => {
+    await loadPlan(page, TEST_PLAN);
+
+    // Materialise a real workspace dir so the main-process executor can resolve
+    // a terminal spec and spawn an embedded shell without a remote SSH target.
+    const workspacePath = path.join(testDir, 'embedded-terminal-workspace');
+    await fs.mkdir(workspacePath, { recursive: true });
+
+    const now = new Date();
+    const earlier = new Date(Date.now() - 5000);
+    await injectTaskStates(page, [
+      {
+        taskId: 'task-alpha',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: earlier, completedAt: now, workspacePath },
+        },
+      },
+    ]);
+
+    // Drawer starts collapsed.
+    await expect(page.getByRole('button', { name: 'Expand terminal drawer' })).toBeVisible();
+    await expect(page.getByTestId('terminal-drawer-body')).toHaveCount(0);
+
+    const taskCard = page.locator('[title$="task-alpha"]').first();
+    await expect(taskCard).toBeVisible({ timeout: 10000 });
+    await taskCard.dispatchEvent('dblclick');
+
+    // Drawer expands; one active tab for task-alpha; terminal pane rendered.
+    await expect(page.getByRole('button', { name: 'Collapse terminal drawer' })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByTestId('terminal-drawer-body')).toBeVisible();
+    const tabs = page.getByTestId('terminal-tab-strip').locator('[data-testid^="terminal-tab-"]');
+    await expect(tabs).toHaveCount(1);
+    await expect(tabs.first()).toHaveAttribute('data-active', 'true');
+    await expect(tabs.first()).toContainText('First test task');
+    await expect(page.locator('[data-testid^="terminal-pane-"]').first()).toBeVisible();
+
+    await captureScreenshot(page, 'embedded-tabbed-terminal');
   });
 
   test('task panel setup failure renders in Error panel', async ({ page }) => {
@@ -390,11 +585,63 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'merge-gate-no-inline-approve');
   });
 
-  test('review-ready workflow exposes pull request in inspector', async ({ page }) => {
+  test('closed-status-merge-gate — merge gate renders the terminal Closed status', async ({ page }) => {
+    await loadPlanAndSelectWorkflow(page, MERGE_GATE_CLOSED_PLAN);
+    await page
+      .locator('.react-flow__node[data-testid$="mg-closed-work"]')
+      .first()
+      .waitFor({ state: 'visible', timeout: 15000 });
+
+    const mergeGateTaskId = await page.evaluate(async () => {
+      const result = await window.invoker.getTasks();
+      const tasks = Array.isArray(result) ? result : result.tasks;
+      const mergeTask = tasks.find((task: { id: string }) => task.id.includes('__merge__'));
+      return mergeTask?.id ?? null;
+    });
+    expect(mergeGateTaskId).toBeTruthy();
+
+    // Deterministic setup: drive the merge gate to `closed` directly — no real GitHub PR.
+    await injectTaskStates(page, [
+      {
+        taskId: mergeGateTaskId!,
+        changes: {
+          status: 'closed',
+          execution: {
+            startedAt: new Date(Date.now() - 5000),
+            completedAt: new Date(),
+            reviewStatus: 'Closed without merge',
+            reviewUrl: 'https://github.com/Neko-Catpital-Labs/Invoker/pull/123',
+          },
+        },
+      },
+    ]);
+
+    const mergeGateNode = page
+      .locator(`.react-flow__node[data-testid="${mergeGateTaskId}"], .react-flow__node[data-testid$="${mergeGateTaskId}"]`)
+      .first();
+    await expect(mergeGateNode).toBeVisible({ timeout: 15000 });
+
+    // Closed is the terminal status the gate displays — distinct from Failed (BLOCKED) and Review Ready.
+    await expect(mergeGateNode.getByText('CLOSED', { exact: true })).toBeVisible();
+    await expect(mergeGateNode.getByText('BLOCKED', { exact: true })).toHaveCount(0);
+    await expect(mergeGateNode.getByText('REVIEW READY', { exact: true })).toHaveCount(0);
+
+    await captureScreenshot(page, 'closed-status-merge-gate');
+  });
+
+  test('workflow inspector captures review-ready and not-review-ready pull request states', async ({ page }) => {
     const workflowId = await loadPlanAndSelectWorkflow(page, REVIEW_READY_WORKFLOW_PR_PLAN);
     await page.locator('.react-flow__node[data-testid$="rr-work"]').first().waitFor({ state: 'visible', timeout: 15000 });
 
     const reviewUrl = 'https://github.com/Neko-Catpital-Labs/Invoker/pull/626';
+
+    await workflowNode(page, workflowId).dispatchEvent('click', { bubbles: true });
+    await expect(page.getByTestId('workflow-inspector-title')).toHaveText('Review ready workflow PR proof');
+    await expect(page.getByText('Inspector', { exact: true })).toHaveCount(0);
+    await expect(page.getByTestId('workflow-inspector-status-label')).not.toContainText('review ready');
+    await expect(page.getByRole('link', { name: reviewUrl })).toHaveCount(0);
+    await captureScreenshot(page, 'not-review-ready-workflow-pr-sidebar');
+
     await injectTaskStates(page, [
       {
         taskId: 'rr-work',
@@ -458,6 +705,171 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'interactive-status-hues');
   });
 
+  test('workflow-task-status-color-parity — workflow and task review_ready share canonical hue', async ({ page }) => {
+    // Load a small plan so the sidebar workflow node and the mini-DAG task nodes
+    // are visible side by side. The workflow status is derived from task counts;
+    // a single review_ready task with the rest completed drives the workflow to
+    // review_ready too (see computeWorkflowStatusFromCounts).
+    await loadPlan(page, TEST_PLAN);
+    const now = new Date();
+    const earlier = new Date(Date.now() - 5000);
+    await injectTaskStates(page, [
+      {
+        taskId: 'task-alpha',
+        changes: {
+          status: 'review_ready',
+          execution: { startedAt: earlier },
+        },
+      },
+      {
+        taskId: 'task-beta',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: earlier, completedAt: now },
+        },
+      },
+      {
+        taskId: 'task-gamma',
+        changes: {
+          status: 'completed',
+          execution: { startedAt: earlier, completedAt: now },
+        },
+      },
+    ]);
+
+    const workflowId = await page.evaluate(async () => {
+      const workflows = await window.invoker.listWorkflows();
+      return workflows[0]?.id ?? null;
+    });
+    expect(workflowId).toBeTruthy();
+
+    // Re-select the workflow so the inspector reflects the derived workflow status.
+    await workflowNode(page, workflowId!).dispatchEvent('click', { bubbles: true });
+
+    // Workflow-level surface: sidebar workflow node displays the workflow-status hue.
+    await expect(workflowNode(page, workflowId!).getByText('review ready')).toBeVisible();
+
+    // Workflow-level surface: inspector header reflects the derived workflow status.
+    await expect(page.getByTestId('workflow-inspector-status-label')).toContainText('review ready');
+
+    // Task-level surface: mini-DAG task node displays the task-status hue.
+    await expect(
+      page.locator('.react-flow__node[data-testid$="task-alpha"]').getByText('REVIEW_READY'),
+    ).toBeVisible();
+
+    await captureScreenshot(page, 'workflow-task-status-color-parity');
+  });
+
+  test('task-status-all-states — task nodes render every persisted status', async ({ page }) => {
+    await loadPlan(page, TASK_STATUS_PROOF_PLAN);
+    await minimizeInspectorIfVisible(page);
+    await expandSelectedWorkflowMiniDagForProof(page);
+
+    const now = new Date();
+    const earlier = new Date(Date.now() - 5000);
+    await injectTaskStates(
+      page,
+      TASK_STATUS_PROOF_SPECS.map((spec) => ({
+        taskId: spec.taskId,
+        changes: {
+          status: spec.status,
+          execution: taskStatusExecution(spec.status, now, earlier),
+        },
+      })),
+    );
+    await page.getByTestId('selected-workflow-mini-dag').getByRole('button', { name: 'Fit View' }).click();
+    await page.waitForTimeout(300);
+
+    for (const spec of TASK_STATUS_PROOF_SPECS) {
+      const node = taskNodeCard(page, spec.taskId);
+      await expect(node).toBeVisible({ timeout: 10000 });
+      await expect(node).toBeInViewport({ timeout: 10000 });
+      await expect(node.getByText(spec.label, { exact: true })).toBeVisible();
+    }
+
+    await captureScreenshot(page, 'task-status-all-states');
+  });
+
+  test('workflow-status-all-states — workflow nodes render every persisted status', async ({ page }) => {
+    const workflowIds = new Map<string, string>();
+    const loadStatusWorkflow = async (
+      status: (typeof WORKFLOW_STATUS_PROOF_STATUSES)[number],
+      dependencies: readonly string[] = [],
+    ) => {
+      const workflowId = await loadPlanAndSelectWorkflow(page, {
+        name: `Status proof ${statusProofLabel(status)}`,
+        repoUrl: E2E_REPO_URL,
+        onFinish: 'none' as const,
+        externalDependencies: dependencies.map((workflowId) => ({
+          workflowId,
+          gatePolicy: 'review_ready' as const,
+        })),
+        tasks: [
+          {
+            id: statusProofWorkflowTaskId(status),
+            description: `${statusProofLabel(status)} workflow task`,
+            command: `echo ${status}`,
+            dependencies: [] as string[],
+          },
+        ],
+      });
+      workflowIds.set(status, workflowId);
+      return workflowId;
+    };
+
+    const pendingId = await loadStatusWorkflow('pending');
+    const runningId = await loadStatusWorkflow('running');
+    const fixingId = await loadStatusWorkflow('fixing_with_ai');
+    const completedId = await loadStatusWorkflow('completed', [pendingId]);
+    const failedId = await loadStatusWorkflow('failed', [runningId]);
+    const closedId = await loadStatusWorkflow('closed', [fixingId]);
+    const blockedId = await loadStatusWorkflow('blocked', [completedId]);
+    await loadStatusWorkflow('review_ready', [failedId]);
+    await loadStatusWorkflow('awaiting_approval', [closedId]);
+    await loadStatusWorkflow('stale', [blockedId]);
+
+    const now = new Date();
+    const earlier = new Date(Date.now() - 5000);
+    for (const status of WORKFLOW_STATUS_PROOF_STATUSES) {
+      expect(workflowIds.get(status)).toBeTruthy();
+    }
+    await injectTaskStates(
+      page,
+      [
+        ...WORKFLOW_STATUS_PROOF_STATUSES.map((status) => ({
+          taskId: statusProofWorkflowTaskId(status),
+          changes: {
+            status,
+            execution: taskStatusExecution(status, now, earlier),
+          },
+        })),
+        ...WORKFLOW_STATUS_PROOF_STATUSES.map((status) => ({
+          taskId: `__merge__${workflowIds.get(status)!}`,
+          changes: {
+            ...(status === 'stale' ? { dependencies: [] as string[] } : {}),
+            status,
+            execution: taskStatusExecution(status, now, earlier),
+          },
+        })),
+      ],
+    );
+
+    await hideSelectedWorkflowMiniDagIfVisible(page);
+    await minimizeInspectorIfVisible(page);
+    await page.getByTestId('workflow-graph-react-flow').getByRole('button', { name: 'Fit View' }).click();
+    await page.waitForTimeout(500);
+
+    for (const status of WORKFLOW_STATUS_PROOF_STATUSES) {
+      const workflowId = workflowIds.get(status);
+      expect(workflowId).toBeTruthy();
+      const node = workflowNode(page, workflowId!);
+      await expect(node).toBeVisible({ timeout: 10000 });
+      await expect(node.getByText(statusProofLabel(status), { exact: true })).toBeVisible();
+    }
+
+    await captureScreenshot(page, 'workflow-status-all-states');
+  });
+
   test('context menu organization for failed task', async ({ page }) => {
     await loadPlanAndSelectWorkflow(page, MENU_PROOF_PLAN);
     await injectTaskStates(page, [
@@ -488,7 +900,9 @@ test.describe('Visual proof capture', () => {
     await expect(page.getByRole('menuitem', { name: 'Retry Workflow' })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: 'Copy Workflow ID' })).toBeVisible();
     await page.getByRole('menuitem', { name: 'More' }).click();
-    await expect(page.getByRole('menuitem', { name: 'Recreate with Rebase' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Rebase and Retry' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Rebase and Recreate' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Recreate with Rebase' })).toHaveCount(0);
     await expect(page.getByRole('menuitem', { name: 'Recreate Workflow' })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: 'Cancel Workflow' })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: 'Delete Workflow' })).toBeVisible();
@@ -643,6 +1057,36 @@ test.describe('Visual proof capture', () => {
     await expect(pendingCard).toBeVisible();
     await captureScreenshot(page, 'statusbar-clear-all-filters');
     await assertPageScreenshot(page, 'statusbar-clear-all-filters');
+  });
+
+  test('closed review PR status is visible and filterable', async ({ page }) => {
+    await loadPlan(page, TEST_PLAN);
+    const now = new Date();
+    await injectTaskStates(page, [
+      {
+        taskId: 'task-alpha',
+        changes: {
+          status: 'closed',
+          execution: {
+            startedAt: new Date(Date.now() - 5000),
+            completedAt: now,
+            reviewStatus: 'Closed without merge',
+            reviewUrl: 'https://github.com/Neko-Catpital-Labs/Invoker/pull/123',
+          },
+        },
+      },
+    ]);
+
+    const closedNode = page.locator('.react-flow__node[data-testid$="task-alpha"]');
+    await expect(closedNode.getByText('CLOSED')).toBeVisible();
+    await expect(page.getByText(/Closed:/)).toBeVisible();
+
+    await page.getByText(/Closed:/).click();
+    await page.waitForTimeout(100);
+    await expect(taskNodeCard(page, 'task-alpha')).toBeVisible();
+    await expect(taskNodeCard(page, 'task-beta')).toBeVisible();
+
+    await captureScreenshot(page, 'closed-review-pr-status');
   });
 
   test('approve-fix modal — no Fix Context panel', async ({ page }) => {
@@ -848,17 +1292,17 @@ test.describe('Visual proof capture', () => {
       name: 'Gate Policy Visual Test',
       repoUrl: E2E_REPO_URL,
       onFinish: 'none' as const,
+      externalDependencies: [
+        { workflowId: wf1!, gatePolicy: 'completed' as const },
+        { workflowId: wf2!, gatePolicy: 'completed' as const },
+        { workflowId: wf3!, gatePolicy: 'completed' as const },
+      ],
       tasks: [
         {
           id: 'gated-task',
           description: 'Task with multiple external gates',
           command: 'echo gated',
           dependencies: [] as string[],
-          externalDependencies: [
-            { workflowId: wf1!, gatePolicy: 'completed' as const },
-            { workflowId: wf2!, gatePolicy: 'completed' as const },
-            { workflowId: wf3!, gatePolicy: 'completed' as const },
-          ],
         },
       ],
     };
@@ -1056,5 +1500,120 @@ test.describe('Visual proof capture', () => {
 
     await captureScreenshot(page, 'queue-action-surface-hardening');
     await assertPageScreenshot(page, 'queue-action-surface-hardening');
+  });
+
+  test('completed SSH task double-click expands terminal drawer with working SSH resume terminal', async ({ page }) => {
+    await loadPlanAndSelectWorkflow(page, SSH_TERMINAL_RESUME_PLAN);
+    const workspacePath = '/home/invoker/.invoker/worktrees/wf-ssh/experiment-ssh-resume';
+    const sessionId = 'codex-session-ssh-123';
+    const terminalSessionId = 'visual-proof-ssh-session';
+    const sshInnerCommand = `cd '${workspacePath}' && codex resume ${sessionId}`;
+    const sshArgs = ['-i', '/tmp/e2e_id_rsa', '-t', 'invoker@remote-do-1', sshInnerCommand];
+    const terminalOutput = [
+      '$ ssh -i /tmp/e2e_id_rsa -t invoker@remote-do-1\r\n',
+      'Connection established: remote-do-1\r\n',
+      `$ ${sshInnerCommand}\r\n`,
+      `Resumed Codex session ${sessionId}\r\n`,
+      'Terminal stream ready for input.\r\n',
+    ].join('');
+
+    await injectTaskStates(page, [
+      {
+        taskId: 'ssh-resume',
+        changes: {
+          status: 'completed',
+          config: {
+            runnerKind: 'ssh',
+            poolMemberId: 'remote-do-1',
+            executionAgent: 'codex',
+          },
+          execution: {
+            workspacePath,
+            agentSessionId: sessionId,
+            completedAt: new Date('2025-01-01T00:00:00.000Z'),
+          },
+        },
+      },
+    ]);
+
+    await page.evaluate(({ args, cwd, terminalId }) => {
+      (window as unknown as { __terminalCalls: string[] }).__terminalCalls = [];
+      (window as unknown as { __terminalOutputSubscribers: Array<(event: { sessionId: string; taskId: string; data: string }) => void> }).__terminalOutputSubscribers = [];
+      window.__INVOKER_TEST_OPEN_TERMINAL__ = async (taskId: string) => {
+        (window as unknown as { __terminalCalls: string[] }).__terminalCalls.push(taskId);
+        return {
+          opened: true,
+          session: {
+            sessionId: terminalId,
+            taskId,
+            status: 'running',
+            cwd,
+            command: 'ssh',
+            args,
+            mode: 'spawn',
+            attached: false,
+            createdAt: '2025-01-01T00:00:00.000Z',
+          },
+        };
+      };
+      window.__INVOKER_TEST_ON_TERMINAL_OUTPUT__ = (cb) => {
+        const subscribers = (window as unknown as { __terminalOutputSubscribers: Array<(event: { sessionId: string; taskId: string; data: string }) => void> }).__terminalOutputSubscribers;
+        subscribers.push(cb);
+        return () => {
+          const index = subscribers.indexOf(cb);
+          if (index >= 0) subscribers.splice(index, 1);
+        };
+      };
+    }, { args: sshArgs, cwd: workspacePath, terminalId: terminalSessionId });
+
+    const sshTaskNode = page
+      .getByTestId('selected-workflow-mini-dag')
+      .locator('.react-flow__node[data-testid$="ssh-resume"]')
+      .first();
+    const box = await sshTaskNode.boundingBox();
+    if (!box) throw new Error('SSH task node has no bounding box');
+    await sshTaskNode.locator('> div').dispatchEvent('dblclick', {
+      bubbles: true,
+      cancelable: true,
+      clientX: box.x + box.width / 2,
+      clientY: box.y + box.height / 2,
+    });
+
+    await expect(page.getByTestId('terminal-drawer-body')).toBeVisible();
+    await expect(page.getByTestId('terminal-tab-wf-test-1/ssh-resume')).toHaveAttribute('data-active', 'true');
+    await expect(page.getByTestId('terminal-session-command')).toContainText('ssh');
+    await expect(page.getByTestId('terminal-session-command')).toContainText(workspacePath);
+    await expect(page.getByTestId('terminal-session-command')).toContainText(`codex resume ${sessionId}`);
+    await expect(page.getByTestId('terminal-pane-wf-test-1/ssh-resume')).toBeVisible();
+    const terminalPane = page.getByTestId('terminal-pane-wf-test-1/ssh-resume');
+    await page.waitForFunction(() => {
+      return (window as unknown as { __terminalOutputSubscribers: unknown[] }).__terminalOutputSubscribers.length > 0;
+    });
+    await page.evaluate(({ output, terminalId }) => {
+      const subscribers = (window as unknown as { __terminalOutputSubscribers: Array<(event: { sessionId: string; taskId: string; data: string }) => void> }).__terminalOutputSubscribers;
+      for (const subscriber of subscribers) {
+        subscriber({ sessionId: terminalId, taskId: 'wf-test-1/ssh-resume', data: output });
+      }
+    }, { output: terminalOutput, terminalId: terminalSessionId });
+    await expect(terminalPane.getByText('Connection established: remote-do-1')).toBeVisible();
+    await expect(terminalPane.getByText(`Resumed Codex session ${sessionId}`)).toBeVisible();
+    await expect(terminalPane.getByText('Terminal stream ready for input.')).toBeVisible();
+    await expect(page.getByTestId('terminal-session-output-preview')).toContainText('Terminal stream ready for input.');
+
+    const calls = await page.evaluate(() => (window as unknown as { __terminalCalls: string[] }).__terminalCalls);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('ssh-resume');
+
+    await captureScreenshot(page, 'completed-ssh-terminal-resume');
+    await assertPageScreenshot(page, 'completed-ssh-terminal-resume');
+  });
+
+  test('task-graph-keyboard-controls - selected workflow task graph visible', async ({ page }) => {
+    await loadPlanAndSelectWorkflow(page, MENU_PROOF_PLAN);
+    const miniDag = page.getByTestId('selected-workflow-mini-dag');
+    await expect(miniDag).toBeVisible();
+    await expect(miniDag.locator('.react-flow__node[data-testid$="task-alpha"]')).toBeVisible();
+    await expect(miniDag.locator('.react-flow__node[data-testid$="task-beta"]')).toBeVisible();
+    await captureScreenshot(page, 'task-graph-keyboard-controls-selected');
   });
 });

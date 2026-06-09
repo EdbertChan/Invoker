@@ -14,13 +14,20 @@ import type {
   InvalidationScope,
   TaskState,
 } from '@invoker/workflow-core';
-import { OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
+import {
+  OrchestratorError,
+  OrchestratorErrorCode,
+  buildCancelInFlight as buildCoreCancelInFlight,
+  parseMergeConflictError,
+} from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import type { TaskRunner } from '@invoker/execution-engine';
+import type { TaskRunner, ReviewGateCiFailureTrigger } from '@invoker/execution-engine';
 import { normalizeMergeModeForPersistence } from './merge-mode.js';
 import { createDeleteAllSnapshot } from './delete-all-snapshot.js';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
 import { isDispatchableLaunch } from './global-topup.js';
+
+type LoadedWorkflow = NonNullable<ReturnType<SQLiteAdapter['loadWorkflow']>>;
 
 // ── Lineage guard ─────────────────────────────────────────────
 
@@ -96,7 +103,7 @@ export interface ActionDeps {
   persistence: SQLiteAdapter;
   /** @deprecated Pool cleanup uses the workflow mirror; repoRoot branch deletion is no longer used. */
   repoRoot?: string;
-  /** When set, rebase-and-refreshes the pool mirror and removes managed branches before bumping generation. */
+  /** When set, fresh-base actions refresh the pool mirror and remove managed branches before retry/recreate. */
   taskExecutor?: TaskRunner;
   mutationTiming?: WorkflowMutationTiming;
   /** When true, successful AI-applied fixes are approved immediately. */
@@ -142,7 +149,7 @@ export async function approveTask(
   const shouldResume =
     fixedTask &&
     task !== undefined &&
-    (task.config.isMergeNode || isMergeConflictError(task.execution.pendingFixError ?? ''));
+    (task.config.isMergeNode || Boolean(parseMergeConflictError(task.execution.pendingFixError ?? '')));
   const started = await (
     shouldResume
       ? (deps.resumeAfterFixApproval ?? deps.orchestrator.resumeTaskAfterFixApproval.bind(deps.orchestrator))
@@ -211,6 +218,39 @@ export function recreateWorkflow(
   deps: Pick<ActionDeps, 'logger' | 'persistence' | 'orchestrator'>,
 ): TaskState[] {
   return bumpGenerationAndRecreate(workflowId, deps);
+}
+
+function workflowIdFromMergeTaskId(target: string): string | undefined {
+  if (!target.startsWith('__merge__')) return undefined;
+  return target.slice('__merge__'.length) || undefined;
+}
+
+export function resolveWorkflowIdForRebaseTarget(
+  target: string,
+  deps: Pick<ActionDeps, 'orchestrator' | 'persistence'>,
+): string {
+  const workflow = deps.persistence.loadWorkflow(target);
+  if (workflow) return workflow.id;
+
+  const mergeWorkflowId = workflowIdFromMergeTaskId(target);
+  if (mergeWorkflowId && deps.persistence.loadWorkflow(mergeWorkflowId)) {
+    return mergeWorkflowId;
+  }
+
+  const task = deps.orchestrator.getTask(target);
+  if (task?.config.workflowId) return task.config.workflowId;
+
+  for (const candidate of deps.persistence.listWorkflows()) {
+    const storedTask = deps.persistence.loadTasks(candidate.id).find((item) => (
+      item.id === target || item.id.endsWith(`/${target}`)
+    ));
+    if (storedTask) return candidate.id;
+  }
+
+  throw new OrchestratorError(
+    OrchestratorErrorCode.WORKFLOW_NOT_FOUND,
+    `Could not resolve workflow for rebase target "${target}"`,
+  );
 }
 
 export function recreateTask(
@@ -346,18 +386,50 @@ export async function deleteAllWorkflowsBulk(
  *      `taskExecutor.killActiveExecution`) when invoked through that
  *      route — this wrapper does not add a parallel cancel call.
  *
- * The `refreshBase` callback returns `undefined` today because
- * `preparePoolForRebaseRetry` does not yet expose the resulting
- * upstream HEAD SHA; recording the SHA is a follow-up. Tests inject
- * their own `refreshBase` callback (via the orchestrator method
- * directly) to assert the fresh-base observable.
+ * `preparePoolForRebaseRetry` resolves the fresh upstream HEAD once.
+ * The explicit fresh-base lifecycle entrypoint can pass that commit
+ * through to the orchestrator callback when available.
  */
+async function prepareWorkflowFreshBase(
+  workflowId: string,
+  deps: ActionDeps,
+): Promise<{ workflow: LoadedWorkflow; freshBase?: { branch: string; commit: string } }> {
+  const workflow = deps.persistence.loadWorkflow(workflowId);
+  if (!workflow) throw new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, `Workflow ${workflowId} not found`);
+
+  let freshBase: { branch: string; commit: string } | undefined;
+  if (deps.taskExecutor && workflow.repoUrl) {
+    const prepare = () => deps.mutationTiming
+      ? deps.taskExecutor!.preparePoolForRebaseRetry(
+        workflowId,
+        workflow.repoUrl,
+        workflow.baseBranch,
+        deps.mutationTiming,
+      )
+      : deps.taskExecutor!.preparePoolForRebaseRetry(
+        workflowId,
+        workflow.repoUrl,
+        workflow.baseBranch,
+      );
+    if (deps.mutationTiming) {
+      freshBase = await deps.mutationTiming.span(
+        'workflow-actions.prepareWorkflowFreshBase.preparePoolForRebaseRetry',
+        { repoUrl: workflow.repoUrl, baseBranch: workflow.baseBranch },
+        prepare,
+      );
+    } else {
+      freshBase = await prepare();
+    }
+  }
+
+  return { workflow, freshBase };
+}
+
 export async function recreateWorkflowFromFreshBase(
   workflowId: string,
   deps: ActionDeps,
 ): Promise<TaskState[]> {
-  const workflow = deps.persistence.loadWorkflow(workflowId);
-  if (!workflow) throw new OrchestratorError(OrchestratorErrorCode.WORKFLOW_NOT_FOUND, `Workflow ${workflowId} not found`);
+  const { workflow, freshBase } = await prepareWorkflowFreshBase(workflowId, deps);
   const nextGen = (workflow.generation ?? 0) + 1;
   deps.mutationTiming?.mark('workflow-actions.recreateWorkflowFromFreshBase.bumpGeneration', 'started', {
     nextGeneration: nextGen,
@@ -371,40 +443,15 @@ export async function recreateWorkflowFromFreshBase(
     { module: 'workflow' },
   );
   deps.logger?.info(
-    `recreateWorkflowFromFreshBase: workflowId=${workflowId} → orchestrator.recreateWorkflowFromFreshBase (pool prep if taskExecutor+repoUrl)`,
+    `recreateWorkflowFromFreshBase: workflowId=${workflowId} → orchestrator.recreateWorkflowFromFreshBase`,
     { module: 'agent-session-trace' },
   );
 
   const recreate = () => deps.orchestrator.recreateWorkflowFromFreshBase(workflowId, {
     refreshBase: async () => {
-      if (deps.taskExecutor && workflow.repoUrl) {
-        const prepare = () => deps.mutationTiming
-          ? deps.taskExecutor!.preparePoolForRebaseRetry(
-            workflowId,
-            workflow.repoUrl,
-            workflow.baseBranch,
-            deps.mutationTiming,
-          )
-          : deps.taskExecutor!.preparePoolForRebaseRetry(
-            workflowId,
-            workflow.repoUrl,
-            workflow.baseBranch,
-          );
-        if (deps.mutationTiming) {
-          await deps.mutationTiming.span(
-            'workflow-actions.recreateWorkflowFromFreshBase.preparePoolForRebaseRetry',
-            { repoUrl: workflow.repoUrl, baseBranch: workflow.baseBranch },
-            prepare,
-          );
-        } else {
-          await prepare();
-        }
-      }
-      // `preparePoolForRebaseRetry` does not yet expose the resulting
-      // upstream HEAD SHA; surfacing it (so the orchestrator can
-      // record `knownFreshBaseCommits` in production too) is the
-      // follow-up the roadmap calls out in "Out of scope".
-      return undefined;
+      // Pool preparation already ran above. The callback is kept so the
+      // orchestrator still sees the fresh-base lifecycle entrypoint.
+      return freshBase;
     },
   });
   return deps.mutationTiming
@@ -412,26 +459,46 @@ export async function recreateWorkflowFromFreshBase(
     : recreate();
 }
 
-/**
- * Recreate a workflow from a fresh upstream base — workflow-scoped
- * entry point for the `invoker:recreate-with-rebase` IPC channel.
- *
- * This is the direct workflow-id counterpart of `rebaseAndRetry`
- * (which performs a `taskId → workflowId` translation first). Both
- * delegate to `recreateWorkflowFromFreshBase` for the actual
- * pool-refresh + generation-bump + DAG reset.
- */
-export async function recreateWithRebase(
-  workflowId: string,
+export async function rebaseRetry(
+  target: string,
   deps: ActionDeps,
 ): Promise<TaskState[]> {
-  deps.mutationTiming?.mark('workflow-actions.recreateWithRebase', 'started', { workflowId });
+  const workflowId = resolveWorkflowIdForRebaseTarget(target, deps);
+  deps.mutationTiming?.mark('workflow-actions.rebaseRetry', 'started', { target, workflowId });
   deps.logger?.info(
-    `recreateWithRebase: workflowId=${workflowId} → recreateWorkflowFromFreshBase`,
+    `rebaseRetry: target=${target} workflowId=${workflowId} → prepare fresh base + retryWorkflow`,
     { module: 'agent-session-trace' },
   );
-  const started = await recreateWorkflowFromFreshBase(workflowId, deps);
-  deps.mutationTiming?.mark('workflow-actions.recreateWithRebase', 'completed', {
+  await prepareWorkflowFreshBase(workflowId, deps);
+  const retry = async (): Promise<TaskState[]> => Promise.resolve(deps.orchestrator.retryWorkflow(workflowId));
+  const started = deps.mutationTiming
+    ? await deps.mutationTiming.span('workflow-actions.rebaseRetry.orchestrator', undefined, retry)
+    : await retry();
+  deps.mutationTiming?.mark('workflow-actions.rebaseRetry', 'completed', {
+    target,
+    workflowId,
+    startedCount: started.length,
+  });
+  return started;
+}
+
+export async function rebaseRecreate(
+  target: string,
+  deps: ActionDeps,
+): Promise<TaskState[]> {
+  const workflowId = resolveWorkflowIdForRebaseTarget(target, deps);
+  deps.mutationTiming?.mark('workflow-actions.rebaseRecreate', 'started', { target, workflowId });
+  deps.logger?.info(
+    `rebaseRecreate: target=${target} workflowId=${workflowId} → prepare fresh base + recreateWorkflow`,
+    { module: 'agent-session-trace' },
+  );
+  await prepareWorkflowFreshBase(workflowId, deps);
+  const recreate = async (): Promise<TaskState[]> => Promise.resolve(bumpGenerationAndRecreate(workflowId, deps));
+  const started = deps.mutationTiming
+    ? await deps.mutationTiming.span('workflow-actions.rebaseRecreate.orchestrator', undefined, recreate)
+    : await recreate();
+  deps.mutationTiming?.mark('workflow-actions.rebaseRecreate', 'completed', {
+    target,
     workflowId,
     startedCount: started.length,
   });
@@ -439,60 +506,41 @@ export async function recreateWithRebase(
 }
 
 /**
- * Rebase-and-retry: refresh the pool mirror / origin base, remove managed
- * experiment/invoker branches in that mirror, bump generation, and restart the DAG.
- *
- * Step 12: this wrapper is now a thin delegate to
- * `recreateWorkflowFromFreshBase` — the chart's first-class action
- * for this behavior. It is preserved as a separate export because
- * existing callers (notably `headlessRebaseAndRetry`) speak in task
- * ids while the workflow-scope action speaks in workflow ids; this
- * function continues to do the `taskId → workflowId` translation.
+ * Reference to a TaskRunner. Either a direct instance or a getter that
+ * returns the current instance — the latter is required when the dep
+ * builder runs before `taskExecutor` is constructed (the executor is
+ * built lazily by `rebuildTaskRunner` after `commandService`).
  */
-export async function rebaseAndRetry(
-  taskId: string,
-  deps: ActionDeps,
-): Promise<TaskState[]> {
-  const task = deps.orchestrator.getTask(taskId);
-  if (!task?.config.workflowId) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found or has no workflow`);
-  const workflowId = task.config.workflowId;
-  deps.mutationTiming?.mark('workflow-actions.rebaseAndRetry', 'started', { taskId, workflowId });
-  deps.logger?.info(
-    `rebaseAndRetry: taskId=${taskId} workflowId=${workflowId} → recreateWorkflowFromFreshBase (Step 12 delegate)`,
-    { module: 'agent-session-trace' },
-  );
-  const started = await recreateWorkflowFromFreshBase(workflowId, deps);
-  deps.mutationTiming?.mark('workflow-actions.rebaseAndRetry', 'completed', {
-    taskId,
-    workflowId,
-    startedCount: started.length,
-  });
-  return started;
+export type TaskExecutorRef = TaskRunner | (() => TaskRunner | null | undefined);
+
+function resolveTaskExecutor(ref: TaskExecutorRef | undefined): TaskRunner | undefined {
+  if (!ref) return undefined;
+  if (typeof ref === 'function') return ref() ?? undefined;
+  return ref;
 }
 
 export interface BuildCancelInFlightDeps {
   orchestrator: Orchestrator;
-  taskExecutor?: TaskRunner;
+  taskExecutor?: TaskExecutorRef;
 }
 
 export function buildCancelInFlight(deps: BuildCancelInFlightDeps): CancelInFlightFn {
-  return async (scope: InvalidationScope, id: string): Promise<void> => {
-    if (scope === 'none') return;
-    const result =
-      scope === 'task'
-        ? deps.orchestrator.cancelTask(id)
-        : deps.orchestrator.cancelWorkflow(id);
-    const taskExecutor = deps.taskExecutor;
-    if (!taskExecutor) return;
-    for (const runningId of result.runningCancelled) {
-      await taskExecutor.killActiveExecution(runningId);
-    }
-  };
+  return buildCoreCancelInFlight({
+    orchestrator: deps.orchestrator,
+    killActiveExecution: async (id) => {
+      const taskExecutor = resolveTaskExecutor(deps.taskExecutor);
+      if (!taskExecutor) return;
+      await taskExecutor.killActiveExecution(id);
+    },
+  });
 }
 
-export function buildInvalidationDeps(
-  deps: Pick<ActionDeps, 'logger' | 'orchestrator' | 'persistence' | 'taskExecutor' | 'mutationTiming'>,
-): InvalidationDeps {
+export type BuildInvalidationDepsArgs = Omit<
+  Pick<ActionDeps, 'logger' | 'orchestrator' | 'persistence' | 'mutationTiming'>,
+  'taskExecutor'
+> & { taskExecutor?: TaskExecutorRef };
+
+export function buildInvalidationDeps(deps: BuildInvalidationDepsArgs): InvalidationDeps {
   const cancelInFlight = buildCancelInFlight({
     orchestrator: deps.orchestrator,
     taskExecutor: deps.taskExecutor,
@@ -513,7 +561,7 @@ export function buildInvalidationDeps(
         logger: deps.logger,
         orchestrator: deps.orchestrator,
         persistence: deps.persistence,
-        taskExecutor: deps.taskExecutor,
+        taskExecutor: resolveTaskExecutor(deps.taskExecutor),
         mutationTiming: deps.mutationTiming,
       }),
     workflowFork: (workflowId: string) => {
@@ -524,29 +572,31 @@ export function buildInvalidationDeps(
       );
       return result.started;
     },
-    // Step 15 wiring (`docs/architecture/task-invalidation-roadmap.md`,
-    // chart row "Change external gate policy"). The dep is invoked
-    // by `applyInvalidation` for action `'scheduleOnly'` WITHOUT a
-    // preceding `cancelInFlight` call — gate-policy edits are
-    // non-invalidating per the chart. The orchestrator's existing
-    // `autoStartExternallyUnblockedReadyTasks` primitive is the
-    // right scheduler entrypoint: it re-evaluates every task with
-    // external dependencies whose blocker has cleared. Today's
-    // primitive is workflow-agnostic; the `taskId` argument is
-    // accepted for future scoping but ignored by the underlying
-    // method.
+    // `scheduleOnly` is invoked by applyInvalidation WITHOUT a
+    // preceding cancelInFlight; the underlying primitive is
+    // workflow-agnostic and ignores the taskId argument.
     scheduleOnly: (_taskId: string) =>
       deps.orchestrator.autoStartExternallyUnblockedReadyTasks(),
     fixApprove: async (taskId: string) => {
       const result = await approveTask(taskId, {
         orchestrator: deps.orchestrator,
-        taskExecutor: deps.taskExecutor,
+        taskExecutor: resolveTaskExecutor(deps.taskExecutor),
       });
       return result.started;
     },
     fixReject: (taskId: string) => {
       rejectTask(taskId, { orchestrator: deps.orchestrator });
       return [];
+    },
+    // For task scope, resolve the owning workflow first; if the task
+    // is gone (detached), the cascade is a no-op.
+    cascadeDownstream: (scope, id) => {
+      const workflowId =
+        scope === 'workflow'
+          ? id
+          : deps.orchestrator.getTask(id)?.config.workflowId;
+      if (!workflowId) return [];
+      return deps.orchestrator.cascadeInvalidationToDownstream(workflowId);
     },
   };
 }
@@ -602,6 +652,14 @@ export function setTaskExternalGatePolicies(
   deps: Pick<ActionDeps, 'orchestrator'>,
 ): TaskState[] {
   return deps.orchestrator.setTaskExternalGatePolicies(taskId, updates);
+}
+
+export function setWorkflowExternalGatePolicies(
+  workflowId: string,
+  updates: ExternalGatePolicyUpdate[],
+  deps: Pick<ActionDeps, 'orchestrator'>,
+): TaskState[] {
+  return deps.orchestrator.setWorkflowExternalGatePolicies(workflowId, updates);
 }
 
 export function selectExperiment(
@@ -749,21 +807,21 @@ export async function resolveConflictAction(
   signal?: AbortSignal,
 ): Promise<{ autoApproved: boolean; started: TaskState[] }> {
   const { orchestrator, persistence, taskExecutor } = deps;
+  const entryLineage = captureTaskLineage(taskId, orchestrator);
+  assertLineageCurrent(entryLineage, orchestrator, signal);
   const { savedError } = orchestrator.beginConflictResolution(taskId);
   const lineage = captureTaskLineage(taskId, orchestrator);
   try {
+    assertLineageCurrent(lineage, orchestrator, signal);
     await taskExecutor.resolveConflict(taskId, savedError, agentName);
     assertLineageCurrent(lineage, orchestrator, signal);
-    return await finalizeAppliedFix(taskId, savedError, deps, signal);
+    return await finalizeAppliedFix(taskId, savedError, deps, signal, lineage);
   } catch (err) {
     if (err instanceof StaleLineageError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
+    assertLineageCurrent(lineage, orchestrator, signal);
     persistence.appendTaskOutput(taskId, `\n[Resolve Conflict] Failed: ${msg}`);
-    try {
-      assertLineageCurrent(lineage, orchestrator, signal);
-    } catch {
-      throw err;
-    }
+    assertLineageCurrent(lineage, orchestrator, signal);
     orchestrator.revertConflictResolution(taskId, savedError, msg);
     throw err;
   }
@@ -805,9 +863,12 @@ export async function fixWithAgentAction(
     };
   }
 
+  const entryLineage = captureTaskLineage(taskId, orchestrator);
+  assertLineageCurrent(entryLineage, orchestrator, options.signal);
   const { savedError: persistedSavedError } = orchestrator.beginConflictResolution(taskId);
   const lineage = captureTaskLineage(taskId, orchestrator);
   try {
+    assertLineageCurrent(lineage, orchestrator, options.signal);
     if (recoveryRoute.kind === 'resolveConflict') {
       await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName);
     } else {
@@ -815,7 +876,7 @@ export async function fixWithAgentAction(
       await taskExecutor.fixWithAgent(taskId, output, options.agentName, persistedSavedError);
     }
     assertLineageCurrent(lineage, orchestrator, options.signal);
-    const result = await finalizeAppliedFix(taskId, persistedSavedError, deps, options.signal);
+    const result = await finalizeAppliedFix(taskId, persistedSavedError, deps, options.signal, lineage);
     return {
       kind: recoveryRoute.kind,
       autoApproved: result.autoApproved,
@@ -826,12 +887,9 @@ export async function fixWithAgentAction(
     const msg = err instanceof Error ? err.message : String(err);
     const errorLabel = options.failureOutputLabel
       ?? (recoveryRoute.kind === 'resolveConflict' ? 'Resolve Conflict' : `Fix with ${options.agentName ?? 'Claude'}`);
+    assertLineageCurrent(lineage, orchestrator, options.signal);
     persistence.appendTaskOutput(taskId, `\n[${errorLabel}] Failed: ${msg}`);
-    try {
-      assertLineageCurrent(lineage, orchestrator, options.signal);
-    } catch {
-      throw err;
-    }
+    assertLineageCurrent(lineage, orchestrator, options.signal);
     orchestrator.revertConflictResolution(taskId, persistedSavedError, msg);
     throw err;
   }
@@ -842,17 +900,20 @@ export async function finalizeAppliedFix(
   savedError: string,
   deps: Pick<ActionDeps, 'orchestrator' | 'autoApproveAIFixes'> & { taskExecutor: TaskRunner },
   signal?: AbortSignal,
+  lineage?: TaskLineageSnapshot,
 ): Promise<{ autoApproved: boolean; started: TaskState[] }> {
   if (signal?.aborted) {
     throw new StaleLineageError(
       `Fix mutation for ${taskId} aborted before finalize: ${signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? 'unknown')}`,
     );
   }
+  if (lineage) assertLineageCurrent(lineage, deps.orchestrator, signal);
   deps.orchestrator.setFixAwaitingApproval(taskId, savedError);
   if (!deps.autoApproveAIFixes) {
     return { autoApproved: false, started: [] };
   }
 
+  if (lineage) assertLineageCurrent(lineage, deps.orchestrator, signal);
   const { started } = await approveTask(taskId, deps);
   return { autoApproved: true, started };
 }
@@ -864,34 +925,11 @@ export type FailureRecoveryRoute =
   | { kind: 'resolveConflict' }
   | { kind: 'recreateWorkflowFromFreshBase'; workflowId: string };
 
-function isMergeConflictError(error: string): boolean {
-  for (const c of [error, error.trim(), error.split('\n\n').at(-1)?.trim() ?? '']) {
-    if (!c) continue;
-    try { if ((JSON.parse(c) as any)?.type === 'merge_conflict') return true; } catch { /* not JSON */ }
-    const jsonStart = c.indexOf('{');
-    if (jsonStart >= 0) {
-      try {
-        if ((JSON.parse(c.slice(jsonStart)) as any)?.type === 'merge_conflict') return true;
-      } catch {
-        /* not parseable JSON tail */
-      }
-    }
-    if (
-      c.includes('CONFLICT (') ||
-      c.includes('Automatic merge failed') ||
-      c.includes('Merge conflict merging ')
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 export function selectFailureRecoveryRoute(
   task: TaskState,
   savedError: string,
 ): FailureRecoveryRoute {
-  if (!isMergeConflictError(savedError)) {
+  if (!parseMergeConflictError(savedError)) {
     return { kind: 'fixWithAgent' };
   }
 
@@ -977,8 +1015,14 @@ async function recordFixedIntegrationAnchor(
   deps: {
     persistence: SQLiteAdapter;
     taskExecutor: TaskRunner;
+    orchestrator?: Pick<Orchestrator, 'getTask'>;
+    lineage?: TaskLineageSnapshot;
+    signal?: AbortSignal;
   },
 ): Promise<void> {
+  if (deps.lineage && deps.orchestrator) {
+    assertLineageCurrent(deps.lineage, deps.orchestrator, deps.signal);
+  }
   const workspacePath = task.execution.workspacePath?.trim();
   if (!workspacePath) {
     deps.persistence.logEvent?.(taskId, 'debug.auto-fix', {
@@ -989,6 +1033,9 @@ async function recordFixedIntegrationAnchor(
   }
   try {
     const fixedIntegrationSha = (await deps.taskExecutor.execGitIn(['rev-parse', 'HEAD'], workspacePath)).trim();
+    if (deps.lineage && deps.orchestrator) {
+      assertLineageCurrent(deps.lineage, deps.orchestrator, deps.signal);
+    }
     const fixedIntegrationRecordedAt = new Date();
     deps.persistence.updateTask(taskId, {
       execution: {
@@ -1003,6 +1050,7 @@ async function recordFixedIntegrationAnchor(
       workspacePath,
     });
   } catch (err) {
+    if (err instanceof StaleLineageError) throw err;
     deps.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'auto-fix-fixed-anchor-failed',
       workspacePath,
@@ -1033,6 +1081,8 @@ export async function autoFixOnFailure(
   const task = orchestrator.getTask(taskId);
   if (!task || task.status !== 'failed') return;
 
+  const entryLineage = captureTaskLineage(taskId, orchestrator);
+  assertLineageCurrent(entryLineage, orchestrator, deps.signal);
   const attempts = (task.execution.autoFixAttempts ?? 0) + 1;
   const max = orchestrator.getAutoFixRetryBudget(taskId);
   const savedError = task.execution.error ?? '';
@@ -1120,6 +1170,7 @@ export async function autoFixOnFailure(
 
     ({ savedError: persistedSavedError } = orchestrator.beginConflictResolution(taskId));
     lineage = captureTaskLineage(taskId, orchestrator);
+    assertLineageCurrent(lineage, orchestrator, deps.signal);
     persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'auto-fix-begin-conflict-resolution',
       savedErrorLength: persistedSavedError.length,
@@ -1140,12 +1191,16 @@ export async function autoFixOnFailure(
       await recordFixedIntegrationAnchor(taskId, task, {
         persistence,
         taskExecutor,
+        orchestrator,
+        lineage,
+        signal: deps.signal,
       });
+      assertLineageCurrent(lineage, orchestrator, deps.signal);
       const finalizeResult = await finalizeAppliedFix(taskId, persistedSavedError, {
         orchestrator,
         taskExecutor,
         autoApproveAIFixes: deps.getAutoApproveAIFixes?.() ?? true,
-      }, deps.signal);
+      }, deps.signal, lineage);
       persistence.logEvent?.(taskId, 'debug.auto-fix', {
         phase: 'auto-fix-post-route-finalize',
         autoApproved: finalizeResult.autoApproved,
@@ -1178,6 +1233,7 @@ export async function autoFixOnFailure(
     if (err instanceof StaleLineageError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const diagnostics = formatAutoFixDiagnostics(err);
+    if (lineage) assertLineageCurrent(lineage, orchestrator, deps.signal);
     persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'auto-fix-route-failed',
       errorType: err instanceof Error ? err.name : typeof err,
@@ -1194,14 +1250,162 @@ export async function autoFixOnFailure(
     persistence.appendTaskOutput(taskId, `\n[Auto-fix] Agent failed (attempt ${attempts}/${max}): ${msg}`);
     const detailedMsg = diagnostics ? `${msg}\n\n${diagnostics}` : msg;
     if (persistedSavedError !== undefined) {
-      if (lineage) {
-        try {
-          assertLineageCurrent(lineage, orchestrator, deps.signal);
-        } catch {
-          throw err;
-        }
-      }
+      if (lineage) assertLineageCurrent(lineage, orchestrator, deps.signal);
       orchestrator.revertConflictResolution(taskId, persistedSavedError, detailedMsg);
+    }
+  }
+}
+
+function formatReviewGateCiSavedError(trigger: ReviewGateCiFailureTrigger): string {
+  const lines = [
+    `Review-gate CI failed for PR ${trigger.reviewId}.`,
+    `PR: ${trigger.reviewUrl}`,
+    trigger.headRef ? `Branch: ${trigger.headRef}` : undefined,
+    trigger.headSha ? `Head SHA: ${trigger.headSha}` : undefined,
+    `Status: ${trigger.statusText}`,
+    '',
+    'Failed checks:',
+    ...trigger.failedChecks.map((check) => (
+      `- ${check.name}${check.conclusion ? ` (${check.conclusion})` : ''}`
+    )),
+  ].filter((line): line is string => line !== undefined);
+  return lines.join('\n');
+}
+
+function formatReviewGateCiFixContext(trigger: ReviewGateCiFailureTrigger): string {
+  const checkLines = trigger.failedChecks.map((check) => {
+    const details = [
+      check.conclusion ? `conclusion=${check.conclusion}` : undefined,
+      check.detailsUrl ? `details=${check.detailsUrl}` : undefined,
+      check.summary ? `summary=${check.summary}` : undefined,
+    ].filter(Boolean).join(' ');
+    return `- ${check.name}${details ? `: ${details}` : ''}`;
+  });
+  return [
+    'This auto-fix was triggered by failed CI on an external review gate PR.',
+    `PR: ${trigger.reviewUrl}`,
+    `Review ID: ${trigger.reviewId}`,
+    trigger.headRef ? `PR head ref: ${trigger.headRef}` : undefined,
+    trigger.headSha ? `PR head SHA: ${trigger.headSha}` : undefined,
+    trigger.branch ? `Invoker branch: ${trigger.branch}` : undefined,
+    '',
+    'Fix the code on this task branch so the failed PR checks pass.',
+    'Preserve the original task intent and do not recreate the PR manually.',
+    '',
+    'Failed checks:',
+    ...checkLines,
+  ].filter((line): line is string => line !== undefined).join('\n');
+}
+
+function assertReviewGateTriggerCurrent(
+  trigger: ReviewGateCiFailureTrigger,
+  orchestrator: Pick<Orchestrator, 'getTask'>,
+): void {
+  const task = orchestrator.getTask(trigger.taskId);
+  if (!task) {
+    throw new StaleLineageError(`Review-gate CI auto-fix task ${trigger.taskId} no longer exists`);
+  }
+  if (
+    task.execution.selectedAttemptId !== trigger.selectedAttemptId ||
+    (task.execution.generation ?? 0) !== trigger.generation ||
+    task.execution.reviewId !== trigger.reviewId ||
+    task.execution.branch !== trigger.branch
+  ) {
+    throw new StaleLineageError(`Review-gate CI auto-fix for ${trigger.taskId} is stale`);
+  }
+}
+
+export async function autoFixOnReviewGateFailure(
+  trigger: ReviewGateCiFailureTrigger,
+  deps: {
+    orchestrator: Orchestrator;
+    persistence: SQLiteAdapter;
+    taskExecutor: TaskRunner;
+    getAutoFixAgent?: () => string | undefined;
+    getAutoApproveAIFixes?: () => boolean | undefined;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  const { orchestrator, persistence, taskExecutor } = deps;
+  const task = orchestrator.getTask(trigger.taskId);
+  if (!task) return;
+  if (task.status !== 'review_ready' && task.status !== 'awaiting_approval' && task.status !== 'failed') return;
+  const max = orchestrator.getAutoFixRetryBudget(trigger.taskId);
+  if (max <= 0) return;
+  const attempts = (task.execution.autoFixAttempts ?? 0) + 1;
+  if (attempts > max) return;
+
+  assertReviewGateTriggerCurrent(trigger, orchestrator);
+  if (deps.signal?.aborted) {
+    throw new StaleLineageError(
+      `Review-gate CI auto-fix for ${trigger.taskId} aborted: ${deps.signal.reason instanceof Error ? deps.signal.reason.message : String(deps.signal.reason ?? 'unknown')}`,
+    );
+  }
+  persistence.updateTask(trigger.taskId, { execution: { autoFixAttempts: attempts } });
+  const savedError = formatReviewGateCiSavedError(trigger);
+  const fixContext = formatReviewGateCiFixContext(trigger);
+  const agentSelection = resolveAutoFixAgent(deps.getAutoFixAgent?.());
+
+  let persistedSavedError: string | undefined;
+  let lineage: TaskLineageSnapshot | undefined;
+  try {
+    ({ savedError: persistedSavedError } = orchestrator.beginAutoFixSession(trigger.taskId, {
+      savedError,
+      expectedLineage: {
+        taskId: trigger.taskId,
+        selectedAttemptId: trigger.selectedAttemptId,
+        generation: trigger.generation,
+      },
+    }));
+    lineage = captureTaskLineage(trigger.taskId, orchestrator);
+    assertLineageCurrent(lineage, orchestrator, deps.signal);
+    persistence.logEvent?.(trigger.taskId, 'debug.auto-fix', {
+      phase: 'review-gate-ci-auto-fix-start',
+      reviewId: trigger.reviewId,
+      headSha: trigger.headSha ?? null,
+      failedCheckCount: trigger.failedChecks.length,
+      selectedAgent: agentSelection.selectedAgent,
+    });
+    const output = persistence.getTaskOutput(trigger.taskId);
+    await taskExecutor.fixWithAgent(
+      trigger.taskId,
+      output,
+      agentSelection.selectedAgent,
+      persistedSavedError,
+      fixContext,
+    );
+    assertLineageCurrent(lineage, orchestrator, deps.signal);
+    const latest = orchestrator.getTask(trigger.taskId);
+    if (!latest) throw new StaleLineageError(`Review-gate CI auto-fix task ${trigger.taskId} disappeared`);
+    await recordFixedIntegrationAnchor(trigger.taskId, latest, {
+      persistence,
+      taskExecutor,
+      orchestrator,
+      lineage,
+      signal: deps.signal,
+    });
+    assertLineageCurrent(lineage, orchestrator, deps.signal);
+    const finalizeResult = await finalizeAppliedFix(trigger.taskId, persistedSavedError, {
+      orchestrator,
+      taskExecutor,
+      autoApproveAIFixes: deps.getAutoApproveAIFixes?.() ?? true,
+    }, deps.signal, lineage);
+    persistence.logEvent?.(trigger.taskId, 'debug.auto-fix', {
+      phase: 'review-gate-ci-auto-fix-finalize',
+      autoApproved: finalizeResult.autoApproved,
+      startedCount: finalizeResult.started.length,
+    });
+  } catch (err) {
+    if (err instanceof StaleLineageError) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    if (lineage) assertLineageCurrent(lineage, orchestrator, deps.signal);
+    persistence.appendTaskOutput(
+      trigger.taskId,
+      `\n[Review Gate Auto-fix] Agent failed (attempt ${attempts}/${max}): ${msg}`,
+    );
+    if (persistedSavedError !== undefined) {
+      if (lineage) assertLineageCurrent(lineage, orchestrator, deps.signal);
+      orchestrator.revertConflictResolution(trigger.taskId, persistedSavedError, msg);
     }
   }
 }

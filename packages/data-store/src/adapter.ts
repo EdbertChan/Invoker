@@ -5,7 +5,8 @@
  * This allows swapping storage backends (in-memory, SQLite, etc.)
  */
 
-import type { TaskState, TaskStateChanges, PlanDefinition, Attempt, WorkflowDerivedStatus, WorkflowRollup } from '@invoker/workflow-core';
+import type { TaskState, TaskStateChanges, PlanDefinition, Attempt, WorkflowDerivedStatus, WorkflowRollup, ExternalDependency, ExternalDependencyChange } from '@invoker/workflow-core';
+import type { SearchResultItem, SearchOptions } from '@invoker/contracts';
 
 // ── Conversation Types ─────────────────────────────────────
 
@@ -46,6 +47,8 @@ export interface Workflow {
   featureBranch?: string;
   mergeMode?: 'manual' | 'automatic' | 'external_review';
   reviewProvider?: string;
+  externalDependencies?: ExternalDependency[];
+  externalDependencyChanges?: ExternalDependencyChange[];
   generation?: number;
   createdAt: string;
   updatedAt: string;
@@ -73,12 +76,29 @@ export interface WorkflowTaskSnapshot {
   tasksByWorkflowId: Map<string, TaskState[]>;
 }
 
+export interface LaunchDispatchInvalidationRow {
+  id: number;
+  taskId: string;
+  attemptId: string;
+  workflowId: string;
+  state: string;
+  generation: number;
+}
+
+export interface ExecutionResourceLeaseReleaseRow {
+  resourceKey: string;
+  resourceType: string;
+  holderId: string;
+  taskId?: string;
+}
+
 export interface PersistenceAdapter {
   // Workflows
   saveWorkflow(workflow: Workflow): void;
-  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'updatedAt' | 'baseBranch' | 'generation' | 'mergeMode'>>): void;
+  updateWorkflow(workflowId: string, changes: Partial<Pick<Workflow, 'name' | 'description' | 'visualProof' | 'planFile' | 'repoUrl' | 'intermediateRepoUrl' | 'branch' | 'onFinish' | 'baseBranch' | 'featureBranch' | 'mergeMode' | 'reviewProvider' | 'externalDependencies' | 'externalDependencyChanges' | 'generation' | 'updatedAt'>>): void;
   loadWorkflow(workflowId: string): Workflow | undefined;
   listWorkflows(): Workflow[];
+  searchWorkflowsAndTasks(query: string, opts?: SearchOptions): SearchResultItem[];
 
   // Tasks
   saveTask(workflowId: string, task: TaskState): void;
@@ -130,6 +150,17 @@ export interface PersistenceAdapter {
     taskChanges: TaskStateChanges,
     attemptPatch: Partial<Pick<Attempt, 'status' | 'exitCode' | 'error' | 'completedAt'>>
   ): void;
+
+  abandonLaunchDispatchesForTasks(
+    taskIds: readonly string[],
+    reason: string,
+    nowIso?: string,
+  ): LaunchDispatchInvalidationRow[];
+  releaseExecutionResourceLeasesForTasks(
+    taskIds: readonly string[],
+    reason: string,
+    nowIso?: string,
+  ): ExecutionResourceLeaseReleaseRow[];
 
   // Agent queries
   /** Read the configured execution agent name for a task (e.g. 'claude', 'codex'). */

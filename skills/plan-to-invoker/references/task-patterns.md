@@ -13,26 +13,45 @@ Source of truth: `packages/surfaces/src/slack/plan-conversation.ts:100-116`
 | "Build/compile" | `command` | `pnpm --filter @invoker/<pkg> build` |
 | "Build all" / "verify compilation" | `command` | `pnpm build` |
 | "Create file X with content Y" | `prompt` | Specify exact path, content structure, what it should export |
-| "Run in Docker" | `command` + `runnerKind: docker` | Command string, set `dockerImage` |
+| "Run in Docker" | `command` + `dockerImage` | Command string, set `dockerImage` |
 | "Lint / type-check" | `command` | `pnpm --filter @invoker/<pkg> lint` or `pnpm --filter @invoker/<pkg> typecheck` |
 | "Check file exists" | `command` | `test -f <path>` |
 | "Check pattern in file" | `command` | `grep -q '<pattern>' <path>` |
-| **Post-fix / regression** (final submitted-plan gate) | `command` | `pnpm run test:all` — keep focused repro commands earlier in the plan, but the final task for implementation plans must be the full-suite gate |
+| **Post-fix / regression** (standalone or terminal stack gate) | `command` | `pnpm run test:all` — keep focused repro commands earlier in the plan, and reserve the full-suite gate for standalone plans or the terminal stack workflow |
 | "Modify UI component" / "Fix layout" | `prompt` + `visualProof: true` | Set `visualProof: true` at plan level; include `description` |
 | **Add visual proof E2E test case** | `prompt` | Add a test to `packages/app/e2e/visual-proof.spec.ts` that sets up the exact UI state being changed and calls `captureScreenshot(page, '<plan-slug>-<state>')`. See `skills/visual-proof/SKILL.md`. |
 | **Capture visual proof (after)** | `command` | `pnpm --filter @invoker/ui build && pnpm --filter @invoker/app build && bash scripts/ui-visual-proof.sh --label after` — depends on **all** implementation tasks |
 | **Invoker-on-Invoker PR publication** | repo-level workflow note | Keep `onFinish: pull_request` + `mergeMode: github`, then publish/update the commit stack with `mergify stack push` once the branch is ready |
 
+Command tasks run under the platform default shell unless the command explicitly invokes another shell. Keep commands POSIX-shell portable by default. If a command needs bash-only options such as `set -o pipefail` or `set -euo pipefail`, wrap it explicitly, for example `bash -lc 'set -euo pipefail; ...'`.
+
 ## Dependency Rules
 
 These are constraints, not guidelines. Violating them produces broken plans.
+
+## Workflow Stack Default
+
+For implementation work (`onFinish != none`), default to a stack of workflow YAML
+files. One YAML file is one Invoker workflow; multiple `tasks:` entries inside
+that file are not a workflow stack.
+
+Split into multiple workflow files when the plan has more than one review slice,
+layer, implementation prompt task, package boundary, UI+non-UI boundary, or
+PR-worthy commit. Submit the resulting chain with
+`scripts/submit-workflow-chain.sh`, using `__UPSTREAM_WORKFLOW_ID__` in later
+templates so each workflow depends on the previous workflow's `__merge__` task.
+
+Standalone implementation workflows are exceptions. If a standalone
+implementation workflow contains multiple prompt tasks, it must include
+`Standalone workflow waiver:` in the top-level description with the reason it is
+not split.
 
 ### Must be sequential (add dependency)
 - **Same file modified by two tasks** → one depends on the other. Order by logical sequence.
 - **Test task** → depends on the implementation task it verifies.
 - **Build/compile check** → depends on all implementation tasks that change source.
 - **Integration test** → depends on all unit-level tasks it integrates.
-- **Final regression task** → depends on **every earlier task** and runs **last** as `pnpm run test:all`.
+- **Final full-suite regression task** → for standalone plans and terminal stack workflows, depends on **every earlier task** and runs **last** as `pnpm run test:all`; non-terminal stack workflows end with focused verification instead.
 - **Visual proof capture task** → depends on **all** implementation tasks and the E2E test case task (it must run after code changes AND the new Playwright test exist).
 
 ### Can be parallel (no dependency needed)
@@ -62,6 +81,21 @@ For plans with `onFinish` set to `pull_request` or `merge`, each task `descripti
    - `dormant`
 
 `onFinish: none` verify-only plans are exempt.
+
+### Review compression contract
+
+Apply `skills/review-compression/SKILL.md` before authoring implementation tasks.
+Each implementation task must include these description headings:
+
+- `Review claim:` the one sentence a reviewer is being asked to approve.
+- `Safety invariant:` why this slice is safe to review locally.
+- `Slice rationale:` why this slice is separate from neighboring work.
+- `Architectural effect:` what changes in control flow, data flow, ownership,
+  dependency direction, or public surface.
+
+Keep directly affected tests and compatibility adapters with the change that
+requires them. Split optional cleanup, special cases, behavior-plus-rename,
+default-flip-plus-deletion, and unrelated stale visual refreshes.
 
 ### Cross-layer direction
 
@@ -187,7 +221,7 @@ See `SKILL.md` (bugfix repro blurb) and this repo’s `scripts/repro-*.sh` examp
 
 When writing `command` fields:
 
-1. **Package tests must `cd` first**: `cd packages/<pkg> && pnpm test`; reserve root-level `pnpm run test:all` for the final implementation-plan regression gate
+1. **Package tests must `cd` first**: `cd packages/<pkg> && pnpm test`; reserve root-level `pnpm run test:all` for standalone plans or the final workflow in an authored stack.
 2. **Use `&&` for sequential steps**: ensures early failure stops execution
 3. **Exit codes matter**: the command succeeds (exit 0) or fails (non-zero). Design accordingly.
 4. **No interactive commands**: everything must run non-interactively
@@ -246,7 +280,7 @@ tasks:
 
 - **God task**: one `prompt` task that says "implement the whole feature" — split it up.
 - **Test-free plan**: every implementation task needs a corresponding verification. No exceptions.
-- **No final full-suite task**: implementation plans must end with a **command** task that runs `pnpm run test:all`.
+- **No final full-suite task**: standalone implementation plans and terminal stack workflows must end with a **command** task that runs `pnpm run test:all`. Non-terminal stack workflows must be validated with a stack manifest and focused verification.
 - **Circular dependencies**: task A depends on B, B depends on A — validator catches this but don't generate it.
 - **Phantom files**: referencing files that don't exist without a task to create them first.
 - **UI plan without visual proof tasks**: `visualProof: true` without the E2E test case task and capture task means no plan-specific screenshots are captured.
@@ -265,5 +299,6 @@ The validator now enforces atomic/detailed tasks:
 - IDs must avoid generic placeholders (`task-1`, `step-2`); kebab-case is recommended
 - Each task must have exactly one of `command` or `prompt`
 - Descriptions must be specific (minimum detail threshold)
+- Implementation task descriptions must include review-compression headings
 - Command tasks cannot be overloaded with long shell chains
 - Prompt tasks must include concrete file paths and explicit acceptance language

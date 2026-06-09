@@ -52,6 +52,7 @@ export interface WorkflowStatus {
   total: number;
   completed: number;
   failed: number;
+  closed: number;
   running: number;
   pending: number;
 }
@@ -253,6 +254,68 @@ export interface SystemDiagnostics {
   bundledSkills?: BundledSkillsStatus;
 }
 
+// ── Embedded terminal session types ─────────────────────────
+
+/**
+ * Describes an embedded terminal session managed by the main process.
+ *
+ * `mode` distinguishes how the session is backed:
+ *   - `spawn`    — main process spawned a fresh child shell for the task
+ *                  (typical for completed/failed tasks restoring a workspace).
+ *   - `attached` — the session is wired to a live executor handle; output is
+ *                  fanned in from `executor.onOutput` and input flows through
+ *                  `executor.sendInput` (used for tasks still running).
+ */
+export interface TerminalSessionDescriptor {
+  sessionId: string;
+  taskId: string;
+  status: 'running' | 'exited';
+  exitCode?: number;
+  cwd?: string;
+  command?: string;
+  args?: string[];
+  mode: 'spawn' | 'attached';
+  attached: boolean;
+  createdAt: string;
+}
+
+export interface TerminalOutputEvent {
+  sessionId: string;
+  taskId: string;
+  data: string;
+}
+
+export interface TerminalExitEvent {
+  sessionId: string;
+  taskId: string;
+  exitCode?: number;
+}
+
+export interface OpenTerminalResponse {
+  opened: boolean;
+  reason?: string;
+  /** Present when the GUI main process opened an embedded session. */
+  session?: TerminalSessionDescriptor;
+}
+
+// ── Search types ────────────────────────────────────────────
+
+export interface SearchResultItem {
+  kind: 'workflow' | 'task';
+  id: string;
+  workflowId?: string;      // populated for task results
+  title: string;            // workflow name or task description
+  subtitle: string;         // "Workflow · <status>" or "Task · <workflowName>"
+  status: string;
+  createdAt: string;
+}
+
+export interface SearchOptions {
+  type?: 'workflows' | 'tasks' | 'all';
+  limit?: number;
+  offset?: number;
+}
+
 // ── Invoke Channel Registry ─────────────────────────────────
 // Each key is the channel name string; value is { request, response }.
 // `request` is a tuple of the arguments passed after the channel name.
@@ -303,7 +366,7 @@ export const IpcChannels = {
   // Task Queries
   'invoker:get-tasks': {} as {
     request: [forceRefresh?: boolean];
-    response: { tasks: TaskState[]; workflows: WorkflowMeta[] };
+    response: { tasks: TaskState[]; workflows: WorkflowMeta[]; streamSequence: number };
   },
   'invoker:get-events': {} as {
     request: [taskId: string];
@@ -422,12 +485,12 @@ export const IpcChannels = {
     request: [workflowId: string];
     response: void;
   },
-  'invoker:rebase-and-retry': {} as {
-    request: [mergeTaskId: string];
+  'invoker:rebase-retry': {} as {
+    request: [target: string];
     response: RebaseAndRetryResult;
   },
-  'invoker:recreate-with-rebase': {} as {
-    request: [workflowId: string];
+  'invoker:rebase-recreate': {} as {
+    request: [target: string];
     response: RebaseAndRetryResult;
   },
   'invoker:set-merge-branch': {} as {
@@ -493,14 +556,30 @@ export const IpcChannels = {
     response: Record<string, unknown>;
   },
   'invoker:get-activity-logs': {} as {
-    request: [];
+    request: [sinceId?: number, limit?: number];
     response: ActivityLogEntry[];
   },
 
   // Terminal
   'invoker:open-terminal': {} as {
     request: [taskId: string];
-    response: { opened: boolean; reason?: string };
+    response: OpenTerminalResponse;
+  },
+  'invoker:terminal-list': {} as {
+    request: [];
+    response: TerminalSessionDescriptor[];
+  },
+  'invoker:terminal-write': {} as {
+    request: [sessionId: string, data: string];
+    response: { ok: boolean; reason?: string };
+  },
+  'invoker:terminal-resize': {} as {
+    request: [sessionId: string, cols: number, rows: number];
+    response: { ok: boolean; reason?: string };
+  },
+  'invoker:terminal-close': {} as {
+    request: [sessionId: string];
+    response: { ok: boolean; reason?: string };
   },
 
   // Worktree Cleanup
@@ -515,6 +594,10 @@ export const IpcChannels = {
   'invoker:get-bundled-skills-status': {} as {
     request: [];
     response: BundledSkillsStatus;
+  },
+  'invoker:search': {} as {
+    request: [query: string, options?: SearchOptions];
+    response: SearchResultItem[];
   },
   'invoker:install-bundled-skills': {} as {
     request: [mode?: BundledSkillsInstallMode];
@@ -549,6 +632,12 @@ export const IpcEventChannels = {
   },
   'invoker:workflows-changed': {} as {
     payload: unknown[];
+  },
+  'invoker:terminal-output': {} as {
+    payload: TerminalOutputEvent;
+  },
+  'invoker:terminal-exit': {} as {
+    payload: TerminalExitEvent;
   },
 } as const;
 

@@ -11,8 +11,8 @@
 
 import { useState, useCallback, useMemo, useEffect, useRef, useLayoutEffect } from 'react';
 import yaml from 'js-yaml';
-import type { TaskState, TaskReplacementDef, ExternalGatePolicyUpdate, WorkflowStatus } from './types.js';
-import type { ActionGraphNode } from '@invoker/contracts';
+import type { TaskState, TaskReplacementDef, ExternalGatePolicyUpdate, WorkflowMeta, WorkflowStatus } from './types.js';
+import type { ActionGraphNode, TerminalSessionDescriptor } from '@invoker/contracts';
 import { useTasks } from './hooks/useTasks.js';
 import { useInvoker } from './hooks/useInvoker.js';
 import { TaskDAG } from './components/TaskDAG.js';
@@ -45,6 +45,43 @@ type ModalState =
   | { type: 'experiment'; task: TaskState }
   | { type: 'replace'; task: TaskState };
 
+type KeyboardRegion = 'workflowGraph' | 'taskGraph' | 'inspector' | 'bottomBar';
+type SearchResult =
+  | { kind: 'workflow'; id: string; title: string; subtitle: string }
+  | { kind: 'task'; id: string; workflowId: string | null; title: string; subtitle: string };
+
+const KEYBOARD_REGION_ORDER: readonly KeyboardRegion[] = ['workflowGraph', 'taskGraph', 'inspector', 'bottomBar'];
+const STATUS_KEY_ORDER: readonly string[] = [
+  'completed',
+  'running',
+  'failed',
+  'closed',
+  'pending',
+  'needs_input',
+  'review_ready',
+  'awaiting_approval',
+  'blocked',
+  'fixing_with_ai',
+];
+const EDITABLE_SELECTOR = [
+  'input',
+  'textarea',
+  'select',
+  '[contenteditable="true"]',
+  '.xterm',
+  '[role="dialog"] input',
+  '[role="dialog"] textarea',
+].join(',');
+
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest(EDITABLE_SELECTOR));
+}
+
+function normalizedSearchText(value: string | undefined): string {
+  return (value ?? '').toLowerCase();
+}
+
 interface WorkflowContextMenuProps {
   x: number;
   y: number;
@@ -52,7 +89,8 @@ interface WorkflowContextMenuProps {
   onOpenWorkflow: (workflowId: string) => void;
   onOpenPr: (workflowId: string) => void;
   onRetryWorkflow: (workflowId: string) => void;
-  onRecreateWithRebase: (workflowId: string) => void;
+  onRebaseRetry: (workflowId: string) => void;
+  onRebaseRecreate: (workflowId: string) => void;
   onRecreateWorkflow: (workflowId: string) => void;
   onCancelWorkflow: (workflowId: string) => void;
   onDeleteWorkflow: (workflowId: string) => void;
@@ -67,7 +105,8 @@ function WorkflowContextMenu({
   onOpenWorkflow,
   onOpenPr,
   onRetryWorkflow,
-  onRecreateWithRebase,
+  onRebaseRetry,
+  onRebaseRecreate,
   onRecreateWorkflow,
   onCancelWorkflow,
   onDeleteWorkflow,
@@ -169,8 +208,11 @@ function WorkflowContextMenu({
       ) : (
         <div>
           <div className="my-1 border-t border-gray-600" />
-          <button role="menuitem" onClick={() => runAction(onRecreateWithRebase)} className={dangerButtonClass}>
-            Recreate with Rebase
+          <button role="menuitem" onClick={() => runAction(onRebaseRetry)} className={buttonClass}>
+            Rebase and Retry
+          </button>
+          <button role="menuitem" onClick={() => runAction(onRebaseRecreate)} className={dangerButtonClass}>
+            Rebase and Recreate
           </button>
           <button role="menuitem" onClick={() => runAction(onRecreateWorkflow)} className={dangerButtonClass}>
             Recreate Workflow
@@ -225,6 +267,7 @@ export function App() {
   const graphSurfaceRef = useRef<HTMLDivElement>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  const [stickySelectedWorkflow, setStickySelectedWorkflow] = useState<WorkflowMeta | null>(null);
   const [workflowSelectionDismissed, setWorkflowSelectionDismissed] = useState(false);
   const [modal, setModal] = useState<ModalState>({ type: 'none' });
   const [hasLoadedPlan, setHasLoadedPlan] = useState(false);
@@ -246,8 +289,20 @@ export function App() {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [advancedMetadataExpanded, setAdvancedMetadataExpanded] = useState(false);
   const [terminalCollapsed, setTerminalCollapsed] = useState(true);
+  const [terminalSessions, setTerminalSessions] = useState<TerminalSessionDescriptor[]>([]);
+  const [activeTerminalSessionId, setActiveTerminalSessionId] = useState<string | null>(null);
   const [workflowContextMenu, setWorkflowContextMenu] = useState<{ x: number; y: number; workflowId: string } | null>(null);
+  const [keyboardRegion, setKeyboardRegion] = useState<KeyboardRegion>('workflowGraph');
+  const [previousGraphRegion, setPreviousGraphRegion] = useState<KeyboardRegion>('workflowGraph');
+  const [centerWorkflowId, setCenterWorkflowId] = useState<string | null>(null);
+  const [centerTaskId, setCenterTaskId] = useState<string | null>(null);
+  const [bottomStatusIndex, setBottomStatusIndex] = useState(0);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const uiPerfThrottleRef = useRef<Record<string, number>>({});
+  const lastShiftAtRef = useRef(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   const refreshSystemDiagnostics = useCallback(() => {
     window.invoker?.getSystemDiagnostics?.().then((diagnostics) => {
@@ -270,6 +325,27 @@ export function App() {
     window.invoker?.getExecutionAgents?.().then(setExecutionAgents).catch(() => {});
     refreshSystemDiagnostics();
   }, [refreshSystemDiagnostics]);
+
+  useEffect(() => {
+    window.invoker?.terminalList?.().then((list) => {
+      if (Array.isArray(list) && list.length > 0) {
+        setTerminalSessions(list);
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.invoker?.onTerminalExit?.((event) => {
+      setTerminalSessions((prev) =>
+        prev.map((session) =>
+          session.sessionId === event.sessionId
+            ? { ...session, status: 'exited', exitCode: event.exitCode }
+            : session,
+        ),
+      );
+    });
+    return () => { unsubscribe?.(); };
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.invoker) return;
@@ -339,15 +415,29 @@ export function App() {
 
   const selectedTask = selectedTaskId ? tasks.get(selectedTaskId) ?? null : null;
   const contextMenuTask = contextMenu ? tasks.get(contextMenu.taskId) ?? null : null;
+  const selectedWorkflowTaskCount = useMemo(() => {
+    if (!selectedWorkflowId) return 0;
+    let count = 0;
+    for (const task of tasks.values()) {
+      if (task.config.workflowId === selectedWorkflowId) count += 1;
+    }
+    return count;
+  }, [selectedWorkflowId, tasks]);
   const selectedWorkflow = useMemo(() => {
     if (selectedWorkflowId) {
-      return workflows.get(selectedWorkflowId) ?? null;
+      return workflows.get(selectedWorkflowId)
+        ?? (stickySelectedWorkflow?.id === selectedWorkflowId && selectedWorkflowTaskCount > 0
+          ? stickySelectedWorkflow
+          : null);
     }
     if (selectedTask?.config.workflowId) {
-      return workflows.get(selectedTask.config.workflowId) ?? null;
+      return workflows.get(selectedTask.config.workflowId)
+        ?? (stickySelectedWorkflow?.id === selectedTask.config.workflowId
+          ? stickySelectedWorkflow
+          : null);
     }
     return null;
-  }, [selectedWorkflowId, selectedTask, workflows]);
+  }, [selectedWorkflowId, selectedTask, workflows, stickySelectedWorkflow, selectedWorkflowTaskCount]);
   const miniDagTasks = useMemo(() => {
     const activeWorkflowId = selectedWorkflow?.id ?? selectedWorkflowId;
     if (!activeWorkflowId) return new Map<string, TaskState>();
@@ -359,6 +449,29 @@ export function App() {
     }
     return next;
   }, [selectedWorkflow, selectedWorkflowId, tasks]);
+  const selectedTaskDagWorkflows = useMemo(() => {
+    if (!selectedWorkflow || workflows.has(selectedWorkflow.id)) {
+      return workflows;
+    }
+    const next = new Map(workflows);
+    next.set(selectedWorkflow.id, selectedWorkflow);
+    return next;
+  }, [selectedWorkflow, workflows]);
+
+  useEffect(() => {
+    if (!selectedWorkflowId) {
+      setStickySelectedWorkflow(null);
+      return;
+    }
+    const liveWorkflow = workflows.get(selectedWorkflowId);
+    if (liveWorkflow) {
+      setStickySelectedWorkflow(liveWorkflow);
+      return;
+    }
+    if (selectedWorkflowTaskCount === 0) {
+      setStickySelectedWorkflow((prev) => (prev?.id === selectedWorkflowId ? null : prev));
+    }
+  }, [selectedWorkflowId, selectedWorkflowTaskCount, workflows]);
 
   useEffect(() => {
     if (selectedTask?.config.workflowId) {
@@ -366,7 +479,7 @@ export function App() {
       setSelectedWorkflowId(selectedTask.config.workflowId);
       return;
     }
-    if (selectedWorkflowId && workflows.has(selectedWorkflowId)) {
+    if (selectedWorkflowId && (workflows.has(selectedWorkflowId) || selectedWorkflowTaskCount > 0)) {
       return;
     }
     if (workflowSelectionDismissed) {
@@ -374,7 +487,7 @@ export function App() {
     }
     const firstWorkflowId = workflows.keys().next().value as string | undefined;
     setSelectedWorkflowId(firstWorkflowId ?? null);
-  }, [selectedTask, selectedWorkflowId, workflowSelectionDismissed, workflows]);
+  }, [selectedTask, selectedWorkflowId, selectedWorkflowTaskCount, workflowSelectionDismissed, workflows]);
 
   const handleStatusClick = useCallback((filterKey: WorkflowStatus, event: React.MouseEvent) => {
     setStatusFilters(prev => {
@@ -396,6 +509,355 @@ export function App() {
       }
     });
   }, []);
+
+  const visibleStatusKeys = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const task of tasks.values()) {
+      const key = task.status === 'awaiting_approval' && task.execution.pendingFixError ? 'fix_approval' : task.status;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return STATUS_KEY_ORDER.filter((key) => key === 'completed' || key === 'running' || key === 'failed' || key === 'pending' || (counts.get(key) ?? 0) > 0);
+  }, [tasks]);
+
+  const searchResults = useMemo<SearchResult[]>(() => {
+    const query = normalizedSearchText(searchQuery.trim());
+    if (!query) return [];
+    const results: SearchResult[] = [];
+    for (const workflow of workflows.values()) {
+      const workflowTasks = [...tasks.values()].filter((task) => task.config.workflowId === workflow.id);
+      const reviewUrl = workflowTasks.find((task) => task.execution.reviewUrl)?.execution.reviewUrl;
+      const haystack = [
+        workflow.id,
+        workflow.name,
+        workflow.status,
+        workflow.repoUrl,
+        workflow.intermediateRepoUrl,
+        reviewUrl,
+      ].map(normalizedSearchText).join(' ');
+      if (haystack.includes(query)) {
+        results.push({
+          kind: 'workflow',
+          id: workflow.id,
+          title: workflow.name || workflow.id,
+          subtitle: `Workflow · ${workflow.status}`,
+        });
+      }
+    }
+    for (const task of tasks.values()) {
+      const workflow = task.config.workflowId ? workflows.get(task.config.workflowId) : null;
+      const haystack = [
+        task.id,
+        task.description,
+        task.status,
+        task.config.summary,
+        task.config.prompt,
+        task.config.command,
+        task.execution.reviewUrl,
+        workflow?.name,
+      ].map(normalizedSearchText).join(' ');
+      if (haystack.includes(query)) {
+        results.push({
+          kind: 'task',
+          id: task.id,
+          workflowId: task.config.workflowId ?? null,
+          title: task.description || task.id,
+          subtitle: `Task · ${workflow?.name ?? task.config.workflowId ?? 'unknown workflow'}`,
+        });
+      }
+    }
+    return results.slice(0, 12);
+  }, [searchQuery, tasks, workflows]);
+
+  useEffect(() => {
+    setSearchActiveIndex(0);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (searchOpen) {
+      const frame = requestAnimationFrame(() => searchInputRef.current?.focus());
+      return () => cancelAnimationFrame(frame);
+    }
+    return undefined;
+  }, [searchOpen]);
+
+  const focusKeyboardRegion = useCallback((region: KeyboardRegion) => {
+    setKeyboardRegion(region);
+    if (region === 'workflowGraph' || region === 'taskGraph') {
+      setPreviousGraphRegion(region);
+    }
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`[data-keyboard-region="${region}"]`)?.focus();
+    });
+  }, []);
+
+  const nodeCenter = useCallback((element: Element | null) => {
+    const rect = element?.getBoundingClientRect();
+    if (rect && (rect.width > 0 || rect.height > 0)) {
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    }
+    return { x: Math.max(24, window.innerWidth / 2), y: Math.max(24, window.innerHeight / 2) };
+  }, []);
+
+  const selectWorkflowById = useCallback((workflowId: string) => {
+    setWorkflowSelectionDismissed(false);
+    setSelectedWorkflowId(workflowId);
+    setSelectedTaskId(null);
+    setContextMenu(null);
+    setWorkflowContextMenu(null);
+    setCenterWorkflowId(workflowId);
+    focusKeyboardRegion('workflowGraph');
+  }, [focusKeyboardRegion]);
+
+  const selectTaskById = useCallback((taskId: string) => {
+    const task = tasks.get(taskId);
+    if (!task) return;
+    setSelectedTaskId(task.id);
+    setWorkflowSelectionDismissed(false);
+    if (task.config.workflowId) {
+      setSelectedWorkflowId(task.config.workflowId);
+      setCenterWorkflowId(task.config.workflowId);
+    }
+    setContextMenu(null);
+    setWorkflowContextMenu(null);
+    setCenterTaskId(task.id);
+    focusKeyboardRegion('taskGraph');
+  }, [focusKeyboardRegion, tasks]);
+
+  const selectRelativeNode = useCallback((direction: 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight') => {
+    const inTaskGraph = keyboardRegion === 'taskGraph';
+    const nodeRecords = inTaskGraph
+      ? [...document.querySelectorAll<HTMLElement>('[data-testid="selected-workflow-mini-dag"] .react-flow__node')]
+          .map((element) => {
+            const testId = element.getAttribute('data-testid') ?? '';
+            const id = testId.startsWith('rf__node-') ? testId.slice('rf__node-'.length) : null;
+            return id && tasks.has(id) ? { id, element } : null;
+          })
+          .filter((record): record is { id: string; element: HTMLElement } => Boolean(record))
+      : [...document.querySelectorAll<HTMLElement>('[data-testid^="workflow-node-"]')]
+          .map((element) => {
+            const testId = element.getAttribute('data-testid') ?? '';
+            const id = testId.slice('workflow-node-'.length);
+            return workflows.has(id) ? { id, element } : null;
+          })
+          .filter((record): record is { id: string; element: HTMLElement } => Boolean(record));
+
+    if (nodeRecords.length === 0) return;
+    const currentId = inTaskGraph ? selectedTaskId : selectedWorkflow?.id ?? selectedWorkflowId;
+    const sorted = [...nodeRecords].sort((a, b) => a.id.localeCompare(b.id));
+    const current = nodeRecords.find((record) => record.id === currentId) ?? sorted[0];
+    const currentRect = current.element.getBoundingClientRect();
+    const currentCenter = {
+      x: currentRect.left + currentRect.width / 2,
+      y: currentRect.top + currentRect.height / 2,
+    };
+    const isHorizontal = direction === 'ArrowLeft' || direction === 'ArrowRight';
+    const sign = direction === 'ArrowLeft' || direction === 'ArrowUp' ? -1 : 1;
+    const candidates = nodeRecords
+      .filter((record) => record.id !== current.id)
+      .map((record) => {
+        const rect = record.element.getBoundingClientRect();
+        const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        const primaryDelta = isHorizontal ? center.x - currentCenter.x : center.y - currentCenter.y;
+        const secondaryDelta = isHorizontal ? center.y - currentCenter.y : center.x - currentCenter.x;
+        return { ...record, primaryDelta, secondaryDelta };
+      })
+      .filter((record) => Math.sign(record.primaryDelta) === sign && Math.abs(record.primaryDelta) > 0)
+      .sort((a, b) => Math.abs(a.primaryDelta) - Math.abs(b.primaryDelta) || Math.abs(a.secondaryDelta) - Math.abs(b.secondaryDelta));
+
+    const fallbackIndex = Math.max(0, sorted.findIndex((record) => record.id === current.id));
+    const fallback = sorted[Math.min(sorted.length - 1, Math.max(0, fallbackIndex + sign))];
+    const next = candidates[0] ?? fallback;
+    if (!next || next.id === current.id) return;
+    if (inTaskGraph) {
+      selectTaskById(next.id);
+    } else {
+      selectWorkflowById(next.id);
+    }
+  }, [keyboardRegion, selectTaskById, selectWorkflowById, selectedTaskId, selectedWorkflow?.id, selectedWorkflowId, tasks, workflows]);
+
+  const openSelectedContextMenu = useCallback(() => {
+    if (keyboardRegion === 'taskGraph' && selectedTaskId && tasks.has(selectedTaskId)) {
+      const element = [...document.querySelectorAll<HTMLElement>('[data-testid="selected-workflow-mini-dag"] .react-flow__node')]
+        .find((candidate) => (candidate.getAttribute('data-testid') ?? '') === `rf__node-${selectedTaskId}`);
+      const point = nodeCenter(element ?? null);
+      setWorkflowContextMenu(null);
+      setContextMenu({ x: point.x, y: point.y, taskId: selectedTaskId });
+      return;
+    }
+    const workflowId = selectedWorkflow?.id ?? selectedWorkflowId;
+    if (keyboardRegion === 'workflowGraph' && workflowId && workflows.has(workflowId)) {
+      const element = document.querySelector<HTMLElement>(`[data-testid="workflow-node-${workflowId}"]`);
+      const point = nodeCenter(element);
+      setContextMenu(null);
+      setWorkflowContextMenu({ x: point.x, y: point.y, workflowId });
+    }
+  }, [keyboardRegion, nodeCenter, selectedTaskId, selectedWorkflow?.id, selectedWorkflowId, tasks, workflows]);
+
+  const activateSearchResult = useCallback((result: SearchResult | undefined) => {
+    if (!result) return;
+    setSearchOpen(false);
+    setSearchQuery('');
+    if (result.kind === 'workflow') {
+      selectWorkflowById(result.id);
+      return;
+    }
+    selectTaskById(result.id);
+  }, [selectTaskById, selectWorkflowById]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Shift' && !isEditableKeyboardTarget(event.target)) {
+        const now = Date.now();
+        if (now - lastShiftAtRef.current <= 450) {
+          event.preventDefault();
+          setSearchOpen(true);
+          setSearchQuery('');
+          setSearchActiveIndex(0);
+          lastShiftAtRef.current = 0;
+          return;
+        }
+        lastShiftAtRef.current = now;
+      }
+
+      if (searchOpen) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          setSearchOpen(false);
+        } else if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setSearchActiveIndex((index) => Math.min(searchResults.length - 1, index + 1));
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setSearchActiveIndex((index) => Math.max(0, index - 1));
+        } else if (event.key === 'Enter') {
+          event.preventDefault();
+          activateSearchResult(searchResults[searchActiveIndex]);
+        }
+        return;
+      }
+
+      if (isEditableKeyboardTarget(event.target) || modal.type !== 'none') return;
+
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        const currentIndex = KEYBOARD_REGION_ORDER.indexOf(keyboardRegion);
+        const nextIndex = event.shiftKey
+          ? (currentIndex - 1 + KEYBOARD_REGION_ORDER.length) % KEYBOARD_REGION_ORDER.length
+          : (currentIndex + 1) % KEYBOARD_REGION_ORDER.length;
+        focusKeyboardRegion(KEYBOARD_REGION_ORDER[nextIndex]);
+        return;
+      }
+
+      if (event.key === 'Escape') {
+        if (keyboardRegion === 'inspector') {
+          event.preventDefault();
+          focusKeyboardRegion(previousGraphRegion);
+        } else if (keyboardRegion === 'taskGraph' && selectedWorkflow && miniDagTasks.size > 0) {
+          event.preventDefault();
+          setContextMenu(null);
+          setWorkflowContextMenu(null);
+          setSelectedTaskId(null);
+          setSelectedWorkflowId(null);
+          setWorkflowSelectionDismissed(true);
+          focusKeyboardRegion('workflowGraph');
+        }
+        return;
+      }
+
+      if (keyboardRegion === 'workflowGraph' || keyboardRegion === 'taskGraph') {
+        if (event.key === ' ' && keyboardRegion === 'workflowGraph') {
+          const workflowId = selectedWorkflow?.id ?? selectedWorkflowId;
+          if (workflowId) {
+            event.preventDefault();
+            setContextMenu(null);
+            setWorkflowContextMenu(null);
+            setWorkflowSelectionDismissed(false);
+            focusKeyboardRegion('taskGraph');
+            return;
+          }
+        }
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          openSelectedContextMenu();
+          return;
+        }
+        if (event.key === 'Home' && keyboardRegion === 'taskGraph') {
+          event.preventDefault();
+          const firstTask = [...miniDagTasks.values()].sort((a, b) => a.dependencies.length - b.dependencies.length || a.id.localeCompare(b.id))[0];
+          if (firstTask) selectTaskById(firstTask.id);
+          return;
+        }
+        if (event.key === 'End' && keyboardRegion === 'taskGraph') {
+          event.preventDefault();
+          const terminalTask = [...miniDagTasks.values()].sort((a, b) => Number(Boolean(b.config.isMergeNode)) - Number(Boolean(a.config.isMergeNode)) || b.id.localeCompare(a.id))[0];
+          if (terminalTask) selectTaskById(terminalTask.id);
+          return;
+        }
+        if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          selectRelativeNode(event.key);
+        }
+        return;
+      }
+
+      if (keyboardRegion === 'inspector') {
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault();
+          setInspectorCollapsed(false);
+        } else if (event.key === 'ArrowRight') {
+          event.preventDefault();
+          setInspectorCollapsed(true);
+        } else if (event.key === 'Enter') {
+          event.preventDefault();
+          document.querySelector<HTMLElement>('[data-keyboard-region="inspector"] button, [data-keyboard-region="inspector"] select, [data-keyboard-region="inspector"] input')?.focus();
+        }
+        return;
+      }
+
+      if (keyboardRegion === 'bottomBar') {
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setTerminalCollapsed(false);
+        } else if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setTerminalCollapsed(true);
+        } else if (event.key === 'ArrowRight') {
+          event.preventDefault();
+          setBottomStatusIndex((index) => Math.min(visibleStatusKeys.length - 1, index + 1));
+        } else if (event.key === 'ArrowLeft') {
+          event.preventDefault();
+          setBottomStatusIndex((index) => Math.max(0, index - 1));
+        } else if (event.key === 'Enter') {
+          event.preventDefault();
+          const key = visibleStatusKeys[bottomStatusIndex] ?? visibleStatusKeys[0];
+          if (key) {
+            handleStatusClick(key as WorkflowStatus, { ctrlKey: false, metaKey: false } as React.MouseEvent);
+          }
+        }
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [
+    activateSearchResult,
+    bottomStatusIndex,
+    focusKeyboardRegion,
+    handleStatusClick,
+    keyboardRegion,
+    miniDagTasks,
+    modal.type,
+    openSelectedContextMenu,
+    previousGraphRegion,
+    searchActiveIndex,
+    searchOpen,
+    searchResults,
+    selectRelativeNode,
+    selectTaskById,
+    selectedWorkflow,
+    selectedWorkflowId,
+    visibleStatusKeys,
+  ]);
   const missingRequiredTool = systemDiagnostics?.tools.find((tool) => tool.required && !tool.installed) ?? null;
   const installedAgentCount = systemDiagnostics?.tools.filter((tool) => (tool.id === 'claude' || tool.id === 'codex') && tool.installed).length ?? 0;
   const needsBundledSkillsPrompt = Boolean(systemDiagnostics?.isPackaged && systemDiagnostics?.bundledSkills?.promptRecommended);
@@ -410,17 +872,38 @@ export function App() {
     setWorkflowContextMenu(null);
   }, []);
 
-  const handleTaskDoubleClick = useCallback(async (task: TaskState) => {
-    setSelectedTaskId(task.id);
-    if (isExperimentSpawnPivotTask(task)) {
+  const openTerminalForTaskId = useCallback(async (taskId: string) => {
+    const task = tasks.get(taskId);
+    if (task && isExperimentSpawnPivotTask(task)) {
       window.alert(EXPERIMENT_SPAWN_PIVOT_OPEN_TERMINAL_MESSAGE);
       return;
     }
-    const result = await window.invoker?.openTerminal(task.id);
-    if (result && !result.opened) {
+    setTerminalCollapsed(false);
+    const result = await (window.__INVOKER_TEST_OPEN_TERMINAL__ ?? window.invoker?.openTerminal)?.(taskId);
+    if (!result) return;
+    if (!result.opened) {
       window.alert(result.reason ?? 'Cannot open terminal for this task.');
+      return;
     }
-  }, []);
+    const session = result.session;
+    if (session) {
+      setTerminalSessions((prev) => {
+        const idx = prev.findIndex((s) => s.sessionId === session.sessionId);
+        if (idx >= 0) {
+          const next = prev.slice();
+          next[idx] = session;
+          return next;
+        }
+        return [...prev, session];
+      });
+      setActiveTerminalSessionId(session.sessionId);
+    }
+  }, [tasks]);
+
+  const handleTaskDoubleClick = useCallback(async (task: TaskState) => {
+    setSelectedTaskId(task.id);
+    await openTerminalForTaskId(task.id);
+  }, [openTerminalForTaskId]);
 
   const handleTaskContextMenu = useCallback((task: TaskState, event: React.MouseEvent) => {
     setSelectedTaskId(task.id);
@@ -484,15 +967,32 @@ export function App() {
   const handleOpenTerminal = useCallback(
     (taskId: string) => {
       setContextMenu(null);
-      const task = tasks.get(taskId);
-      if (task && isExperimentSpawnPivotTask(task)) {
-        window.alert(EXPERIMENT_SPAWN_PIVOT_OPEN_TERMINAL_MESSAGE);
-        return;
-      }
-      void window.invoker?.openTerminal(taskId);
+      void openTerminalForTaskId(taskId);
     },
-    [tasks],
+    [openTerminalForTaskId],
   );
+
+  const handleCloseTerminalSession = useCallback(async (sessionId: string) => {
+    setTerminalSessions((prev) => prev.filter((session) => session.sessionId !== sessionId));
+    setActiveTerminalSessionId((prev) => {
+      if (prev !== sessionId) return prev;
+      const remaining = terminalSessions.filter((session) => session.sessionId !== sessionId);
+      return remaining[remaining.length - 1]?.sessionId ?? null;
+    });
+    try {
+      await window.invoker?.terminalClose?.(sessionId);
+    } catch {
+      /* best-effort */
+    }
+  }, [terminalSessions]);
+
+  const terminalTaskLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const task of tasks.values()) {
+      labels.set(task.id, task.description || task.id);
+    }
+    return labels;
+  }, [tasks]);
 
   const handleReplaceTask = useCallback((taskId: string) => {
     setContextMenu(null);
@@ -508,15 +1008,27 @@ export function App() {
     }
   }, []);
 
-  const handleRecreateWithRebase = useCallback(async (workflowId: string) => {
+  const handleRebaseRetry = useCallback(async (workflowId: string) => {
     setContextMenu(null);
     try {
-      const result = await window.invoker?.recreateWithRebase(workflowId);
+      const result = await window.invoker?.rebaseRetry(workflowId);
       if (result && !result.success) {
-        console.error('Recreate with Rebase failed for some branches:', result.errors);
+        console.error('Rebase and Retry failed for some branches:', result.errors);
       }
     } catch (err) {
-      console.error('Recreate with Rebase failed:', err);
+      console.error('Rebase and Retry failed:', err);
+    }
+  }, []);
+
+  const handleRebaseRecreate = useCallback(async (workflowId: string) => {
+    setContextMenu(null);
+    try {
+      const result = await window.invoker?.rebaseRecreate(workflowId);
+      if (result && !result.success) {
+        console.error('Rebase and Recreate failed for some branches:', result.errors);
+      }
+    } catch (err) {
+      console.error('Rebase and Recreate failed:', err);
     }
   }, []);
 
@@ -744,7 +1256,7 @@ export function App() {
   const allSettled = useMemo(() => {
     if (tasks.size === 0) return false;
     for (const task of tasks.values()) {
-      if (task.status !== 'completed' && task.status !== 'failed' && task.status !== 'blocked') {
+      if (task.status !== 'completed' && task.status !== 'failed' && task.status !== 'closed' && task.status !== 'blocked') {
         return false;
       }
     }
@@ -1076,7 +1588,10 @@ export function App() {
             <div
               ref={graphSurfaceRef}
               data-testid="workflow-graph-surface"
-              className="flex-1 relative overflow-hidden border-r border-gray-800 bg-gray-900"
+              data-keyboard-region="workflowGraph"
+              tabIndex={0}
+              data-keyboard-active={keyboardRegion === 'workflowGraph' ? 'true' : 'false'}
+              className={`flex-1 relative overflow-hidden border-r border-gray-800 bg-gray-900 outline-none ${keyboardRegion === 'workflowGraph' ? 'ring-2 ring-inset ring-blue-400/50' : ''}`}
               onClick={viewMode === 'dag' ? handleDagSurfaceClick : undefined}
             >
               {viewMode === 'queue' ? (
@@ -1105,6 +1620,7 @@ export function App() {
                     tasks={tasks}
                     workflows={workflows}
                     selectedWorkflowId={selectedWorkflow?.id ?? null}
+                    centerWorkflowId={centerWorkflowId}
                     statusFilters={statusFilters}
                     onSelectWorkflow={handleWorkflowClick}
                     onWorkflowContextMenu={handleWorkflowContextMenu}
@@ -1118,15 +1634,23 @@ export function App() {
                       boundsRef={graphSurfaceRef}
                       contentClassName="h-[250px]"
                     >
-                      <TaskDAG
-                        tasks={miniDagTasks}
-                        workflows={workflows}
-                        selectedTaskId={selectedTaskId}
-                        onTaskClick={handleTaskClick}
-                        onTaskDoubleClick={handleTaskDoubleClick}
-                        onTaskContextMenu={handleTaskContextMenu}
-                        statusFilters={new Set()}
-                      />
+                      <div
+                        data-keyboard-region="taskGraph"
+                        tabIndex={0}
+                        data-keyboard-active={keyboardRegion === 'taskGraph' ? 'true' : 'false'}
+                        className={`h-full outline-none ${keyboardRegion === 'taskGraph' ? 'ring-2 ring-inset ring-blue-300/60' : ''}`}
+                      >
+                        <TaskDAG
+                          tasks={miniDagTasks}
+                          workflows={selectedTaskDagWorkflows}
+                          selectedTaskId={selectedTaskId}
+                          centerTaskId={centerTaskId}
+                          onTaskClick={handleTaskClick}
+                          onTaskDoubleClick={handleTaskDoubleClick}
+                          onTaskContextMenu={handleTaskContextMenu}
+                          statusFilters={new Set()}
+                        />
+                      </div>
                     </FloatingGraphPanel>
                   )}
                 </>
@@ -1134,21 +1658,37 @@ export function App() {
             </div>
 
             {viewMode === 'dag' && (
-              <>
+              <div
+                data-keyboard-region="bottomBar"
+                tabIndex={0}
+                data-keyboard-active={keyboardRegion === 'bottomBar' ? 'true' : 'false'}
+                className={`outline-none ${keyboardRegion === 'bottomBar' ? 'ring-2 ring-inset ring-blue-400/50' : ''}`}
+              >
                 <StatusBar
                   tasks={tasks}
                   activeFilters={statusFilters}
+                  keyboardActiveKey={keyboardRegion === 'bottomBar' ? visibleStatusKeys[bottomStatusIndex] ?? null : null}
                   onStatusClick={(filterKey, event) => handleStatusClick(filterKey as WorkflowStatus, event)}
                 />
                 <TerminalDrawer
                   collapsed={terminalCollapsed}
                   onToggle={() => setTerminalCollapsed((prev) => !prev)}
+                  sessions={terminalSessions}
+                  activeSessionId={activeTerminalSessionId}
+                  onSelectSession={setActiveTerminalSessionId}
+                  onCloseSession={(sessionId) => void handleCloseTerminalSession(sessionId)}
+                  taskLabels={terminalTaskLabels}
                 />
-              </>
+              </div>
             )}
           </div>
 
-          <div className={`${inspectorCollapsed ? 'w-16' : 'w-96'} transition-all duration-150`}>
+          <div
+            data-keyboard-region="inspector"
+            tabIndex={0}
+            data-keyboard-active={keyboardRegion === 'inspector' ? 'true' : 'false'}
+            className={`${inspectorCollapsed ? 'w-16' : 'w-96'} transition-all duration-150 outline-none ${keyboardRegion === 'inspector' ? 'ring-2 ring-inset ring-blue-400/50' : ''}`}
+          >
             <WorkflowInspector
               workflow={selectedWorkflow}
               task={selectedTask}
@@ -1171,6 +1711,58 @@ export function App() {
           </div>
         </div>
       </div>
+
+      {searchOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Search workflows and tasks"
+          data-testid="keyboard-search-overlay"
+          className="fixed inset-0 z-40 flex items-start justify-center bg-black/45 px-4 pt-[12vh]"
+          onClick={() => setSearchOpen(false)}
+        >
+          <div
+            className="w-full max-w-2xl overflow-hidden rounded-lg border border-gray-700 bg-gray-900 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <input
+              ref={searchInputRef}
+              data-testid="keyboard-search-input"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search workflows, tasks, summaries, commands, or PRs"
+              className="w-full border-b border-gray-800 bg-gray-950 px-4 py-3 text-sm text-gray-100 outline-none placeholder:text-gray-500"
+            />
+            <div
+              role="listbox"
+              data-testid="keyboard-search-results"
+              className="max-h-[360px] overflow-auto py-1"
+            >
+              {searchQuery.trim() && searchResults.length === 0 && (
+                <div className="px-4 py-6 text-center text-sm text-gray-500">No matches</div>
+              )}
+              {!searchQuery.trim() && (
+                <div className="px-4 py-6 text-center text-sm text-gray-500">Start typing to search workflows and tasks</div>
+              )}
+              {searchResults.map((result, index) => (
+                <button
+                  key={`${result.kind}:${result.id}`}
+                  type="button"
+                  role="option"
+                  aria-selected={index === searchActiveIndex}
+                  data-testid={`keyboard-search-result-${result.kind}-${result.id}`}
+                  className={`flex w-full flex-col px-4 py-2 text-left text-sm ${index === searchActiveIndex ? 'bg-blue-600/25 text-white' : 'text-gray-200 hover:bg-gray-800'}`}
+                  onMouseEnter={() => setSearchActiveIndex(index)}
+                  onClick={() => activateSearchResult(result)}
+                >
+                  <span className="truncate font-medium">{result.title}</span>
+                  <span className="truncate text-xs text-gray-400">{result.subtitle}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modals */}
       {modal.type === 'input' && (
@@ -1226,7 +1818,8 @@ export function App() {
           onOpenWorkflow={handleWorkflowClick}
           onOpenPr={handleOpenWorkflowPr}
           onRetryWorkflow={(workflowId) => void handleRetryWorkflow(workflowId)}
-          onRecreateWithRebase={(workflowId) => void handleRecreateWithRebase(workflowId)}
+          onRebaseRetry={(workflowId) => void handleRebaseRetry(workflowId)}
+          onRebaseRecreate={(workflowId) => void handleRebaseRecreate(workflowId)}
           onRecreateWorkflow={(workflowId) => void handleRecreateWorkflow(workflowId)}
           onCancelWorkflow={(workflowId) => void handleCancelWorkflow(workflowId)}
           onDeleteWorkflow={(workflowId) => void handleDeleteWorkflow(workflowId)}

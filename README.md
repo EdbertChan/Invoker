@@ -1,8 +1,12 @@
 # Invoker
 
+<video src="docs/assets/invoker-preview.mp4" controls muted playsinline width="100%"></video>
+
+[Watch the Invoker demo video](docs/assets/invoker-preview.mp4)
+
 **Persisted workflow orchestration: a DAG of tasks in isolated workspaces, composed through git branches, merge gates, and review.**
 
-Current version: `0.0.1`. Version history lives in [CHANGELOG.md](CHANGELOG.md).
+Current version: `0.0.3`. Version history lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Overview
 
@@ -12,8 +16,9 @@ Current version: `0.0.1`. Version history lives in [CHANGELOG.md](CHANGELOG.md).
 | Hard to see what ran and on what inputs | Every execution is an addressable, replayable record with explicit lineage |
 | Review/merge treated as "outside" the tool | Human gates are first-class states in the workflow lifecycle |
 | Control actions racing each other | A single serialized control plane mediates every mutation |
+| Multi-agent work becomes hard to supervise | Stacked workflow graphs show parallel runs, dependencies, PRs, and replay paths in one UI |
 
-**What it is (one paragraph):** Invoker is a persisted workflow engine—not just a task list. It runs ready nodes under a concurrency cap, tracks explicit lifecycle states, and treats **code changes** (branches, merges, conflicts) as part of the execution model. Desktop UI, **headless** CLI, and Slack are surfaces on the same engine. Details: [docs/architecture-overview.md](docs/architecture-overview.md), longer narrative: [docs/invoker-medium-article.md](docs/invoker-medium-article.md).
+**What it is (one paragraph):** Invoker is a persisted workflow engine—not just a task list. It runs ready nodes under a concurrency cap, tracks explicit lifecycle states, preserves AI session audit trails, and treats **code changes** (branches, merges, conflicts, pull requests) as part of the execution model. Desktop UI, **headless** CLI, and Slack are surfaces on the same engine. Details: [docs/architecture-overview.md](docs/architecture-overview.md), longer narrative: [docs/invoker-medium-article.md](docs/invoker-medium-article.md).
 
 ## Prerequisites
 
@@ -34,15 +39,78 @@ Invoker does not provision machines for you. You are responsible for bringing yo
 
 If pnpm skips Electron's dependency install hook and you hit `Electron failed to install correctly`, rerun `pnpm install` or any normal launch command after allowing Electron's build script. Recent pnpm versions may require `pnpm approve-builds`.
 
-For packaged installs, the repo includes an installer script and a tag-driven release workflow:
+For packaged installs, the repo includes npm launchers, direct GitHub Release downloads, an installer script, and a tag-driven release workflow.
+
+### Standalone CLI
+
+The standalone CLI does not require Node after installation. It can run plans directly, or delegate to a running Invoker desktop owner when one is available.
+
+Install with npm:
+
+```bash
+npm install -g @neko-catpital-labs/invoker-cli
+invoker-cli --version
+invoker-cli doctor
+invoker-cli run plans/fixtures/hello-world.yaml --standalone
+```
+
+Or download the platform binary from GitHub Releases:
+
+```bash
+version=0.0.3
+case "$(uname -s)" in
+  Darwin) platform=darwin ;;
+  Linux) platform=linux ;;
+  *) echo "Unsupported OS" >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+  arm64|aarch64) arch=arm64 ;;
+  x86_64|amd64) arch=x64 ;;
+  *) echo "Unsupported architecture" >&2; exit 1 ;;
+esac
+curl -L -o invoker-cli "https://github.com/Neko-Catpital-Labs/Invoker/releases/download/v${version}/invoker-cli-${version}-${platform}-${arch}"
+chmod +x invoker-cli
+./invoker-cli --version
+./invoker-cli run plans/fixtures/hello-world.yaml --standalone
+```
+
+Release checksums are published as `SHA256SUMS`. To verify a downloaded binary:
+
+```bash
+curl -L -O "https://github.com/Neko-Catpital-Labs/Invoker/releases/download/v0.0.3/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+`invoker-cli doctor --fix` can install some missing runtime tools on a best-effort basis using Homebrew on macOS, apt on Linux, or npm for npm-based CLIs. Authentication-dependent setup, such as `gh auth login` and provider CLI login, remains manual.
+
+`invoker-cli run <plan.yaml>` defaults to `auto` mode: it submits the plan to a running desktop owner over IPC when one is reachable, and otherwise runs the plan in a standalone CLI database at `~/.invoker-cli`. Use `--live` to require the desktop owner, `--standalone` to force isolated CLI execution, `--db-dir <path>` to choose a different standalone database directory, and `--json` for a machine-readable result summary.
+
+### Desktop UI
+
+Install the desktop UI launcher with npm:
+
+```bash
+npm install -g @neko-catpital-labs/invoker-ui
+invoker-ui
+invoker-ui doctor
+```
+
+Direct desktop downloads are also available from GitHub Releases:
+- macOS: `.dmg` and `.zip`
+- Linux: `.deb` and `.AppImage`
+
+The macOS npm launcher uses the `.zip` app bundle asset so it does not need to mount a `.dmg`.
+
+For source-based packaged installs, the repo includes an installer script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Neko-Catpital-Labs/Invoker/master/scripts/install.sh | bash
 ```
 
 Tagged releases are configured to publish:
-- macOS: `.dmg`
-- Linux: `.deb` and `.AppImage`
+- standalone CLI binaries and `.tar.gz` archives for macOS and Linux on x64 and arm64
+- desktop `.dmg`, `.zip`, `.deb`, and `.AppImage`
+- `SHA256SUMS` covering release assets
 
 Packaged installs bundle the first-party Invoker skills inside the app. On first GUI launch, Invoker prompts you to install those skills into the supported global skill directories for Codex, Claude, and Cursor using `invoker-`-prefixed names so they do not overwrite existing skills. For headless/package-only usage, install the same bundled skills explicitly with:
 
@@ -69,6 +137,7 @@ Minimal example:
   "maxConcurrency": 6,
   "autoFixRetries": 3,
   "autoFixAgent": "claude",
+  "autoFixCi": false,
   "remoteTargets": {
     "staging-a": {
       "host": "203.0.113.10",
@@ -94,7 +163,7 @@ More examples: [docs/invoker-config-example.json](docs/invoker-config-example.js
 
 ### Multiple SSH Executors
 
-Define multiple entries under `remoteTargets`, then select them per task with `runnerKind: ssh` and `poolMemberId`.
+Define multiple entries under `remoteTargets`, then select them per task with `poolId`.
 
 ```yaml
 name: multi-remote-example
@@ -104,14 +173,12 @@ tasks:
   - id: test-a
     description: Run checks on remote target A
     command: pnpm test
-    runnerKind: ssh
-    poolMemberId: staging-a
+    poolId: staging-a
 
   - id: test-b
     description: Run checks on remote target B
     command: pnpm test
-    runnerKind: ssh
-    poolMemberId: staging-b
+    poolId: staging-b
 ```
 
 Use this when you want Invoker to spread work across machines you already manage. The SSH executor does not provision the hosts for you; it connects to the target you name and runs there.
@@ -120,7 +187,7 @@ Use this when you want Invoker to spread work across machines you already manage
 
 Start here if you want to get Invoker running locally with the smallest possible setup.
 
-If you need to turn a product or implementation plan into an Invoker workflow, use the `plan-to-invoker` skill. Repo installs can link it with `bash scripts/setup-agent-skills.sh`. Packaged installs can install the bundled `invoker-plan-to-invoker` copy from the first-run System Setup prompt or with `invoker --install-skills`. The canonical skill source lives at [skills/plan-to-invoker/SKILL.md](skills/plan-to-invoker/SKILL.md), and its deterministic validation entrypoint is `bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>`.
+If you need to turn a product or implementation plan into an Invoker workflow, use the `invoker-plan-to-invoker` skill. Repo installs can install bundled prefixed skill copies with `bash scripts/setup-agent-skills.sh`. Packaged installs can install the bundled `invoker-plan-to-invoker` copy from the first-run System Setup prompt or with `invoker --install-skills`. The canonical skill source lives at [skills/plan-to-invoker/SKILL.md](skills/plan-to-invoker/SKILL.md), and its deterministic validation entrypoint is `bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>`.
 
 1. Install the prerequisites above.
 2. Clone the repo and run the installation commands.
@@ -175,16 +242,41 @@ Use `--output text|label|json|jsonl` on `query` commands. Only **one** process s
 **Example plan:**
 
 ```yaml
-name: ci-hardening
+name: ai-feature-hardening
+description: |
+  Demonstrates a small AI implementation workflow with parallel code paths,
+  an SSH-backed verification task, and a pull request review gate.
+repoUrl: git@github.com:your-org/your-repo.git
 baseBranch: main
+onFinish: pull_request
+mergeMode: github
 tasks:
-  - id: deps
-    description: Install dependencies
-    command: pnpm install --frozen-lockfile
+  - id: plan
+    description: Ask an AI agent to produce a scoped implementation plan
+    prompt: |
+      Inspect the repository, identify the smallest implementation slice,
+      and produce a concise plan with verification steps.
+    executionAgent: codex
+    dependencies: []
+
+  - id: api
+    description: Implement the API slice in an isolated worktree
+    command: pnpm --filter @your-org/api test
+    dependencies: [plan]
+
+  - id: ui
+    description: Implement the UI slice in an isolated worktree
+    prompt: |
+      Implement the UI affordance described by the plan. Preserve audit
+      state so a failed task can be reopened, edited, and replayed.
+    executionAgent: codex
+    dependencies: [plan]
+
   - id: tests
-    description: Run tests
-    command: pnpm test
-    dependencies: [deps]
+    description: Run the final regression suite on a configured SSH executor
+    command: pnpm run test:all
+    poolId: staging-a
+    dependencies: [api, ui]
 ```
 
 ## Architecture (at a glance)
@@ -243,7 +335,7 @@ Layer rules: [ARCHITECTURE.md](ARCHITECTURE.md). Agent/repo conventions: [CLAUDE
 
 - **DB conflicts** — Do not run two writers on the same DB; headless CLI mutations use a standalone owner, while GUI-started workflows stay owned by the desktop app process.
 - **`pnpm` or `git` not found from the desktop app** — On macOS this is often a Finder/GUI `PATH` issue. Launch Invoker from a terminal with `./run.sh`, or make the required binaries available to GUI-launched apps.
-- **Missing Cursor skills** — `bash scripts/setup-agent-skills.sh`
+- **Missing bundled agent skills** — `bash scripts/setup-agent-skills.sh`
 - **Install failures** — Use Node 22 as per `engines`
 - **Obsidian (README / Mermaid)** — In **Source** mode the diagram stays plain text. Open **Reading view** (book icon in the header, or the *Toggle reading view* command). **Live Preview** usually renders Mermaid as well; if you see an empty box or a parse error, update Obsidian, try the default theme, and disable CSS snippets (some themes hide Mermaid).
 

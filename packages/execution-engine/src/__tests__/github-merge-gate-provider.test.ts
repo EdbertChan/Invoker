@@ -61,7 +61,6 @@ describe('GitHubMergeGateProvider', () => {
           'pr', 'list',
           '--repo', 'Neko-Catpital-Labs/Invoker',
           '--head', 'feature/test',
-          '--base', 'master',
           '--state', 'open',
           '--json', 'url,number',
           '--limit', '1',
@@ -107,7 +106,7 @@ describe('GitHubMergeGateProvider', () => {
       expect(result.identifier).toBe('42');
       expect(spawnMock).toHaveBeenCalledWith(
         'git',
-        ['push', '--force', '-u', 'origin', 'feature/test'],
+        ['push', '--force', 'origin', 'feature/test:refs/heads/feature/test'],
         expect.objectContaining({ cwd: '/tmp/repo' }),
       );
       expect(spawnMock).toHaveBeenCalledWith(
@@ -116,7 +115,6 @@ describe('GitHubMergeGateProvider', () => {
           'pr', 'list',
           '--repo', 'owner/repo',
           '--head', 'feature/test',
-          '--base', 'main',
           '--state', 'open',
           '--json', 'url,number',
           '--limit', '1',
@@ -137,7 +135,7 @@ describe('GitHubMergeGateProvider', () => {
       );
     });
 
-    it('reuses an existing open PR instead of creating a new one', async () => {
+    it('reuses an existing open PR by head and retargets its base', async () => {
       const { spawn } = await import('node:child_process');
       const spawnMock = vi.mocked(spawn);
 
@@ -163,7 +161,13 @@ describe('GitHubMergeGateProvider', () => {
       expect(result.url).toBe('https://github.com/owner/repo/pull/10');
       expect(spawnMock).toHaveBeenCalledWith(
         'gh',
-        ['api', 'repos/owner/repo/pulls/10', '--method', 'PATCH', '-f', 'title=Updated PR', '-f', 'body=## Summary'],
+        [
+          'api', 'repos/owner/repo/pulls/10',
+          '--method', 'PATCH',
+          '-f', 'base=main',
+          '-f', 'title=Updated PR',
+          '-f', 'body=## Summary',
+        ],
         expect.objectContaining({ cwd: '/tmp/repo' }),
       );
     });
@@ -239,6 +243,31 @@ describe('GitHubMergeGateProvider', () => {
     });
   });
 
+  describe('closeReview', () => {
+    it('closes the owning PR without deleting the branch', async () => {
+      process.env.INVOKER_GITHUB_TARGET_REPO = 'owner/repo';
+      const { spawn } = await import('node:child_process');
+      const spawnMock = vi.mocked(spawn);
+
+      spawnMock.mockImplementation(((cmd: string) => {
+        if (cmd === 'gh') return mockSpawnResult('{}', 0);
+        return mockSpawnResult('', 0);
+      }) as any);
+
+      await provider.closeReview({ identifier: '42', cwd: '/tmp/repo' });
+
+      expect(spawnMock).toHaveBeenCalledWith(
+        'gh',
+        [
+          'api', 'repos/owner/repo/pulls/42',
+          '--method', 'PATCH',
+          '-f', 'state=closed',
+        ],
+        expect.objectContaining({ cwd: '/tmp/repo' }),
+      );
+    });
+  });
+
   describe('checkApproval', () => {
     it('treats a merged PR as approved with statusText "Merged"', async () => {
       process.env.INVOKER_GITHUB_TARGET_REPO = 'owner/repo';
@@ -305,8 +334,73 @@ describe('GitHubMergeGateProvider', () => {
       const result = await provider.checkApproval({ identifier: '3', cwd: '/tmp/repo' });
 
       expect(result.approved).toBe(false);
-      expect(result.rejected).toBe(true);
+      expect(result.rejected).toBe(false);
+      expect(result.closed).toBe(true);
       expect(result.statusText).toBe('Closed');
+    });
+
+    it('returns PR head metadata and failed checks for review-gate auto-fix', async () => {
+      process.env.INVOKER_GITHUB_TARGET_REPO = 'owner/repo';
+      const { spawn } = await import('node:child_process');
+      const spawnMock = vi.mocked(spawn);
+
+      spawnMock.mockImplementation(((cmd: string) => {
+        if (cmd === 'gh') {
+          return mockSpawnResult(JSON.stringify({
+            state: 'OPEN',
+            reviewDecision: null,
+            url: 'https://github.com/owner/repo/pull/4',
+            headRefOid: 'abc123',
+            headRefName: 'feature/red-ci',
+            mergeStateStatus: 'CLEAN',
+            statusCheckRollup: [
+              {
+                __typename: 'StatusContext',
+                context: 'invoker/fake-ci',
+                state: 'FAILURE',
+                targetUrl: 'https://github.com/owner/repo/pull/4',
+                description: 'Fixture failed',
+              },
+              {
+                name: 'test-all',
+                status: 'COMPLETED',
+                conclusion: 'FAILURE',
+                detailsUrl: 'https://github.com/owner/repo/actions/runs/1',
+                summary: 'Tests failed',
+              },
+              {
+                name: 'lint',
+                status: 'COMPLETED',
+                conclusion: 'SUCCESS',
+              },
+            ],
+          }), 0);
+        }
+        return mockSpawnResult('', 0);
+      }) as any);
+
+      const result = await provider.checkApproval({ identifier: '4', cwd: '/tmp/repo' });
+
+      expect(result.headSha).toBe('abc123');
+      expect(result.headRef).toBe('feature/red-ci');
+      expect(result.mergeState).toBe('clean');
+      expect(result.checks).toEqual({
+        state: 'failure',
+        failed: [
+          {
+            name: 'invoker/fake-ci',
+            conclusion: 'FAILURE',
+            detailsUrl: 'https://github.com/owner/repo/pull/4',
+            summary: 'Fixture failed',
+          },
+          {
+            name: 'test-all',
+            conclusion: 'FAILURE',
+            detailsUrl: 'https://github.com/owner/repo/actions/runs/1',
+            summary: 'Tests failed',
+          },
+        ],
+      });
     });
   });
 });

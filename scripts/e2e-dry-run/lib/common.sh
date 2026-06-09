@@ -97,18 +97,35 @@ invoker_e2e_init() {
   invoker_e2e_ensure_branch_aliases
 }
 
+invoker_e2e_pid_cmdline() {
+  local pid="$1"
+  if [ -r "/proc/$pid/cmdline" ]; then
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true
+    return 0
+  fi
+  ps -p "$pid" -o command= 2>/dev/null || true
+}
+
+invoker_e2e_pid_has_env() {
+  local pid="$1" key="$2" value="$3"
+  if [ -r "/proc/$pid/environ" ]; then
+    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -Fqx "$key=$value"
+    return $?
+  fi
+  # macOS has no /proc/<pid>/environ; `ps eww` appends the environment to the
+  # command line, which is enough for exact e2e temp paths and port values.
+  ps eww -p "$pid" -o command= 2>/dev/null | grep -Fq "$key=$value"
+}
+
 invoker_e2e_kill_owned_headless_processes() {
   # Kill only the headless processes that belong to this test run.
   # Scope by this case's INVOKER_DB_DIR/INVOKER_API_PORT so one case's EXIT trap
   # cannot SIGTERM another concurrently-running case.
   if [ -n "${INVOKER_DB_DIR:-}" ] || [ -n "${INVOKER_API_PORT:-}" ]; then
-    local pid environ_blob cmdline
+    local pid cmdline
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      [ -r "/proc/$pid/environ" ] || continue
-      [ -r "/proc/$pid/cmdline" ] || continue
-      environ_blob="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null || true)"
-      cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+      cmdline="$(invoker_e2e_pid_cmdline "$pid")"
       case "$cmdline" in
         *"--headless"*)
           ;;
@@ -116,12 +133,13 @@ invoker_e2e_kill_owned_headless_processes() {
           continue
           ;;
       esac
-      if [ -n "${INVOKER_DB_DIR:-}" ] && ! printf '%s\n' "$environ_blob" | grep -Fqx "INVOKER_DB_DIR=$INVOKER_DB_DIR"; then
-        if [ -n "${INVOKER_API_PORT:-}" ] && ! printf '%s\n' "$environ_blob" | grep -Fqx "INVOKER_API_PORT=$INVOKER_API_PORT"; then
-          continue
-        fi
+      if [ -n "${INVOKER_DB_DIR:-}" ] && invoker_e2e_pid_has_env "$pid" "INVOKER_DB_DIR" "$INVOKER_DB_DIR"; then
+        kill "$pid" 2>/dev/null || true
+        continue
       fi
-      kill "$pid" 2>/dev/null || true
+      if [ -n "${INVOKER_API_PORT:-}" ] && invoker_e2e_pid_has_env "$pid" "INVOKER_API_PORT" "$INVOKER_API_PORT"; then
+        kill "$pid" 2>/dev/null || true
+      fi
     done < <(pgrep -f '(/electron|packages/app/dist/main.js|headless-client.js|run.sh --headless)' 2>/dev/null || true)
   fi
 }
@@ -367,7 +385,10 @@ PY
 # Usage: ST=$(invoker_e2e_task_status <taskId>)
 invoker_e2e_task_status() {
   local task_id="$1"
-  invoker_e2e_run_headless task-status "$task_id" 2>/dev/null | tail -1
+  invoker_e2e_run_headless task-status "$task_id" 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' \
+    | grep -E '^(pending|running|completed|failed|awaiting_approval|review_ready|fixing_with_ai|closed|skipped)$' \
+    | tail -1
 }
 
 # Poll until task status equals expected (1s interval). Use after cancel/restart
@@ -440,17 +461,14 @@ invoker_e2e_wait_workflow_visible() {
 
 invoker_e2e_count_owned_headless_processes() {
   local count=0
-  local pid environ_blob cmdline
+  local pid cmdline
   if [ -z "${INVOKER_DB_DIR:-}" ] && [ -z "${INVOKER_API_PORT:-}" ]; then
     printf '0'
     return 0
   fi
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    [ -r "/proc/$pid/environ" ] || continue
-    [ -r "/proc/$pid/cmdline" ] || continue
-    environ_blob="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null || true)"
-    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    cmdline="$(invoker_e2e_pid_cmdline "$pid")"
     case "$cmdline" in
       *"--headless"*)
         ;;
@@ -458,12 +476,14 @@ invoker_e2e_count_owned_headless_processes() {
         continue
         ;;
     esac
-    if [ -n "${INVOKER_DB_DIR:-}" ] && ! printf '%s\n' "$environ_blob" | grep -Fqx "INVOKER_DB_DIR=$INVOKER_DB_DIR"; then
-      if [ -n "${INVOKER_API_PORT:-}" ] && ! printf '%s\n' "$environ_blob" | grep -Fqx "INVOKER_API_PORT=$INVOKER_API_PORT"; then
-        continue
-      fi
+    if [ -n "${INVOKER_DB_DIR:-}" ] && invoker_e2e_pid_has_env "$pid" "INVOKER_DB_DIR" "$INVOKER_DB_DIR"; then
+      count=$((count + 1))
+      continue
     fi
-    count=$((count + 1))
+    if [ -n "${INVOKER_API_PORT:-}" ] && invoker_e2e_pid_has_env "$pid" "INVOKER_API_PORT" "$INVOKER_API_PORT"; then
+      count=$((count + 1))
+      continue
+    fi
   done < <(pgrep -f '(/electron|packages/app/dist/main.js|headless-client.js|run.sh --headless)' 2>/dev/null || true)
   printf '%s' "$count"
 }
@@ -528,7 +548,7 @@ rows = conn.execute(
     """
 ).fetchall()
 
-def parse_ts(value: str | None):
+def parse_ts(value):
     if not value:
         return None
     if "T" in value:

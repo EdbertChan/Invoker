@@ -8,6 +8,11 @@
 import type { CommandEnvelope, CommandResult } from '@invoker/contracts';
 import { OrchestratorError } from './orchestrator.js';
 import type { Orchestrator, ExternalGatePolicyUpdate, TaskReplacementDef } from './orchestrator.js';
+import {
+  applyInvalidation,
+  buildOrchestratorOnlyInvalidationDeps,
+  type InvalidationDeps,
+} from './invalidation-policy.js';
 import type { TaskState } from '@invoker/workflow-graph';
 
 // ── Cancel Result ────────────────────────────────────────────
@@ -18,13 +23,16 @@ export type CancelResult = { cancelled: string[]; runningCancelled: string[] };
 
 export class CommandService {
   private readonly orchestrator: Orchestrator;
+  private readonly invalidationDeps: InvalidationDeps;
 
   // Promise-chain mutexes: workflow-local by default, global fallback when no workflow can be resolved.
   private readonly workflowMutexTails = new Map<string, Promise<void>>();
   private globalMutexTail: Promise<void> = Promise.resolve();
 
-  constructor(orchestrator: Orchestrator) {
+  constructor(orchestrator: Orchestrator, invalidationDeps?: InvalidationDeps) {
     this.orchestrator = orchestrator;
+    this.invalidationDeps = invalidationDeps
+      ?? buildOrchestratorOnlyInvalidationDeps(orchestrator);
   }
 
   // ── Mutex ────────────────────────────────────────────────
@@ -136,7 +144,7 @@ export class CommandService {
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
       'RETRY_TASK_FAILED',
-      () => this.orchestrator.retryTask(envelope.payload.taskId),
+      () => applyInvalidation('task', 'retryTask', envelope.payload.taskId, this.invalidationDeps),
       this.workflowIdForTask(envelope.payload.taskId),
     );
   }
@@ -152,7 +160,7 @@ export class CommandService {
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
       'RECREATE_TASK_FAILED',
-      () => this.orchestrator.recreateTask(envelope.payload.taskId),
+      () => applyInvalidation('task', 'recreateTask', envelope.payload.taskId, this.invalidationDeps),
       this.workflowIdForTask(envelope.payload.taskId),
     );
   }
@@ -352,6 +360,19 @@ export class CommandService {
     );
   }
 
+  async setWorkflowExternalGatePolicies(
+    envelope: CommandEnvelope<{ workflowId: string; updates: ExternalGatePolicyUpdate[] }>,
+  ): Promise<CommandResult<TaskState[]>> {
+    return this.executeCommand<TaskState[]>(
+      'SET_GATE_POLICIES_FAILED',
+      () => this.orchestrator.setWorkflowExternalGatePolicies(
+        envelope.payload.workflowId,
+        envelope.payload.updates,
+      ),
+      envelope.payload.workflowId,
+    );
+  }
+
   async replaceTask(
     envelope: CommandEnvelope<{ taskId: string; replacementTasks: TaskReplacementDef[] }>,
   ): Promise<CommandResult<TaskState[]>> {
@@ -421,7 +442,7 @@ export class CommandService {
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
       'RETRY_WORKFLOW_FAILED',
-      () => this.orchestrator.retryWorkflow(envelope.payload.workflowId),
+      () => applyInvalidation('workflow', 'retryWorkflow', envelope.payload.workflowId, this.invalidationDeps),
       envelope.payload.workflowId,
     );
   }
@@ -445,7 +466,7 @@ export class CommandService {
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
       'RECREATE_WORKFLOW_FAILED',
-      () => this.orchestrator.recreateWorkflow(envelope.payload.workflowId),
+      () => applyInvalidation('workflow', 'recreateWorkflow', envelope.payload.workflowId, this.invalidationDeps),
       envelope.payload.workflowId,
     );
   }
@@ -468,8 +489,35 @@ export class CommandService {
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
       'RECREATE_WORKFLOW_FROM_FRESH_BASE_FAILED',
-      () => this.orchestrator.recreateWorkflowFromFreshBase(envelope.payload.workflowId),
+      () => applyInvalidation(
+        'workflow',
+        'recreateWorkflowFromFreshBase',
+        envelope.payload.workflowId,
+        this.invalidationDeps,
+      ),
       envelope.payload.workflowId,
+    );
+  }
+
+  async runSerializedForWorkflow<T>(
+    workflowId: string | undefined,
+    fn: () => T | Promise<T>,
+  ): Promise<CommandResult<T>> {
+    return this.executeCommand<T>(
+      'SERIALIZED_WORKFLOW_MUTATION_FAILED',
+      fn,
+      workflowId,
+    );
+  }
+
+  async runSerializedForTask<T>(
+    taskId: string,
+    fn: () => T | Promise<T>,
+  ): Promise<CommandResult<T>> {
+    return this.executeCommand<T>(
+      'SERIALIZED_TASK_MUTATION_FAILED',
+      fn,
+      this.workflowIdForTask(taskId),
     );
   }
 

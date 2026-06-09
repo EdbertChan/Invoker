@@ -6,8 +6,23 @@ export interface MergeGateProviderResult {
 export interface MergeGateApprovalStatus {
   approved: boolean;
   rejected: boolean;
+  closed?: boolean;
   statusText: string;
   url: string;
+  headSha?: string;
+  headRef?: string;
+  mergeState?: 'clean' | 'dirty' | 'unknown';
+  checks?: {
+    state: 'pending' | 'success' | 'failure';
+    failed: MergeGateFailedCheck[];
+  };
+}
+
+export interface MergeGateFailedCheck {
+  name: string;
+  conclusion?: string;
+  detailsUrl?: string;
+  summary?: string;
 }
 
 export interface MergeGateProvider {
@@ -25,4 +40,9 @@ export interface MergeGateProvider {
     identifier: string;
     cwd: string;
   }): Promise<MergeGateApprovalStatus>;
+
+  closeReview?(opts: {
+    identifier: string;
+    cwd: string;
+  }): Promise<void>;
 }

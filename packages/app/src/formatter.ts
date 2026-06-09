@@ -29,6 +29,7 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
   fixing_with_ai: MAGENTA,
   completed: GREEN,
   failed: RED,
+  closed: DIM,
   needs_input: BLUE,
   review_ready: CYAN,
   blocked: DIM,
@@ -42,6 +43,7 @@ const STATUS_ICONS: Record<TaskStatus, string> = {
   fixing_with_ai: '🔧',
   completed: '✓',
   failed: '✗',
+  closed: '◼',
   needs_input: '?',
   review_ready: '👀',
   blocked: '⊘',
@@ -82,6 +84,7 @@ export function formatWorkflowStatus(status: {
   total: number;
   completed: number;
   failed: number;
+  closed?: number;
   running: number;
   pending: number;
 }): string {
@@ -89,6 +92,7 @@ export function formatWorkflowStatus(status: {
     `${BOLD}Workflow:${RESET} ${status.total} total`,
     `${GREEN}${status.completed} completed${RESET}`,
     `${RED}${status.failed} failed${RESET}`,
+    `${DIM}${status.closed ?? 0} closed${RESET}`,
     `${YELLOW}${status.running} running${RESET}`,
     `${DIM}${status.pending} pending${RESET}`,
   ];
@@ -264,6 +268,8 @@ export function serializeWorkflow(wf: Workflow): Record<string, unknown> {
     ...(wf.featureBranch != null && { featureBranch: wf.featureBranch }),
     ...(wf.mergeMode != null && { mergeMode: wf.mergeMode }),
     ...(wf.reviewProvider != null && { reviewProvider: wf.reviewProvider }),
+    ...(wf.externalDependencies != null && { externalDependencies: wf.externalDependencies }),
+    ...(wf.externalDependencyChanges != null && { externalDependencyChanges: wf.externalDependencyChanges }),
     ...(wf.generation != null && { generation: wf.generation }),
   };
 }
@@ -278,6 +284,8 @@ export function serializeTask(task: TaskState): Record<string, unknown> {
   if (task.config.command != null) config.command = task.config.command;
   if (task.config.prompt != null) config.prompt = task.config.prompt;
   if (task.config.runnerKind != null) config.runnerKind = task.config.runnerKind;
+  if (task.config.poolId != null) config.poolId = task.config.poolId;
+  if (task.config.poolMemberId != null) config.poolMemberId = task.config.poolMemberId;
   if (task.config.isMergeNode != null) config.isMergeNode = task.config.isMergeNode;
   if (task.config.executionAgent != null) config.executionAgent = task.config.executionAgent;
   if (task.config.featureBranch != null) config.featureBranch = task.config.featureBranch;
@@ -288,6 +296,9 @@ export function serializeTask(task: TaskState): Record<string, unknown> {
   if (task.execution.error != null) execution.error = task.execution.error;
   if (task.execution.exitCode != null) execution.exitCode = task.execution.exitCode;
   if (task.execution.reviewUrl != null) execution.reviewUrl = task.execution.reviewUrl;
+  if (task.execution.reviewId != null) execution.reviewId = task.execution.reviewId;
+  if (task.execution.reviewStatus != null) execution.reviewStatus = task.execution.reviewStatus;
+  if (task.execution.autoFixAttempts != null) execution.autoFixAttempts = task.execution.autoFixAttempts;
   if (task.execution.agentSessionId != null) execution.agentSessionId = task.execution.agentSessionId;
   if (task.execution.lastAgentSessionId != null) execution.lastAgentSessionId = task.execution.lastAgentSessionId;
   if (task.execution.agentName != null) execution.agentName = task.execution.agentName;
@@ -298,6 +309,7 @@ export function serializeTask(task: TaskState): Record<string, unknown> {
   if (task.execution.launchStartedAt != null) execution.launchStartedAt = task.execution.launchStartedAt instanceof Date ? task.execution.launchStartedAt.toISOString() : task.execution.launchStartedAt;
   if (task.execution.launchCompletedAt != null) execution.launchCompletedAt = task.execution.launchCompletedAt instanceof Date ? task.execution.launchCompletedAt.toISOString() : task.execution.launchCompletedAt;
   if (task.execution.lastHeartbeatAt != null) execution.lastHeartbeatAt = task.execution.lastHeartbeatAt instanceof Date ? task.execution.lastHeartbeatAt.toISOString() : task.execution.lastHeartbeatAt;
+  if (task.execution.pendingFixError != null) execution.pendingFixError = task.execution.pendingFixError;
   if (task.execution.mergeConflict != null) {
     execution.mergeConflict = {
       failedBranch: task.execution.mergeConflict.failedBranch,

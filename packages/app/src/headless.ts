@@ -26,17 +26,24 @@ import {
   registerBuiltinAgents,
   assertPlanExecutionAgentsRegistered,
   type AgentRegistry,
+  type TaskHeartbeatEvent,
 } from '@invoker/execution-engine';
 import { loadConfig, resolveSecretsFilePath, type InvokerConfig } from './config.js';
 import { backupPlan } from './plan-backup.js';
 import { startApiServer } from './api-server.js';
 import { WorkflowMutationFacade } from './workflow-mutation-facade.js';
 import {
+  parseMetadataValue,
+  setTaskMetadata,
+  setWorkflowMetadata,
+} from './metadata-setter.js';
+import {
   approveTask,
+  autoFixOnReviewGateFailure,
   deleteAllWorkflows as sharedDeleteAllWorkflows,
   fixWithAgentAction,
-  rebaseAndRetry,
-  recreateWithRebase,
+  rebaseRetry,
+  rebaseRecreate,
   resolveConflictAction,
   recreateWorkflow as sharedRecreateWorkflow,
   recreateTask as sharedRecreateTask,
@@ -52,15 +59,17 @@ import {
   finalizeMutationWithGlobalTopup,
   isDispatchableLaunch,
 } from './global-topup.js';
+import { LaunchDispatcher } from './launch-dispatcher.js';
 import { resolveHeadlessTargetWorkflowId } from './headless-command-classification.js';
 import { trackWorkflow } from './headless-watch.js';
 import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './workflow-preemption.js';
-import { relaunchOrphansAndStartReady } from './orphan-relaunch.js';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
 import type { RuntimeServices } from '@invoker/runtime-service';
 
 export { bumpGenerationAndRecreate } from './workflow-actions.js';
 export {
+  DEFAULT_DELEGATION_TIMEOUT_MS,
+  WORKFLOW_DELEGATION_TIMEOUT_MS,
   delegationTimeoutMs,
   isDelegated,
   resolveDelegationTimeoutMs,
@@ -106,6 +115,18 @@ export interface HeadlessDeps {
   signal?: AbortSignal;
   mutationTiming?: WorkflowMutationTiming;
   runtimeServices?: RuntimeServices;
+  /**
+   * CB.7: provider for the owner's long-lived TaskRunner. When the
+   * launch-outbox is `'active'`, `createHeadlessExecutor` reuses this
+   * instance instead of constructing a fresh `TaskRunner` per command.
+   * Returning `null` (or omitting the provider entirely) falls back to
+   * the legacy behaviour (a new TaskRunner each call). This eliminates
+   * Issue 6 (multi-TaskRunner blindness — each runner has its own
+   * `launchingAttemptIds` Set) once the outbox dispatcher is the only
+   * launch path. The fallback also keeps the function safe to call in
+   * environments without an owner-mode TaskRunner (peer mode, tests).
+   */
+  ownerTaskRunnerProvider?: () => TaskRunner | null;
 }
 
 // ── ANSI Helpers ─────────────────────────────────────────────
@@ -116,9 +137,12 @@ const YELLOW = '\x1b[33m';
 
 // ── Shared Helpers ───────────────────────────────────────────
 
-function headlessHeartbeat(taskId: string, deps: Pick<HeadlessDeps, 'persistence'>): void {
-  const now = new Date();
-  try { deps.persistence.updateTask(taskId, { execution: { lastHeartbeatAt: now } }); } catch { /* db locked */ }
+function headlessHeartbeat(
+  taskId: string,
+  event: TaskHeartbeatEvent,
+  deps: Pick<HeadlessDeps, 'orchestrator'>,
+): void {
+  deps.orchestrator.recordTaskHeartbeat(taskId, { at: event.at, source: event.source });
 }
 
 function buildHeadlessApiServerDeps(
@@ -132,8 +156,10 @@ function buildHeadlessApiServerDeps(
       persistence: deps.persistence,
       taskExecutor,
       dispatchMode: deps.mutationTiming ? 'fire-and-forget' : 'await',
+      launchOutboxMode: deps.invokerConfig.launchOutboxMode,
       autoApproveAIFixes: deps.invokerConfig?.autoApproveAIFixes,
       killRunningTask: (taskId: string) => taskExecutor.killActiveExecution(taskId),
+      commandService: deps.commandService,
     }),
     deleteWorkflow: async (workflowId: string) => {
       const allTasks = deps.orchestrator.getAllTasks();
@@ -145,6 +171,7 @@ function buildHeadlessApiServerDeps(
       for (const task of workflowTasks) {
         await taskExecutor.killActiveExecution(task.id);
       }
+      await taskExecutor.closeWorkflowReview(workflowId);
       const envelope = makeEnvelope('delete-workflow', 'headless', 'workflow', { workflowId });
       const cmdResult = await deps.commandService.deleteWorkflow(envelope);
       if (!cmdResult.ok) throw new Error(cmdResult.error.message);
@@ -186,7 +213,34 @@ export function createHeadlessExecutor(
   deps: HeadlessDeps,
   callbackOverrides?: Partial<ConstructorParameters<typeof TaskRunner>[0]['callbacks']>,
 ): TaskRunner {
-  const executor = new TaskRunner({
+  // CB.7: in active launch-outbox mode the owner's long-lived
+  // TaskRunner is the single launch path (it services the
+  // task_launch_dispatch outbox via LaunchDispatcher). Reusing it
+  // eliminates the multi-TaskRunner blindness from Issue 6 — every
+  // headless command shares the same launchingAttemptIds Set so
+  // duplicate-suppression and dispatch-row ack/complete/fail accounting
+  // all stay coherent. callbackOverrides are intentionally ignored on
+  // this path because the owner's TaskRunner already has its own
+  // production callbacks (persistence writes, renderer deltas, etc.);
+  // per-command callbacks would either duplicate that work or fight it.
+  if (deps.invokerConfig.launchOutboxMode === 'active') {
+    const owner = deps.ownerTaskRunnerProvider?.() ?? null;
+    if (owner) {
+      if (callbackOverrides) {
+        deps.logger?.debug?.(
+          '[headless] createHeadlessExecutor: ignoring callbackOverrides — launchOutboxMode=active reuses owner TaskRunner',
+          { module: 'headless' },
+        );
+      }
+      return owner;
+    }
+    deps.logger?.warn?.(
+      '[headless] createHeadlessExecutor: launchOutboxMode=active but ownerTaskRunnerProvider is unavailable — falling back to per-command TaskRunner',
+      { module: 'headless' },
+    );
+  }
+  let executor: TaskRunner;
+  executor = new TaskRunner({
     orchestrator: deps.orchestrator,
     persistence: deps.persistence,
     executorRegistry: deps.executorRegistry,
@@ -198,6 +252,17 @@ export function createHeadlessExecutor(
     },
     remoteTargetsProvider: () => loadConfig().remoteTargets ?? {},
     executionPoolsProvider: () => deps.invokerConfig.executionPools ?? {},
+    onReviewGateCiFailure: deps.invokerConfig.autoFixCi
+      ? async (trigger) => {
+          await autoFixOnReviewGateFailure(trigger, {
+            orchestrator: deps.orchestrator,
+            persistence: deps.persistence,
+            taskExecutor: executor,
+            getAutoFixAgent: () => loadConfig().autoFixAgent,
+            getAutoApproveAIFixes: () => loadConfig().autoApproveAIFixes,
+          });
+        }
+      : undefined,
     mergeGateProvider: new GitHubMergeGateProvider(),
     reviewProviderRegistry: (() => {
       const registry = new ReviewProviderRegistry();
@@ -214,11 +279,57 @@ export function createHeadlessExecutor(
           deps.logger.error(`Failed to persist output for ${taskId}: ${err}`, { module: 'output' });
         }
       },
-      onHeartbeat: (taskId) => headlessHeartbeat(taskId, deps),
+      onHeartbeat: (taskId, event) => headlessHeartbeat(taskId, event, deps),
       ...callbackOverrides,
     },
   });
   return executor;
+}
+
+async function dispatchHeadlessRunnableTasks(
+  deps: HeadlessDeps,
+  taskExecutor: TaskRunner,
+  runnable: TaskState[],
+  context: string,
+): Promise<void> {
+  if (runnable.length === 0) return;
+  if (deps.invokerConfig.launchOutboxMode !== 'active') {
+    await taskExecutor.executeTasks(runnable);
+    return;
+  }
+
+  const dispatcher = new LaunchDispatcher({
+    persistence: deps.persistence,
+    orchestrator: {
+      prepareTaskForNewAttempt: (taskId, reason) =>
+        deps.orchestrator.prepareTaskForNewAttempt(taskId, reason),
+      syncFromDb: (workflowId) => deps.orchestrator.syncFromDb(workflowId),
+      getTask: (taskId) => deps.orchestrator.getTask(taskId),
+      getTaskLaunchReadiness: (taskId) => deps.orchestrator.getTaskLaunchReadiness(taskId),
+    },
+    taskRunnerProvider: () => taskExecutor,
+    ownerId: `headless-${process.pid}`,
+    logger: deps.logger,
+    mode: 'active',
+  });
+  deps.logger?.debug?.(
+    `[headless] ${context}: launchOutboxMode=active — polling local launch dispatcher for ${runnable.length} runnable task(s)`,
+    { module: 'headless' },
+  );
+  const poll = (): void => {
+    try {
+      dispatcher.poll();
+    } catch (err) {
+      deps.logger?.warn?.(
+        `[headless] ${context}: local launch dispatcher poll failed: ${err instanceof Error ? err.message : String(err)}`,
+        { module: 'headless' },
+      );
+    }
+  };
+  poll();
+  const timer = setInterval(poll, 250);
+  timer.unref?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 export function wireHeadlessAutoFix(
@@ -397,6 +508,19 @@ async function headlessQuery(args: string[], deps: HeadlessDeps): Promise<void> 
         case 'json':  process.stdout.write(formatAsJson(workflows.map(serializeWorkflow)) + '\n'); break;
         case 'jsonl': process.stdout.write(formatAsJsonl(workflows.map(serializeWorkflow)) + '\n'); break;
         default:      process.stdout.write(formatWorkflowList(workflows) + '\n'); break;
+      }
+      break;
+    }
+    case 'workflow': {
+      const workflowId = flags.positional[0];
+      if (!workflowId) throw new Error('Missing workflowId. Usage: --headless query workflow <workflowId>');
+      const workflow = deps.persistence.loadWorkflow(workflowId);
+      if (!workflow) throw new Error(`Workflow "${workflowId}" not found.`);
+      switch (flags.output) {
+        case 'label': process.stdout.write(`${workflow.id}\n`); break;
+        case 'json':  process.stdout.write(formatAsJson(serializeWorkflow(workflow)) + '\n'); break;
+        case 'jsonl': process.stdout.write(formatAsJsonl([serializeWorkflow(workflow)]) + '\n'); break;
+        default:      process.stdout.write(formatWorkflowList([workflow]) + '\n'); break;
       }
       break;
     }
@@ -851,7 +975,7 @@ async function headlessCostEvents(
 async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
   const subCommand = args[0];
   if (!subCommand) {
-    throw new Error('Missing set sub-command. Usage: --headless set <command|executor|agent|merge-mode|gate-policy>');
+    throw new Error('Missing set sub-command. Usage: --headless set <command|executor|agent|merge-mode|gate-policy|workflow|task>');
   }
 
   switch (subCommand) {
@@ -879,8 +1003,14 @@ async function headlessSet(args: string[], deps: HeadlessDeps): Promise<void> {
     case 'gate-policy':
       await headlessSetGatePolicy(args.slice(1), deps);
       break;
+    case 'workflow':
+      await headlessSetWorkflowMetadata(args[1], args[2], args.slice(3).join(' '), deps);
+      break;
+    case 'task':
+      await headlessSetTaskMetadata(args[1], args[2], args.slice(3).join(' '), deps);
+      break;
     default:
-      throw new Error(`Unknown set sub-command: "${subCommand}". Use: command, prompt, executor, agent, merge-mode, fix-prompt, fix-context, gate-policy`);
+      throw new Error(`Unknown set sub-command: "${subCommand}". Use: command, prompt, executor, agent, merge-mode, fix-prompt, fix-context, gate-policy, workflow, task`);
   }
 }
 
@@ -890,6 +1020,7 @@ async function headlessMigrateCompatibility(deps: HeadlessDeps): Promise<void> {
   process.stdout.write(`  migratedFixingWithAiStatuses: ${report.migratedFixingWithAiStatuses}\n`);
   process.stdout.write(`  normalizedMergeModes: ${report.normalizedMergeModes}\n`);
   process.stdout.write(`  staleAutoFixExperimentTasks: ${report.staleAutoFixExperimentTasks}\n`);
+  process.stdout.write(`  normalizedLegacyAcknowledgedLaunchDispatches: ${report.normalizedLegacyAcknowledgedLaunchDispatches}\n`);
 }
 
 async function headlessInstallSkills(
@@ -968,17 +1099,11 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
     case 'detach-workflow':
       await headlessDetachWorkflow(args[1], args[2], deps);
       break;
-    case 'rebase':
-      await headlessRebaseAndRetry(args[1], deps);
+    case 'rebase-retry':
+      await headlessRebaseRetry(args[1], deps);
       break;
-    case 'recreate-with-rebase':
-      await headlessRecreateWithRebase(args[1], deps);
-      break;
-
-    // Deprecated aliases
-    case 'rebase-and-retry':
-      warnDeprecated('rebase-and-retry', 'rebase');
-      await headlessRebaseAndRetry(args[1], deps);
+    case 'rebase-recreate':
+      await headlessRebaseRecreate(args[1], deps);
       break;
     case 'fix':
       await headlessFix(args[1], deps, args[2]);
@@ -1118,6 +1243,7 @@ ${BOLD}Usage:${RESET}  electron dist/main.js --headless <command> [args...]
 
 ${BOLD}Query${RESET} (read-only, all support --output text|label|json|jsonl):
   query workflows [--status S] [--output F]          List all saved workflows
+  query workflow <workflowId> [--output F]           Show one workflow
   query tasks [--workflow <id>|<workflowId>] [--status S]
                                                       Show task states (latest workflow by default)
     [--no-merge] [--output F]
@@ -1138,8 +1264,8 @@ ${BOLD}Execute:${RESET}
   recreate-task <taskId>                               Recreate task + downstream (task-scoped reset)
   fork-workflow <workflowId>                          Fork a live workflow into a new branched workflow (Step 14)
   detach-workflow <workflowId> <upstreamWorkflowId>  Detach one upstream workflow and void downstream to pending
-  rebase <taskId>                                     Refresh pool base + nuclear restart
-  recreate-with-rebase <workflowId|mergeTaskId|taskId> Recreate workflow from fresh upstream base
+  rebase-retry <workflowId|mergeTaskId|taskId>        Refresh pool base, then retry incomplete work
+  rebase-recreate <workflowId|mergeTaskId|taskId>     Refresh pool base, then recreate workflow
   fix <taskId> [claude|codex]                         Fix a failed task (default: claude)
   resolve-conflict <taskId> [claude|codex]            Resolve merge conflict + restart
 
@@ -1160,6 +1286,8 @@ ${BOLD}Configure:${RESET}
   set fix-context <taskId> <text>                     Update fix-session context and retry
   set gate-policy <taskId> <wfId> [depTaskId] <policy>
                                                       policy: completed | review_ready
+  set workflow <workflowId> <fieldPath> <value>      Safely update workflow metadata/config
+  set task <taskId> <fieldPath> <value>              Safely update task metadata/config
   migrate-compat                                     Normalize persisted compatibility workflow/task state
 
 ${BOLD}Lifecycle:${RESET}
@@ -1176,7 +1304,6 @@ ${BOLD}Deprecated${RESET} (use new names above):
   edit → set command            edit-executor → set executor
   edit-agent → set agent        set-merge-mode → set merge-mode
   delete-workflow → delete
-  rebase-and-retry → rebase (task) or recreate-with-rebase (workflow)
 
 ${BOLD}Options:${RESET}
   --wait-for-approval    Keep running until PR approval (use with 'run' or 'resume')
@@ -1243,7 +1370,7 @@ async function headlessWatch(workflowId: string | undefined, deps: HeadlessDeps)
     syncFromDb: true,
     setExitCodeOnFailure: true,
   });
-  process.stdout.write(`\n[watch] done — ${result.status.completed} completed, ${result.status.failed} failed\n`);
+  process.stdout.write(`\n[watch] done — ${result.status.completed} completed, ${result.status.failed} failed, ${result.status.closed} closed\n`);
 }
 
 // ── Headless Commands ────────────────────────────────────────
@@ -1346,7 +1473,7 @@ async function headlessResume(
   });
 
   orchestrator.syncFromDb(workflowId);
-  const allStarted = relaunchOrphansAndStartReady(orchestrator, deps.logger, 'headless', workflowId);
+  const allStarted = orchestrator.startExecution();
 
   if (noTrack) {
     if (allStarted.length > 0) {
@@ -1510,6 +1637,37 @@ async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Promise<vo
     const runnable = result.data.filter(isDispatchableLaunch);
     process.stdout.write(`Restarted task "${taskId}" — ${runnable.length} task(s) to execute\n`);
 
+    if (deps.noTrack) {
+      const runningKey = (task: TaskState): string => {
+        const attemptId = task.execution.selectedAttemptId?.trim();
+        return attemptId ? `attempt:${attemptId}` : `task:${task.id}`;
+      };
+      const scopedKeys = new Set(runnable.map((task) => runningKey(task)));
+      const globalTopup = deps.orchestrator
+        .startExecution()
+        .filter(isDispatchableLaunch)
+        .filter((task) => !scopedKeys.has(runningKey(task)));
+      const dispatchable = [...runnable, ...globalTopup];
+      if (dispatchable.length > 0) {
+        if (deps.deferRunnableTasks) {
+          deps.deferRunnableTasks(dispatchable, restored.workflowId);
+        } else {
+          const taskExecutor = createHeadlessExecutor(deps);
+          const launch = setTimeout(() => {
+            void taskExecutor.executeTasks(dispatchable).catch((err) => {
+              deps.logger.error(
+                `background no-track task retry failed for ${taskId}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+                { module: 'headless' },
+              );
+            });
+          }, 25);
+          launch.unref?.();
+        }
+      }
+      process.stdout.write('[headless] --no-track enabled: retry-task accepted; exiting without tracking.\n');
+      return;
+    }
+
     const taskExecutor = createHeadlessExecutor(deps);
     const autoFix = wireHeadlessAutoFix(deps, taskExecutor);
     const { topup } = await dispatchStartedTasksWithGlobalTopup({
@@ -1635,29 +1793,25 @@ async function headlessResolveConflict(taskId: string, deps: HeadlessDeps, agent
   }
 }
 
-async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promise<void> {
-  if (!taskId) throw new Error('Missing arguments. Usage: --headless rebase-and-retry <taskId>');
-  const restored = restoreWorkflowForTaskUnlessDeleteAllWon(taskId, deps, 'rebase');
-  if (!restored) return;
-  taskId = restored.resolvedTaskId;
-  const workflowId = deps.orchestrator.getTask(taskId)?.config.workflowId;
-  if (!workflowId) throw new Error(`Task "${taskId}" has no workflow`);
+async function headlessRebaseRetry(target: string, deps: HeadlessDeps): Promise<void> {
+  if (!target) throw new Error('Missing arguments. Usage: --headless rebase-retry <workflowId|mergeTaskId|taskId>');
+  const workflowId = resolveHeadlessTargetWorkflowId(target, deps.persistence);
   await preemptWorkflowBeforeMutation(workflowId, {
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
-    context: 'headless.rebase-and-retry',
+    context: 'headless.rebase-retry',
     mutationTiming: deps.mutationTiming,
   });
 
   const te = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, te);
-  const started = await rebaseAndRetry(taskId, { ...deps, taskExecutor: te, mutationTiming: deps.mutationTiming });
+  const started = await rebaseRetry(target, { ...deps, taskExecutor: te, mutationTiming: deps.mutationTiming });
   const runnable = started.filter(isDispatchableLaunch);
   const { topup } = await dispatchStartedTasksWithGlobalTopup({
     orchestrator: deps.orchestrator,
     taskExecutor: te,
     logger: deps.logger,
-    context: 'headless.rebase-and-retry',
+    context: 'headless.rebase-retry',
     started,
     scopedWorkflowId: workflowId,
     mutationTiming: deps.mutationTiming,
@@ -1667,7 +1821,7 @@ async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promi
     return;
   }
   if (deps.noTrack) {
-    process.stdout.write('[headless] --no-track enabled: rebase accepted; exiting without tracking.\n');
+    process.stdout.write('[headless] --no-track enabled: rebase-retry accepted; exiting without tracking.\n');
     autoFix.unsubscribe();
     return;
   }
@@ -1680,28 +1834,28 @@ async function headlessRebaseAndRetry(taskId: string, deps: HeadlessDeps): Promi
   autoFix.unsubscribe();
 
   const tasksStarted = runnable.length;
-  process.stdout.write(`Rebase-and-retry: resetting workflow from current HEAD (${tasksStarted} task(s))\n`);
+  process.stdout.write(`Rebase-retry: retried workflow from fresh base (${tasksStarted} task(s))\n`);
 }
 
-async function headlessRecreateWithRebase(workflowTarget: string, deps: HeadlessDeps): Promise<void> {
-  if (!workflowTarget) throw new Error('Missing arguments. Usage: --headless recreate-with-rebase <workflowId|mergeTaskId|taskId>');
+async function headlessRebaseRecreate(workflowTarget: string, deps: HeadlessDeps): Promise<void> {
+  if (!workflowTarget) throw new Error('Missing arguments. Usage: --headless rebase-recreate <workflowId|mergeTaskId|taskId>');
   const workflowId = resolveHeadlessTargetWorkflowId(workflowTarget, deps.persistence);
   await preemptWorkflowBeforeMutation(workflowId, {
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
-    context: 'headless.recreate-with-rebase',
+    context: 'headless.rebase-recreate',
     mutationTiming: deps.mutationTiming,
   });
 
   const te = createHeadlessExecutor(deps);
   const autoFix = wireHeadlessAutoFix(deps, te);
-  const started = await recreateWithRebase(workflowId, { ...deps, taskExecutor: te, mutationTiming: deps.mutationTiming });
+  const started = await rebaseRecreate(workflowTarget, { ...deps, taskExecutor: te, mutationTiming: deps.mutationTiming });
   const runnable = started.filter(isDispatchableLaunch);
   const { topup } = await dispatchStartedTasksWithGlobalTopup({
     orchestrator: deps.orchestrator,
     taskExecutor: te,
     logger: deps.logger,
-    context: 'headless.recreate-with-rebase',
+    context: 'headless.rebase-recreate',
     started,
     scopedWorkflowId: workflowId,
     mutationTiming: deps.mutationTiming,
@@ -1711,7 +1865,7 @@ async function headlessRecreateWithRebase(workflowTarget: string, deps: Headless
     return;
   }
   if (deps.noTrack) {
-    process.stdout.write('[headless] --no-track enabled: recreate-with-rebase accepted; exiting without tracking.\n');
+    process.stdout.write('[headless] --no-track enabled: rebase-recreate accepted; exiting without tracking.\n');
     autoFix.unsubscribe();
     return;
   }
@@ -1724,7 +1878,7 @@ async function headlessRecreateWithRebase(workflowTarget: string, deps: Headless
   autoFix.unsubscribe();
 
   const tasksStarted = runnable.length;
-  process.stdout.write(`Recreate-with-rebase: resetting workflow from fresh base (${tasksStarted} task(s))\n`);
+  process.stdout.write(`Rebase-recreate: recreated workflow from fresh base (${tasksStarted} task(s))\n`);
 }
 
 async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps): Promise<void> {
@@ -1737,13 +1891,16 @@ async function headlessRecreateWorkflow(workflowId: string, deps: HeadlessDeps):
     context: 'headless.recreate-workflow',
     mutationTiming: deps.mutationTiming,
   });
-  const started = deps.mutationTiming
+  const recreateWfEnvelope = makeEnvelope('recreate-workflow', 'headless', 'workflow', { workflowId });
+  const recreateWfResult = deps.mutationTiming
     ? await deps.mutationTiming.span(
-      'headless.recreate-workflow.sharedRecreateWorkflow',
+      'headless.recreate-workflow.commandService.recreateWorkflow',
       undefined,
-      async () => sharedRecreateWorkflow(workflowId, { persistence: deps.persistence, orchestrator: deps.orchestrator }),
+      () => deps.commandService.recreateWorkflow(recreateWfEnvelope),
     )
-    : sharedRecreateWorkflow(workflowId, { persistence: deps.persistence, orchestrator: deps.orchestrator });
+    : await deps.commandService.recreateWorkflow(recreateWfEnvelope);
+  if (!recreateWfResult.ok) throw new Error(recreateWfResult.error.message);
+  const started = recreateWfResult.data;
   const runnable = started.filter(isDispatchableLaunch);
   if (runnable.length > 0) {
     const te = createHeadlessExecutor(deps);
@@ -1801,13 +1958,16 @@ async function headlessRecreateTask(taskId: string, deps: HeadlessDeps): Promise
     await preemptTaskSubgraph(taskId, deps);
   }
 
-  const started = deps.mutationTiming
+  const recreateTaskEnvelope = makeEnvelope('recreate-task', 'headless', 'task', { taskId });
+  const recreateTaskResult = deps.mutationTiming
     ? await deps.mutationTiming.span(
-      'headless.recreate-task.sharedRecreateTask',
+      'headless.recreate-task.commandService.recreateTask',
       { taskId },
-      async () => sharedRecreateTask(taskId, { persistence: deps.persistence, orchestrator: deps.orchestrator }),
+      () => deps.commandService.recreateTask(recreateTaskEnvelope),
     )
-    : sharedRecreateTask(taskId, { persistence: deps.persistence, orchestrator: deps.orchestrator });
+    : await deps.commandService.recreateTask(recreateTaskEnvelope);
+  if (!recreateTaskResult.ok) throw new Error(recreateTaskResult.error.message);
+  const started = recreateTaskResult.data;
   const runnable = started.filter(isDispatchableLaunch);
   const workflowId = deps.orchestrator.getTask(taskId)?.config.workflowId;
   process.stdout.write(`Recreate task "${taskId}" (+ downstream) — ${runnable.length} task(s) to execute (pool fetch skipped)\n`);
@@ -2050,9 +2210,7 @@ async function headlessEdit(taskId: string, newCommand: string, deps: HeadlessDe
   const result = await deps.commandService.editTaskCommand(envelope);
   if (!result.ok) throw new Error(result.error.message);
   const runnable = result.data.filter(isDispatchableLaunch);
-  if (runnable.length > 0) {
-    await taskExecutor.executeTasks(runnable);
-  }
+  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-command');
   process.stdout.write(`Edited task "${taskId}" command → "${newCommand}"\n`);
 
   if (deps.noTrack) {
@@ -2084,9 +2242,7 @@ async function headlessEditPrompt(taskId: string, newPrompt: string, deps: Headl
   const result = await deps.commandService.editTaskPrompt(envelope);
   if (!result.ok) throw new Error(result.error.message);
   const runnable = result.data.filter(isDispatchableLaunch);
-  if (runnable.length > 0) {
-    await taskExecutor.executeTasks(runnable);
-  }
+  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-prompt');
   process.stdout.write(`Edited task "${taskId}" prompt → "${newPrompt}"\n`);
 
   if (deps.noTrack) {
@@ -2128,9 +2284,7 @@ async function headlessEditExecutor(
   const result = await deps.commandService.editTaskType(envelope);
   if (!result.ok) throw new Error(result.error.message);
   const runnable = result.data.filter(isDispatchableLaunch);
-  if (runnable.length > 0) {
-    await taskExecutor.executeTasks(runnable);
-  }
+  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-type');
   process.stdout.write(
     `Edited task "${taskId}" executor → "${runnerKind}"` +
     `${poolMemberId ? ` (poolMemberId=${poolMemberId})` : ''}\n`,
@@ -2166,9 +2320,7 @@ async function headlessEditAgent(taskId: string, agentName: string, deps: Headle
   const result = await deps.commandService.editTaskAgent(envelope);
   if (!result.ok) throw new Error(result.error.message);
   const runnable = result.data.filter(isDispatchableLaunch);
-  if (runnable.length > 0) {
-    await taskExecutor.executeTasks(runnable);
-  }
+  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-agent');
   process.stdout.write(`Edited task "${taskId}" agent → "${agentName}"\n`);
 
   if (deps.noTrack) {
@@ -2461,6 +2613,8 @@ async function headlessDeleteWorkflow(workflowId: string, deps: HeadlessDeps): P
   if (!workflowId) throw new Error('Missing workflowId. Usage: --headless delete-workflow <workflowId>');
   // Preempt running tasks (kill processes + cancel) — matches owner-mode bridge contract
   await preemptWorkflowExecution(workflowId, deps);
+  const taskExecutor = createHeadlessExecutor(deps);
+  await taskExecutor.closeWorkflowReview(workflowId);
   // Serialized via CommandService: DB delete + memory clear + scheduler cleanup + removal deltas
   const envelope = makeEnvelope('delete-workflow', 'headless', 'workflow', { workflowId });
   const result = await deps.commandService.deleteWorkflow(envelope);
@@ -2669,6 +2823,50 @@ async function headlessSetGatePolicy(args: string[], deps: HeadlessDeps): Promis
   });
 }
 
+async function headlessSetWorkflowMetadata(
+  workflowId: string,
+  fieldPath: string,
+  rawValue: string,
+  deps: HeadlessDeps,
+): Promise<void> {
+  if (!workflowId || !fieldPath || rawValue === '') {
+    throw new Error('Missing arguments. Usage: --headless set workflow <workflowId> <fieldPath> <value>');
+  }
+  const result = await setWorkflowMetadata(
+    {
+      commandService: deps.commandService,
+      orchestrator: deps.orchestrator,
+      persistence: deps.persistence,
+    },
+    workflowId,
+    fieldPath,
+    parseMetadataValue(rawValue),
+  );
+  process.stdout.write(`Updated workflow "${result.id}" ${result.fieldPath} → ${JSON.stringify(result.value)}\n`);
+}
+
+async function headlessSetTaskMetadata(
+  taskId: string,
+  fieldPath: string,
+  rawValue: string,
+  deps: HeadlessDeps,
+): Promise<void> {
+  if (!taskId || !fieldPath || rawValue === '') {
+    throw new Error('Missing arguments. Usage: --headless set task <taskId> <fieldPath> <value>');
+  }
+  const result = await setTaskMetadata(
+    {
+      commandService: deps.commandService,
+      orchestrator: deps.orchestrator,
+      persistence: deps.persistence,
+    },
+    taskId,
+    fieldPath,
+    parseMetadataValue(rawValue),
+  );
+  process.stdout.write(`Updated task "${result.id}" ${result.fieldPath} → ${JSON.stringify(result.value)}\n`);
+}
+
 async function headlessSlack(deps: HeadlessDeps): Promise<void> {
   const { orchestrator, persistence, initServices, wireSlackBot } = deps;
 
@@ -2798,8 +2996,8 @@ async function waitForCompletion(
       readyTasks = readyTasks.filter((t) => t.config.workflowId === workflowId);
     }
     const settledStatuses = waitForApproval
-      ? ['completed', 'failed', 'needs_input', 'blocked', 'stale']
-      : ['completed', 'failed', 'needs_input', 'awaiting_approval', 'review_ready', 'blocked', 'stale'];
+      ? ['completed', 'failed', 'closed', 'needs_input', 'blocked', 'stale']
+      : ['completed', 'failed', 'closed', 'needs_input', 'awaiting_approval', 'review_ready', 'blocked', 'stale'];
     const allSettled = tasks.every((t) => settledStatuses.includes(t.status));
     if (allSettled && !hasBackgroundWork?.()) return;
     // Also settle if nothing is running and at least one task awaits human action.

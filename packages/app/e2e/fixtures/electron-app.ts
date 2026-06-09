@@ -11,60 +11,111 @@ import { resolveRepoRoot } from '@invoker/contracts';
 import { test as base, expect, _electron as electron, type ElectronApplication, type Page } from '@playwright/test';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { stringify as yamlStringify } from 'yaml';
 
 export type ElectronFixtures = {
   electronApp: ElectronApplication;
+  guiOwnerMode: string;
   page: Page;
   testDir: string;
 };
 
 const repoRoot = resolveRepoRoot(__dirname);
 
+async function removeTestDir(dir: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      await fs.rm(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOTEMPTY' && code !== 'EBUSY' && code !== 'EPERM') {
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError;
+}
+
 export const test = base.extend<ElectronFixtures>({
+  guiOwnerMode: [process.env.INVOKER_E2E_GUI_OWNER_MODE ?? 'gui', { option: true }],
+
   testDir: async ({}, use) => {
     const dir = mkdtempSync(path.join(tmpdir(), 'invoker-e2e-'));
     await use(dir);
     if (process.env.INVOKER_E2E_KEEP_TMP !== '1') {
-      rmSync(dir, { recursive: true, force: true });
+      await removeTestDir(dir);
     }
   },
 
-  electronApp: async ({ testDir }, use) => {
+  electronApp: async ({ guiOwnerMode, testDir }, use) => {
     // Dummy `claude` on PATH + fix command — same as scripts/e2e-dry-run (no real CLI).
     const claudeMarker = path.join(repoRoot, 'scripts', 'e2e-dry-run', 'fixtures', 'claude-marker.sh');
     const stubDir = path.join(testDir, 'claude-stub');
     const markerRoot = path.join(testDir, 'e2e-markers');
     const configPath = path.join(testDir, 'e2e-config.json');
     const ipcSocketPath = path.join(testDir, 'ipc-transport.sock');
+    const electronUserDataDir = path.join(testDir, 'electron-user-data');
     await fs.mkdir(stubDir, { recursive: true });
     await fs.mkdir(markerRoot, { recursive: true });
+    await fs.mkdir(electronUserDataDir, { recursive: true });
     writeFileSync(configPath, JSON.stringify({ autoFixRetries: 0 }), 'utf8');
     try {
       await fs.symlink(claudeMarker, path.join(stubDir, 'claude'));
     } catch {
       // Windows / EPERM: fix path still uses INVOKER_CLAUDE_FIX_COMMAND; prompt tasks may hit real claude.
     }
+    const codexStub = path.join(stubDir, 'codex');
+    writeFileSync(codexStub, `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "resume" ]]; then
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    echo "stdin is not a terminal" >&2
+    exit 12
+  fi
+  sleep 1
+  echo "TTY OK: codex resume \${2:-}"
+  exit 0
+fi
+if [[ "\${1:-}" == "exec" ]]; then
+  echo '{"type":"session_configured","session_id":"codex-e2e-exec"}'
+  echo '{"type":"turn_context","cwd":"'"$PWD"'"}'
+  echo '{"type":"task_complete","last_agent_message":"Codex E2E exec complete"}'
+  exit 0
+fi
+echo "unsupported codex args: $*" >&2
+exit 64
+`, 'utf8');
+    chmodSync(codexStub, 0o755);
     const pathEnv = `${stubDir}${path.delimiter}${process.env.PATH ?? ''}`;
     const app = await electron.launch({
       args: [
         ...(process.platform === 'linux'
           ? ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-gpu-compositing', '--disable-gpu-sandbox', '--disable-software-rasterizer']
           : []),
+        `--user-data-dir=${electronUserDataDir}`,
         path.resolve(__dirname, '..', '..', 'dist', 'main.js'),
       ],
       env: {
         ...process.env,
         NODE_ENV: 'test',
         TZ: 'UTC',
+        INVOKER_GUI_OWNER_MODE: guiOwnerMode,
         INVOKER_DB_DIR: testDir,
         INVOKER_IPC_SOCKET: ipcSocketPath,
         INVOKER_ALLOW_DELETE_ALL: '1',
         INVOKER_E2E_ENABLE_COMPOSITOR: '1',
         INVOKER_REPO_CONFIG_PATH: configPath,
+        INVOKER_STANDALONE_OWNER_IDLE_TIMEOUT_MS:
+          process.env.INVOKER_E2E_STANDALONE_OWNER_IDLE_TIMEOUT_MS ?? '10000',
+        INVOKER_EMBEDDED_TERMINAL_BACKEND:
+          process.env.INVOKER_E2E_EMBEDDED_TERMINAL_BACKEND ?? 'pty',
         INVOKER_E2E_MARKER_ROOT: markerRoot,
         INVOKER_TEST_FIXED_NOW: '2025-01-01T00:00:00.000Z',
         INVOKER_CLAUDE_COMMAND: claudeMarker,
@@ -91,6 +142,13 @@ export const test = base.extend<ElectronFixtures>({
     await page.waitForFunction(() => typeof window.invoker !== 'undefined', null, { timeout: 10000 });
 
     await use(page);
+    try {
+      await page.evaluate(async () => {
+        await window.invoker.deleteAllWorkflows();
+      });
+    } catch {
+      // Best-effort cleanup; the test failure itself should remain the signal.
+    }
   },
 });
 

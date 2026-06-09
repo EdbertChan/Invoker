@@ -74,6 +74,7 @@ let port: number;
 let mocks: {
   orchestrator: Record<string, ReturnType<typeof vi.fn>>;
   persistence: Record<string, ReturnType<typeof vi.fn>>;
+  commandService: Record<string, ReturnType<typeof vi.fn>>;
   executorRegistry: Record<string, ReturnType<typeof vi.fn>>;
   taskExecutor: Record<string, ReturnType<typeof vi.fn>>;
   killRunningTask: ReturnType<typeof vi.fn>;
@@ -86,6 +87,7 @@ function createMocks() {
     orchestrator: {
       getWorkflowStatus: vi.fn(() => ({ total: 1, completed: 0, failed: 0, running: 1, pending: 0 })),
       getAllTasks: vi.fn(() => [makeTask()]),
+      syncFromDb: vi.fn(),
       startExecution: vi.fn(() => []),
       getTask: vi.fn((id: string) => (id === 'task-1' ? makeTask() : undefined)),
       approve: vi.fn().mockResolvedValue([]),
@@ -95,6 +97,9 @@ function createMocks() {
       beginConflictResolution: vi.fn(() => ({ savedError: 'saved-error' })),
       setFixAwaitingApproval: vi.fn(),
       retryTask: vi.fn(() => [makeTask()]),
+      recreateTask: vi.fn(() => [makeTask()]),
+      retryWorkflow: vi.fn(() => [makeTask()]),
+      recreateWorkflow: vi.fn(() => [makeTask()]),
       editTaskCommand: vi.fn(() => [makeTask()]),
       editTaskPrompt: vi.fn(() => [makeTask()]),
       editTaskType: vi.fn(() => [makeTask()]),
@@ -122,12 +127,64 @@ function createMocks() {
     persistence: {
       listWorkflows: vi.fn(() => [{ id: 'wf-1', name: 'test', generation: 1 }]),
       loadWorkflow: vi.fn(() => ({ id: 'wf-1', generation: 1 })),
+      loadTask: vi.fn((id: string) => (id === 'task-1' ? makeTask() : undefined)),
       updateWorkflow: vi.fn(),
-      loadTasks: vi.fn(() => []),
+      updateTask: vi.fn(),
+      loadTasks: vi.fn(() => [makeTask()]),
+      logEvent: vi.fn(),
       getEvents: vi.fn(() => [{ taskId: 'task-1', eventType: 'started', timestamp: '2024-01-01' }]),
       getTaskOutput: vi.fn(() => 'hello world output'),
     },
     executorRegistry: {},
+    commandService: {
+      runSerializedForWorkflow: vi.fn(async (_workflowId: string, fn: () => unknown) => {
+        await fn();
+        return { ok: true, data: undefined };
+      }),
+      // Production CommandService routes through applyInvalidation which
+      // ultimately invokes orchestrator.{retry,recreate}{Task,Workflow}
+      // and (for recreateWorkflow) bumpGenerationAndRecreate which calls
+      // persistence.loadWorkflow first. Mocks below preserve the same
+      // observable behavior (orchestrator is still called, generation
+      // bump persisted, WORKFLOW_NOT_FOUND surfaced) so existing
+      // assertions keep working after the facade routes through
+      // CommandService.
+      retryTask: vi.fn(async (envelope: { payload: { taskId: string } }) => {
+        try {
+          return { ok: true, data: mocks.orchestrator.retryTask(envelope.payload.taskId) };
+        } catch (err) {
+          return { ok: false, error: { code: 'RETRY_TASK_FAILED', message: (err as Error).message } };
+        }
+      }),
+      recreateTask: vi.fn(async (envelope: { payload: { taskId: string } }) => {
+        try {
+          return { ok: true, data: mocks.orchestrator.recreateTask(envelope.payload.taskId) };
+        } catch (err) {
+          return { ok: false, error: { code: 'RECREATE_TASK_FAILED', message: (err as Error).message } };
+        }
+      }),
+      retryWorkflow: vi.fn(async (envelope: { payload: { workflowId: string } }) => {
+        try {
+          return { ok: true, data: mocks.orchestrator.retryWorkflow(envelope.payload.workflowId) };
+        } catch (err) {
+          return { ok: false, error: { code: 'RETRY_WORKFLOW_FAILED', message: (err as Error).message } };
+        }
+      }),
+      recreateWorkflow: vi.fn(async (envelope: { payload: { workflowId: string } }) => {
+        const workflowId = envelope.payload.workflowId;
+        const wf = mocks.persistence.loadWorkflow(workflowId);
+        if (!wf) {
+          return { ok: false, error: { code: 'WORKFLOW_NOT_FOUND', message: `Workflow ${workflowId} not found` } };
+        }
+        const nextGen = (wf.generation ?? 0) + 1;
+        mocks.persistence.updateWorkflow(workflowId, { generation: nextGen });
+        try {
+          return { ok: true, data: mocks.orchestrator.recreateWorkflow(workflowId) };
+        } catch (err) {
+          return { ok: false, error: { code: 'RECREATE_WORKFLOW_FAILED', message: (err as Error).message } };
+        }
+      }),
+    },
     taskExecutor: {
       executeTasks: vi.fn().mockResolvedValue(undefined),
       publishAfterFix: vi.fn().mockResolvedValue(undefined),
@@ -145,6 +202,7 @@ function buildFacade(m: typeof mocks) {
   return new WorkflowMutationFacade({
     orchestrator: m.orchestrator as any,
     persistence: m.persistence as any,
+    commandService: m.commandService as any,
     taskExecutor: m.taskExecutor as any,
     killRunningTask: m.killRunningTask,
   });
@@ -181,7 +239,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   // Reset all mocks between tests
-  for (const group of [mocks.orchestrator, mocks.persistence, mocks.taskExecutor]) {
+  for (const group of [mocks.orchestrator, mocks.persistence, mocks.taskExecutor, mocks.commandService]) {
     for (const fn of Object.values(group)) {
       if (typeof fn === 'function' && 'mockClear' in fn) fn.mockClear();
     }
@@ -193,6 +251,7 @@ beforeEach(() => {
   // Re-apply default return values after clear
   mocks.orchestrator.getWorkflowStatus.mockReturnValue({ total: 1, completed: 0, failed: 0, running: 1, pending: 0 });
   mocks.orchestrator.getAllTasks.mockReturnValue([makeTask()]);
+  mocks.orchestrator.syncFromDb.mockReturnValue(undefined);
   mocks.orchestrator.startExecution.mockReturnValue([]);
   mocks.orchestrator.getTask.mockImplementation((id: string) => (id === 'task-1' ? makeTask() : undefined));
   mocks.orchestrator.approve.mockResolvedValue([]);
@@ -210,7 +269,12 @@ beforeEach(() => {
   });
   mocks.persistence.listWorkflows.mockReturnValue([{ id: 'wf-1', name: 'test', generation: 1 }]);
   mocks.persistence.loadWorkflow.mockReturnValue({ id: 'wf-1', generation: 1 });
-  mocks.persistence.loadTasks.mockReturnValue([]);
+  mocks.persistence.loadTask.mockImplementation((id: string) => (id === 'task-1' ? makeTask() : undefined));
+  mocks.persistence.loadTasks.mockReturnValue([makeTask()]);
+  mocks.commandService.runSerializedForWorkflow.mockImplementation(async (_workflowId: string, fn: () => unknown) => {
+    await fn();
+    return { ok: true, data: undefined };
+  });
   mocks.persistence.getEvents.mockReturnValue([{ taskId: 'task-1', eventType: 'started', timestamp: '2024-01-01' }]);
   mocks.persistence.getTaskOutput.mockReturnValue('hello world output');
   mocks.killRunningTask.mockResolvedValue(undefined);
@@ -782,8 +846,8 @@ describe('POST /api/workflows/:id/restart', () => {
   });
 });
 
-describe('POST /api/workflows/:id/rebase-and-retry', () => {
-  it('normalizes merge-node targets to the owning workflow before fresh-base recreate', async () => {
+describe('POST /api/workflows/:id/rebase-retry', () => {
+  it('normalizes merge-node targets to the owning workflow before fresh-base retry', async () => {
     mocks.persistence.loadWorkflow = vi.fn((workflowId: string) => (
       workflowId === 'wf-1' ? { id: 'wf-1', generation: 1 } : undefined
     ));
@@ -792,19 +856,16 @@ describe('POST /api/workflows/:id/rebase-and-retry', () => {
         ? [makeTask({ id: '__merge__wf-1', config: { workflowId: 'wf-1', isMergeNode: true } })]
         : []
     ));
-    mocks.orchestrator.recreateWorkflowFromFreshBase = vi.fn(async () => [makeTask()]);
+    mocks.orchestrator.retryWorkflow = vi.fn(() => [makeTask()]);
 
-    const res = await request(port, 'POST', '/api/workflows/__merge__wf-1/rebase-and-retry');
+    const res = await request(port, 'POST', '/api/workflows/__merge__wf-1/rebase-retry');
 
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.workflowId).toBe('wf-1');
-    expect(res.body.action).toBe('rebase_and_retried');
-    expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', expect.any(Object));
-    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
-      'wf-1',
-      expect.objectContaining({ refreshBase: expect.any(Function) }),
-    );
+    expect(res.body.action).toBe('rebase_retried');
+    expect(mocks.persistence.updateWorkflow).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.retryWorkflow).toHaveBeenCalledWith('wf-1');
   });
 });
 
@@ -830,22 +891,53 @@ describe('POST /api/workflows/:id/fork', () => {
   });
 });
 
-describe('POST /api/workflows/:id/recreate-with-rebase', () => {
-  it('recreates workflow from fresh base', async () => {
-    mocks.orchestrator.recreateWorkflowFromFreshBase = vi.fn().mockResolvedValue([makeTask()]);
-    const res = await request(port, 'POST', '/api/workflows/wf-1/recreate-with-rebase');
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.action).toBe('recreated_with_rebase');
-    expect(res.body.tasksStarted).toBe(1);
-    expect(res.body.deprecated).toBeUndefined();
-    expect(mocks.orchestrator.recreateWorkflowFromFreshBase).toHaveBeenCalledWith(
-      'wf-1',
-      expect.objectContaining({ refreshBase: expect.any(Function) }),
-    );
+describe('POST /api/workflows/:id/rebase-recreate', () => {
+  it('queues rebase-recreate through the workflow mutation coordinator when available', async () => {
+    const localMocks = createMocks();
+    localMocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
+    const queueWorkflowMutation = vi.fn(() => 123);
+    const queuedApi = startApiServer({
+      orchestrator: localMocks.orchestrator as any,
+      persistence: localMocks.persistence as any,
+      executorRegistry: localMocks.executorRegistry as any,
+      mutations: buildFacade(localMocks),
+      queueWorkflowMutation,
+      deleteWorkflow: localMocks.deleteWorkflow,
+      detachWorkflow: localMocks.detachWorkflow,
+    });
+    await new Promise<void>((resolve) => {
+      if (queuedApi.server.listening) resolve();
+      else queuedApi.server.on('listening', resolve);
+    });
+    const queuedAddr = queuedApi.server.address();
+    const queuedPort = typeof queuedAddr === 'object' && queuedAddr ? queuedAddr.port : queuedApi.port;
+
+    try {
+      const res = await request(queuedPort, 'POST', '/api/workflows/wf-1/rebase-recreate');
+
+      expect(res.status).toBe(202);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.queued).toBe(true);
+      expect(res.body.intentId).toBe(123);
+      expect(queueWorkflowMutation).toHaveBeenCalledWith('wf-1', 'high', 'invoker:rebase-recreate', ['wf-1']);
+      expect(localMocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+    } finally {
+      await queuedApi.close();
+    }
   });
 
-  it('keeps cross-workflow started tasks out of the scoped recreate-with-rebase runnable result', async () => {
+  it('recreates workflow from fresh base', async () => {
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
+    const res = await request(port, 'POST', '/api/workflows/wf-1/rebase-recreate');
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.action).toBe('rebase_recreated');
+    expect(res.body.tasksStarted).toBe(1);
+    expect(res.body.deprecated).toBeUndefined();
+    expect(mocks.orchestrator.recreateWorkflow).toHaveBeenCalledWith('wf-1');
+  });
+
+  it('keeps cross-workflow started tasks out of the scoped rebase-recreate runnable result', async () => {
     const scoped = makeTask({
       id: 'wf-1/task-a',
       config: { workflowId: 'wf-1' },
@@ -856,10 +948,10 @@ describe('POST /api/workflows/:id/recreate-with-rebase', () => {
       config: { workflowId: 'wf-2' },
       execution: { selectedAttemptId: 'attempt-b' },
     });
-    mocks.orchestrator.recreateWorkflowFromFreshBase = vi.fn().mockResolvedValue([scoped, crossWorkflow]);
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => [scoped, crossWorkflow]);
     mocks.orchestrator.startExecution.mockReturnValue([]);
 
-    const res = await request(port, 'POST', '/api/workflows/wf-1/recreate-with-rebase');
+    const res = await request(port, 'POST', '/api/workflows/wf-1/rebase-recreate');
 
     expect(res.status).toBe(200);
     expect(mocks.taskExecutor.executeTasks).toHaveBeenCalledTimes(2);
@@ -867,21 +959,16 @@ describe('POST /api/workflows/:id/recreate-with-rebase', () => {
     expect(mocks.taskExecutor.executeTasks).toHaveBeenNthCalledWith(2, [crossWorkflow]);
   });
 
-  it('rebase-and-retry still works as deprecated alias', async () => {
-    mocks.orchestrator.recreateWorkflowFromFreshBase = vi.fn().mockResolvedValue([makeTask()]);
+  it('old rebase-and-retry route is gone', async () => {
     const res = await request(port, 'POST', '/api/workflows/wf-1/rebase-and-retry');
-    expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(true);
-    expect(res.body.action).toBe('rebase_and_retried');
-    expect(res.body.deprecated).toBe(true);
-    expect(res.body.replacement).toBe('/api/workflows/:id/recreate-with-rebase');
+    expect(res.status).toBe(404);
   });
 
   it('returns 404 when workflow not found', async () => {
     mocks.persistence.loadWorkflow.mockReturnValue(undefined);
-    const res = await request(port, 'POST', '/api/workflows/wf-missing/recreate-with-rebase');
+    const res = await request(port, 'POST', '/api/workflows/wf-missing/rebase-recreate');
     expect(res.status).toBe(404);
-    expect(res.body.error).toContain('not found');
+    expect(res.body.error).toContain('Could not resolve workflow');
   });
 });
 
@@ -941,6 +1028,72 @@ describe('POST /api/workflows/:id/merge-mode', () => {
     const res = await request(port, 'POST', '/api/workflows/wf-1/merge-mode', { mode: 'invalid' });
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Invalid mergeMode');
+  });
+});
+
+describe('PATCH metadata endpoints', () => {
+  it('updates workflow metadata through the facade', async () => {
+    const res = await request(port, 'PATCH', '/api/workflows/wf-1/metadata', {
+      fieldPath: 'repoUrl',
+      value: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.scope).toBe('workflow');
+    expect(mocks.commandService.runSerializedForWorkflow).toHaveBeenCalledWith('wf-1', expect.any(Function));
+    expect(mocks.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', {
+      repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+    });
+  });
+
+  it('updates task metadata through the facade', async () => {
+    const res = await request(port, 'PATCH', '/api/tasks/task-1/metadata', {
+      fieldPath: 'config.poolId',
+      value: 'some-pool',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.scope).toBe('task');
+    expect(mocks.persistence.updateTask).toHaveBeenCalledWith('task-1', {
+      config: { poolId: 'some-pool' },
+    });
+  });
+
+  it('rejects forbidden fields in normal mode', async () => {
+    const res = await request(port, 'PATCH', '/api/tasks/task-1/metadata', {
+      fieldPath: 'execution.error',
+      value: 'boom',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('not allowed');
+    expect(mocks.persistence.updateTask).not.toHaveBeenCalled();
+  });
+
+  it('gates raw metadata repair mode', async () => {
+    const original = process.env.INVOKER_ALLOW_RAW_METADATA_SET;
+    delete process.env.INVOKER_ALLOW_RAW_METADATA_SET;
+    const rejected = await request(port, 'PATCH', '/api/tasks/task-1/metadata', {
+      fieldPath: 'raw.execution.error',
+      value: 'boom',
+    });
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toContain('Raw metadata updates are disabled');
+
+    process.env.INVOKER_ALLOW_RAW_METADATA_SET = '1';
+    const accepted = await request(port, 'PATCH', '/api/tasks/task-1/metadata', {
+      fieldPath: 'raw.execution.error',
+      value: 'boom',
+    });
+    expect(accepted.status).toBe(200);
+    expect(mocks.persistence.updateTask).toHaveBeenCalledWith('task-1', {
+      execution: { error: 'boom' },
+    });
+
+    if (original === undefined) delete process.env.INVOKER_ALLOW_RAW_METADATA_SET;
+    else process.env.INVOKER_ALLOW_RAW_METADATA_SET = original;
   });
 });
 
