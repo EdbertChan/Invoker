@@ -80,3 +80,17 @@ export function registerGuiLifecycleHandlers(
   app.on('window-all-closed', handlers.onWindowAllClosed);
   app.on('before-quit', handlers.onBeforeQuit);
 }
+
+export interface GuiWindowStartupOptions {
+  seedUiSnapshotCache: () => void;
+  createWindow: () => void;
+  recordCreateWindowEnd: () => void;
+  registerActivateHandler: () => void;
+}
+
+export function completeGuiWindowStartup(options: GuiWindowStartupOptions): void {
+  options.seedUiSnapshotCache();
+  options.createWindow();
+  options.recordCreateWindowEnd();
+  options.registerActivateHandler();
+}

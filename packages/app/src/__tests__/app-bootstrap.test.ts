@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  completeGuiWindowStartup,
   configureEarlyElectronApp,
   registerGuiLifecycleHandlers,
   runElectronReadyBootstrap,
@@ -181,5 +182,22 @@ describe('app-bootstrap', () => {
     );
 
     expect([...handlers.keys()]).toEqual(['window-all-closed', 'before-quit']);
+  });
+
+  it('preserves final GUI window startup ordering', () => {
+    const order: string[] = [];
+    completeGuiWindowStartup({
+      seedUiSnapshotCache: () => order.push('seedUiSnapshotCache'),
+      createWindow: () => order.push('createWindow'),
+      recordCreateWindowEnd: () => order.push('recordCreateWindowEnd'),
+      registerActivateHandler: () => order.push('registerActivateHandler'),
+    });
+
+    expect(order).toEqual([
+      'seedUiSnapshotCache',
+      'createWindow',
+      'recordCreateWindowEnd',
+      'registerActivateHandler',
+    ]);
   });
 });
