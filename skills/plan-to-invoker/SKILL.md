@@ -47,6 +47,8 @@ Use these as concrete skill steps. Every step should run a command and produce p
 
 ### Primary validation surface
 
+INV-63 selected this `skill-doctor.sh` surface in `docs/context/inv-63/experiment-brief.md`. Keep it as the primary review contract: one command, one exit code, one JSON summary, preserved first-failure attribution, schema and atomicity coverage, and enforced policy-matrix traceability. The individual scripts below are debugging aids after this command identifies the failing step.
+
 **Run all plan validation checks in one command:**
 
 ```bash

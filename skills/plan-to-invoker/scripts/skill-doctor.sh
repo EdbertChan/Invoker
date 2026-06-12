@@ -262,6 +262,8 @@ fi
 
 if [[ "$SKIP_ASSUMPTIONS" == "false" && -f "$ASSUMPTIONS_FILE" ]]; then
   ASSUMPTIONS_SOURCE_KIND="$(jq -r '.sourceKind // "generic"' "$ASSUMPTIONS_FILE" 2>/dev/null || echo generic)"
+  # INV-63 selected the doctor as the single deterministic gate. Policy-matrix
+  # sources must not pass unless row coverage maps to a real authored stack.
   if [[ "$ASSUMPTIONS_SOURCE_KIND" == "policy_matrix" && -z "$COVERAGE_MAP_FILE" ]]; then
     OVERALL_FAILED=true
     add_check_result \
