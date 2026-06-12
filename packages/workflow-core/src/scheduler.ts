@@ -108,8 +108,10 @@ export class TaskScheduler {
   }
 
   /**
-   * Remove and return the highest-priority job if under maxConcurrency limit.
-   * Returns null if at capacity or queue empty.
+   * Remove and return the highest-priority job if the scheduler's local
+   * in-memory running set is under maxConcurrency. Orchestrator code that uses
+   * persisted attempt leases as the occupancy truth should call takeNext().
+   * Returns null if at local capacity or queue empty.
    */
   dequeue(): TaskJob | null {
     if (this.queue.length === 0) {

@@ -29,6 +29,39 @@ describe('headless-client', () => {
     expect(runElectronHeadless).not.toHaveBeenCalled();
   });
 
+  it('delegates mutating commands even when standalone owner mode is inherited by the client shell', async () => {
+    const previousStandaloneMode = process.env.INVOKER_HEADLESS_STANDALONE;
+    process.env.INVOKER_HEADLESS_STANDALONE = '1';
+
+    try {
+      const bus = new LocalBus();
+      const ownerHandler = vi.fn(async () => ({ ok: true }));
+      const runElectronHeadless = vi.fn(async () => 0);
+
+      bus.onRequest('headless.exec', ownerHandler);
+      bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-standalone-env', mode: 'standalone' }));
+
+      const exitCode = await runHeadlessClientCommand(['retry', 'wf-standalone-env', '--no-track'], {
+        messageBus: bus,
+        ensureStandaloneOwner: vi.fn(async () => {}),
+        runElectronHeadless,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(ownerHandler).toHaveBeenCalledWith(expect.objectContaining({
+        args: ['retry', 'wf-standalone-env'],
+        noTrack: true,
+      }));
+      expect(runElectronHeadless).not.toHaveBeenCalled();
+    } finally {
+      if (previousStandaloneMode === undefined) {
+        delete process.env.INVOKER_HEADLESS_STANDALONE;
+      } else {
+        process.env.INVOKER_HEADLESS_STANDALONE = previousStandaloneMode;
+      }
+    }
+  });
+
   it('delegates mutating commands to an existing non-standalone owner without bootstrapping', async () => {
     const bus = new LocalBus();
     const ownerHandler = vi.fn(async () => ({ ok: true }));

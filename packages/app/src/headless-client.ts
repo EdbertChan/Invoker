@@ -438,15 +438,14 @@ export async function runHeadlessClientCommand(
   loadConfig();
 
   const { args, waitForApproval, noTrack } = parseArgs(argv);
-  const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1';
   const internalOwnerServe = args[0] === 'owner-serve';
 
-  if (!standaloneMode && !internalOwnerServe && await delegateReadOnlyQuery(args, deps.messageBus, deps.refreshMessageBus)) {
+  if (!internalOwnerServe && await delegateReadOnlyQuery(args, deps.messageBus, deps.refreshMessageBus)) {
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
   }
 
-  if (!isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {
+  if (!isHeadlessMutatingCommand(args) || internalOwnerServe) {
     return deps.runElectronHeadless(argv);
   }
 
