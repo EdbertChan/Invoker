@@ -253,7 +253,7 @@ describe('TaskScheduler', () => {
       expect(queued[1].taskId).toBe('low');
     });
 
-    it('returns shallow copy (mutating the result does not affect internal queue)', () => {
+    it('returns job snapshots (mutating the result does not affect internal queue)', () => {
       const scheduler = new TaskScheduler();
 
       scheduler.enqueue({ taskId: 'a', attemptId: 'a-a1', priority: 1 });
@@ -264,6 +264,13 @@ describe('TaskScheduler', () => {
 
       // Internal queue should be unaffected
       expect(scheduler.getQueuedJobs()).toHaveLength(2);
+
+      const jobCopy = scheduler.getQueuedJobs()[0];
+      jobCopy.taskId = 'mutated';
+      jobCopy.attemptId = 'mutated-a1';
+      jobCopy.priority = 99;
+
+      expect(scheduler.getQueuedJobs()[0]).toEqual({ taskId: 'b', attemptId: 'b-a1', priority: 2 });
     });
   });
 
