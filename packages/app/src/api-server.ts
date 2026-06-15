@@ -313,7 +313,10 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         const taskId = decodeURIComponent(recreateDownstreamMatch[1]);
         try {
           const result = await mutations.recreateDownstream(taskId);
-          json(res, 200, { ok: true, taskId, action: 'recreated_downstream', tasksStarted: result.runnable.length });
+          // INV-155: report the facade-scoped dispatch count; the API layer
+          // does not recalculate mutation lifecycle state locally.
+          const tasksStarted = result.runnable.length;
+          json(res, 200, { ok: true, taskId, action: 'recreated_downstream', tasksStarted });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
         }

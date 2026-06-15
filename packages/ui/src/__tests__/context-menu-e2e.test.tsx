@@ -183,6 +183,8 @@ describe('Context menu (component)', () => {
 
     await waitFor(() => expect(mock.api.recreateDownstream).toHaveBeenCalledWith('task-alpha'));
     expect(mock.api.recreateTask).not.toHaveBeenCalled();
+    expect(mock.api.restartTask).not.toHaveBeenCalled();
+    expect(mock.api.cancelTask).not.toHaveBeenCalled();
   });
 
   it('task context menu disables Recreate Downstream while the task is running', async () => {

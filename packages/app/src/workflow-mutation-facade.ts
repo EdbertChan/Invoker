@@ -187,10 +187,9 @@ export class WorkflowMutationFacade {
       (cs) => cs.recreateDownstream(makeEnvelope('facade.recreate-downstream', 'surface', 'task', { taskId })),
       () => sharedRecreateDownstream(taskId, { orchestrator: this.deps.orchestrator }),
     );
-    // `started` contains only descendants (the target is preserved), so a
-    // [taskId] dispatch scope would filter every launch out.
-    const scopedTaskIds = started.map((task) => task.id);
-    return this.finalizeWithTopup(started, 'facade.recreate-downstream', { scopedTaskIds });
+    const downstreamStarted = this.recreatedDescendants(started, taskId);
+    const scopedTaskIds = downstreamStarted.map((task) => task.id);
+    return this.finalizeWithTopup(downstreamStarted, 'facade.recreate-downstream', { scopedTaskIds });
   }
 
   async selectExperiment(taskId: string, experimentId: string): Promise<MutationResult> {
@@ -548,6 +547,12 @@ export class WorkflowMutationFacade {
     if (scope.scopedWorkflowId && scope.scopedTaskIds?.length) {
       throw new Error('WorkflowMutationFacade dispatch scope cannot be both workflow-scoped and task-scoped.');
     }
+  }
+
+  // INV-155: recreate-downstream preserves the target task, so only recreated
+  // descendants are eligible for mutation-scoped dispatch.
+  private recreatedDescendants(started: TaskState[], preservedTaskId: string): TaskState[] {
+    return started.filter((task) => task.id !== preservedTaskId);
   }
 
   private async topupOnly(context: string): Promise<TaskState[]> {
