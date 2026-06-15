@@ -131,7 +131,9 @@ import {
 } from './headless.js';
 import {
   approveTask as sharedApproveTask,
+  assertLineageCurrent,
   buildInvalidationDeps,
+  captureTaskLineage,
   deleteAllWorkflows as sharedDeleteAllWorkflows,
   deleteAllWorkflowsBulk as sharedDeleteAllWorkflowsBulk,
   fixWithAgentAction,
@@ -2108,6 +2110,8 @@ function createEmbeddedTerminalBackendFromConfig(
     if (!task) {
       throw new Error(`Task ${taskId} not found`);
     }
+    const entryLineage = captureTaskLineage(taskId, orchestrator);
+    assertLineageCurrent(entryLineage, orchestrator, activeMutationContext?.signal);
     const savedError = task.execution.error ?? '';
     const recoveryRoute = selectFailureRecoveryRoute(task, savedError);
     logger.info(
@@ -2118,11 +2122,13 @@ function createEmbeddedTerminalBackendFromConfig(
     if (source === 'auto-fix') {
       const attemptsBefore = task?.execution.autoFixAttempts ?? 0;
       const attemptsAfter = attemptsBefore + 1;
+      assertLineageCurrent(entryLineage, orchestrator, activeMutationContext?.signal);
       persistence.updateTask(taskId, {
         execution: {
           autoFixAttempts: attemptsAfter,
         },
       });
+      assertLineageCurrent(entryLineage, orchestrator, activeMutationContext?.signal);
       logAutoFixDebug(taskId, 'dispatch-attempt-bumped', { attemptsBefore, attemptsAfter });
     }
     const result = await fixWithAgentAction(

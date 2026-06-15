@@ -95,6 +95,32 @@ export function assertLineageCurrent(
   }
 }
 
+function coreStaleLineageError(taskId: string, phase: string, err: unknown): StaleLineageError | undefined {
+  if (!(err instanceof Error)) return undefined;
+  if (!/\blineage is stale\b/.test(err.message)) return undefined;
+  return new StaleLineageError(`Fix mutation for ${taskId} discarded during ${phase}: ${err.message}`);
+}
+
+function beginConflictResolutionCurrent(
+  taskId: string,
+  orchestrator: Pick<Orchestrator, 'beginConflictResolution' | 'getTask'>,
+  entryLineage: TaskLineageSnapshot,
+  signal?: AbortSignal,
+): { savedError: string; lineage: TaskLineageSnapshot } {
+  assertLineageCurrent(entryLineage, orchestrator, signal);
+  let result: { savedError: string };
+  try {
+    result = orchestrator.beginConflictResolution(taskId, entryLineage);
+  } catch (err) {
+    const stale = coreStaleLineageError(taskId, 'conflict-resolution start', err);
+    if (stale) throw stale;
+    throw err;
+  }
+  const lineage = captureTaskLineage(taskId, orchestrator);
+  assertLineageCurrent(lineage, orchestrator, signal);
+  return { savedError: result.savedError, lineage };
+}
+
 // ── Deps interfaces ──────────────────────────────────────────
 
 export interface ActionDeps {
@@ -816,11 +842,8 @@ export async function resolveConflictAction(
 ): Promise<{ autoApproved: boolean; started: TaskState[] }> {
   const { orchestrator, persistence, taskExecutor } = deps;
   const entryLineage = captureTaskLineage(taskId, orchestrator);
-  assertLineageCurrent(entryLineage, orchestrator, signal);
-  const { savedError } = orchestrator.beginConflictResolution(taskId);
-  const lineage = captureTaskLineage(taskId, orchestrator);
+  const { savedError, lineage } = beginConflictResolutionCurrent(taskId, orchestrator, entryLineage, signal);
   try {
-    assertLineageCurrent(lineage, orchestrator, signal);
     await taskExecutor.resolveConflict(taskId, savedError, agentName);
     assertLineageCurrent(lineage, orchestrator, signal);
     return await finalizeAppliedFix(taskId, savedError, deps, signal, lineage);
@@ -828,9 +851,12 @@ export async function resolveConflictAction(
     if (err instanceof StaleLineageError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     assertLineageCurrent(lineage, orchestrator, signal);
-    persistence.appendTaskOutput(taskId, `\n[Resolve Conflict] Failed: ${msg}`);
+    const reverted = orchestrator.revertConflictResolution(taskId, savedError, msg, lineage);
+    if (reverted === false) {
+      throw new StaleLineageError(`Resolve-conflict cleanup for ${taskId} discarded because task lineage changed`);
+    }
     assertLineageCurrent(lineage, orchestrator, signal);
-    orchestrator.revertConflictResolution(taskId, savedError, msg);
+    persistence.appendTaskOutput(taskId, `\n[Resolve Conflict] Failed: ${msg}`);
     throw err;
   }
 }
@@ -872,11 +898,13 @@ export async function fixWithAgentAction(
   }
 
   const entryLineage = captureTaskLineage(taskId, orchestrator);
-  assertLineageCurrent(entryLineage, orchestrator, options.signal);
-  const { savedError: persistedSavedError } = orchestrator.beginConflictResolution(taskId);
-  const lineage = captureTaskLineage(taskId, orchestrator);
+  const { savedError: persistedSavedError, lineage } = beginConflictResolutionCurrent(
+    taskId,
+    orchestrator,
+    entryLineage,
+    options.signal,
+  );
   try {
-    assertLineageCurrent(lineage, orchestrator, options.signal);
     if (recoveryRoute.kind === 'resolveConflict') {
       await taskExecutor.resolveConflict(taskId, persistedSavedError, options.agentName);
     } else {
@@ -896,9 +924,12 @@ export async function fixWithAgentAction(
     const errorLabel = options.failureOutputLabel
       ?? (recoveryRoute.kind === 'resolveConflict' ? 'Resolve Conflict' : `Fix with ${options.agentName ?? 'Claude'}`);
     assertLineageCurrent(lineage, orchestrator, options.signal);
-    persistence.appendTaskOutput(taskId, `\n[${errorLabel}] Failed: ${msg}`);
+    const reverted = orchestrator.revertConflictResolution(taskId, persistedSavedError, msg, lineage);
+    if (reverted === false) {
+      throw new StaleLineageError(`Fix cleanup for ${taskId} discarded because task lineage changed`);
+    }
     assertLineageCurrent(lineage, orchestrator, options.signal);
-    orchestrator.revertConflictResolution(taskId, persistedSavedError, msg);
+    persistence.appendTaskOutput(taskId, `\n[${errorLabel}] Failed: ${msg}`);
     throw err;
   }
 }
@@ -916,7 +947,12 @@ export async function finalizeAppliedFix(
     );
   }
   if (lineage) assertLineageCurrent(lineage, deps.orchestrator, signal);
-  deps.orchestrator.setFixAwaitingApproval(taskId, savedError);
+  const markedAwaitingApproval = lineage
+    ? deps.orchestrator.setFixAwaitingApproval(taskId, savedError, lineage)
+    : deps.orchestrator.setFixAwaitingApproval(taskId, savedError);
+  if (markedAwaitingApproval === false) {
+    throw new StaleLineageError(`Fix awaiting-approval transition for ${taskId} discarded because task lineage changed`);
+  }
   if (!deps.autoApproveAIFixes) {
     return { autoApproved: false, started: [] };
   }
@@ -1176,9 +1212,12 @@ export async function autoFixOnFailure(
       return;
     }
 
-    ({ savedError: persistedSavedError } = orchestrator.beginConflictResolution(taskId));
-    lineage = captureTaskLineage(taskId, orchestrator);
-    assertLineageCurrent(lineage, orchestrator, deps.signal);
+    ({ savedError: persistedSavedError, lineage } = beginConflictResolutionCurrent(
+      taskId,
+      orchestrator,
+      entryLineage,
+      deps.signal,
+    ));
     persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'auto-fix-begin-conflict-resolution',
       savedErrorLength: persistedSavedError.length,
@@ -1259,7 +1298,10 @@ export async function autoFixOnFailure(
     const detailedMsg = diagnostics ? `${msg}\n\n${diagnostics}` : msg;
     if (persistedSavedError !== undefined) {
       if (lineage) assertLineageCurrent(lineage, orchestrator, deps.signal);
-      orchestrator.revertConflictResolution(taskId, persistedSavedError, detailedMsg);
+      const reverted = orchestrator.revertConflictResolution(taskId, persistedSavedError, detailedMsg, lineage);
+      if (reverted === false) {
+        throw new StaleLineageError(`Auto-fix cleanup for ${taskId} discarded because task lineage changed`);
+      }
     }
   }
 }
@@ -1413,7 +1455,10 @@ export async function autoFixOnReviewGateFailure(
     );
     if (persistedSavedError !== undefined) {
       if (lineage) assertLineageCurrent(lineage, orchestrator, deps.signal);
-      orchestrator.revertConflictResolution(trigger.taskId, persistedSavedError, msg);
+      const reverted = orchestrator.revertConflictResolution(trigger.taskId, persistedSavedError, msg, lineage);
+      if (reverted === false) {
+        throw new StaleLineageError(`Review-gate auto-fix cleanup for ${trigger.taskId} discarded because task lineage changed`);
+      }
     }
   }
 }
