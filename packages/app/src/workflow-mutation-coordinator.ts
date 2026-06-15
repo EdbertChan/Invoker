@@ -1,4 +1,16 @@
+import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
+
 export type WorkflowMutationPriority = 'high' | 'normal';
+
+export type WorkflowMutationContext = {
+  signal: AbortSignal;
+  workflowId: string;
+  channel: string;
+  args: readonly unknown[];
+  priority?: WorkflowMutationPriority;
+  intentId?: number;
+  mutationTiming?: WorkflowMutationTiming;
+};
 
 type Job<T> = {
   run: () => Promise<T>;
@@ -61,4 +73,3 @@ export class WorkflowMutationCoordinator {
       });
   }
 }
-

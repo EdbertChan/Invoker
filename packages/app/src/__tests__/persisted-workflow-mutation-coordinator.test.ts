@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { SQLiteAdapter } from '@invoker/data-store';
-import { PersistedWorkflowMutationCoordinator, type WorkflowMutationContext } from '../persisted-workflow-mutation-coordinator.js';
+import { PersistedWorkflowMutationCoordinator } from '../persisted-workflow-mutation-coordinator.js';
+import type { WorkflowMutationContext } from '../workflow-mutation-coordinator.js';
 import { dispatchStartedTasksWithGlobalTopup } from '../global-topup.js';
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -1452,6 +1453,9 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(capturedContext!.signal.aborted).toBe(false);
     expect(capturedContext!.workflowId).toBe('wf-1');
     expect(capturedContext!.intentId).toBe(1);
+    expect(capturedContext!.channel).toBe('invoker:fix-with-agent');
+    expect(capturedContext!.args).toEqual(['wf-1/blocker-task', null]);
+    expect(capturedContext!.priority).toBe('normal');
 
     const recreateTask = coordinator.enqueue<void>(
       'wf-1',

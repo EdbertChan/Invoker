@@ -171,7 +171,7 @@ import {
   WorkflowMetadataInvalidator,
 } from './workflow-metadata-invalidation.js';
 import { shouldSkipAutoFixForError } from './auto-fix-gating.js';
-import type { WorkflowMutationPriority } from './workflow-mutation-coordinator.js';
+import type { WorkflowMutationContext, WorkflowMutationPriority } from './workflow-mutation-coordinator.js';
 import { PersistedWorkflowMutationCoordinator } from './persisted-workflow-mutation-coordinator.js';
 import { LaunchDispatcher, type LaunchDispatcherMode } from './launch-dispatcher.js';
 import { recoverWorkflowMutationsOnStartup } from './workflow-mutation-startup.js';
@@ -302,7 +302,7 @@ const workflowMutationDispatcher = new Map<string, (...args: unknown[]) => Promi
  * cleared afterward. Allows fix-with-agent and conflict-resolution
  * handlers to read the AbortSignal without changing every handler signature.
  */
-let activeMutationContext: import('./persisted-workflow-mutation-coordinator.js').WorkflowMutationContext | undefined;
+let activeMutationContext: WorkflowMutationContext | undefined;
 let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
 let writerLock: DbWriterLockResult | null = null;
 const workflowMutationOwnerId = `owner-${process.pid}-${Date.now()}`;
