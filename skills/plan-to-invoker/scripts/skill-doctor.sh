@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # skill-doctor.sh: Deterministic orchestrator for plan validation scripts
+# INV-63 selected this full orchestrator as the primary proof surface; do not
+# substitute schema-only validate-plan.sh output when judging plan readiness.
 # Usage: bash skill-doctor.sh [OPTIONS] <plan-file>
 #
 # OPTIONS:
@@ -38,7 +40,7 @@ PLAN_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help)
-      sed -n '2,18p' "$0" | sed 's/^# \?//'
+      awk 'NR == 1 { next } /^#/ || /^$/ { print; next } { exit }' "$0"
       exit 0
       ;;
     --skip-assumptions)

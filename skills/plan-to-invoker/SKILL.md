@@ -56,6 +56,8 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 **Exit codes:** 0 = all checks pass, 1 = one or more failures, 2 = usage error
 **Output:** JSON summary with per-check pass/fail status
 
+**INV-63 experiment-backed contract:** The selected proof surface is the full `skill-doctor.sh` orchestrator, as recorded in `docs/context/inv-63/experiment-brief.md`. Treat `validate-plan.sh` as schema-only debugging support, not as readiness proof. The documented counterexample is `skills/plan-to-invoker/fixtures/positive/01-minimal-verification.yaml`: `validate-plan.sh` accepts it, while `skill-doctor.sh` correctly rejects it at `lint-task-atomicity` because strict reviewability requirements are not met.
+
 **Optional flags:**
 - `--skip-assumptions` — skip assumption extraction and verify plan generation
 - `--skip-atomicity` — skip task atomicity linting
