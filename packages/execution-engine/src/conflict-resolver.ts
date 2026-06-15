@@ -73,6 +73,34 @@ function promptByteLength(prompt: string): number {
   return Buffer.byteLength(prompt, 'utf8');
 }
 
+type TaskLineageSnapshot = {
+  taskId: string;
+  selectedAttemptId: string | undefined;
+  generation: number;
+};
+
+function captureTaskLineage(taskId: string, orchestrator: Orchestrator): TaskLineageSnapshot {
+  const task = orchestrator.getTask(taskId);
+  return {
+    taskId,
+    selectedAttemptId: task?.execution.selectedAttemptId,
+    generation: task?.execution.generation ?? 0,
+  };
+}
+
+function assertTaskLineageCurrent(host: ConflictResolverHost, snapshot: TaskLineageSnapshot): void {
+  const current = captureTaskLineage(snapshot.taskId, host.orchestrator);
+  if (
+    current.selectedAttemptId !== snapshot.selectedAttemptId
+    || current.generation !== snapshot.generation
+  ) {
+    throw new OrchestratorError(
+      OrchestratorErrorCode.TASK_LINEAGE_STALE,
+      `Task ${snapshot.taskId} lineage changed during fix result persistence`,
+    );
+  }
+}
+
 function buildPromptFileBootstrap(promptPath: string): string {
   return [
     `The full task instructions are in this file: ${promptPath}`,
@@ -474,6 +502,7 @@ export async function fixWithAgentImpl(
   if (task.status !== 'failed' && task.status !== 'running' && task.status !== 'fixing_with_ai') {
     throw new Error(`Task ${taskId} is not in a fixable state (status: ${task.status})`);
   }
+  const lineage = captureTaskLineage(taskId, host.orchestrator);
 
   const taskForPrompt = savedError
     ? { ...task, execution: { ...task.execution, error: savedError } }
@@ -499,6 +528,7 @@ export async function fixWithAgentImpl(
     const resolvedWorkspacePath =
       (await resolveRemoteBranchOwnerPath(task.execution.branch, workspacePath, target)) ?? workspacePath;
     if (resolvedWorkspacePath !== workspacePath) {
+      assertTaskLineageCurrent(host, lineage);
       host.persistence.updateTask(taskId, {
         execution: {
           workspacePath: resolvedWorkspacePath,
@@ -518,9 +548,11 @@ export async function fixWithAgentImpl(
       agentName,
       host.agentRegistry,
     );
+    assertTaskLineageCurrent(host, lineage);
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${remoteAgentBin} (remote)] Output:\n${output}`);
     }
+    assertTaskLineageCurrent(host, lineage);
     host.persistence.updateTask(taskId, {
       execution: {
         agentSessionId: sessionId,
@@ -566,9 +598,11 @@ export async function fixWithAgentImpl(
       agent: agentLabel,
     });
     const { stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName);
+    assertTaskLineageCurrent(host, lineage);
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${agentLabel}] Output:\n${output}`);
     }
+    assertTaskLineageCurrent(host, lineage);
     host.persistence.updateTask(taskId, {
       execution: {
         agentSessionId: sessionId,
@@ -588,6 +622,7 @@ export async function fixWithAgentImpl(
     // Persist session ID even on failure so the session can be audited
     const failedSessionId = err?.sessionId as string | undefined;
     if (failedSessionId) {
+      assertTaskLineageCurrent(host, lineage);
       host.persistence.updateTask(taskId, {
         execution: {
           agentSessionId: failedSessionId,

@@ -57,7 +57,7 @@ if (process.env.INVOKER_USER_DATA_DIR) {
   app.setPath('userData', process.env.INVOKER_USER_DATA_DIR);
 }
 
-import { Orchestrator, CommandService, OrchestratorErrorCode } from '@invoker/workflow-core';
+import { Orchestrator, CommandService, OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
 import type {
   PlanDefinition,
   TaskDelta,
@@ -145,6 +145,11 @@ import {
   setWorkflowMergeMode,
   StaleLineageError,
 } from './workflow-actions.js';
+
+function isStaleFixMutationError(err: unknown): err is Error {
+  return err instanceof StaleLineageError
+    || (err instanceof OrchestratorError && err.code === OrchestratorErrorCode.TASK_LINEAGE_STALE);
+}
 import { execSync } from 'node:child_process';
 import { resolveTaskTerminalSpec } from './open-terminal-for-task.js';
 import {
@@ -1460,7 +1465,7 @@ if (isHeadless) {
               logStandaloneAutoFixDebug(taskId, 'schedule-dispatch-finished');
             })
             .catch((err) => {
-              if (err instanceof StaleLineageError) {
+              if (isStaleFixMutationError(err)) {
                 logger.info(`auto-fix discarded stale result for "${taskId}": ${err.message}`, { module: 'auto-fix' });
                 return;
               }
@@ -2191,7 +2196,7 @@ function createEmbeddedTerminalBackendFromConfig(
         logAutoFixDebug(taskId, 'schedule-dispatch-finished');
       })
       .catch((err) => {
-        if (err instanceof StaleLineageError) {
+        if (isStaleFixMutationError(err)) {
           logger.info(`auto-fix discarded stale result for "${taskId}": ${err.message}`, { module: 'auto-fix' });
           return;
         }
@@ -4312,7 +4317,7 @@ function createEmbeddedTerminalBackendFromConfig(
           launchOutboxMode: invokerConfig.launchOutboxMode,
         });
       } catch (err) {
-        if (err instanceof StaleLineageError) {
+        if (isStaleFixMutationError(err)) {
           logger.info(`resolve-conflict discarded stale result for "${taskId}": ${err.message}`, { module: 'ipc' });
           return;
         }
@@ -4350,7 +4355,7 @@ function createEmbeddedTerminalBackendFromConfig(
           launchOutboxMode: invokerConfig.launchOutboxMode,
         });
       } catch (err) {
-        if (err instanceof StaleLineageError) {
+        if (isStaleFixMutationError(err)) {
           logger.info(`fix-with-agent discarded stale result for "${taskId}": ${err.message}`, { module: 'ipc' });
           return;
         }

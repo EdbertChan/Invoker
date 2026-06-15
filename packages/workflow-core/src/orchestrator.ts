@@ -48,6 +48,7 @@ function mergeTrace(tag: string, data: Record<string, unknown>): void {
 export const OrchestratorErrorCode = {
   TASK_NOT_FOUND: 'TASK_NOT_FOUND',
   TASK_ALREADY_TERMINAL: 'TASK_ALREADY_TERMINAL',
+  TASK_LINEAGE_STALE: 'TASK_LINEAGE_STALE',
   WORKFLOW_NOT_FOUND: 'WORKFLOW_NOT_FOUND',
 } as const;
 
@@ -2589,7 +2590,10 @@ export class Orchestrator {
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     if (!this.taskMatchesLineageExpectation(task, expectedLineage)) {
-      throw new Error(`Task ${taskId} lineage is stale for conflict resolution start`);
+      throw new OrchestratorError(
+        OrchestratorErrorCode.TASK_LINEAGE_STALE,
+        `Task ${taskId} lineage is stale for conflict resolution start`,
+      );
     }
     if (task.status !== 'failed') throw new Error(`Task ${taskId} is not failed (status: ${task.status})`);
 
@@ -2645,7 +2649,10 @@ export class Orchestrator {
     const task = this.stateGetTask(taskId);
     if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
     if (!this.taskMatchesLineageExpectation(task, opts.expectedLineage)) {
-      throw new Error(`Task ${taskId} lineage is stale for auto-fix start`);
+      throw new OrchestratorError(
+        OrchestratorErrorCode.TASK_LINEAGE_STALE,
+        `Task ${taskId} lineage is stale for auto-fix start`,
+      );
     }
     if (
       task.status !== 'failed' &&

@@ -637,6 +637,21 @@ describe('Orchestrator', () => {
       expect(savedError).toBe(mergeConflictError);
     });
 
+    it('beginConflictResolution rejects stale expected lineage before changing state', () => {
+      const before = orchestrator.getTask('t2')!;
+
+      expect(() => orchestrator.beginConflictResolution('t2', {
+        taskId: before.id,
+        selectedAttemptId: 'stale-attempt',
+        generation: before.execution.generation ?? 0,
+      })).toThrow('lineage is stale');
+
+      const after = orchestrator.getTask('t2')!;
+      expect(after.status).toBe('failed');
+      expect(after.execution.selectedAttemptId).toBe(before.execution.selectedAttemptId);
+      expect(after.execution.generation).toBe(before.execution.generation);
+    });
+
     it('revertConflictResolution restores failed state with mergeConflict', () => {
       const { savedError } = orchestrator.beginConflictResolution('t2');
       const fixAttemptId = orchestrator.getTask('t2')!.execution.selectedAttemptId;
@@ -662,6 +677,23 @@ describe('Orchestrator', () => {
           d.changes.status === 'failed',
       );
       expect(failedDeltas).toHaveLength(1);
+    });
+
+    it('revertConflictResolution no-ops when expected lineage is stale', () => {
+      const { savedError } = orchestrator.beginConflictResolution('t2');
+      const fixingTask = orchestrator.getTask('t2')!;
+
+      publishedDeltas = [];
+      orchestrator.revertConflictResolution('t2', savedError, 'late failure', {
+        taskId: fixingTask.id,
+        selectedAttemptId: 'stale-attempt',
+        generation: fixingTask.execution.generation ?? 0,
+      });
+
+      const task = orchestrator.getTask('t2')!;
+      expect(task.status).toBe('fixing_with_ai');
+      expect(task.execution.error).toBeUndefined();
+      expect(publishedDeltas).toHaveLength(0);
     });
 
     it('revertConflictResolution uses agent-agnostic fix failure prefix', () => {
