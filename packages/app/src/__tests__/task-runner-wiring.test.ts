@@ -74,6 +74,9 @@ describe('task-runner-wiring', () => {
     let latestRunner: any = null;
     const taskHandles = new Map();
     const logger = createLogger();
+    const enqueueTaskOutput = vi.fn();
+    const flushTaskOutput = vi.fn();
+    const assertFatalExecutionCapacity = vi.fn();
     const orchestrator = {
       getTask: vi.fn(() => ({
         status: 'running',
@@ -100,9 +103,9 @@ describe('task-runner-wiring', () => {
       },
       logger: logger as any,
       taskHandles,
-      enqueueTaskOutput: vi.fn(),
-      flushTaskOutput: vi.fn(),
-      assertFatalExecutionCapacity: vi.fn(),
+      enqueueTaskOutput,
+      flushTaskOutput,
+      assertFatalExecutionCapacity,
       getTaskRunner: () => currentRunner,
       setTaskRunner: (value) => { currentRunner = value; },
       setLatestTaskExecutor: (value) => { latestRunner = value; },
@@ -122,12 +125,21 @@ describe('task-runner-wiring', () => {
     expect(loadConfig).toHaveBeenCalledTimes(2);
 
     config.callbacks.onOutput('task-1', 'chunk');
-    expect(taskRunnerConstructor.mock.calls[0]?.[0].callbacks.onOutput).toBe(config.callbacks.onOutput);
+    expect(enqueueTaskOutput).toHaveBeenCalledWith('task-1', 'chunk');
+
+    config.callbacks.onLaunchFailed('task-1', new Error('spawn failed'), { type: 'worktree' });
+    expect(assertFatalExecutionCapacity).toHaveBeenCalledWith('launch failed task-1');
+    expect(logger.error).toHaveBeenCalledWith(
+      'Task "task-1" launch failed before spawn (executor: worktree): spawn failed',
+      { module: 'exec' },
+    );
 
     const handle = { executionId: 'exec-1', workspacePath: '/repo/wt', branch: 'feature' };
     const executor = { type: 'worktree' };
     config.callbacks.onSpawned('task-1', handle, executor);
     expect(taskHandles.get('task-1')).toEqual({ handle, executor });
+    expect(flushTaskOutput).toHaveBeenCalledWith('task-1');
+    expect(assertFatalExecutionCapacity).toHaveBeenCalledWith('spawned task-1');
 
     config.callbacks.onComplete('task-1', {
       status: 'completed',
@@ -135,6 +147,8 @@ describe('task-runner-wiring', () => {
       outputs: { exitCode: 0 },
     });
     expect(taskHandles.has('task-1')).toBe(false);
+    expect(flushTaskOutput).toHaveBeenCalledWith('task-1');
+    expect(assertFatalExecutionCapacity).toHaveBeenCalledWith('complete task-1');
 
     const heartbeatAt = new Date('2026-06-03T01:02:03.000Z');
     config.callbacks.onHeartbeat('task-1', { at: heartbeatAt, source: 'remote_workload' });
