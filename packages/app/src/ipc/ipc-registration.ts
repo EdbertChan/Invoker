@@ -138,3 +138,136 @@ export function registerBootstrapStateIpc(context: BootstrapStateIpcContext): vo
     event.returnValue = payload;
   });
 }
+
+type IpcMainHandle = Pick<IpcMain, 'handle'>;
+
+export interface TestTaskStateInjectionIpcContext<TUpdate> {
+  ipcMain: IpcMainHandle;
+  getOwnerMode: () => boolean;
+  getMessageBus: () => Pick<MessageBus, 'request'>;
+  injectTaskStates: (updates: TUpdate[]) => Promise<void>;
+}
+
+export function registerTestTaskStateInjectionIpc<TUpdate>(
+  context: TestTaskStateInjectionIpcContext<TUpdate>,
+): void {
+  context.ipcMain.handle('invoker:inject-task-states', async (_event, updates: TUpdate[]) => {
+    if (!context.getOwnerMode()) {
+      await context.getMessageBus().request('headless.gui-mutation', {
+        channel: 'invoker:inject-task-states',
+        args: [updates],
+      } satisfies GuiMutationPayload);
+      return;
+    }
+    await context.injectTaskStates(updates);
+  });
+}
+
+export interface QueueStatusIpcContext<TQueueStatus> {
+  ipcMain: IpcMainHandle;
+  getQueueStatus: () => TQueueStatus;
+}
+
+export function registerQueueStatusIpc<TQueueStatus>(
+  context: QueueStatusIpcContext<TQueueStatus>,
+): void {
+  context.ipcMain.handle('invoker:get-queue-status', () => context.getQueueStatus());
+}
+
+export interface ActionGraphIpcContext<TActionGraph> {
+  ipcMain: IpcMainHandle;
+  getActionGraph: () => Promise<TActionGraph> | TActionGraph;
+}
+
+export function registerActionGraphIpc<TActionGraph>(
+  context: ActionGraphIpcContext<TActionGraph>,
+): void {
+  context.ipcMain.handle('invoker:get-action-graph', () => context.getActionGraph());
+}
+
+export interface UiPerformanceIpcContext<TStats extends Record<string, unknown>> {
+  ipcMain: IpcMainHandle;
+  reportUiPerformanceMetric: (metric: string, data?: Record<string, unknown>) => void;
+  getUiPerfStats: () => TStats;
+}
+
+export function registerUiPerformanceIpc<TStats extends Record<string, unknown>>(
+  context: UiPerformanceIpcContext<TStats>,
+): void {
+  context.ipcMain.handle(
+    'invoker:report-ui-perf',
+    (_event, metric: string, data?: Record<string, unknown>) => {
+      context.reportUiPerformanceMetric(metric, data);
+    },
+  );
+  context.ipcMain.handle('invoker:get-ui-perf-stats', () => ({
+    ...context.getUiPerfStats(),
+  }));
+}
+
+export interface SystemUtilityIpcContext<
+  TSystemDiagnostics,
+  TBundledSkillsStatus,
+  TInstallMode = unknown,
+> {
+  ipcMain: IpcMainHandle;
+  getRemoteTargets: () => string[];
+  getExecutionAgents: () => string[];
+  getSystemDiagnostics: () => TSystemDiagnostics;
+  getBundledSkillsStatus: () => TBundledSkillsStatus;
+  installBundledSkills: (mode?: TInstallMode) => Promise<unknown> | unknown;
+  updateInvokerCli: () => Promise<unknown> | unknown;
+}
+
+export function registerSystemUtilityIpc<TSystemDiagnostics, TBundledSkillsStatus, TInstallMode>(
+  context: SystemUtilityIpcContext<TSystemDiagnostics, TBundledSkillsStatus, TInstallMode>,
+): void {
+  context.ipcMain.handle('invoker:get-remote-targets', () => context.getRemoteTargets());
+  context.ipcMain.handle('invoker:get-execution-agents', () => context.getExecutionAgents());
+  context.ipcMain.handle('invoker:get-system-diagnostics', () => context.getSystemDiagnostics());
+  context.ipcMain.handle('invoker:get-bundled-skills-status', () => context.getBundledSkillsStatus());
+  context.ipcMain.handle('invoker:install-bundled-skills', (_event, mode: TInstallMode = 'install' as TInstallMode) => {
+    return context.installBundledSkills(mode);
+  });
+  context.ipcMain.handle('invoker:update-invoker-cli', () => context.updateInvokerCli());
+}
+
+export interface ActivityLogsIpcContext<TActivityLog> {
+  ipcMain: IpcMainHandle;
+  getActivityLogs: (sinceId?: number, limit?: number) => TActivityLog[];
+}
+
+export function registerActivityLogsIpc<TActivityLog>(
+  context: ActivityLogsIpcContext<TActivityLog>,
+): void {
+  context.ipcMain.handle('invoker:get-activity-logs', (_event, sinceId?: number, limit?: number) => {
+    return context.getActivityLogs(sinceId, limit);
+  });
+}
+
+export interface EmbeddedTerminalIpcContext<TSession> {
+  ipcMain: IpcMainHandle;
+  openTerminal: (taskId: string) => Promise<unknown> | unknown;
+  listTerminals: () => Promise<TSession[]> | TSession[];
+  writeTerminal: (sessionId: string, data: string) => Promise<unknown> | unknown;
+  resizeTerminal: (sessionId: string, cols: number, rows: number) => Promise<unknown> | unknown;
+  closeTerminal: (sessionId: string) => Promise<unknown> | unknown;
+}
+
+export function registerEmbeddedTerminalIpc<TSession>(
+  context: EmbeddedTerminalIpcContext<TSession>,
+): void {
+  context.ipcMain.handle('invoker:open-terminal', (_event, taskId: string) => {
+    return context.openTerminal(taskId);
+  });
+  context.ipcMain.handle('invoker:terminal-list', () => context.listTerminals());
+  context.ipcMain.handle('invoker:terminal-write', (_event, sessionId: string, data: string) => {
+    return context.writeTerminal(sessionId, data);
+  });
+  context.ipcMain.handle('invoker:terminal-resize', (_event, sessionId: string, cols: number, rows: number) => {
+    return context.resizeTerminal(sessionId, cols, rows);
+  });
+  context.ipcMain.handle('invoker:terminal-close', (_event, sessionId: string) => {
+    return context.closeTerminal(sessionId);
+  });
+}

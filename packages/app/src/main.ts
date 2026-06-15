@@ -192,8 +192,15 @@ import {
 } from './action-graph-diagnostics.js';
 import { registerReadOnlyIpcHandlers } from './ipc-read-handlers.js';
 import {
+  registerActionGraphIpc,
+  registerActivityLogsIpc,
   registerBootstrapStateIpc,
+  registerEmbeddedTerminalIpc,
   registerGuiMutationHandler as registerGuiMutationIpcHandler,
+  registerQueueStatusIpc,
+  registerSystemUtilityIpc,
+  registerTestTaskStateInjectionIpc,
+  registerUiPerformanceIpc,
   registerWorkflowScopedGuiMutationHandler as registerWorkflowScopedGuiMutationIpcHandler,
   type GuiMutationPayload,
   type GuiMutationRegistrationContext,
@@ -3484,19 +3491,12 @@ function createEmbeddedTerminalBackendFromConfig(
           requestWorkflowMetadataPublish('gap-detect');
         }
       };
-      ipcMain.handle(
-        'invoker:inject-task-states',
-        async (_event, updates: Array<{ taskId: string; changes: TaskStateChanges }>) => {
-          if (!ownerMode) {
-            await messageBus.request('headless.gui-mutation', {
-              channel: 'invoker:inject-task-states',
-              args: [updates],
-            } satisfies GuiMutationPayload);
-            return;
-          }
-          await injectTaskStates(updates);
-        },
-      );
+      registerTestTaskStateInjectionIpc({
+        ipcMain,
+        getOwnerMode: () => ownerMode,
+        getMessageBus: () => messageBus,
+        injectTaskStates,
+      });
     }
 
     registerGuiMutationHandler('invoker:start', async () => {
@@ -3850,73 +3850,77 @@ function createEmbeddedTerminalBackendFromConfig(
       },
     );
 
-    ipcMain.handle('invoker:get-queue-status', () => {
-      return orchestrator.getQueueStatus();
+    registerQueueStatusIpc({
+      ipcMain,
+      getQueueStatus: () => orchestrator.getQueueStatus(),
     });
 
-    ipcMain.handle('invoker:get-action-graph', async () => {
-      if (!ownerMode) {
+    registerActionGraphIpc({
+      ipcMain,
+      getActionGraph: async () => {
+        if (!ownerMode) {
+          try {
+            return await messageBus.request('headless.query', { kind: 'action-graph' });
+          } catch (err) {
+            logger.warn(
+              `get-action-graph owner delegation failed; falling back to local read-only snapshot: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+              { module: 'ipc' },
+            );
+          }
+        }
+        orchestrator.syncAllFromDb();
+        const tasks = orchestrator.getAllTasks();
+        const workflows = persistence.listWorkflows();
+        return buildActionGraphDiagnostics({
+          workflows,
+          tasks,
+          attemptsByTaskId: new Map(tasks.map((task) => [task.id, persistence.loadAttempts(task.id)])),
+          queueStatus: orchestrator.getQueueStatus(),
+          mutationIntents: persistence.listWorkflowMutationIntents(),
+          mutationLeases: persistence.listWorkflowMutationLeases(),
+          eventsByTaskId: new Map(tasks.map((task) => [task.id, persistence.getEvents(task.id)])),
+          activityLogs: persistence.getActivityLogs(0, 200),
+          stallThresholdMs: resolveActionDiagnosticsStallThresholdMs(invokerConfig),
+        });
+      },
+    });
+
+    registerUiPerformanceIpc({
+      ipcMain,
+      reportUiPerformanceMetric: (metric, data) => {
+        const payload = {
+          ts: new Date().toISOString(),
+          metric,
+          ...(data ?? {}),
+        };
+        if (metric === 'renderer_event_loop_lag' && typeof data?.lagMs === 'number') {
+          const hiddenOrUnfocused = data.visibilityState === 'hidden' || data.hasFocus === false;
+          if (hiddenOrUnfocused) {
+            uiPerfStats.maxRendererHiddenEventLoopLagMs = Math.max(uiPerfStats.maxRendererHiddenEventLoopLagMs, data.lagMs);
+          } else {
+            uiPerfStats.maxRendererEventLoopLagMs = Math.max(uiPerfStats.maxRendererEventLoopLagMs, data.lagMs);
+          }
+          if (typeof data.cumulativeLagMs === 'number') {
+            uiPerfStats.maxRendererCumulativeLagMs = Math.max(uiPerfStats.maxRendererCumulativeLagMs, data.cumulativeLagMs);
+          }
+          if (typeof data.tickDeltaMs === 'number') {
+            uiPerfStats.maxRendererTickDeltaMs = Math.max(uiPerfStats.maxRendererTickDeltaMs, data.tickDeltaMs);
+          }
+        }
+        if (metric === 'renderer_long_task' && typeof data?.durationMs === 'number') {
+          uiPerfStats.maxRendererLongTaskMs = Math.max(uiPerfStats.maxRendererLongTaskMs, data.durationMs);
+        }
+        uiPerfStats.rendererReports += 1;
         try {
-          return await messageBus.request('headless.query', { kind: 'action-graph' });
-        } catch (err) {
-          logger.warn(
-            `get-action-graph owner delegation failed; falling back to local read-only snapshot: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-            { module: 'ipc' },
-          );
+          persistence.writeActivityLog('ui-perf', 'info', JSON.stringify(payload));
+        } catch {
+          // DB might be locked
         }
-      }
-      orchestrator.syncAllFromDb();
-      const tasks = orchestrator.getAllTasks();
-      const workflows = persistence.listWorkflows();
-      return buildActionGraphDiagnostics({
-        workflows,
-        tasks,
-        attemptsByTaskId: new Map(tasks.map((task) => [task.id, persistence.loadAttempts(task.id)])),
-        queueStatus: orchestrator.getQueueStatus(),
-        mutationIntents: persistence.listWorkflowMutationIntents(),
-        mutationLeases: persistence.listWorkflowMutationLeases(),
-        eventsByTaskId: new Map(tasks.map((task) => [task.id, persistence.getEvents(task.id)])),
-        activityLogs: persistence.getActivityLogs(0, 200),
-        stallThresholdMs: resolveActionDiagnosticsStallThresholdMs(invokerConfig),
-      });
+      },
+      getUiPerfStats,
     });
-
-    ipcMain.handle('invoker:report-ui-perf', (_event, metric: string, data?: Record<string, unknown>) => {
-      const payload = {
-        ts: new Date().toISOString(),
-        metric,
-        ...(data ?? {}),
-      };
-      if (metric === 'renderer_event_loop_lag' && typeof data?.lagMs === 'number') {
-        const hiddenOrUnfocused = data.visibilityState === 'hidden' || data.hasFocus === false;
-        if (hiddenOrUnfocused) {
-          uiPerfStats.maxRendererHiddenEventLoopLagMs = Math.max(uiPerfStats.maxRendererHiddenEventLoopLagMs, data.lagMs);
-        } else {
-          uiPerfStats.maxRendererEventLoopLagMs = Math.max(uiPerfStats.maxRendererEventLoopLagMs, data.lagMs);
-        }
-        if (typeof data.cumulativeLagMs === 'number') {
-          uiPerfStats.maxRendererCumulativeLagMs = Math.max(uiPerfStats.maxRendererCumulativeLagMs, data.cumulativeLagMs);
-        }
-        if (typeof data.tickDeltaMs === 'number') {
-          uiPerfStats.maxRendererTickDeltaMs = Math.max(uiPerfStats.maxRendererTickDeltaMs, data.tickDeltaMs);
-        }
-      }
-      if (metric === 'renderer_long_task' && typeof data?.durationMs === 'number') {
-        uiPerfStats.maxRendererLongTaskMs = Math.max(uiPerfStats.maxRendererLongTaskMs, data.durationMs);
-      }
-      uiPerfStats.rendererReports += 1;
-      try {
-        persistence.writeActivityLog('ui-perf', 'info', JSON.stringify(payload));
-      } catch {
-        // DB might be locked
-      }
-    });
-
-    ipcMain.handle('invoker:get-ui-perf-stats', () => ({
-      ...getUiPerfStats(),
-    }));
 
     registerWorkflowScopedGuiMutationHandler(
       'invoker:recreate-workflow',
@@ -4510,35 +4514,21 @@ function createEmbeddedTerminalBackendFromConfig(
       },
     );
 
-    ipcMain.handle('invoker:get-remote-targets', () => {
-      return Object.keys(loadConfig().remoteTargets ?? {});
-    });
-
-    ipcMain.handle('invoker:get-execution-agents', () => {
-      return agentRegistry.listExecution().map(a => a.name);
-    });
-
-    ipcMain.handle('invoker:get-system-diagnostics', () => {
-      return collectSystemDiagnostics({
+    registerSystemUtilityIpc({
+      ipcMain,
+      getRemoteTargets: () => Object.keys(loadConfig().remoteTargets ?? {}),
+      getExecutionAgents: () => agentRegistry.listExecution().map(a => a.name),
+      getSystemDiagnostics: () => collectSystemDiagnostics({
         appVersion: app.getVersion(),
         isPackaged: app.isPackaged,
         platform: process.platform,
         arch: process.arch,
         bundledSkills: getBundledSkillsStatus(),
         cliInstaller: resolveCliInstallerStatus(buildCliInstallerContext()),
-      });
-    });
-
-    ipcMain.handle('invoker:get-bundled-skills-status', () => {
-      return getBundledSkillsStatus();
-    });
-
-    ipcMain.handle('invoker:install-bundled-skills', (_event, mode = 'install') => {
-      return installPackagedSkills(mode);
-    });
-
-    ipcMain.handle('invoker:update-invoker-cli', () => {
-      return updateInvokerCli(buildCliInstallerContext());
+      }),
+      getBundledSkillsStatus,
+      installBundledSkills: installPackagedSkills,
+      updateInvokerCli: () => updateInvokerCli(buildCliInstallerContext()),
     });
 
     registerGuiMutationHandler('invoker:replace-task', async (taskIdArg: unknown, replacementTasksArg: unknown) => {
@@ -4569,8 +4559,9 @@ function createEmbeddedTerminalBackendFromConfig(
     });
 
     // ── DB Polling — detect external workflow changes ───
-    ipcMain.handle('invoker:get-activity-logs', (_event, sinceId?: number, limit?: number) => {
-      return persistence.getActivityLogs(sinceId ?? 0, limit ?? 2000);
+    registerActivityLogsIpc({
+      ipcMain,
+      getActivityLogs: (sinceId, limit) => persistence.getActivityLogs(sinceId ?? 0, limit ?? 2000),
     });
 
     // ── Embedded terminal session manager (GUI) ─────────────────
@@ -4578,57 +4569,48 @@ function createEmbeddedTerminalBackendFromConfig(
     // (or selecting) an embedded session managed in the main process.
     // Headless `open-terminal` still routes to `openExternalTerminalForTask`
     // in `headless.ts` so existing CLI behaviour is preserved.
-    ipcMain.handle('invoker:open-terminal', async (_event, taskId: string) => {
-      logger.info(`invoked for task="${taskId}"`, { module: 'open-terminal' });
-      const liveHandle = taskHandles.get(taskId);
-      const resolved = resolveTaskTerminalSpec({
-        taskId,
-        persistence,
-        executorRegistry,
-        executionAgentRegistry: agentRegistry,
-        repoRoot,
-        logger,
-        // If a live executor handle exists we can safely attach instead of
-        // refusing — embedded mode is designed for this case.
-        allowRunning: Boolean(liveHandle),
-        runningTaskReason:
-          'Task is still running or being fixed with AI. View output in the terminal panel below.',
-      });
-      if (!resolved.ok) {
-        return { opened: false, reason: resolved.reason };
-      }
-      try {
-        const session = embeddedTerminalManager.openOrReuse({
+    registerEmbeddedTerminalIpc({
+      ipcMain,
+      openTerminal: async (taskId) => {
+        logger.info(`invoked for task="${taskId}"`, { module: 'open-terminal' });
+        const liveHandle = taskHandles.get(taskId);
+        const resolved = resolveTaskTerminalSpec({
           taskId,
-          spec: resolved.spec,
-          cwd: resolved.cwd,
-          attach: liveHandle ? { handle: liveHandle.handle, executor: liveHandle.executor } : undefined,
+          persistence,
+          executorRegistry,
+          executionAgentRegistry: agentRegistry,
+          repoRoot,
+          logger,
+          // If a live executor handle exists we can safely attach instead of
+          // refusing — embedded mode is designed for this case.
+          allowRunning: Boolean(liveHandle),
+          runningTaskReason:
+            'Task is still running or being fixed with AI. View output in the terminal panel below.',
         });
-        return { opened: true, session };
-      } catch (err) {
-        // A backend spawn failure (e.g. node-pty's spawn-helper missing its
-        // exec bit) must surface as a visible refusal, not a rejected IPC
-        // promise the renderer drops silently.
-        const reason = err instanceof Error ? err.message : String(err);
-        logger.warn(`terminal session spawn failed for task="${taskId}": ${reason}`, { module: 'open-terminal' });
-        return { opened: false, reason: `Failed to start terminal session: ${reason}` };
-      }
-    });
-
-    ipcMain.handle('invoker:terminal-list', async () => {
-      return embeddedTerminalManager.list();
-    });
-
-    ipcMain.handle('invoker:terminal-write', async (_event, sessionId: string, data: string) => {
-      return embeddedTerminalManager.write(sessionId, data);
-    });
-
-    ipcMain.handle('invoker:terminal-resize', async (_event, sessionId: string, cols: number, rows: number) => {
-      return embeddedTerminalManager.resize(sessionId, cols, rows);
-    });
-
-    ipcMain.handle('invoker:terminal-close', async (_event, sessionId: string) => {
-      return embeddedTerminalManager.close(sessionId);
+        if (!resolved.ok) {
+          return { opened: false, reason: resolved.reason };
+        }
+        try {
+          const session = embeddedTerminalManager.openOrReuse({
+            taskId,
+            spec: resolved.spec,
+            cwd: resolved.cwd,
+            attach: liveHandle ? { handle: liveHandle.handle, executor: liveHandle.executor } : undefined,
+          });
+          return { opened: true, session };
+        } catch (err) {
+          // A backend spawn failure (e.g. node-pty's spawn-helper missing its
+          // exec bit) must surface as a visible refusal, not a rejected IPC
+          // promise the renderer drops silently.
+          const reason = err instanceof Error ? err.message : String(err);
+          logger.warn(`terminal session spawn failed for task="${taskId}": ${reason}`, { module: 'open-terminal' });
+          return { opened: false, reason: `Failed to start terminal session: ${reason}` };
+        }
+      },
+      listTerminals: () => embeddedTerminalManager.list(),
+      writeTerminal: (sessionId, data) => embeddedTerminalManager.write(sessionId, data),
+      resizeTerminal: (sessionId, cols, rows) => embeddedTerminalManager.resize(sessionId, cols, rows),
+      closeTerminal: (sessionId) => embeddedTerminalManager.close(sessionId),
     });
 
     Menu.setApplicationMenu(

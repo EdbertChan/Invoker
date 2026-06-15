@@ -2,15 +2,22 @@ import { describe, expect, it, vi } from 'vitest';
 import type { IpcMain } from 'electron';
 import { TransportError, TransportErrorCode } from '@invoker/transport';
 import {
+  registerActionGraphIpc,
+  registerActivityLogsIpc,
   registerBootstrapStateIpc,
+  registerEmbeddedTerminalIpc,
   registerGuiMutationHandler,
+  registerQueueStatusIpc,
+  registerSystemUtilityIpc,
+  registerTestTaskStateInjectionIpc,
+  registerUiPerformanceIpc,
   registerWorkflowScopedGuiMutationHandler,
   type GuiMutationRegistrationContext,
   type WorkflowScopedGuiMutationRegistrationContext,
 } from '../ipc/ipc-registration.js';
 import type { WorkflowMutationPriority } from '../workflow-mutation-coordinator.js';
 
-type HandleHandler = (_event: unknown, ...args: unknown[]) => Promise<unknown>;
+type HandleHandler = (_event: unknown, ...args: unknown[]) => unknown;
 type OnHandler = (event: { returnValue?: unknown }) => void;
 
 function createFakeIpcMain() {
@@ -207,5 +214,113 @@ describe('ipc-registration', () => {
         jsonSizeBytes: expect.any(Number),
       }),
     );
+  });
+
+  it('registers test task state injection with owner and follower behavior unchanged', async () => {
+    const ownerIpc = createFakeIpcMain();
+    const injectTaskStates = vi.fn(async () => undefined);
+    registerTestTaskStateInjectionIpc({
+      ipcMain: ownerIpc.ipcMain,
+      getOwnerMode: () => true,
+      getMessageBus: () => ({ request: vi.fn() }),
+      injectTaskStates,
+    });
+
+    const updates = [{ taskId: 'task-1', changes: { status: 'running' } }];
+    await ownerIpc.handleHandlers.get('invoker:inject-task-states')?.({}, updates);
+    expect(injectTaskStates).toHaveBeenCalledWith(updates);
+
+    const followerIpc = createFakeIpcMain();
+    const request = vi.fn(async () => undefined);
+    registerTestTaskStateInjectionIpc({
+      ipcMain: followerIpc.ipcMain,
+      getOwnerMode: () => false,
+      getMessageBus: () => ({ request }),
+      injectTaskStates: vi.fn(async () => undefined),
+    });
+
+    await followerIpc.handleHandlers.get('invoker:inject-task-states')?.({}, updates);
+    expect(request).toHaveBeenCalledWith('headless.gui-mutation', {
+      channel: 'invoker:inject-task-states',
+      args: [updates],
+    });
+  });
+
+  it('registers direct diagnostic and performance IPC channels with unchanged outputs', async () => {
+    const { ipcMain, handleHandlers } = createFakeIpcMain();
+    const reportUiPerformanceMetric = vi.fn();
+    registerQueueStatusIpc({
+      ipcMain,
+      getQueueStatus: () => ({ running: 1 }),
+    });
+    registerActionGraphIpc({
+      ipcMain,
+      getActionGraph: async () => ({ nodes: ['task-1'] }),
+    });
+    registerUiPerformanceIpc({
+      ipcMain,
+      reportUiPerformanceMetric,
+      getUiPerfStats: () => ({ rendererReports: 2 }),
+    });
+
+    expect(handleHandlers.get('invoker:get-queue-status')?.({})).toEqual({ running: 1 });
+    await expect(handleHandlers.get('invoker:get-action-graph')?.({})).resolves.toEqual({ nodes: ['task-1'] });
+    handleHandlers.get('invoker:report-ui-perf')?.({}, 'renderer_long_task', { durationMs: 10 });
+    expect(reportUiPerformanceMetric).toHaveBeenCalledWith('renderer_long_task', { durationMs: 10 });
+    expect(handleHandlers.get('invoker:get-ui-perf-stats')?.({})).toEqual({ rendererReports: 2 });
+  });
+
+  it('registers system utility IPC channels with unchanged callback mapping', () => {
+    const { ipcMain, handleHandlers } = createFakeIpcMain();
+    const installBundledSkills = vi.fn((mode?: string) => ({ mode }));
+    const updateInvokerCli = vi.fn(() => ({ updated: true }));
+    registerSystemUtilityIpc({
+      ipcMain,
+      getRemoteTargets: () => ['devbox'],
+      getExecutionAgents: () => ['codex'],
+      getSystemDiagnostics: () => ({ platform: 'test' }),
+      getBundledSkillsStatus: () => ({ installed: true }),
+      installBundledSkills,
+      updateInvokerCli,
+    });
+
+    expect(handleHandlers.get('invoker:get-remote-targets')?.({})).toEqual(['devbox']);
+    expect(handleHandlers.get('invoker:get-execution-agents')?.({})).toEqual(['codex']);
+    expect(handleHandlers.get('invoker:get-system-diagnostics')?.({})).toEqual({ platform: 'test' });
+    expect(handleHandlers.get('invoker:get-bundled-skills-status')?.({})).toEqual({ installed: true });
+    expect(handleHandlers.get('invoker:install-bundled-skills')?.({})).toEqual({ mode: 'install' });
+    expect(handleHandlers.get('invoker:install-bundled-skills')?.({}, 'repair')).toEqual({ mode: 'repair' });
+    expect(handleHandlers.get('invoker:update-invoker-cli')?.({})).toEqual({ updated: true });
+    expect(updateInvokerCli).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers activity log and embedded terminal IPC channels with unchanged callback arguments', () => {
+    const { ipcMain, handleHandlers } = createFakeIpcMain();
+    registerActivityLogsIpc({
+      ipcMain,
+      getActivityLogs: (sinceId, limit) => [{ sinceId, limit }],
+    });
+
+    const calls: unknown[] = [];
+    registerEmbeddedTerminalIpc({
+      ipcMain,
+      openTerminal: (taskId) => ({ opened: true, taskId }),
+      listTerminals: () => [{ sessionId: 's1' }],
+      writeTerminal: (sessionId, data) => calls.push(['write', sessionId, data]),
+      resizeTerminal: (sessionId, cols, rows) => calls.push(['resize', sessionId, cols, rows]),
+      closeTerminal: (sessionId) => calls.push(['close', sessionId]),
+    });
+
+    expect(handleHandlers.get('invoker:get-activity-logs')?.({}, 5, 10)).toEqual([{ sinceId: 5, limit: 10 }]);
+    expect(handleHandlers.get('invoker:open-terminal')?.({}, 'task-1')).toEqual({ opened: true, taskId: 'task-1' });
+    expect(handleHandlers.get('invoker:terminal-list')?.({})).toEqual([{ sessionId: 's1' }]);
+    handleHandlers.get('invoker:terminal-write')?.({}, 's1', 'ls\n');
+    handleHandlers.get('invoker:terminal-resize')?.({}, 's1', 120, 30);
+    handleHandlers.get('invoker:terminal-close')?.({}, 's1');
+    expect(calls).toEqual([
+      ['write', 's1', 'ls\n'],
+      ['resize', 's1', 120, 30],
+      ['close', 's1'],
+    ]);
   });
 });
