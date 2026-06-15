@@ -1,7 +1,8 @@
 /**
  * Priority queue with simple maxConcurrency limit for task scheduling.
  *
- * No I/O, no Docker, no Git — just a sorted queue and concurrency tracking.
+ * No I/O, no Docker, no Git, no owner process state — just a sorted queue and
+ * concurrency tracking.
  * Higher priority numbers are dequeued first.
  */
 
