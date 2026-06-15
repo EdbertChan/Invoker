@@ -34,6 +34,7 @@ function makeDeps(overrides: Partial<WorkflowMutationFacadeDeps> = {}): Workflow
     orchestrator: {
       retryTask: vi.fn(() => [makeRunningTask()]),
       recreateTask: vi.fn(() => [makeRunningTask()]),
+      recreateDownstream: vi.fn(() => [makeRunningTask({ id: 'task-child' })]),
       cancelTask: vi.fn(() => ({ cancelled: ['task-a'], runningCancelled: [] })),
       cancelWorkflow: vi.fn(() => ({ cancelled: ['task-a'], runningCancelled: ['task-a'] })),
       deleteWorkflow: vi.fn(),
@@ -101,6 +102,25 @@ describe('WorkflowMutationFacade', () => {
       expect(deps.orchestrator.recreateTask).toHaveBeenCalledWith('task-a');
       expect(result.started).toHaveLength(1);
       expect(deps.taskExecutor.executeTasks).toHaveBeenCalled();
+    });
+  });
+
+  describe('recreateDownstream', () => {
+    it('dispatches returned descendants as scoped runnable work while preserving the target task', async () => {
+      const descendant = makeRunningTask({
+        id: 'task-child',
+        dependencies: ['task-a'],
+        execution: { selectedAttemptId: 'attempt-child' },
+      });
+      (deps.orchestrator as any).recreateDownstream.mockReturnValue([descendant]);
+
+      const result = await facade.recreateDownstream('task-a');
+
+      expect((deps.orchestrator as any).recreateDownstream).toHaveBeenCalledWith('task-a');
+      expect(deps.orchestrator.recreateTask).not.toHaveBeenCalled();
+      expect(result.runnable.map((task) => task.id)).toEqual(['task-child']);
+      expect(result.topup).toHaveLength(0);
+      expect(deps.taskExecutor.executeTasks).toHaveBeenCalledWith([descendant]);
     });
   });
 
