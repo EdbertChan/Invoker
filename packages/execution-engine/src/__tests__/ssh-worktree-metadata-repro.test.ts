@@ -31,6 +31,16 @@ function makeTask(overrides: {
   } as TaskState;
 }
 
+function createDeferred<T = void>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('SSH worktree metadata repro', () => {
   const tempRoots: string[] = [];
 
@@ -143,5 +153,100 @@ describe('SSH worktree metadata repro', () => {
         error: expect.stringContaining('Executor startup failed (ssh)'),
       }),
     }));
+  });
+
+  it('does not attach stale SSH startup failure metadata or failed response after selected attempt advances', async () => {
+    const staleWorkspacePath = '/home/invoker/.invoker/worktrees/049de5b865cc/experiment-wf-1-test-execution-engine-old';
+    const staleBranch = 'experiment/wf-1/test-execution-engine-old';
+    const startEntered = createDeferred();
+    const startupResult = createDeferred<never>();
+
+    const failingExecutor = {
+      type: 'ssh',
+      start: vi.fn().mockImplementation(async () => {
+        startEntered.resolve();
+        return await startupResult.promise;
+      }),
+      onComplete: vi.fn(),
+      onOutput: vi.fn(),
+      onHeartbeat: vi.fn(),
+      kill: vi.fn(),
+      destroyAll: vi.fn(),
+    };
+
+    const attempt1Task = makeTask({
+      id: 'wf-1/test-execution-engine',
+      config: { command: 'pnpm test', runnerKind: 'ssh' },
+      execution: { selectedAttemptId: 'attempt-1', generation: 1 },
+    });
+    let currentTask = attempt1Task;
+
+    const updateTask = vi.fn();
+    const appendTaskOutput = vi.fn();
+    const logEvent = vi.fn();
+    const handleWorkerResponse = vi.fn(() => []);
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: () => currentTask,
+        getAllTasks: () => [currentTask],
+        handleWorkerResponse,
+      } as any,
+      persistence: {
+        updateTask,
+        appendTaskOutput,
+        logEvent,
+      } as any,
+      executorRegistry: {
+        getDefault: () => failingExecutor,
+        get: () => failingExecutor,
+        getAll: () => [failingExecutor],
+      } as any,
+      cwd: '/tmp',
+    });
+
+    const done = runner.executeTask(attempt1Task);
+    await startEntered.promise;
+
+    currentTask = makeTask({
+      id: 'wf-1/test-execution-engine',
+      status: 'pending',
+      config: { command: 'pnpm test', runnerKind: 'ssh' },
+      execution: {
+        selectedAttemptId: 'attempt-2',
+        generation: 2,
+        workspacePath: '/home/invoker/.invoker/worktrees/049de5b865cc/experiment-wf-1-test-execution-engine-new',
+        branch: 'experiment/wf-1/test-execution-engine-new',
+      },
+    });
+
+    startupResult.reject(Object.assign(new Error('SSH remote script failed (exit=128)'), {
+      workspacePath: staleWorkspacePath,
+      branch: staleBranch,
+      agentSessionId: 'old-session',
+    }));
+
+    await done;
+
+    expect(updateTask).not.toHaveBeenCalledWith('wf-1/test-execution-engine', expect.objectContaining({
+      execution: expect.objectContaining({
+        workspacePath: staleWorkspacePath,
+        branch: staleBranch,
+      }),
+    }));
+    expect(handleWorkerResponse).not.toHaveBeenCalled();
+    expect(appendTaskOutput).toHaveBeenCalledWith(
+      'wf-1/test-execution-engine',
+      expect.stringContaining('Executor startup failed (ssh)'),
+    );
+    expect(logEvent).toHaveBeenCalledWith(
+      'wf-1/test-execution-engine',
+      'task.executor.startup-stale-suppressed',
+      expect.objectContaining({
+        attemptId: 'attempt-1',
+        workspacePath: staleWorkspacePath,
+        branch: staleBranch,
+      }),
+    );
   });
 });

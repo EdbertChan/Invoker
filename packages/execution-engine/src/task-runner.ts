@@ -983,6 +983,7 @@ export class TaskRunner {
             continue;
           }
         }
+        const launchIsStale = this.isLaunchStale(task.id, attemptId, startGeneration);
         const startupErrorMessage = `Executor startup failed (${executor.type}): ${err instanceof Error ? err.message : String(err)}\n`;
         this.callbacks.onOutput?.(task.id, startupErrorMessage);
         try {
@@ -990,13 +991,24 @@ export class TaskRunner {
         } catch {
           // Preserve the original startup failure if output persistence also fails.
         }
+        if (launchIsStale) {
+          this.persistence.logEvent?.(task.id, 'task.executor.startup-stale-suppressed', {
+            attemptId,
+            executorType: executor.type,
+            workspacePath: meta.workspacePath,
+            branch: meta.branch,
+            agentSessionId: meta.agentSessionId,
+            containerId: meta.containerId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         // Only persist startup-failure metadata when the launch is still
         // current.  If the task has moved to a newer attempt or generation
         // (e.g. via recreate-task), writing old workspace/branch metadata
         // would corrupt the live attempt's state.
         if (
           (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-          && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
+          && !launchIsStale
         ) {
           const execution: Record<string, string> = {};
           if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
