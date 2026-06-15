@@ -39,17 +39,16 @@ import { homedir } from 'node:os';
 import {
   configureEarlyElectronApp,
   registerGuiLifecycleHandlers,
+  resolveMainProcessLaunchArgs,
   runElectronReadyBootstrap,
   startGuiModeBootstrap,
 } from './bootstrap/app-bootstrap.js';
 
 const enableTestCompositor = process.env.INVOKER_E2E_ENABLE_COMPOSITOR === '1' || Boolean(process.env.CAPTURE_MODE);
 const hideE2eWindow = process.env.NODE_ENV === 'test' && process.env.INVOKER_E2E_HIDE_WINDOW !== '0';
-const earlyHeadlessMode = process.argv.includes('--headless')
-  || process.argv.includes('--install-skills')
-  || process.argv.slice(2).includes('install-skills');
+const launchArgs = resolveMainProcessLaunchArgs(process.argv);
 
-configureEarlyElectronApp({ app, enableTestCompositor, isHeadless: earlyHeadlessMode });
+configureEarlyElectronApp({ app, enableTestCompositor, isHeadless: launchArgs.isHeadless });
 
 // Isolate userData (and with it the single-instance lock) for e2e runs so a
 // test instance can launch alongside a normally running Invoker.
@@ -192,6 +191,7 @@ import {
 } from './action-graph-diagnostics.js';
 import { registerReadOnlyIpcHandlers } from './ipc-read-handlers.js';
 import {
+  createGuiMutationTranslator,
   registerBootstrapStateIpc,
   registerGuiMutationHandler as registerGuiMutationIpcHandler,
   registerWorkflowScopedGuiMutationHandler as registerWorkflowScopedGuiMutationIpcHandler,
@@ -253,33 +253,7 @@ declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
 
 // ── Detect headless mode ─────────────────────────────────────
-
-// Electron passes extra args after `--` or interleaves them.
-// We look for `--headless` anywhere in process.argv.
-const headlessIndex = process.argv.indexOf('--headless');
-const directInstallSkills = process.argv.includes('--install-skills') || process.argv.slice(2).includes('install-skills');
-const isHeadless = headlessIndex !== -1 || directInstallSkills;
-
-// In headless mode, extract the CLI args after --headless
-let cliArgs = headlessIndex !== -1
-  ? process.argv.slice(headlessIndex + 1)
-  : directInstallSkills
-    ? ['install-skills']
-    : [];
-
-// Parse --wait-for-approval flag
-const waitForApprovalIndex = cliArgs.indexOf('--wait-for-approval');
-const waitForApproval = waitForApprovalIndex !== -1;
-if (waitForApproval) {
-  cliArgs = [...cliArgs.slice(0, waitForApprovalIndex), ...cliArgs.slice(waitForApprovalIndex + 1)];
-}
-
-// Parse --no-track / --do-not-track flag
-const noTrackIndex = cliArgs.findIndex((arg) => arg === '--no-track' || arg === '--do-not-track');
-const noTrack = noTrackIndex !== -1;
-if (noTrack) {
-  cliArgs = [...cliArgs.slice(0, noTrackIndex), ...cliArgs.slice(noTrackIndex + 1)];
-}
+const { isHeadless, cliArgs, waitForApproval, noTrack } = launchArgs;
 
 // ── Shared state ─────────────────────────────────────────────
 
@@ -2593,117 +2567,10 @@ function createEmbeddedTerminalBackendFromConfig(
     return workflowMutationCoordinator.enqueue<T>(workflowId, priority, channel, args);
   }
 
-  function translateGuiMutationToHeadless(payload: GuiMutationPayload):
-    | { channel: 'headless.gui-mutation'; request: GuiMutationPayload }
-    | { channel: 'headless.run'; request: HeadlessRunMutationPayload }
-    | { channel: 'headless.resume'; request: HeadlessResumeMutationPayload }
-    | { channel: 'headless.exec'; request: HeadlessExecMutationPayload }
-    | null {
-    const [arg0, arg1, arg2] = payload.args;
-    switch (payload.channel) {
-      case 'invoker:load-plan':
-        return { channel: 'headless.gui-mutation', request: payload };
-      case 'invoker:start':
-        return { channel: 'headless.gui-mutation', request: payload };
-      case 'invoker:stop':
-        return { channel: 'headless.gui-mutation', request: payload };
-      case 'invoker:clear':
-        return { channel: 'headless.gui-mutation', request: payload };
-      case 'invoker:resume-workflow': {
-        const workflows = persistence.listWorkflows();
-        const workflowId = workflows[0]?.id;
-        if (!workflowId) return null;
-        return { channel: 'headless.resume', request: { workflowId } };
-      }
-      case 'invoker:delete-all-workflows':
-        return { channel: 'headless.exec', request: { args: ['delete-all'] } };
-      case 'invoker:delete-all-workflows-bulk':
-        return { channel: 'headless.exec', request: { args: ['delete-all'] } };
-      case 'invoker:delete-workflow':
-        return { channel: 'headless.exec', request: { args: ['delete', String(arg0)] } };
-      case 'invoker:detach-workflow':
-        return { channel: 'headless.exec', request: { args: ['detach-workflow', String(arg0), String(arg1)] } };
-      case 'invoker:provide-input':
-        return { channel: 'headless.exec', request: { args: ['input', String(arg0), String(arg1)] } };
-      case 'invoker:approve':
-        return { channel: 'headless.exec', request: { args: ['approve', String(arg0)] } };
-      case 'invoker:reject':
-        return arg1 === undefined
-          ? { channel: 'headless.exec', request: { args: ['reject', String(arg0)] } }
-          : { channel: 'headless.exec', request: { args: ['reject', String(arg0), String(arg1)] } };
-      case 'invoker:select-experiment':
-        if (Array.isArray(arg1)) return null;
-        return { channel: 'headless.exec', request: { args: ['select', String(arg0), String(arg1)] } };
-      case 'invoker:restart-task':
-        return { channel: 'headless.exec', request: { args: ['retry-task', String(arg0)] } };
-      case 'invoker:cancel-task':
-        return { channel: 'headless.exec', request: { args: ['cancel', String(arg0)] } };
-      case 'invoker:cancel-workflow':
-        return { channel: 'headless.exec', request: { args: ['cancel-workflow', String(arg0)] } };
-      case 'invoker:recreate-workflow':
-        return { channel: 'headless.exec', request: { args: ['recreate', String(arg0)] } };
-      case 'invoker:recreate-task':
-        return { channel: 'headless.exec', request: { args: ['recreate-task', String(arg0)] } };
-      case 'invoker:recreate-downstream':
-        return { channel: 'headless.exec', request: { args: ['recreate-downstream', String(arg0)] } };
-      case 'invoker:retry-workflow':
-        return { channel: 'headless.exec', request: { args: ['retry', String(arg0)] } };
-      case 'invoker:rebase-retry':
-        return { channel: 'headless.exec', request: { args: ['rebase-retry', String(arg0)] } };
-      case 'invoker:rebase-recreate':
-        return { channel: 'headless.exec', request: { args: ['rebase-recreate', String(arg0)] } };
-      case 'invoker:set-merge-branch':
-        return { channel: 'headless.gui-mutation', request: payload };
-      case 'invoker:set-merge-mode':
-        return { channel: 'headless.exec', request: { args: ['set', 'merge-mode', String(arg0), String(arg1)] } };
-      case 'invoker:approve-merge': {
-        const workflowId = String(arg0);
-        const mergeTask = persistence.loadTasks(workflowId).find((task) => task.config.isMergeNode);
-        if (!mergeTask) return null;
-        return { channel: 'headless.exec', request: { args: ['approve', mergeTask.id] } };
-      }
-      case 'invoker:check-pr-statuses':
-        return { channel: 'headless.gui-mutation', request: payload };
-      case 'invoker:check-pr-status':
-        return { channel: 'headless.gui-mutation', request: payload };
-      case 'invoker:resolve-conflict':
-        return arg1 === undefined
-          ? { channel: 'headless.exec', request: { args: ['resolve-conflict', String(arg0)] } }
-          : { channel: 'headless.exec', request: { args: ['resolve-conflict', String(arg0), String(arg1)] } };
-      case 'invoker:fix-with-agent':
-        return arg1 === undefined
-          ? { channel: 'headless.exec', request: { args: ['fix', String(arg0)] } }
-          : { channel: 'headless.exec', request: { args: ['fix', String(arg0), String(arg1)] } };
-      case 'invoker:edit-task-command':
-        return { channel: 'headless.exec', request: { args: ['set', 'command', String(arg0), String(arg1)] } };
-      case 'invoker:edit-task-prompt':
-        return { channel: 'headless.exec', request: { args: ['set', 'prompt', String(arg0), String(arg1)] } };
-      case 'invoker:edit-task-type':
-        return { channel: 'headless.exec', request: { args: ['set', 'executor', String(arg0), String(arg1)] } };
-      case 'invoker:edit-task-pool':
-        return null;
-      case 'invoker:edit-task-agent':
-        return { channel: 'headless.exec', request: { args: ['set', 'agent', String(arg0), String(arg1)] } };
-      case 'invoker:set-task-external-gate-policies': {
-        const taskId = String(arg0);
-        const updates = Array.isArray(arg1) ? arg1 as Array<{ workflowId: string; taskId?: string; gatePolicy: 'completed' | 'review_ready' }> : [];
-        if (updates.length !== 1) return null;
-        const update = updates[0];
-        if (!update) return null;
-        const args = ['set', 'gate-policy', taskId, update.workflowId];
-        if (update.taskId) args.push(update.taskId);
-        args.push(update.gatePolicy);
-        return { channel: 'headless.exec', request: { args } };
-      }
-      case 'invoker:replace-task':
-        return {
-          channel: 'headless.exec',
-          request: { args: ['replace-task', String(arg0), JSON.stringify(Array.isArray(arg1) ? arg1 : [])] },
-        };
-      default:
-        return null;
-    }
-  }
+  const translateGuiMutationToHeadless = createGuiMutationTranslator({
+    listWorkflows: () => persistence.listWorkflows(),
+    loadTasks: (workflowId) => persistence.loadTasks(workflowId),
+  });
 
   async function performSharedApproveTask(
     taskId: string,

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { IpcMain } from 'electron';
 import { TransportError, TransportErrorCode } from '@invoker/transport';
 import {
+  createGuiMutationTranslator,
   registerBootstrapStateIpc,
   registerGuiMutationHandler,
   registerWorkflowScopedGuiMutationHandler,
@@ -28,6 +29,48 @@ function createFakeIpcMain() {
 }
 
 describe('ipc-registration', () => {
+  it('translates GUI mutation channels to the same delegated owner requests', () => {
+    const translate = createGuiMutationTranslator({
+      listWorkflows: () => [{ id: 'wf-1' }],
+      loadTasks: (workflowId) => [
+        {
+          id: `${workflowId}/__merge__`,
+          config: { isMergeNode: true },
+        } as any,
+      ],
+    });
+
+    expect(translate({ channel: 'invoker:start', args: [] })).toEqual({
+      channel: 'headless.gui-mutation',
+      request: { channel: 'invoker:start', args: [] },
+    });
+    expect(translate({ channel: 'invoker:resume-workflow', args: [] })).toEqual({
+      channel: 'headless.resume',
+      request: { workflowId: 'wf-1' },
+    });
+    expect(translate({ channel: 'invoker:approve', args: ['wf-1/task-1'] })).toEqual({
+      channel: 'headless.exec',
+      request: { args: ['approve', 'wf-1/task-1'] },
+    });
+    expect(translate({ channel: 'invoker:reject', args: ['wf-1/task-1', 'needs work'] })).toEqual({
+      channel: 'headless.exec',
+      request: { args: ['reject', 'wf-1/task-1', 'needs work'] },
+    });
+    expect(translate({ channel: 'invoker:approve-merge', args: ['wf-1'] })).toEqual({
+      channel: 'headless.exec',
+      request: { args: ['approve', 'wf-1/__merge__'] },
+    });
+    expect(translate({
+      channel: 'invoker:set-task-external-gate-policies',
+      args: ['wf-1/task-1', [{ workflowId: 'upstream', taskId: 'build', gatePolicy: 'review_ready' }]],
+    })).toEqual({
+      channel: 'headless.exec',
+      request: { args: ['set', 'gate-policy', 'wf-1/task-1', 'upstream', 'build', 'review_ready'] },
+    });
+    expect(translate({ channel: 'invoker:select-experiment', args: ['wf-1/task-1', ['a', 'b']] })).toBeNull();
+    expect(translate({ channel: 'invoker:edit-task-pool', args: ['wf-1/task-1', 'pool-a'] })).toBeNull();
+  });
+
   it('runs mutation handlers locally in owner mode and records the channel', async () => {
     const { ipcMain, handleHandlers } = createFakeIpcMain();
     const guiMutationHandlers = new Map<string, (...args: unknown[]) => Promise<unknown>>();

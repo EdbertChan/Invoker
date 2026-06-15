@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   configureEarlyElectronApp,
   registerGuiLifecycleHandlers,
+  resolveMainProcessLaunchArgs,
   runElectronReadyBootstrap,
   startGuiModeBootstrap,
 } from '../bootstrap/app-bootstrap.js';
@@ -97,6 +98,38 @@ describe('app-bootstrap', () => {
 
     expect(setActivationPolicy).not.toHaveBeenCalled();
     expect(hideDock).not.toHaveBeenCalled();
+  });
+
+  it('parses headless launch flags without changing remaining CLI args', () => {
+    expect(resolveMainProcessLaunchArgs([
+      '/electron',
+      '/app/dist/main.js',
+      '--headless',
+      'run',
+      'plan.yaml',
+      '--wait-for-approval',
+      '--no-track',
+    ])).toEqual({
+      isHeadless: true,
+      directInstallSkills: false,
+      cliArgs: ['run', 'plan.yaml'],
+      waitForApproval: true,
+      noTrack: true,
+    });
+  });
+
+  it('treats direct install-skills as headless startup', () => {
+    expect(resolveMainProcessLaunchArgs([
+      '/electron',
+      '/app/dist/main.js',
+      'install-skills',
+    ])).toEqual({
+      isHeadless: true,
+      directInstallSkills: true,
+      cliArgs: ['install-skills'],
+      waitForApproval: false,
+      noTrack: false,
+    });
   });
 
   it('runs ready bootstrap only after Electron readiness resolves', async () => {

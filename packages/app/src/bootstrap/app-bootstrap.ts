@@ -7,6 +7,46 @@ export interface EarlyElectronAppOptions {
   isHeadless: boolean;
 }
 
+export interface MainProcessLaunchArgs {
+  isHeadless: boolean;
+  directInstallSkills: boolean;
+  cliArgs: string[];
+  waitForApproval: boolean;
+  noTrack: boolean;
+}
+
+export function resolveMainProcessLaunchArgs(argv: string[]): MainProcessLaunchArgs {
+  const headlessIndex = argv.indexOf('--headless');
+  const directInstallSkills = argv.includes('--install-skills') || argv.slice(2).includes('install-skills');
+  const isHeadless = headlessIndex !== -1 || directInstallSkills;
+
+  let cliArgs = headlessIndex !== -1
+    ? argv.slice(headlessIndex + 1)
+    : directInstallSkills
+      ? ['install-skills']
+      : [];
+
+  const waitForApprovalIndex = cliArgs.indexOf('--wait-for-approval');
+  const waitForApproval = waitForApprovalIndex !== -1;
+  if (waitForApproval) {
+    cliArgs = [...cliArgs.slice(0, waitForApprovalIndex), ...cliArgs.slice(waitForApprovalIndex + 1)];
+  }
+
+  const noTrackIndex = cliArgs.findIndex((arg) => arg === '--no-track' || arg === '--do-not-track');
+  const noTrack = noTrackIndex !== -1;
+  if (noTrack) {
+    cliArgs = [...cliArgs.slice(0, noTrackIndex), ...cliArgs.slice(noTrackIndex + 1)];
+  }
+
+  return {
+    isHeadless,
+    directInstallSkills,
+    cliArgs,
+    waitForApproval,
+    noTrack,
+  };
+}
+
 export function configureEarlyElectronApp(options: EarlyElectronAppOptions): void {
   const platform = options.platform ?? process.platform;
 
