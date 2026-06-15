@@ -56,5 +56,41 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('passes cancellation context without changing queue priority behavior', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-context';
+    const order: string[] = [];
+    const signalStates: boolean[] = [];
+
+    const runningGate = deferred();
+    const running = c.enqueue(wf, 'normal', async (context) => {
+      order.push(`${context.workflowId}:${context.mutationKind}:running`);
+      signalStates.push(context.signal.aborted);
+      await runningGate.promise;
+    }, { mutationKind: 'fix-with-agent' });
+
+    const normal = c.enqueue(wf, 'normal', async (context) => {
+      order.push(`${context.workflowId}:${context.mutationKind}:normal`);
+      signalStates.push(context.signal.aborted);
+    }, { mutationKind: 'edit-task' });
+
+    const high = c.enqueue(wf, 'high', async (context) => {
+      order.push(`${context.workflowId}:${context.mutationKind}:high`);
+      signalStates.push(context.signal.aborted);
+    }, { mutationKind: 'recreate-task' });
+
+    await Promise.resolve();
+    runningGate.resolve();
+    await running;
+    await high;
+    await normal;
+
+    expect(order).toEqual([
+      'wf-context:fix-with-agent:running',
+      'wf-context:recreate-task:high',
+      'wf-context:edit-task:normal',
+    ]);
+    expect(signalStates).toEqual([false, false, false]);
+  });
+});

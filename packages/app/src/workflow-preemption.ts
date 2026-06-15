@@ -6,7 +6,20 @@ export type WorkflowCancelResult = {
   runningCancelled: string[];
 };
 
-type PreemptWorkflowExecution = (workflowId: string) => Promise<WorkflowCancelResult | void>;
+type PreemptWorkflowExecution = (
+  workflowId: string,
+  signal?: AbortSignal,
+) => Promise<WorkflowCancelResult | void>;
+
+function throwIfMutationAborted(signal: AbortSignal | undefined, context: string): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  const reason = signal.reason instanceof Error
+    ? signal.reason.message
+    : String(signal.reason ?? 'unknown');
+  throw new Error(`Workflow mutation preemption aborted in ${context}: ${reason}`);
+}
 
 export async function preemptWorkflowBeforeMutation(
   workflowId: string,
@@ -15,16 +28,19 @@ export async function preemptWorkflowBeforeMutation(
     logger?: Logger;
     context: string;
     mutationTiming?: WorkflowMutationTiming;
+    signal?: AbortSignal;
   },
 ): Promise<WorkflowCancelResult> {
+  throwIfMutationAborted(deps.signal, deps.context);
   deps.logger?.info(`preempt begin context="${deps.context}" workflow="${workflowId}"`, { module: 'preempt' });
   const raw = deps.mutationTiming
     ? await deps.mutationTiming.span(
       'preemptWorkflowBeforeMutation',
       { context: deps.context },
-      () => deps.preemptWorkflowExecution(workflowId),
+      () => deps.preemptWorkflowExecution(workflowId, deps.signal),
     )
-    : await deps.preemptWorkflowExecution(workflowId);
+    : await deps.preemptWorkflowExecution(workflowId, deps.signal);
+  throwIfMutationAborted(deps.signal, deps.context);
   const result: WorkflowCancelResult = raw ?? { cancelled: [], runningCancelled: [] };
   deps.mutationTiming?.mark('preemptWorkflowBeforeMutation.result', 'completed', {
     context: deps.context,
