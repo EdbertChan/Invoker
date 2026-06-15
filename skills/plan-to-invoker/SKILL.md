@@ -70,6 +70,30 @@ bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file>
 This single command runs: assumption extraction, verify plan generation, YAML validation, atomicity linting, and parse-results validation. Use this for deterministic pass/fail before submitting any plan.
 For policy-matrix inputs, it also checks that row-level coverage was extracted and that verify-plan generation did not degrade to `verify-noop`. When validating a plan against a separate policy source, pass `--source-file`, `--coverage-map`, and `--stack-manifest`; policy-matrix inputs now fail without a coverage map and a real authored stack manifest.
 
+**INV-63 experiment decision consumed:** `docs/context/inv-63/experiment-brief.md` selected `skill-doctor.sh` as the review-facing proof contract and rejected direct composition of individual checks as the primary validation surface. Do not replace this gate with `validate-plan.sh` alone or an informal checklist. Individual scripts remain fallback diagnostics only.
+
+For implementation work that depends on the INV-63 contract, consume the doctor JSON with an explicit gate over stable fields:
+
+```bash
+bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file> > /tmp/skill-doctor.json
+jq -e '
+  .contractSource == "docs/context/inv-63/experiment-brief.md" and
+  .primaryValidationSurface == "skill-doctor.sh" and
+  .allPassed == true
+' /tmp/skill-doctor.json
+```
+
+For expected-failure fixtures, capture the non-zero exit and gate on `firstFailedStep` or explicit failed step IDs:
+
+```bash
+set +e
+bash skills/plan-to-invoker/scripts/skill-doctor.sh <plan-file> > /tmp/skill-doctor.json
+code=$?
+set -e
+test "$code" -eq 1
+jq -e '.firstFailedStep == "lint-task-atomicity"' /tmp/skill-doctor.json
+```
+
 ### Fallback commands (for debugging individual checks)
 
 If `skill-doctor.sh` fails, run individual checks to isolate the problem:

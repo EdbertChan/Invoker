@@ -19,6 +19,8 @@
 #   2 = usage/argument error
 #
 # Output: JSON summary of all checks with pass/fail status
+# Contract source: docs/context/inv-63/experiment-brief.md
+# Gate fields: allPassed, firstFailedStep, checks[].stepId, checks[].status
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -334,6 +336,9 @@ run_check \
 
 # Generate final summary JSON
 if command -v jq &>/dev/null; then
+  # INV-63 selected this script as the review-facing validation surface. Keep
+  # these metadata fields stable so downstream gates can prove they consumed
+  # the experiment-backed contract instead of relying on prose review.
   SUMMARY=$(jq -n \
     --argjson checks "$(cat "$CHECKS_FILE")" \
     --arg planFile "$PLAN_FILE" \
@@ -341,6 +346,9 @@ if command -v jq &>/dev/null; then
     --arg firstFailedStep "${FIRST_FAILED_STEP:-null}" \
     '{
       planFile: $planFile,
+      contractSource: "docs/context/inv-63/experiment-brief.md",
+      primaryValidationSurface: "skill-doctor.sh",
+      deterministicGateFields: ["allPassed", "firstFailedStep", "checks[].stepId", "checks[].status"],
       allPassed: $allPassed,
       firstFailedStep: ($firstFailedStep | if . == "null" then null else . end),
       checks: $checks
@@ -349,7 +357,7 @@ if command -v jq &>/dev/null; then
   echo "$SUMMARY"
 else
   # Fallback without jq - minimal JSON
-  echo '{"planFile":"'"$PLAN_FILE"'","allPassed":false,"error":"jq not available for full report"}'
+  echo '{"planFile":"'"$PLAN_FILE"'","contractSource":"docs/context/inv-63/experiment-brief.md","primaryValidationSurface":"skill-doctor.sh","deterministicGateFields":["allPassed","firstFailedStep","checks[].stepId","checks[].status"],"allPassed":false,"error":"jq not available for full report"}'
 fi
 
 # Exit with appropriate code
