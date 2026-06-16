@@ -26,6 +26,7 @@ export interface TaskRunnerWiringDeps {
   taskHandles: TaskHandleMap;
   enqueueTaskOutput: (taskId: string, data: string) => void;
   flushTaskOutput: (taskId: string) => void;
+  persistLaunchFailureDiagnostic?: (taskId: string, error: Error, executorType: string) => void;
   assertFatalExecutionCapacity: (label: string) => void;
   getTaskRunner: () => TaskRunner | null;
   setTaskRunner: (taskRunner: TaskRunner) => void;
@@ -93,6 +94,7 @@ export function rebuildTaskRunner(deps: TaskRunnerWiringDeps): TaskRunner {
         deps.enqueueTaskOutput(taskId, data);
       },
       onLaunchFailed: (taskId, error, executor) => {
+        deps.persistLaunchFailureDiagnostic?.(taskId, error, executor.type);
         deps.assertFatalExecutionCapacity(`launch failed ${taskId}`);
         deps.logger.error(
           `Task "${taskId}" launch failed before spawn (executor: ${executor.type}): ${error.message}`,

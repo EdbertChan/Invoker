@@ -255,6 +255,37 @@ function isTaskRecoverableOnExplicitResume(task: TaskState): boolean {
   );
 }
 
+const STARTUP_DIAGNOSTIC_TAIL_CHARS = 4_000;
+
+function appendExecutorStartupDiagnostic(
+  taskId: string,
+  executorType: string,
+  error: Error,
+  db: Pick<SQLiteAdapter, 'appendTaskOutput' | 'getOutputTail'>,
+  opts?: { flushPendingOutput?: (taskId: string) => void },
+): void {
+  try {
+    opts?.flushPendingOutput?.(taskId);
+    const tailChunks = db.getOutputTail(taskId);
+    let tail = tailChunks.map((chunk) => chunk.data).join('');
+    if (tail.length > STARTUP_DIAGNOSTIC_TAIL_CHARS) {
+      tail = '...' + tail.slice(tail.length - STARTUP_DIAGNOSTIC_TAIL_CHARS);
+    }
+
+    const message = error.message || String(error);
+    const parts: string[] = ['\n[Startup Diagnostic]'];
+    parts.push(`executor=${executorType}`);
+    parts.push(`message=${message}`);
+    if (tail) {
+      parts.push(`--- recent output tail ---\n${tail}`);
+    }
+    parts.push('--- end startup diagnostic ---\n');
+    db.appendTaskOutput(taskId, parts.join('\n'));
+  } catch {
+    // Best-effort: diagnostics must not mask the original startup failure.
+  }
+}
+
 declare const __BUILD_SHA__: string | undefined;
 declare const __BUILD_VERSION__: string | undefined;
 
@@ -1011,7 +1042,11 @@ if (isHeadless) {
       };
 
       const createStandaloneTaskExecutor = (): TaskRunner => {
-        const executor = createHeadlessExecutor(headlessDeps);
+        const executor = createHeadlessExecutor(headlessDeps, {
+          onLaunchFailed: (taskId, error, executor) => {
+            appendExecutorStartupDiagnostic(taskId, executor.type, error, persistence);
+          },
+        });
         wireHeadlessApproveHook(headlessDeps, executor);
         return executor;
       };
@@ -2260,6 +2295,11 @@ function createEmbeddedTerminalBackendFromConfig(
       taskHandles,
       enqueueTaskOutput,
       flushTaskOutput,
+      persistLaunchFailureDiagnostic: (taskId, error, executorType) => {
+        appendExecutorStartupDiagnostic(taskId, executorType, error, persistence, {
+          flushPendingOutput: flushTaskOutput,
+        });
+      },
       assertFatalExecutionCapacity,
       getTaskRunner: () => taskExecutor,
       setTaskRunner: (runner) => { taskExecutor = runner; },
@@ -4737,7 +4777,7 @@ function createEmbeddedTerminalBackendFromConfig(
         }
         if (orchestrator) {
           for (const task of orchestrator.getAllTasks()) {
-            if (task.status === 'running' || task.status === 'fixing_with_ai') {
+            if (isTaskInFlightForForcedStop(task)) {
               if (persistence) {
                 persistShutdownDiagnostic(task, persistence, {
                   flushPendingOutput: flushTaskOutput,
