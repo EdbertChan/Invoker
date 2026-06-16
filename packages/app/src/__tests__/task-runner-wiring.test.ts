@@ -86,6 +86,8 @@ describe('task-runner-wiring', () => {
       updateTask: vi.fn(),
       loadWorkflow: vi.fn(),
     };
+    const persistLaunchFailureDiagnostic = vi.fn();
+    const assertFatalExecutionCapacity = vi.fn();
 
     const runner = rebuildTaskRunner({
       orchestrator: orchestrator as any,
@@ -102,7 +104,8 @@ describe('task-runner-wiring', () => {
       taskHandles,
       enqueueTaskOutput: vi.fn(),
       flushTaskOutput: vi.fn(),
-      assertFatalExecutionCapacity: vi.fn(),
+      persistLaunchFailureDiagnostic,
+      assertFatalExecutionCapacity,
       getTaskRunner: () => currentRunner,
       setTaskRunner: (value) => { currentRunner = value; },
       setLatestTaskExecutor: (value) => { latestRunner = value; },
@@ -135,6 +138,11 @@ describe('task-runner-wiring', () => {
       outputs: { exitCode: 0 },
     });
     expect(taskHandles.has('task-1')).toBe(false);
+
+    const launchError = new Error('Executor startup failed (ssh): concrete stderr');
+    config.callbacks.onLaunchFailed('task-1', launchError, { type: 'ssh' });
+    expect(persistLaunchFailureDiagnostic).toHaveBeenCalledWith('task-1', launchError, 'ssh');
+    expect(assertFatalExecutionCapacity).toHaveBeenCalledWith('launch failed task-1');
 
     const heartbeatAt = new Date('2026-06-03T01:02:03.000Z');
     config.callbacks.onHeartbeat('task-1', { at: heartbeatAt, source: 'remote_workload' });
