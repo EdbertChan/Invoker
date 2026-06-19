@@ -994,10 +994,23 @@ export class TaskRunner {
         // current.  If the task has moved to a newer attempt or generation
         // (e.g. via recreate-task), writing old workspace/branch metadata
         // would corrupt the live attempt's state.
-        if (
-          (meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId)
-          && !this.isLaunchStale(task.id, attemptId, task.execution.generation ?? 0)
-        ) {
+        const hasStartupMetadata = Boolean(
+          meta.workspacePath || meta.branch || meta.agentSessionId || meta.containerId,
+        );
+        const startupFailureIsStale = this.isLaunchStale(task.id, attemptId, startGeneration);
+        if (hasStartupMetadata && startupFailureIsStale) {
+          this.persistence.logEvent?.(task.id, 'task.executor.stale_startup_failure', {
+            attemptId,
+            generation: startGeneration,
+            executorType: executor.type,
+            workspacePath: meta.workspacePath,
+            branch: meta.branch,
+            agentSessionId: meta.agentSessionId,
+            containerId: meta.containerId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (hasStartupMetadata && !startupFailureIsStale) {
           const execution: Record<string, string> = {};
           if (meta.workspacePath) execution.workspacePath = meta.workspacePath;
           if (meta.branch) execution.branch = meta.branch;

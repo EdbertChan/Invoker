@@ -1239,6 +1239,75 @@ describe('TaskRunner', () => {
       expect(handleWorkerResponse).not.toHaveBeenCalled();
     });
 
+    it('uses the captured launch generation when the task object mutates during startup failure', async () => {
+      const handleWorkerResponse = vi.fn();
+      const updateTask = vi.fn();
+      const appendTaskOutput = vi.fn();
+      const logEvent = vi.fn();
+      const task = makeTask({
+        id: 'mutated-generation',
+        status: 'running',
+        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        execution: { selectedAttemptId: 'attempt-1', generation: 1 },
+      });
+      const orchestrator = {
+        getTask: () => task,
+        handleWorkerResponse,
+      };
+      const startupErr: any = new Error('remote startup failed after recreate');
+      startupErr.workspacePath = '/tmp/old-mutated-worktree';
+      startupErr.branch = 'experiment/old-mutated-branch';
+      const throwingExecutor = {
+        type: 'ssh',
+        start: async () => {
+          task.execution.generation = 2;
+          throw startupErr;
+        },
+        onOutput: () => () => {},
+        onComplete: () => () => {},
+      };
+      const registry = {
+        getDefault: () => throwingExecutor,
+        get: () => throwingExecutor,
+        getAll: () => [throwingExecutor],
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: { updateTask, appendTaskOutput, logEvent } as any,
+        executorRegistry: registry as any,
+        cwd: '/tmp',
+      });
+
+      await runner.executeTask(task);
+
+      expect(updateTask).not.toHaveBeenCalledWith(
+        'mutated-generation',
+        expect.objectContaining({
+          execution: expect.objectContaining({
+            workspacePath: '/tmp/old-mutated-worktree',
+            branch: 'experiment/old-mutated-branch',
+          }),
+        }),
+      );
+      expect(handleWorkerResponse).not.toHaveBeenCalled();
+      expect(appendTaskOutput).toHaveBeenCalledWith(
+        'mutated-generation',
+        expect.stringContaining('Executor startup failed (ssh): remote startup failed after recreate'),
+      );
+      expect(logEvent).toHaveBeenCalledWith(
+        'mutated-generation',
+        'task.executor.stale_startup_failure',
+        expect.objectContaining({
+          attemptId: 'attempt-1',
+          generation: 1,
+          executorType: 'ssh',
+          workspacePath: '/tmp/old-mutated-worktree',
+          branch: 'experiment/old-mutated-branch',
+        }),
+      );
+    });
+
     it('still persists metadata and emits response when lineage is current', async () => {
       const handleWorkerResponse = vi.fn();
       const updateTask = vi.fn();
