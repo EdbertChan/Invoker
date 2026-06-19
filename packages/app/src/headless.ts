@@ -1708,6 +1708,10 @@ async function headlessFix(rawArgs: string[], deps: HeadlessDeps): Promise<void>
       reviewGateContext: parsed.reviewGateContext,
       signal: deps.signal,
     });
+    if (result.stale) {
+      deps.logger?.info?.(`fix-with-agent discarded stale result for "${taskId}"`, { module: 'headless' });
+      return;
+    }
     await finalizeMutationWithGlobalTopup({
       orchestrator: deps.orchestrator,
       taskExecutor: te,
@@ -1759,6 +1763,10 @@ async function headlessResolveConflict(taskId: string, deps: HeadlessDeps, agent
       taskExecutor: te,
       autoApproveAIFixes: deps.invokerConfig.autoApproveAIFixes,
     }, agent, deps.signal);
+    if (result.stale) {
+      deps.logger?.info?.(`resolve-conflict discarded stale result for "${taskId}"`, { module: 'headless' });
+      return;
+    }
     await finalizeMutationWithGlobalTopup({
       orchestrator: deps.orchestrator,
       taskExecutor: te,

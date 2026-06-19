@@ -338,7 +338,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
             ok: true,
             taskId,
             action: 'resolve_conflict',
-            status: result.autoApproved ? 'auto_approved' : 'awaiting_approval',
+            status: result.stale ? 'discarded_stale' : result.autoApproved ? 'auto_approved' : 'awaiting_approval',
           });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
