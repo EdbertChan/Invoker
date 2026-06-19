@@ -2051,7 +2051,7 @@ function createEmbeddedTerminalBackendFromConfig(
     taskId: string,
     agentName?: string,
     source: 'ipc' | 'auto-fix' = 'ipc',
-  ): Promise<TaskState[]> => {
+  ) => {
     const task = orchestrator.getTask(taskId);
     if (!task) {
       throw new Error(`Task ${taskId} not found`);
@@ -2089,7 +2089,10 @@ function createEmbeddedTerminalBackendFromConfig(
         signal: activeMutationContext?.signal,
       },
     );
-    return result.started;
+    if (result.stale) {
+      logger.info(`fix-with-agent discarded stale result for "${taskId}"`, { module: source === 'auto-fix' ? 'auto-fix' : 'ipc' });
+    }
+    return result;
   };
 
   const scheduleAutoFix = (taskId: string): void => {
@@ -4168,6 +4171,10 @@ function createEmbeddedTerminalBackendFromConfig(
           taskExecutor: requireTaskExecutor(),
           autoApproveAIFixes: invokerConfig.autoApproveAIFixes,
         }, agentName, activeMutationContext?.signal);
+        if (result.stale) {
+          logger.info(`resolve-conflict discarded stale result for "${taskId}"`, { module: 'ipc' });
+          return;
+        }
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
@@ -4203,13 +4210,14 @@ function createEmbeddedTerminalBackendFromConfig(
       const taskId = String(taskIdArg);
       const agentName = agentNameArg === undefined ? undefined : String(agentNameArg);
       try {
-        const started = await executeFixWithAgentMutation(taskId, agentName, 'ipc');
+        const result = await executeFixWithAgentMutation(taskId, agentName, 'ipc');
+        if (result.stale) return;
         await finalizeMutationWithGlobalTopup({
           orchestrator,
           taskExecutor: requireTaskExecutor(),
           logger,
           context: 'ipc.fix-with-agent',
-          started,
+          started: result.started,
           mutationTiming: activeMutationContext?.mutationTiming,
           scopedTaskIds: [taskId],
         });

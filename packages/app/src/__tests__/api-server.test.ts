@@ -658,6 +658,32 @@ describe('POST /api/tasks/:id/resolve-conflict', () => {
     expect(res.status).toBe(200);
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
   });
+
+  it('reports stale conflict-resolution results without top-up', async () => {
+    let getTaskCalls = 0;
+    mocks.orchestrator.getTask.mockImplementation((id: string) => {
+      if (id !== 'task-1') return undefined;
+      getTaskCalls += 1;
+      if (getTaskCalls <= 3) {
+        return makeTask({
+          id: 'task-1',
+          execution: { selectedAttemptId: 'attempt-1', generation: 2 },
+        });
+      }
+      return makeTask({
+        id: 'task-1',
+        status: 'pending',
+        execution: { selectedAttemptId: 'attempt-2', generation: 3 },
+      });
+    });
+
+    const res = await request(port, 'POST', '/api/tasks/task-1/resolve-conflict', { agent: 'claude' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('discarded_stale');
+    expect(mocks.orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(mocks.orchestrator.startExecution).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/tasks/:id/reject', () => {

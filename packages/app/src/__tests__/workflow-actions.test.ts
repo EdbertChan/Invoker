@@ -624,7 +624,7 @@ describe('finalizeAppliedFix', () => {
     });
 
     expect(result).toEqual({ autoApproved: false, started: [] });
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-error');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-error', undefined);
     expect(orchestrator.approve).not.toHaveBeenCalled();
   });
 
@@ -795,7 +795,11 @@ describe('autoFixOnFailure', () => {
       taskExecutor: taskExecutor as unknown as TaskRunner,
     });
 
-    expect(orchestrator.beginConflictResolution).toHaveBeenCalledWith('task-a');
+    expect(orchestrator.beginConflictResolution).toHaveBeenCalledWith('task-a', {
+      taskId: 'task-a',
+      selectedAttemptId: undefined,
+      generation: 0,
+    });
     expect(taskExecutor.fixWithAgent).toHaveBeenCalledWith('task-a', 'test output', 'claude', 'boom');
     expect(taskExecutor.resolveConflict).not.toHaveBeenCalled();
     expect(orchestrator.retryTask).toHaveBeenCalledWith('task-a');
@@ -886,7 +890,11 @@ describe('autoFixOnFailure', () => {
       taskExecutor: taskExecutor as unknown as TaskRunner,
     });
 
-    expect(orchestrator.beginConflictResolution).toHaveBeenCalledWith('task-a');
+    expect(orchestrator.beginConflictResolution).toHaveBeenCalledWith('task-a', {
+      taskId: 'task-a',
+      selectedAttemptId: undefined,
+      generation: 0,
+    });
     expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'claude');
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
     expect(orchestrator.retryTask).toHaveBeenCalledWith('task-a');
@@ -1340,7 +1348,11 @@ describe('fixWithAgentAction', () => {
 
     expect(taskExecutor.fixWithAgent).toHaveBeenCalledWith('task-a', 'test output', 'codex', 'boom');
     expect(taskExecutor.resolveConflict).not.toHaveBeenCalled();
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom', {
+      taskId: 'task-a',
+      selectedAttemptId: undefined,
+      generation: 0,
+    });
     expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
   });
 
@@ -1379,7 +1391,11 @@ describe('fixWithAgentAction', () => {
 
     expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'claude');
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError);
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError, {
+      taskId: 'task-a',
+      selectedAttemptId: undefined,
+      generation: 0,
+    });
     expect(result).toEqual({ kind: 'resolveConflict', autoApproved: false, started: [] });
   });
 
@@ -1414,7 +1430,11 @@ describe('fixWithAgentAction', () => {
 
     expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex');
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError);
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError, {
+      taskId: 'task-a',
+      selectedAttemptId: undefined,
+      generation: 0,
+    });
     expect(result).toEqual({ kind: 'resolveConflict', autoApproved: false, started: [] });
   });
 
@@ -2265,7 +2285,7 @@ describe('assertLineageCurrent', () => {
 });
 
 describe('fixWithAgentAction lineage guard', () => {
-  it('throws StaleLineageError when lineage changes during async fix', async () => {
+  it('returns a stale no-op when lineage changes during async fix', async () => {
     let fixCallCount = 0;
     const orchestrator = {
       getTask: vi.fn(() => {
@@ -2297,19 +2317,18 @@ describe('fixWithAgentAction lineage guard', () => {
       resolveConflict: vi.fn(),
     };
 
-    await expect(fixWithAgentAction('task-a', {
+    const result = await fixWithAgentAction('task-a', {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow(StaleLineageError);
+    });
 
-    // Should NOT have called setFixAwaitingApproval (the late write)
+    expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [], stale: true });
     expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
-    // Should NOT have called revertConflictResolution either
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
   });
 
-  it('throws StaleLineageError when signal is aborted during async fix', async () => {
+  it('returns a stale no-op when signal is aborted during async fix', async () => {
     const ac = new AbortController();
     const orchestrator = {
       getTask: vi.fn(() => makeTask({
@@ -2333,14 +2352,15 @@ describe('fixWithAgentAction lineage guard', () => {
       resolveConflict: vi.fn(),
     };
 
-    await expect(fixWithAgentAction('task-a', {
+    const result = await fixWithAgentAction('task-a', {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
     }, {
       signal: ac.signal,
-    })).rejects.toThrow(StaleLineageError);
+    });
 
+    expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [], stale: true });
     expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
   });
@@ -2377,13 +2397,13 @@ describe('fixWithAgentAction lineage guard', () => {
       resolveConflict: vi.fn(),
     };
 
-    await expect(fixWithAgentAction('task-a', {
+    const result = await fixWithAgentAction('task-a', {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow(StaleLineageError);
+    });
 
-    // revertConflictResolution must NOT be called when lineage is stale
+    expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [], stale: true });
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
     expect(persistence.appendTaskOutput).not.toHaveBeenCalled();
   });
@@ -2415,13 +2435,17 @@ describe('fixWithAgentAction lineage guard', () => {
     });
 
     // Normal path should proceed
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom', {
+      taskId: 'task-a',
+      selectedAttemptId: 'att-1',
+      generation: 5,
+    });
     expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
   });
 });
 
 describe('resolveConflictAction lineage guard', () => {
-  it('throws StaleLineageError when lineage changes during conflict resolution', async () => {
+  it('returns a stale no-op when lineage changes during conflict resolution', async () => {
     let getTaskCallCount = 0;
     const mergeError = JSON.stringify({
       type: 'merge_conflict',
@@ -2456,12 +2480,13 @@ describe('resolveConflictAction lineage guard', () => {
       resolveConflict: vi.fn().mockResolvedValue(undefined),
     };
 
-    await expect(resolveConflictAction('task-a', {
+    const result = await resolveConflictAction('task-a', {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow(StaleLineageError);
+    });
 
+    expect(result).toEqual({ autoApproved: false, started: [], stale: true });
     expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
   });
@@ -2495,12 +2520,13 @@ describe('resolveConflictAction lineage guard', () => {
       resolveConflict: vi.fn().mockRejectedValue(new Error('resolution failed')),
     };
 
-    await expect(resolveConflictAction('task-a', {
+    const result = await resolveConflictAction('task-a', {
       orchestrator: orchestrator as unknown as Orchestrator,
       persistence: persistence as unknown as SQLiteAdapter,
       taskExecutor: taskExecutor as unknown as TaskRunner,
-    })).rejects.toThrow(StaleLineageError);
+    });
 
+    expect(result).toEqual({ autoApproved: false, started: [], stale: true });
     expect(orchestrator.revertConflictResolution).not.toHaveBeenCalled();
     expect(persistence.appendTaskOutput).not.toHaveBeenCalledWith(
       'task-a',
@@ -2736,7 +2762,11 @@ describe('autoFixOnReviewGateFailure', () => {
       expect.stringContaining('This auto-fix was triggered by failed CI'),
     );
     expect(taskExecutor.fixWithAgent.mock.calls[0]?.[4]).toContain('test-all');
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('merge-a', 'Review-gate CI failed');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('merge-a', 'Review-gate CI failed', {
+      taskId: 'merge-a',
+      selectedAttemptId: 'att-1',
+      generation: 7,
+    });
   });
 
   it('does not start when review-gate lineage is stale', async () => {
@@ -2795,7 +2825,7 @@ describe('finalizeAppliedFix lineage guard', () => {
       taskExecutor: {} as TaskRunner,
     }, ac.signal);
 
-    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-error');
+    expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'saved-error', undefined);
     expect(result).toEqual({ autoApproved: false, started: [] });
   });
 });

@@ -94,10 +94,12 @@ export interface DeleteAllResult {
 
 export interface FixMutationResult extends MutationResult {
   detail: FixWithAgentActionResult;
+  stale?: boolean;
 }
 
 export interface ResolveConflictMutationResult extends MutationResult {
   autoApproved: boolean;
+  stale?: boolean;
 }
 
 type DispatchScope = {
@@ -425,6 +427,15 @@ export class WorkflowMutationFacade {
       },
       agentName,
     );
+    if (result.stale) {
+      return {
+        autoApproved: result.autoApproved,
+        started: [],
+        runnable: [],
+        topup: [],
+        stale: true,
+      };
+    }
     const { runnable, topup } = await this.dispatchWithTopup(
       result.started,
       'facade.resolve-conflict',
@@ -457,6 +468,9 @@ export class WorkflowMutationFacade {
       },
       options,
     );
+    if (detail.stale) {
+      return { detail, started: [], runnable: [], topup: [], stale: true };
+    }
     const started =
       detail.kind === 'recreateWorkflowFromFreshBase'
         ? detail.started
