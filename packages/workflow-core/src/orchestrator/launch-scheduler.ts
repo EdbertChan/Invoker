@@ -4,6 +4,7 @@ import type { Attempt, TaskDelta, TaskState, TaskStateChanges } from '@invoker/w
 import { isDiscardedAttempt } from '../attempt-policy.js';
 import type { TaskScheduler } from '../scheduler.js';
 import type { TaskRepository } from '../task-repository.js';
+import { publishTaskDelta } from './events.js';
 import type {
   OrchestratorMessageBus,
   OrchestratorPersistence,
@@ -18,7 +19,6 @@ export interface LaunchSchedulerHost {
   messageBus: OrchestratorMessageBus;
   taskRepository: TaskRepository;
   logger: Logger;
-  taskDeltaChannel: string;
   maxConcurrency: number;
   deferRunningUntilLaunch: boolean;
   refreshFromDb(): void;
@@ -341,7 +341,7 @@ export function drainScheduler(host: LaunchSchedulerHost): TaskState[] {
         });
       }
     }
-    host.messageBus.publish(host.taskDeltaChannel, host.buildUpdateDelta(task, updated, changes));
+    publishTaskDelta(host.messageBus, host.buildUpdateDelta(task, updated, changes));
     started.push(updated);
     host.logger.info('[orchestrator] drainScheduler: started', {
       taskId: job.taskId,
@@ -429,7 +429,7 @@ export function markTaskRunningAfterLaunch(
 
     const launchUpdated = host.writeAndSync(taskId, changes);
     host.persistence.logEvent?.(taskId, 'task.running', changes);
-    host.messageBus.publish(host.taskDeltaChannel, host.buildUpdateDelta(task, launchUpdated, changes));
+    publishTaskDelta(host.messageBus, host.buildUpdateDelta(task, launchUpdated, changes));
     host.logger.info('[orchestrator] markTaskRunningAfterLaunch: executing', {
       taskId,
       attemptId,
