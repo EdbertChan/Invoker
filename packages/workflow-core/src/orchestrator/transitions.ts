@@ -4,6 +4,7 @@ import type { ParsedResponse } from '../response-handler.js';
 import { parseMergeConflictError } from '../merge-conflict-error.js';
 import type { TaskScheduler } from '../scheduler.js';
 import type { TaskRepository } from '../task-repository.js';
+import { publishTaskDelta } from './events.js';
 import type {
   OrchestratorMessageBus,
   OrchestratorPersistence,
@@ -15,7 +16,6 @@ export interface TransitionHost {
   messageBus: OrchestratorMessageBus;
   taskRepository: TaskRepository;
   logger: Logger;
-  taskDeltaChannel: string;
   deferredTaskIds: Set<string>;
   makeTaskNotFoundError(taskId: string, message: string): Error;
   stateGetTask(taskId: string): TaskState | undefined;
@@ -96,7 +96,7 @@ export function handleCompleted(
   const delta: TaskDelta = host.buildUpdateDelta(task!, completedUpdated, changes);
   const eventName = needsApproval ? 'task.awaiting_approval' : 'task.completed';
   host.persistence.logEvent?.(taskId, eventName, changes);
-  host.messageBus.publish(host.taskDeltaChannel, delta);
+  publishTaskDelta(host.messageBus, delta);
 
   try {
     const currentAttemptId = host.stateGetTask(taskId)?.execution.selectedAttemptId;
@@ -178,7 +178,7 @@ export function finalizeFailedTask(
   host.restoreTask(updated);
   const delta: TaskDelta = host.buildUpdateDelta(existing, updated, changes);
   host.persistence.logEvent?.(taskId, eventName, changes);
-  host.messageBus.publish(host.taskDeltaChannel, delta);
+  publishTaskDelta(host.messageBus, delta);
 
   host.checkExperimentCompletion(taskId);
 
@@ -259,7 +259,7 @@ export function handleNeedsInput(
   }
   const delta: TaskDelta = host.buildUpdateDelta(needsInputBefore, needsInputUpdated, changes);
   host.persistence.logEvent?.(taskId, 'task.needs_input', changes);
-  host.messageBus.publish(host.taskDeltaChannel, delta);
+  publishTaskDelta(host.messageBus, delta);
   return [];
 }
 
