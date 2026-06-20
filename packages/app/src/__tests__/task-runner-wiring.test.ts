@@ -194,6 +194,58 @@ describe('task-runner-wiring', () => {
     expect(currentRunner.approveMerge).toHaveBeenCalledTimes(1);
   });
 
+  it('persists a compact diagnostic block when executor startup fails', () => {
+    const flushTaskOutput = vi.fn();
+    const appendTaskOutput = vi.fn();
+    const orchestrator = {
+      getTask: vi.fn(() => ({
+        id: 'task-1',
+        status: 'running',
+        execution: {},
+        config: {},
+      })),
+      recordTaskHeartbeat: vi.fn(),
+      setBeforeApproveHook: vi.fn(),
+    };
+
+    rebuildTaskRunner({
+      orchestrator: orchestrator as any,
+      persistence: {
+        appendTaskOutput,
+        getOutputTail: vi.fn(() => [{ data: 'FAIL src/foo.test.ts\n' }]),
+        loadWorkflow: vi.fn(),
+      } as any,
+      executorRegistry: {} as any,
+      repoRoot: '/repo',
+      invokerConfig: {},
+      logger: createLogger() as any,
+      taskHandles: new Map(),
+      enqueueTaskOutput: vi.fn(),
+      flushTaskOutput,
+      assertFatalExecutionCapacity: vi.fn(),
+      getTaskRunner: () => null,
+      setTaskRunner: vi.fn(),
+      setLatestTaskExecutor: vi.fn(),
+    });
+
+    const config = taskRunnerConstructor.mock.calls[0]?.[0] as any;
+    config.callbacks.onLaunchFailed(
+      'task-1',
+      new Error('Executor startup failed (ssh): git clone failed'),
+      { type: 'ssh' },
+    );
+
+    expect(flushTaskOutput).toHaveBeenCalledWith('task-1');
+    expect(appendTaskOutput).toHaveBeenCalledWith(
+      'task-1',
+      expect.stringContaining('[Startup Failure Diagnostic]'),
+    );
+    const diagnostic = appendTaskOutput.mock.calls[0]?.[1] as string;
+    expect(diagnostic).toContain('executor=ssh');
+    expect(diagnostic).toContain('message=Executor startup failed (ssh): git clone failed');
+    expect(diagnostic).toContain('FAIL src/foo.test.ts');
+  });
+
 
   it('kills preempted tasks through TaskRunner so SSH pool capacity is released', async () => {
     const handle = { executionId: 'exec-1', taskId: 'task-1' };

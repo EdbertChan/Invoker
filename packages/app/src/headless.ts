@@ -67,6 +67,7 @@ import { trackWorkflow } from './headless-watch.js';
 import { preemptWorkflowBeforeMutation, type WorkflowCancelResult } from './workflow-preemption.js';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
 import type { RuntimeServices } from '@invoker/runtime-service';
+import { persistDiagnosticBlock } from './shutdown-diagnostic.js';
 
 export { bumpGenerationAndRecreate } from './workflow-actions.js';
 export {
@@ -265,6 +266,15 @@ export function createHeadlessExecutor(
         } catch (err) {
           deps.logger.error(`Failed to persist output for ${taskId}: ${err}`, { module: 'output' });
         }
+      },
+      onLaunchFailed: (taskId, error, executor) => {
+        const task = deps.orchestrator.getTask(taskId);
+        if (!task) return;
+        persistDiagnosticBlock(task, deps.persistence, {
+          label: 'Startup Failure Diagnostic',
+          message: error.message,
+          fields: { executor: executor.type },
+        });
       },
       onHeartbeat: (taskId, event) => headlessHeartbeat(taskId, event, deps),
       ...callbackOverrides,

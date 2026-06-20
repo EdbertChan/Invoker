@@ -1853,6 +1853,20 @@ export class SQLiteAdapter implements PersistenceAdapter {
     return readFileSync(file, 'utf8');
   }
 
+  private getLegacyTaskOutputRows(taskId: string): string[] {
+    const rows = this.queryAll(
+      'SELECT data FROM task_output WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    ) as Array<{ data: string }>;
+    return rows.map((r) => r.data);
+  }
+
+  private getLegacyDiagnosticTaskOutputRows(taskId: string): string[] {
+    return this.getLegacyTaskOutputRows(taskId).filter((data) =>
+      data.includes('[Shutdown Diagnostic]') || data.includes('[Startup Failure Diagnostic]'),
+    );
+  }
+
   private encodeSpoolLine(chunk: OutputChunk): string {
     const data = Buffer.from(chunk.data, 'utf8').toString('base64');
     return `${chunk.offset}\t${data}\n`;
@@ -2324,13 +2338,10 @@ export class SQLiteAdapter implements PersistenceAdapter {
     const diagnosticFile = this.readTaskOutputFile(taskId);
     const spoolChunks = this.getOutputChunks(taskId);
     if (spoolChunks.length > 0) {
-      return spoolChunks.map((chunk) => chunk.data).join('') + diagnosticFile;
+      const legacyDiagnostics = this.getLegacyDiagnosticTaskOutputRows(taskId).join('');
+      return spoolChunks.map((chunk) => chunk.data).join('') + legacyDiagnostics + diagnosticFile;
     }
-    const rows = this.queryAll(
-      'SELECT data FROM task_output WHERE task_id = ? ORDER BY id ASC',
-      [taskId],
-    ) as Array<{ data: string }>;
-    return rows.map((r) => r.data).join('') + diagnosticFile;
+    return this.getLegacyTaskOutputRows(taskId).join('') + diagnosticFile;
   }
 
   /**

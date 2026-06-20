@@ -205,6 +205,41 @@ describe('persistShutdownDiagnostic', () => {
     expect(output).toContain('[Startup Failure Diagnostic]');
   });
 
+  it('records concrete message and fields for startup diagnostics', () => {
+    const task = makeTask();
+    const db = makeDb();
+
+    persistShutdownDiagnostic(task, db, {
+      label: 'Startup Failure Diagnostic',
+      message: 'Executor startup failed (ssh): git clone failed',
+      fields: { executor: 'ssh' },
+    });
+
+    const output = db.appended[0];
+    expect(output).toContain('[Startup Failure Diagnostic]');
+    expect(output).toContain('executor=ssh');
+    expect(output).toContain('message=Executor startup failed (ssh): git clone failed');
+  });
+
+  it('falls back to durable task output when spool tail is empty', () => {
+    const task = makeTask();
+    const db: ShutdownDiagnosticDb & { appended: string[] } = {
+      appended: [],
+      getOutputTail: () => [],
+      getTaskOutput: () => 'direct durable output\nError: concrete failure\n',
+      appendTaskOutput: (_taskId: string, data: string) => {
+        db.appended.push(data);
+      },
+    };
+
+    persistShutdownDiagnostic(task, db, { forcedStopReason: 'Application quit' });
+
+    const output = db.appended[0];
+    expect(output).toContain('--- recent output tail ---');
+    expect(output).toContain('direct durable output');
+    expect(output).toContain('Error: concrete failure');
+  });
+
   it('omits forcedStopReason line when not provided', () => {
     const task = makeTask({ execution: { error: 'real error' } });
     const db = makeDb();

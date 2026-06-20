@@ -1084,7 +1084,12 @@ function startHeadlessMode(): void {
               for (const task of allTasks) {
                 if (isTaskInFlightForForcedStop(task)) {
                   logger.info(`stop — failing in-flight task "${task.id}" (${task.status})`, { module: 'ipc-delegate' });
-                  persistShutdownDiagnostic(task, persistence, { forcedStopReason: 'Stopped by user' });
+                  persistShutdownDiagnostic(task, persistence, {
+                    // Standalone owner runners persist stream output directly
+                    // through appendTaskOutput; the helper falls back to that
+                    // durable read path when no spool tail exists.
+                    forcedStopReason: 'Stopped by user',
+                  });
                   orchestrator.handleWorkerResponse({
                     requestId: `stop-${task.id}`,
                     actionId: task.id,
@@ -1679,7 +1684,12 @@ function startHeadlessMode(): void {
         for (const task of orchestrator.getAllTasks()) {
           if (isTaskInFlightForForcedStop(task)) {
             if (persistence) {
-              persistShutdownDiagnostic(task, persistence, { forcedStopReason: 'Application quit' });
+              persistShutdownDiagnostic(task, persistence, {
+                // Headless owner shutdown has no pending spool buffer, but
+                // recent direct durable output is still available to the
+                // diagnostic helper through getTaskOutput().
+                forcedStopReason: 'Application quit',
+              });
             }
             orchestrator.handleWorkerResponse({
               requestId: `quit-${task.id}`,

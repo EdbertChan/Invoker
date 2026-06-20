@@ -12,6 +12,7 @@ import {
 import type { Logger } from '@invoker/contracts';
 import { loadConfig, resolveSecretsFilePath, type InvokerConfig } from '../config.js';
 import { autoFixOnReviewGateFailure } from '../workflow-actions.js';
+import { persistDiagnosticBlock } from '../shutdown-diagnostic.js';
 
 export type TaskHandleMap = Map<string, { handle: ExecutorHandle; executor: Executor }>;
 
@@ -114,6 +115,15 @@ export function rebuildTaskRunner(deps: TaskRunnerWiringDeps): TaskRunner {
         deps.enqueueTaskOutput(taskId, data);
       },
       onLaunchFailed: (taskId, error, executor) => {
+        const task = deps.orchestrator.getTask(taskId);
+        if (task) {
+          persistDiagnosticBlock(task, deps.persistence, {
+            flushPendingOutput: deps.flushTaskOutput,
+            label: 'Startup Failure Diagnostic',
+            message: error.message,
+            fields: { executor: executor.type },
+          });
+        }
         deps.assertFatalExecutionCapacity(`launch failed ${taskId}`);
         deps.logger.error(
           `Task "${taskId}" launch failed before spawn (executor: ${executor.type}): ${error.message}`,

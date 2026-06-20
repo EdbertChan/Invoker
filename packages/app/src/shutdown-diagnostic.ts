@@ -2,6 +2,7 @@ import type { TaskState } from '@invoker/workflow-core';
 
 export interface ShutdownDiagnosticDb {
   getOutputTail(taskId: string): Array<{ data: string }>;
+  getTaskOutput?(taskId: string): string;
   appendTaskOutput(taskId: string, data: string): void;
 }
 
@@ -24,6 +25,11 @@ export interface PersistShutdownDiagnosticOptions {
   label?: string;
 }
 
+export interface PersistDiagnosticBlockOptions extends PersistShutdownDiagnosticOptions {
+  message?: string;
+  fields?: Record<string, string | number | boolean | undefined | null>;
+}
+
 /**
  * Persist a compact diagnostic block into durable task output so that
  * post-mortem inspection retains concrete context instead of collapsing
@@ -35,15 +41,28 @@ export interface PersistShutdownDiagnosticOptions {
 export function persistShutdownDiagnostic(
   task: TaskState,
   db: ShutdownDiagnosticDb,
-  opts?: PersistShutdownDiagnosticOptions,
+  opts?: PersistDiagnosticBlockOptions,
+): void {
+  persistDiagnosticBlock(task, db, opts);
+}
+
+export function persistDiagnosticBlock(
+  task: TaskState,
+  db: ShutdownDiagnosticDb,
+  opts?: PersistDiagnosticBlockOptions,
 ): void {
   try {
     // Flush any buffered output so the spool is up-to-date.
     opts?.flushPendingOutput?.(task.id);
 
-    // Gather the most recent output tail from the output spool.
+    // Gather the most recent output tail from the output spool. Some headless
+    // paths write stream output directly to durable task output instead, so
+    // fall back to that read path when the spool is empty.
     const tailChunks = db.getOutputTail(task.id);
     let tail = tailChunks.map(c => c.data).join('');
+    if (!tail && db.getTaskOutput) {
+      tail = db.getTaskOutput(task.id);
+    }
     if (tail.length > SHUTDOWN_DIAGNOSTIC_TAIL_CHARS) {
       tail = '...' + tail.slice(tail.length - SHUTDOWN_DIAGNOSTIC_TAIL_CHARS);
     }
@@ -53,6 +72,14 @@ export function persistShutdownDiagnostic(
     parts.push(`status=${task.status}`);
     if (opts?.forcedStopReason) {
       parts.push(`forcedStopReason=${opts.forcedStopReason}`);
+    }
+    for (const [key, value] of Object.entries(opts?.fields ?? {})) {
+      if (value !== undefined && value !== null) {
+        parts.push(`${key}=${value}`);
+      }
+    }
+    if (opts?.message) {
+      parts.push(`message=${opts.message}`);
     }
     if (task.execution.error) {
       parts.push(`error=${task.execution.error}`);

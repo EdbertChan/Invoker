@@ -2201,6 +2201,40 @@ describe('SQLiteAdapter', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it('preserves legacy SQLite diagnostic rows alongside spool stream', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-output-legacy-diag-spool-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const db = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        db.saveWorkflow(testWorkflow);
+        db.saveTask('wf-1', makeTask('t-legacy-diag-spool'));
+
+        db.appendOutputChunk('t-legacy-diag-spool', 'FAIL src/foo.test.ts\n');
+        (db as any).db.run(
+          'INSERT INTO task_output (task_id, data) VALUES (?, ?)',
+          ['t-legacy-diag-spool', 'duplicate stream that should stay hidden\n'],
+        );
+        (db as any).db.run(
+          'INSERT INTO task_output (task_id, data) VALUES (?, ?)',
+          [
+            't-legacy-diag-spool',
+            '\n[Startup Failure Diagnostic]\nexecutor=ssh\nmessage=git clone failed\n--- end shutdown diagnostic ---\n',
+          ],
+        );
+
+        const output = db.getTaskOutput('t-legacy-diag-spool');
+        expect(output).toContain('FAIL src/foo.test.ts');
+        expect(output).toContain('[Startup Failure Diagnostic]');
+        expect(output).toContain('message=git clone failed');
+        expect(output).not.toContain('duplicate stream that should stay hidden');
+
+        db.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('pruneDuplicateTaskOutputRows', () => {
