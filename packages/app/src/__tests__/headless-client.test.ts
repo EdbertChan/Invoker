@@ -100,6 +100,58 @@ describe('headless-client', () => {
     expect(resumeHandler).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-42' }));
   });
 
+  it('delegates bundled skill installation to the shared owner', async () => {
+    const bus = new LocalBus();
+    const ownerHandler = vi.fn(async () => ({ ok: true }));
+    bus.onRequest('headless.exec', ownerHandler);
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
+
+    const runElectronHeadless = vi.fn(async () => 0);
+
+    const exitCode = await runHeadlessClientCommand(['install-skills', 'update'], {
+      messageBus: bus,
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      runElectronHeadless,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(ownerHandler).toHaveBeenCalledWith(expect.objectContaining({
+      args: ['install-skills', 'update'],
+      noTrack: false,
+      waitForApproval: false,
+    }));
+    expect(runElectronHeadless).not.toHaveBeenCalled();
+  });
+
+  it('keeps standalone fallback for bundled skill installation only when explicitly forced', async () => {
+    const originalStandalone = process.env.INVOKER_HEADLESS_STANDALONE;
+    process.env.INVOKER_HEADLESS_STANDALONE = '1';
+
+    try {
+      const bus = new LocalBus();
+      const ownerHandler = vi.fn(async () => ({ ok: true }));
+      bus.onRequest('headless.exec', ownerHandler);
+      bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
+      const runElectronHeadless = vi.fn(async () => 0);
+
+      const exitCode = await runHeadlessClientCommand(['install-skills'], {
+        messageBus: bus,
+        ensureStandaloneOwner: vi.fn(async () => {}),
+        runElectronHeadless,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(ownerHandler).not.toHaveBeenCalled();
+      expect(runElectronHeadless).toHaveBeenCalledWith(['install-skills']);
+    } finally {
+      if (originalStandalone === undefined) {
+        delete process.env.INVOKER_HEADLESS_STANDALONE;
+      } else {
+        process.env.INVOKER_HEADLESS_STANDALONE = originalStandalone;
+      }
+    }
+  });
+
   it('bootstraps a standalone owner once when no owner is present, then delegates', async () => {
     const bus = new LocalBus();
     const ownerHandler = vi.fn(async () => ({ ok: true }));

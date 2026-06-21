@@ -2029,6 +2029,8 @@ function createEmbeddedTerminalBackendFromConfig(
         });
       },
       executionAgentRegistry: registerBuiltinAgents(),
+      getBundledSkillsStatus,
+      installBundledSkills: installPackagedSkills,
     });
     const { workflowId } = classifyHeadlessExecMutation(payload);
     logger.info(`executeHeadlessExec end args="${payload.args.join(' ')}" workflow="${workflowId ?? 'unknown'}"`, {

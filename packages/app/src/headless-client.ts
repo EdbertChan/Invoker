@@ -255,6 +255,14 @@ export interface HeadlessClientDeps {
   runElectronHeadless: (args: string[]) => Promise<number>;
 }
 
+function shouldRunStandaloneFallback(
+  args: string[],
+  standaloneMode: boolean,
+  internalOwnerServe: boolean,
+): boolean {
+  return !isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe;
+}
+
 async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void> {
   const invokerHomeRoot = resolveInvokerHomeRoot();
   const bootstrapLock = tryAcquireOwnerBootstrapLock(invokerHomeRoot);
@@ -446,7 +454,7 @@ export async function runHeadlessClientCommand(
     return typeof exitCode === 'number' ? exitCode : 0;
   }
 
-  if (!isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {
+  if (shouldRunStandaloneFallback(args, standaloneMode, internalOwnerServe)) {
     return deps.runElectronHeadless(argv);
   }
 

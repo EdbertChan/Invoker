@@ -111,4 +111,46 @@ describe('bundled-skills', () => {
       }
     }
   });
+
+  it('marks installed skills stale when managed target contents no longer match the bundled source', () => {
+    const resourcesRoot = makeTempRoot('invoker-bundled-resources-');
+    const invokerHomeRoot = makeTempRoot('invoker-bundled-home-');
+    const repoRoot = makeTempRoot('invoker-bundled-repo-');
+    const codexHome = makeTempRoot('invoker-codex-home-');
+    const originalHome = process.env.HOME;
+    process.env.HOME = codexHome;
+
+    try {
+      writeSkill(resourcesRoot, 'plan-to-invoker');
+      installBundledSkills({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+
+      writeFileSync(
+        join(codexHome, '.codex', 'skills', 'invoker-plan-to-invoker', 'SKILL.md'),
+        '# modified\n',
+      );
+
+      const status = resolveBundledSkillsStatus({
+        isPackaged: true,
+        repoRoot,
+        resourcesPath: resourcesRoot,
+        invokerHomeRoot,
+      });
+      const codexTarget = status.targets.find((target) => target.id === 'codex');
+
+      expect(codexTarget?.installed).toBe(true);
+      expect(codexTarget?.upToDate).toBe(false);
+      expect(status.promptRecommended).toBe(true);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
 });
