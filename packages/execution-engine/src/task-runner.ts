@@ -258,6 +258,7 @@ export interface LaunchOutboxAck {
 
 export interface LaunchDispatchOptions {
   dispatchId: number;
+  /** INV-97: the runner outcome acks or fails the durable dispatch row. */
   launchOutbox: LaunchOutboxAck;
 }
 
