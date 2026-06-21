@@ -279,6 +279,8 @@ async function dispatchHeadlessRunnableTasks(
 ): Promise<void> {
   if (runnable.length === 0) return;
 
+  // INV-97: app-layer mutations return runnable tasks, but the durable
+  // launch outbox owns the actual TaskRunner handoff.
   const dispatcher = new LaunchDispatcher({
     persistence: deps.persistence,
     orchestrator: {
