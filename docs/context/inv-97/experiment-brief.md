@@ -26,10 +26,10 @@ Evidence anchors:
 - `packages/app/src/global-topup.ts:92` documents that the durable launch outbox owns dispatch.
 - `packages/app/src/global-topup.ts:202` filters scoped runnable work and top-up work without directly launching the batch.
 - `packages/app/src/headless.ts:274` builds a local `LaunchDispatcher` for headless mutation returns.
-- `packages/app/src/headless.ts:2345`, `:2377`, `:2419`, and `:2455` route edit command, prompt, executor, and agent mutations through `dispatchHeadlessRunnableTasks`.
+- `packages/app/src/headless.ts:2347`, `:2379`, `:2421`, and `:2457` route edit command, prompt, executor, and agent mutations through `dispatchHeadlessRunnableTasks`.
 - `packages/app/src/launch-dispatcher.ts:132` atomically claims a dispatch row.
 - `packages/app/src/launch-dispatcher.ts:175` hands the leased row to `TaskRunner.executeTask` with outbox ack hooks.
-- `packages/execution-engine/src/task-runner.ts:611`, `:636`, `:734`, and `:1299` complete or fail the dispatch row from runner outcomes.
+- `packages/execution-engine/src/task-runner.ts:612`, `:637`, `:735`, and `:1300` complete or fail the dispatch row from runner outcomes.
 
 ### Competing design: immediate in-process execution
 
@@ -45,7 +45,7 @@ Run from the repository root unless a command explicitly changes directory.
 
 ```sh
 cd packages/app
-pnpm exec vitest run src/__tests__/app-layer-handoff-repro.test.ts
+pnpm test -- src/__tests__/app-layer-handoff-repro.test.ts
 ```
 
 Expected output threshold:
@@ -66,7 +66,7 @@ Expected output threshold:
 Observed on 2026-06-21:
 
 ```text
-✓ src/__tests__/app-layer-handoff-repro.test.ts (8 tests) 31ms
+✓ src/__tests__/app-layer-handoff-repro.test.ts (8 tests) 634ms
 
 Test Files  1 passed (1)
      Tests  8 passed (8)
@@ -103,10 +103,10 @@ Expected output threshold:
 Observed on 2026-06-21:
 
 ```text
-2345:  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-command');
-2377:  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-prompt');
-2419:  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-type');
-2455:  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-agent');
+2347:  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-command');
+2379:  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-prompt');
+2421:  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-type');
+2457:  await dispatchHeadlessRunnableTasks(deps, taskExecutor, runnable, 'edit-task-agent');
 ```
 
 Verdict: pass. The app-layer mutation paths exercised by the repro use the dispatcher helper.
@@ -127,10 +127,10 @@ Observed on 2026-06-21:
 
 ```text
 packages/app/src/launch-dispatcher.ts:175:        .executeTask(task, { dispatchId: leased.id, launchOutbox: this })
-packages/execution-engine/src/task-runner.ts:611:          const completed = dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
-packages/execution-engine/src/task-runner.ts:636:        dispatchOpts.launchOutbox.failDispatch(dispatchOpts.dispatchId, err);
-packages/execution-engine/src/task-runner.ts:734:          dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
-packages/execution-engine/src/task-runner.ts:1299:      dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
+packages/execution-engine/src/task-runner.ts:612:          const completed = dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
+packages/execution-engine/src/task-runner.ts:637:        dispatchOpts.launchOutbox.failDispatch(dispatchOpts.dispatchId, err);
+packages/execution-engine/src/task-runner.ts:735:          dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
+packages/execution-engine/src/task-runner.ts:1300:      dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
 ```
 
 Verdict: pass. The selected design has a durable dispatch row at handoff and terminal runner callbacks for completion/failure.
