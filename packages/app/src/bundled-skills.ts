@@ -9,6 +9,8 @@ import { resolveInvokerHomeRoot } from './delete-all-snapshot.js';
 
 const MANAGED_PREFIX = 'invoker-';
 const MANIFEST_FILE = 'bundled-skills.json';
+const INSTALL_SKILLS_COMMAND = 'install-skills';
+const INSTALL_SKILLS_FLAG = '--install-skills';
 
 interface BundledSkillsManifest {
   bundledHash: string;
@@ -34,6 +36,10 @@ function resolveBundledSkillsSourceRoot(context: BundledSkillsContext): string |
 
   const repoSkills = path.join(context.repoRoot, 'skills');
   return existsSync(repoSkills) ? repoSkills : null;
+}
+
+export function isBundledSkillsRuntimeInstallCommand(argv: readonly string[]): boolean {
+  return argv.includes(INSTALL_SKILLS_FLAG) || argv.includes(INSTALL_SKILLS_COMMAND);
 }
 
 function listBundledSkillNames(sourceRoot: string): string[] {

@@ -27,6 +27,7 @@ import {
   isStandaloneCapable,
 } from './owner-endpoint.js';
 import { createOwnerResolver } from './owner-resolver.js';
+import { isBundledSkillsRuntimeInstallCommand } from './bundled-skills.js';
 
 const RED = '\x1b[31m';
 const RESET = '\x1b[0m';
@@ -440,13 +441,14 @@ export async function runHeadlessClientCommand(
   const { args, waitForApproval, noTrack } = parseArgs(argv);
   const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1';
   const internalOwnerServe = args[0] === 'owner-serve';
+  const bundledSkillsRuntimeInstall = isBundledSkillsRuntimeInstallCommand(args);
 
   if (!standaloneMode && !internalOwnerServe && await delegateReadOnlyQuery(args, deps.messageBus, deps.refreshMessageBus)) {
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
   }
 
-  if (!isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {
+  if (bundledSkillsRuntimeInstall || !isHeadlessMutatingCommand(args) || standaloneMode || internalOwnerServe) {
     return deps.runElectronHeadless(argv);
   }
 
