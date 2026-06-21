@@ -52,10 +52,11 @@ Expected output threshold:
 
 - Exit code: `0`
 - `Test Files  1 passed (1)`
-- `Tests  7 passed (7)`
-- The seven test names include:
+- `Tests  8 passed (8)`
+- The eight test names include:
   - `edit-task-command records a runnable launch for the outbox`
   - `edit-task-prompt records a runnable launch for the outbox`
+  - `edit-task-type records a runnable launch for the outbox`
   - `edit-task-agent records a runnable launch for the outbox`
   - `set-task-external-gate-policies records the newly unblocked task for the outbox`
   - `replace-task records replacement launches for the outbox`
@@ -65,13 +66,13 @@ Expected output threshold:
 Observed on 2026-06-21:
 
 ```text
-✓ src/__tests__/app-layer-handoff-repro.test.ts (7 tests) 104ms
+✓ src/__tests__/app-layer-handoff-repro.test.ts (8 tests) 31ms
 
 Test Files  1 passed (1)
-     Tests  7 passed (7)
+     Tests  8 passed (8)
 ```
 
-Verdict: pass. The repro covers command, prompt, agent, external gate, replacement, merge branch retry, and standalone-owner merge branch retry handoffs.
+Verdict: pass. The repro covers command, prompt, executor type, agent, external gate, replacement, merge branch retry, and standalone-owner merge branch retry handoffs.
 
 ### 2. Static guard: global top-up does not directly execute runnable batches
 
@@ -138,7 +139,7 @@ Verdict: pass. The selected design has a durable dispatch row at handoff and ter
 
 INV-97 proof is accepted only if all thresholds hold:
 
-- The focused repro test exits `0` with exactly one test file and seven tests passing.
+- The focused repro test exits `0` with exactly one test file and eight tests passing.
 - `global-topup.ts` has no direct runnable-batch `taskExecutor.executeTasks(...)` call.
 - The tested app/headless mutation paths route through `dispatchHeadlessRunnableTasks`.
 - `LaunchDispatcher` calls `TaskRunner.executeTask` with `dispatchId` and `launchOutbox`.
@@ -146,4 +147,4 @@ INV-97 proof is accepted only if all thresholds hold:
 
 ## Final verdict
 
-The selected durable launch-outbox design is better supported than immediate in-process execution for the INV-97 app-layer handoff. The test demonstrates the observable contract: mutation paths return runnable work for the outbox, do not pre-assign a fresh workspace for normal task relaunches, preserve merge retry workspace metadata, and avoid unintended global top-up. The static guards tie that behavior to the architecture: app refill avoids direct execution, headless edit paths poll a local dispatcher, the dispatcher owns the lease, and the runner terminates the dispatch row.
+The selected durable launch-outbox design is better supported than immediate in-process execution for the INV-97 app-layer handoff. The test demonstrates the observable contract: mutation paths return runnable work for the outbox, edit executor type without direct in-process launch, do not pre-assign a fresh workspace for normal task relaunches, preserve merge retry workspace metadata, and avoid unintended global top-up. The static guards tie that behavior to the architecture: app refill avoids direct execution, headless edit paths poll a local dispatcher, the dispatcher owns the lease, and the runner terminates the dispatch row.
