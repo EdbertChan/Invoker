@@ -514,6 +514,28 @@ export class TaskRunner {
     await Promise.all(tasks.map((task) => this.executeTask(task)));
   }
 
+  async waitForIdle(timeoutMs = 30_000): Promise<void> {
+    const startedAt = Date.now();
+    while (true) {
+      const chain = this.completionChain;
+      await chain;
+      if (
+        this.activeExecutions.size === 0
+        && this.launchingAttemptIds.size === 0
+        && this.completionChain === chain
+      ) {
+        return;
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error(
+          `Timed out waiting for TaskRunner to become idle ` +
+          `(active=${this.activeExecutions.size}, launching=${this.launchingAttemptIds.size})`,
+        );
+      }
+      await new Promise((resolveTimer) => setTimeout(resolveTimer, 25));
+    }
+  }
+
   private executeNewlyStartedTasks(
     tasks: TaskState[],
     dispatchOpts?: LaunchDispatchOptions,

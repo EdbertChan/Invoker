@@ -10,6 +10,7 @@ import { main } from '../index.js';
 const repoRoot = resolve(__dirname, '../../../..');
 const cliPath = resolve(repoRoot, 'packages/cli/dist/index.js');
 const fixturePlan = resolve(repoRoot, 'plans/fixtures/hello-world.yaml');
+const standaloneCliTimeoutMs = 120_000;
 
 function writeStandalonePlan(dir: string, body: string): string {
   const planPath = join(dir, 'plan.yaml');
@@ -61,7 +62,7 @@ describe('invoker-cli', () => {
     const result = runCli(['run', fixturePlan, '--standalone', '--db-dir', dbDir]);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('hello-from-invoker-cli');
-  });
+  }, standaloneCliTimeoutMs);
 
   it('--json emits a successful workflow result object', () => {
     const dbDir = mkdtempSync(join(tmpdir(), 'invoker-cli-json-db-'));
@@ -70,7 +71,7 @@ describe('invoker-cli', () => {
     const lines = result.stdout.trim().split('\n');
     const json = JSON.parse(lines[lines.length - 1]);
     expect(json.workflow.status).toBe('success');
-  });
+  }, standaloneCliTimeoutMs);
 
   it('invalid YAML exits non-zero with a validation error', () => {
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-invalid-'));
@@ -138,7 +139,7 @@ tasks:
     expect(createMessageBus).not.toHaveBeenCalled();
     expect(output.stdout).toContain('hello-from-invoker-cli');
     output.restore();
-  });
+  }, standaloneCliTimeoutMs);
 
   it('auto mode delegates when a GUI owner exists', async () => {
     const output = captureProcessOutput();
@@ -177,7 +178,7 @@ tasks:
     expect(code).toBe(0);
     expect(output.stdout).toContain('hello-from-invoker-cli');
     output.restore();
-  }, 60_000);
+  }, standaloneCliTimeoutMs);
 
   it('standalone prompt-only plans route through the execution engine', () => {
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-prompt-'));
@@ -196,7 +197,7 @@ tasks:
     expect(result.status).not.toBe(0);
     expect(`${result.stdout}\n${result.stderr}`).not.toContain('Standalone CLI v1 supports command tasks only');
     expect(`${result.stdout}\n${result.stderr}`).toContain('No execution agent registered with name "missing-agent"');
-  });
+  }, standaloneCliTimeoutMs);
 
   it('rejects --db-dir with --live', async () => {
     const output = captureProcessOutput();

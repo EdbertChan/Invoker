@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .invoker/
+.invoker-test-all/
 *.db
 .env*
 .DS_Store

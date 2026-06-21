@@ -487,6 +487,7 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
 
     const workflow = persistence.listWorkflows()[0];
     const tasks = workflow ? await waitForWorkflowToSettle(orchestrator, workflow.id) : [];
+    await taskRunner.waitForIdle();
     const failedTasks = tasks.filter((task) => task.status === 'failed').length;
     const completedTasks = tasks.filter((task) => task.status === 'completed').length;
     return {
@@ -582,8 +583,17 @@ export async function main(argv: string[] = process.argv.slice(2), deps: CliDeps
   }
 }
 
+async function flushStandardStreams(): Promise<void> {
+  await Promise.all([
+    new Promise<void>((resolveFlush) => process.stdout.write('', () => resolveFlush())),
+    new Promise<void>((resolveFlush) => process.stderr.write('', () => resolveFlush())),
+  ]);
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  void main().then((exitCode) => {
+  void main().then(async (exitCode) => {
     process.exitCode = exitCode;
+    await flushStandardStreams();
+    process.exit(exitCode);
   });
 }
