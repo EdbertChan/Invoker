@@ -24,10 +24,11 @@ export class MergeGateExecutor extends BaseExecutor<MergeGateEntry> {
       ? this.host.persistence.loadWorkflow(task.config.workflowId)
       : undefined;
     let workspacePath: string | undefined;
-    const needsGateWorkspace = Boolean(
-      workflow?.featureBranch
-        && ((workflow.onFinish ?? 'none') !== 'none' || workflow.mergeMode === 'external_review'),
-    );
+    const needsGateWorkspace = workflow !== undefined
+      && Boolean(
+        workflow.featureBranch
+          && ((workflow.onFinish ?? 'none') !== 'none' || workflow.mergeMode === 'external_review'),
+      );
     if (needsGateWorkspace) {
       const baseBranch = workflow.baseBranch ?? this.host.defaultBranch ?? await this.host.detectDefaultBranch();
       const baseCheckoutRef = normalizeBranchForGithubCli(baseBranch);
