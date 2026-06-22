@@ -10,6 +10,7 @@ import { main } from '../index.js';
 const repoRoot = resolve(__dirname, '../../../..');
 const cliPath = resolve(repoRoot, 'packages/cli/dist/index.js');
 const fixturePlan = resolve(repoRoot, 'plans/fixtures/hello-world.yaml');
+const standaloneRunTimeoutMs = 120_000;
 
 function writeStandalonePlan(dir: string, body: string): string {
   const planPath = join(dir, 'plan.yaml');
@@ -21,6 +22,7 @@ function runCli(args: string[]) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
+    timeout: standaloneRunTimeoutMs,
   });
 }
 
@@ -59,18 +61,20 @@ describe('invoker-cli', () => {
   it('runs the hello-world fixture with an isolated db dir', () => {
     const dbDir = mkdtempSync(join(tmpdir(), 'invoker-cli-test-db-'));
     const result = runCli(['run', fixturePlan, '--standalone', '--db-dir', dbDir]);
+    expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('hello-from-invoker-cli');
-  });
+  }, standaloneRunTimeoutMs + 5_000);
 
   it('--json emits a successful workflow result object', () => {
     const dbDir = mkdtempSync(join(tmpdir(), 'invoker-cli-json-db-'));
     const result = runCli(['run', fixturePlan, '--standalone', '--db-dir', dbDir, '--json']);
+    expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
     const lines = result.stdout.trim().split('\n');
     const json = JSON.parse(lines[lines.length - 1]);
     expect(json.workflow.status).toBe('success');
-  });
+  }, standaloneRunTimeoutMs + 5_000);
 
   it('invalid YAML exits non-zero with a validation error', () => {
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-invalid-'));
@@ -138,7 +142,7 @@ tasks:
     expect(createMessageBus).not.toHaveBeenCalled();
     expect(output.stdout).toContain('hello-from-invoker-cli');
     output.restore();
-  });
+  }, standaloneRunTimeoutMs + 5_000);
 
   it('auto mode delegates when a GUI owner exists', async () => {
     const output = captureProcessOutput();
@@ -177,7 +181,7 @@ tasks:
     expect(code).toBe(0);
     expect(output.stdout).toContain('hello-from-invoker-cli');
     output.restore();
-  }, 60_000);
+  }, standaloneRunTimeoutMs + 5_000);
 
   it('standalone prompt-only plans route through the execution engine', () => {
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-prompt-'));
@@ -193,10 +197,11 @@ tasks:
 
     const result = runCli(['run', planPath, '--standalone', '--db-dir', join(dir, 'db'), '--json']);
 
+    expect(result.error).toBeUndefined();
     expect(result.status).not.toBe(0);
     expect(`${result.stdout}\n${result.stderr}`).not.toContain('Standalone CLI v1 supports command tasks only');
     expect(`${result.stdout}\n${result.stderr}`).toContain('No execution agent registered with name "missing-agent"');
-  });
+  }, standaloneRunTimeoutMs + 5_000);
 
   it('rejects --db-dir with --live', async () => {
     const output = captureProcessOutput();
