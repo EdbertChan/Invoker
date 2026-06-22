@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
+import { once } from 'node:events';
 import type { Logger } from '@invoker/contracts';
 import { SQLiteAdapter, SqliteTaskRepository } from '@invoker/data-store';
 import {
@@ -435,10 +436,12 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
     ownerCapability: true,
     outputDir: join(dbDir, 'outputs'),
   });
+  let executorRegistry: ExecutorRegistry | undefined;
+  let taskRunner: TaskRunner | undefined;
 
   try {
     const executionAgentRegistry = registerBuiltinAgents();
-    const executorRegistry = new ExecutorRegistry();
+    executorRegistry = new ExecutorRegistry();
     executorRegistry.register('worktree', new WorktreeExecutor({
       worktreeBaseDir: join(dbDir, 'worktrees'),
       cacheDir: join(dbDir, 'repos'),
@@ -455,7 +458,7 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
       defaultPoolId: runtimeConfig.defaultPoolId,
       availablePoolIds: Object.keys(runtimeConfig.executionPools ?? {}),
     });
-    const taskRunner = new TaskRunner({
+    taskRunner = new TaskRunner({
       orchestrator,
       persistence,
       executorRegistry,
@@ -487,6 +490,7 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
 
     const workflow = persistence.listWorkflows()[0];
     const tasks = workflow ? await waitForWorkflowToSettle(orchestrator, workflow.id) : [];
+    await taskRunner.waitForIdle();
     const failedTasks = tasks.filter((task) => task.status === 'failed').length;
     const completedTasks = tasks.filter((task) => task.status === 'completed').length;
     return {
@@ -501,6 +505,13 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
       delete process.env.INVOKER_DB_DIR;
     } else {
       process.env.INVOKER_DB_DIR = previousInvokerDbDir;
+    }
+    if (taskRunner) {
+      await taskRunner.waitForIdle().catch(() => {});
+      await taskRunner.clearSshExecutorCache().catch(() => {});
+    }
+    if (executorRegistry) {
+      await Promise.all(executorRegistry.getAll().map((executor) => executor.destroyAll().catch(() => {})));
     }
     persistence.close();
   }
@@ -583,7 +594,14 @@ export async function main(argv: string[] = process.argv.slice(2), deps: CliDeps
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  void main().then((exitCode) => {
+  void main().then(async (exitCode) => {
     process.exitCode = exitCode;
+    if (process.stdout.writableNeedDrain) {
+      await once(process.stdout, 'drain').catch(() => {});
+    }
+    if (process.stderr.writableNeedDrain) {
+      await once(process.stderr, 'drain').catch(() => {});
+    }
+    process.exit(exitCode);
   });
 }

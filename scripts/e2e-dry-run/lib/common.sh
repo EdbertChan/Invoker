@@ -77,6 +77,7 @@ invoker_e2e_init() {
   # Isolate each e2e run from other local Invoker instances/tests to avoid API port collisions.
   export INVOKER_API_PORT="${INVOKER_API_PORT:-$((4300 + (RANDOM % 1000)))}"
   export INVOKER_DB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/invoker-e2e-db.XXXXXX")"
+  export INVOKER_USER_DATA_DIR="${INVOKER_USER_DATA_DIR:-$INVOKER_DB_DIR/electron-user-data}"
   export INVOKER_IPC_SOCKET="${INVOKER_IPC_SOCKET:-$INVOKER_DB_DIR/ipc-transport.sock}"
   export INVOKER_E2E_MARKER_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/invoker-e2e-marker.XXXXXX")"
   # Template must end with XXXXXX (suffix after X breaks BSD mktemp and can flake).
@@ -188,7 +189,7 @@ invoker_e2e_cleanup() {
   invoker_e2e_kill_owned_headless_processes
   # Clean up worktrees created during the test.
   git -C "$INVOKER_E2E_REPO_ROOT" worktree prune 2>/dev/null || true
-  rm -rf "${INVOKER_DB_DIR:-}" "${INVOKER_E2E_MARKER_ROOT:-}" "${INVOKER_E2E_STUB_DIR:-}" 2>/dev/null || true
+  rm -rf "${INVOKER_DB_DIR:-}" "${INVOKER_USER_DATA_DIR:-}" "${INVOKER_E2E_MARKER_ROOT:-}" "${INVOKER_E2E_STUB_DIR:-}" 2>/dev/null || true
   rm -f "${INVOKER_REPO_CONFIG_PATH:-}" 2>/dev/null || true
 
   # Restore original PATH so claude/gh/codex stubs never leak into user shells.

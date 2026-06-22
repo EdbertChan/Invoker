@@ -21,6 +21,7 @@ done
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/invoker-repro-recreate-task-queue.XXXXXX")"
 HOME_DIR="$TMP_DIR/home"
 DB_DIR="$HOME_DIR/.invoker"
+USER_DATA_DIR="$TMP_DIR/electron-user-data"
 PLAN_PATH="$TMP_DIR/repro-plan.yaml"
 CONFIG_PATH="$DB_DIR/config.json"
 REPO_FIXTURE_DIR="$TMP_DIR/repro-repo"
@@ -59,7 +60,8 @@ query_sqlite_value() {
 }
 
 query_action_graph_value() {
-  HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test \
+  env -u INVOKER_HEADLESS_STANDALONE \
+    HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test \
     node "$HEADLESS_CLIENT_JS" query action-graph --output json 2>/dev/null \
     | node "$ROOT_DIR/scripts/repro/action-graph-query.mjs" "$@"
 }
@@ -116,7 +118,7 @@ wait_for_owner_ready() {
   local started_at
   started_at="$(date +%s)"
   while true; do
-    if [[ -S "$IPC_SOCKET_PATH" ]] || grep -q 'owner-ipc-ready' "$DB_DIR/invoker.log" 2>/dev/null; then
+    if grep -q 'owner-ipc-ready' "$DB_DIR/invoker.log" 2>/dev/null; then
       return 0
     fi
     if (( $(date +%s) - started_at >= timeout )); then
@@ -131,6 +133,8 @@ mkdir -p "$DB_DIR" "$REPO_FIXTURE_DIR"
 
 pushd "$ROOT_DIR" >/dev/null
 export INVOKER_SQLITE_FLUSH_DEBOUNCE_MS=0
+export INVOKER_GUI_OWNER_MODE=gui
+export INVOKER_USER_DATA_DIR="$USER_DATA_DIR"
 
 if [[ ! -f packages/app/dist/main.js ]]; then
   pnpm --filter @invoker/app build >/dev/null
@@ -167,7 +171,8 @@ tasks:
       bash -lc 'sleep 20'
 EOF
 
-HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test \
+env -u INVOKER_HEADLESS_STANDALONE \
+  HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test \
   "$ELECTRON_BIN" "$MAIN_JS" >"$OWNER_STDOUT" 2>"$OWNER_STDERR" &
 OWNER_PID=$!
 
@@ -187,7 +192,8 @@ fi
 wait_for_owner_ready 20
 
 set +e
-HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" --no-track run "$PLAN_PATH" \
+env -u INVOKER_HEADLESS_STANDALONE \
+  HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" --no-track run "$PLAN_PATH" \
   >"$SUBMIT_STDOUT" 2>"$SUBMIT_STDERR"
 SUBMIT_STATUS=$?
 set -e
@@ -202,7 +208,8 @@ WORKFLOW_ID="$(
 
 if [[ -z "${WORKFLOW_ID:-}" ]]; then
   for _ in {1..100}; do
-    WORKFLOW_ID="$(HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" query workflows --output label 2>/dev/null | tail -n1)"
+    WORKFLOW_ID="$(env -u INVOKER_HEADLESS_STANDALONE \
+      HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" query workflows --output label 2>/dev/null | tail -n1)"
     [[ -n "${WORKFLOW_ID:-}" ]] && break
     sleep 0.1
   done
@@ -226,7 +233,8 @@ echo "workflow: $WORKFLOW_ID"
 echo "completed target task: $TARGET_ID"
 echo "running blocker task: $BLOCKER_ID"
 
-HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" recreate-task "$BLOCKER_ID" \
+env -u INVOKER_HEADLESS_STANDALONE \
+  HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" recreate-task "$BLOCKER_ID" \
   >"$BLOCKER_RECREATE_STDOUT" 2>"$BLOCKER_RECREATE_STDERR" &
 BLOCKER_RECREATE_PID=$!
 
@@ -247,7 +255,8 @@ fi
 
 wait_for_intent_status "$BLOCKER_RECREATE_INTENT_ID" "running" 15
 
-HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" recreate-task "$TARGET_ID" \
+env -u INVOKER_HEADLESS_STANDALONE \
+  HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test node "$HEADLESS_CLIENT_JS" recreate-task "$TARGET_ID" \
   >"$TARGET_RECREATE_STDOUT" 2>"$TARGET_RECREATE_STDERR" &
 TARGET_RECREATE_PID=$!
 

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { LocalBus } from '@invoker/transport';
@@ -10,11 +10,32 @@ import { main } from '../index.js';
 const repoRoot = resolve(__dirname, '../../../..');
 const cliPath = resolve(repoRoot, 'packages/cli/dist/index.js');
 const fixturePlan = resolve(repoRoot, 'plans/fixtures/hello-world.yaml');
+const CLI_INTEGRATION_TIMEOUT_MS = 90_000;
 
 function writeStandalonePlan(dir: string, body: string): string {
   const planPath = join(dir, 'plan.yaml');
-  writeFileSync(planPath, body.replace('__REPO_ROOT__', JSON.stringify(repoRoot)), 'utf8');
+  const repoPath = createTinyRepo(dir);
+  writeFileSync(planPath, body.replace('__REPO_URL__', JSON.stringify(repoPath)), 'utf8');
   return planPath;
+}
+
+function createTinyRepo(dir: string): string {
+  const repoPath = join(dir, 'repo');
+  mkdirSync(repoPath, { recursive: true });
+  runGit(repoPath, ['init', '-b', 'master']);
+  runGit(repoPath, ['config', 'user.email', 'invoker-cli-test@example.com']);
+  runGit(repoPath, ['config', 'user.name', 'Invoker CLI Test']);
+  writeFileSync(join(repoPath, 'README.md'), 'tiny cli test repo\n', 'utf8');
+  runGit(repoPath, ['add', 'README.md']);
+  runGit(repoPath, ['commit', '-m', 'init']);
+  return repoPath;
+}
+
+function runGit(cwd: string, args: string[]): void {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
+  }
 }
 
 function runCli(args: string[]) {
@@ -57,20 +78,38 @@ describe('invoker-cli', () => {
   });
 
   it('runs the hello-world fixture with an isolated db dir', () => {
-    const dbDir = mkdtempSync(join(tmpdir(), 'invoker-cli-test-db-'));
-    const result = runCli(['run', fixturePlan, '--standalone', '--db-dir', dbDir]);
+    const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-test-'));
+    const dbDir = join(dir, 'db');
+    const planPath = writeStandalonePlan(dir, `name: CLI fixture
+repoUrl: __REPO_URL__
+onFinish: none
+tasks:
+  - id: hello
+    description: Print hello from the standalone CLI.
+    command: echo hello-from-invoker-cli
+`);
+    const result = runCli(['run', planPath, '--standalone', '--db-dir', dbDir]);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('hello-from-invoker-cli');
-  });
+  }, CLI_INTEGRATION_TIMEOUT_MS);
 
   it('--json emits a successful workflow result object', () => {
-    const dbDir = mkdtempSync(join(tmpdir(), 'invoker-cli-json-db-'));
-    const result = runCli(['run', fixturePlan, '--standalone', '--db-dir', dbDir, '--json']);
+    const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-json-'));
+    const dbDir = join(dir, 'db');
+    const planPath = writeStandalonePlan(dir, `name: CLI JSON
+repoUrl: __REPO_URL__
+onFinish: none
+tasks:
+  - id: hello
+    description: Print hello from the standalone CLI.
+    command: echo hello-from-invoker-cli
+`);
+    const result = runCli(['run', planPath, '--standalone', '--db-dir', dbDir, '--json']);
     expect(result.status).toBe(0);
     const lines = result.stdout.trim().split('\n');
     const json = JSON.parse(lines[lines.length - 1]);
     expect(json.workflow.status).toBe('success');
-  });
+  }, CLI_INTEGRATION_TIMEOUT_MS);
 
   it('invalid YAML exits non-zero with a validation error', () => {
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-invalid-'));
@@ -118,7 +157,7 @@ describe('invoker-cli', () => {
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-standalone-'));
     const dbDir = join(dir, 'db');
     const planPath = writeStandalonePlan(dir, `name: Standalone in process
-repoUrl: __REPO_ROOT__
+repoUrl: __REPO_URL__
 onFinish: none
 tasks:
   - id: hello
@@ -138,7 +177,7 @@ tasks:
     expect(createMessageBus).not.toHaveBeenCalled();
     expect(output.stdout).toContain('hello-from-invoker-cli');
     output.restore();
-  });
+  }, CLI_INTEGRATION_TIMEOUT_MS);
 
   it('auto mode delegates when a GUI owner exists', async () => {
     const output = captureProcessOutput();
@@ -161,7 +200,7 @@ tasks:
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-auto-'));
     const dbDir = join(dir, 'db');
     const planPath = writeStandalonePlan(dir, `name: Auto fallback in process
-repoUrl: __REPO_ROOT__
+repoUrl: __REPO_URL__
 onFinish: none
 tasks:
   - id: hello
@@ -177,12 +216,12 @@ tasks:
     expect(code).toBe(0);
     expect(output.stdout).toContain('hello-from-invoker-cli');
     output.restore();
-  }, 60_000);
+  }, CLI_INTEGRATION_TIMEOUT_MS);
 
   it('standalone prompt-only plans route through the execution engine', () => {
     const dir = mkdtempSync(join(tmpdir(), 'invoker-cli-prompt-'));
     const planPath = writeStandalonePlan(dir, `name: Prompt-only standalone
-repoUrl: __REPO_ROOT__
+repoUrl: __REPO_URL__
 onFinish: none
 tasks:
   - id: prompt
@@ -196,7 +235,7 @@ tasks:
     expect(result.status).not.toBe(0);
     expect(`${result.stdout}\n${result.stderr}`).not.toContain('Standalone CLI v1 supports command tasks only');
     expect(`${result.stdout}\n${result.stderr}`).toContain('No execution agent registered with name "missing-agent"');
-  });
+  }, CLI_INTEGRATION_TIMEOUT_MS);
 
   it('rejects --db-dir with --live', async () => {
     const output = captureProcessOutput();

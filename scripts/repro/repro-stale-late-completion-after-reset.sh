@@ -70,13 +70,42 @@ wait_for_query_status() {
 
 query_sqlite_value() {
   local sql="$1"
-  node "$ROOT_DIR/scripts/repro/sqljs-query.mjs" "$DB_DIR/invoker.db" "$sql"
+  sqlite3 -noheader "$DB_DIR/invoker.db" "$sql"
+}
+
+sql_quote() {
+  printf "%s" "$1" | sed "s/'/''/g"
 }
 
 query_action_graph_value() {
-  HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test \
-    node "$HEADLESS_CLIENT_JS" query action-graph --output json 2>/dev/null \
-    | node "$ROOT_DIR/scripts/repro/action-graph-query.mjs" "$@"
+  local command="$1"
+  shift
+  case "$command" in
+    task-status)
+      local task_id
+      task_id="$(sql_quote "$1")"
+      query_sqlite_value "select coalesce(status, '') from tasks where id = '$task_id' limit 1;" 2>/dev/null || true
+      ;;
+    task-event-time-since)
+      local task_id event_type since
+      task_id="$(sql_quote "$1")"
+      event_type="$(sql_quote "$2")"
+      since="$(sql_quote "$3")"
+      query_sqlite_value "select coalesce((select created_at from events where task_id = '$task_id' and event_type = '$event_type' and datetime(created_at) >= datetime('$since') order by datetime(created_at) asc limit 1), '');" 2>/dev/null || true
+      ;;
+    task-event-count-between)
+      local task_id event_type after before
+      task_id="$(sql_quote "$1")"
+      event_type="$(sql_quote "$2")"
+      after="$(sql_quote "$3")"
+      before="$(sql_quote "$4")"
+      query_sqlite_value "select count(*) from events where task_id = '$task_id' and event_type = '$event_type' and datetime(created_at) > datetime('$after') and datetime(created_at) < datetime('$before');" 2>/dev/null || true
+      ;;
+    *)
+      echo "repro: unsupported direct query: $command" >&2
+      return 2
+      ;;
+  esac
 }
 
 sqlite_schema_ready() {
@@ -94,7 +123,8 @@ submit_workflow_with_retry() {
     : >"$SUBMIT_STDOUT"
     : >"$SUBMIT_STDERR"
     set +e
-    HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless --no-track run "$PLAN_PATH" \
+    env -u INVOKER_HEADLESS_STANDALONE \
+      HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless --no-track run "$PLAN_PATH" \
       >"$SUBMIT_STDOUT" 2>"$SUBMIT_STDERR"
     local submit_status=$?
     set -e
@@ -133,6 +163,7 @@ run_mode() {
   PLAN_PATH="$TMP_DIR/repro-plan.yaml"
   CONFIG_PATH="$DB_DIR/config.json"
   IPC_SOCKET_PATH="$DB_DIR/repro-ipc.sock"
+  USER_DATA_DIR="$TMP_DIR/electron-user-data"
   REPO_FIXTURE_DIR="$TMP_DIR/repro-repo"
   GUI_STDOUT="$TMP_DIR/gui.stdout.log"
   GUI_STDERR="$TMP_DIR/gui.stderr.log"
@@ -178,7 +209,10 @@ tasks:
     dependencies: [mid]
 EOF
 
-  HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" >"$GUI_STDOUT" 2>"$GUI_STDERR" &
+  env -u INVOKER_HEADLESS_STANDALONE \
+    HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" \
+    INVOKER_GUI_OWNER_MODE=gui INVOKER_USER_DATA_DIR="$USER_DATA_DIR" NODE_ENV=test \
+    "$ELECTRON_BIN" "$MAIN_JS" >"$GUI_STDOUT" 2>"$GUI_STDERR" &
   GUI_WRAPPER_PID=$!
 
   for _ in {1..200}; do
@@ -215,12 +249,14 @@ EOF
 
   case "$mode" in
     recreate)
-      HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless recreate "$WORKFLOW_ID" \
+      env -u INVOKER_HEADLESS_STANDALONE \
+        HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless recreate "$WORKFLOW_ID" \
         >"$RESET_STDOUT" 2>"$RESET_STDERR" &
       RESET_WRAPPER_PID=$!
       ;;
     retry-task)
-      HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless retry-task "$PREPARE_ID" \
+      env -u INVOKER_HEADLESS_STANDALONE \
+        HOME="$HOME_DIR" INVOKER_DB_DIR="$DB_DIR" INVOKER_IPC_SOCKET="$IPC_SOCKET_PATH" NODE_ENV=test "$ELECTRON_BIN" "$MAIN_JS" --headless retry-task "$PREPARE_ID" \
         >"$RESET_STDOUT" 2>"$RESET_STDERR" &
       RESET_WRAPPER_PID=$!
       ;;

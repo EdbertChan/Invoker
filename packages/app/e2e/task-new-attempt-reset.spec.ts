@@ -1,11 +1,12 @@
 import { test as base, _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SQLiteAdapter } from '@invoker/data-store';
 import { stringify as yamlStringify } from 'yaml';
-import { E2E_REPO_URL } from './fixtures/electron-app.js';
+import { E2E_BARE_REPO, E2E_REPO_URL } from './fixtures/electron-app.js';
 
 const MAIN_JS = path.resolve(__dirname, '..', 'dist', 'main.js');
 
@@ -108,10 +109,6 @@ async function closeApp(app: ElectronApplication): Promise<void> {
   }
 }
 
-async function waitForOwnerCloseSettle(): Promise<void> {
-  await delay(1_500);
-}
-
 async function waitForStandaloneOwnerExit(): Promise<void> {
   await delay(6_000);
 }
@@ -132,9 +129,49 @@ async function cleanupWorkflow(page: Page | undefined): Promise<void> {
   }).catch(() => undefined);
 }
 
+async function seedCompletedTask(
+  dbPath: string,
+  taskId: string,
+  completedAt: Date,
+  upstream: { branch: string; commit: string },
+): Promise<void> {
+  const adapter = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+  try {
+    const attemptId = `${taskId}-completed-attempt`;
+    adapter.saveAttempt({
+      id: attemptId,
+      nodeId: taskId,
+      queuePriority: 0,
+      upstreamAttemptIds: [],
+      status: 'completed',
+      claimedAt: completedAt,
+      startedAt: completedAt,
+      completedAt,
+      exitCode: 0,
+      branch: upstream.branch,
+      commit: upstream.commit,
+      createdAt: completedAt,
+    });
+    adapter.updateTask(taskId, {
+      status: 'completed',
+      execution: {
+        selectedAttemptId: attemptId,
+        startedAt: completedAt,
+        completedAt,
+        exitCode: 0,
+        branch: upstream.branch,
+        commit: upstream.commit,
+      },
+    });
+  } finally {
+    adapter.close();
+  }
+}
+
 async function seedStaleLaunchAttempt(dbPath: string, taskId: string, attemptId: string, staleAt: Date): Promise<void> {
   const adapter = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
   try {
+    const leaseExpiresAt = new Date(Date.now() + 60_000);
     adapter.saveAttempt({
       id: attemptId,
       nodeId: taskId,
@@ -144,6 +181,7 @@ async function seedStaleLaunchAttempt(dbPath: string, taskId: string, attemptId:
       claimedAt: staleAt,
       startedAt: staleAt,
       lastHeartbeatAt: staleAt,
+      leaseExpiresAt,
       branch: 'stale-branch',
       commit: 'stale-commit',
       workspacePath: '/tmp/stale-workspace',
@@ -194,12 +232,21 @@ base.describe('Task new-attempt reset repro', () => {
       });
       await page.evaluate((planYaml) => window.invoker.loadPlan(planYaml), yamlStringify(RESET_PLAN));
 
-      const loaded = await waitForTask(page, 'slow-task', (task) => task.status === 'pending');
+      const loaded = await waitForTask(
+        page,
+        'slow-task',
+        (task) => task.status === 'pending',
+      );
+      const dependency = await waitForTask(page, 'fast-task', (task) => task.status === 'pending');
       const oldAttemptId = `${loaded.id}-old-attempt`;
       const staleTs = '2025-01-01T00:00:00.000Z';
       await closeApp(app);
       app = undefined;
-      await waitForOwnerCloseSettle();
+      await waitForStandaloneOwnerExit();
+      const baseCommit = execFileSync('git', ['--git-dir', E2E_BARE_REPO, 'rev-parse', 'refs/heads/main'], {
+        encoding: 'utf8',
+      }).trim();
+      await seedCompletedTask(dbPath, dependency.id, new Date(staleTs), { branch: 'main', commit: baseCommit });
       await seedStaleLaunchAttempt(dbPath, loaded.id, oldAttemptId, new Date(staleTs));
 
       const relaunchedApp = await launchApp(testDir, configPath);

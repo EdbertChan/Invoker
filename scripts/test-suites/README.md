@@ -29,6 +29,7 @@ The orchestrator is **`scripts/run-all-tests.sh`**, invoked as **`pnpm run test:
 | `INVOKER_TEST_ALL_FAIL_FAST=1` | Stop after the first failing suite |
 | `INVOKER_TEST_ALL_RESUME=1` | Resume from saved per-suite state for the current mode |
 | `INVOKER_TEST_ALL_FORCE_RERUN=1` | Ignore saved state and rerun every discovered suite |
+| `INVOKER_TEST_ALL_ARTIFACT_ROOT=/path/to/dir` | Override the checkout-local directory used for runner state and logs |
 | `INVOKER_TEST_ALL_STATE_FILE=/path/to/state.tsv` | Override the state file location |
 | `INVOKER_TEST_ALL_JOBS=2` | Allow explicitly tagged parallel-safe suites to overlap |
 | `INVOKER_TEST_ALL_EXCLUDE='required/foo.sh,required/bar.sh'` | Skip suites that already run as separate CI jobs while keeping proof inventory accounting |

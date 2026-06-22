@@ -20,6 +20,10 @@ Keep the owner fallback local.
 
 - behavior
 
+## Review Unit
+
+- validation-policy
+
 ## Safety Invariant
 
 Only the refresh path changes.
@@ -55,6 +59,10 @@ Route refresh through one helper.
 ## Review Lane
 
 - behavior
+
+## Review Unit
+
+- routing
 
 ## Safety Invariant
 
@@ -129,6 +137,10 @@ One claim.
 
 - behavior
 
+## Review Unit
+
+- validation-policy
+
 ## Safety Invariant
 
 Local only.
@@ -161,6 +173,10 @@ One claim.
 ## Review Lane
 
 - behavior
+
+## Review Unit
+
+- validation-policy
 
 ## Safety Invariant
 
@@ -246,6 +262,10 @@ Auto-fix recovery can scan persisted failed tasks and enqueue the normal fix int
 
 - behavior
 
+## Review Unit
+
+- validation-policy
+
 ## Safety Invariant
 
 The policy only submits through the existing mutation route and skips stale or already queued candidates.
@@ -289,6 +309,10 @@ The recovery worker owns auto-fix recovery end to end.
 
 - behavior
 
+## Review Unit
+
+- validation-policy
+
 ## Safety Invariant
 
 Every submitted fix still goes through the existing mutation route.
@@ -329,6 +353,10 @@ One claim.
 ## Review Lane
 
 - behavior
+
+## Review Unit
+
+- validation-policy
 
 ## Safety Invariant
 
@@ -436,15 +464,19 @@ assert(
 
 const refactorBody = `## Summary
 
-Extract a helper first.
+Route refresh events through one helper.
 
 ## Review Claim
 
-Move refresh logic into a helper module.
+Route refresh handling through a shared dispatcher.
 
 ## Review Lane
 
 - refactor
+
+## Review Unit
+
+- routing
 
 ## Safety Invariant
 
@@ -452,7 +484,7 @@ Behavior stays unchanged.
 
 ## Slice Rationale
 
-Field additions land in a later behavior PR.
+Routing stays behavior-equivalent while the helper boundary changes.
 
 ## Non-goals
 
@@ -471,12 +503,12 @@ Field additions land in a later behavior PR.
 - Data migration? No
 `;
 assert(
-  validatePrBody(refactorBody, { changedFiles: ['packages/app/src/main.ts', 'packages/app/src/refresh-task-graph.ts'] }).length === 0,
+  validatePrBody(refactorBody, { changedFiles: ['packages/app/src/main.ts'] }).length === 0,
   'refactor lane with explicit no-behavior non-goals should pass for product-only files',
 );
 
 const refactorNonGoalErrors = validatePrBody(refactorBody.replace('No behavior change.', 'No docs changes.'), {
-  changedFiles: ['packages/app/src/main.ts', 'packages/app/src/refresh-task-graph.ts'],
+  changedFiles: ['packages/app/src/main.ts'],
 });
 assert(
   refactorNonGoalErrors.some((error) => error.includes('Review lane refactor must state in ## Non-goals that behavior stays unchanged')),
@@ -494,6 +526,10 @@ Reject stale auto-fix recovery candidates before submission.
 ## Review Lane
 
 - behavior
+
+## Review Unit
+
+- validation-policy
 
 ## Safety Invariant
 

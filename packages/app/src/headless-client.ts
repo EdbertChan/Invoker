@@ -94,6 +94,7 @@ const READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 8_000;
 const POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS = 3;
 const DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS = 60_000;
+const HEADLESS_DELEGATION_REQUEST_DEADLINE_MS = 120_000;
 
 function standaloneOwnerBootstrapTimeoutMs(): number {
   const raw = process.env.INVOKER_HEADLESS_OWNER_BOOTSTRAP_TIMEOUT_MS;
@@ -391,10 +392,16 @@ export async function runHeadlessClientCommand(
 }
 
 export async function runHeadlessClient(argv: string[]): Promise<number> {
-  let bus = new IpcBus(undefined, { allowServe: false });
+  let bus = new IpcBus(undefined, {
+    allowServe: false,
+    requestDeadlineMs: HEADLESS_DELEGATION_REQUEST_DEADLINE_MS,
+  });
   const refreshMessageBus = async (): Promise<MessageBus> => {
     bus.disconnect();
-    bus = new IpcBus(undefined, { allowServe: false });
+    bus = new IpcBus(undefined, {
+      allowServe: false,
+      requestDeadlineMs: HEADLESS_DELEGATION_REQUEST_DEADLINE_MS,
+    });
     await bus.ready();
     return bus;
   };

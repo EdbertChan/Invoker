@@ -514,6 +514,25 @@ export class TaskRunner {
     await Promise.all(tasks.map((task) => this.executeTask(task)));
   }
 
+  async waitForIdle(timeoutMs = 30_000): Promise<void> {
+    const startedAt = Date.now();
+    while (true) {
+      const chain = this.completionChain;
+      await chain;
+      if (
+        chain === this.completionChain
+        && this.activeExecutions.size === 0
+        && this.launchingAttemptIds.size === 0
+      ) {
+        return;
+      }
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error('Timed out waiting for task runner to become idle');
+      }
+      await new Promise((resolveTimer) => setTimeout(resolveTimer, 25));
+    }
+  }
+
   private executeNewlyStartedTasks(
     tasks: TaskState[],
     dispatchOpts?: LaunchDispatchOptions,
@@ -1087,8 +1106,10 @@ export class TaskRunner {
 
     // Persist execution metadata immediately at task start — all fields explicit
     {
-      // Fail-fast: workspacePath must be provided by all executors
-      if (!handle.workspacePath) {
+      // Fail-fast: process-backed executors must provide workspacePath. A
+      // no-op merge node can complete without a terminal workspace.
+      const allowNoWorkspacePath = executor.type === 'merge' && task.config.isMergeNode;
+      if (!handle.workspacePath && !allowNoWorkspacePath) {
         this.releasePoolSelectionLease(this.pendingPoolSelections.get(task.id));
         throw new Error(
           `Executor "${executor.type}" did not provide workspacePath for task "${task.id}". ` +
@@ -1114,7 +1135,7 @@ export class TaskRunner {
           ...(selectedSshTargetId ? { poolMemberId: selectedSshTargetId } : {}),
         },
         execution: {
-          workspacePath: handle.workspacePath,
+          workspacePath: handle.workspacePath ?? undefined,
           branch: handle.branch ?? undefined,  // Explicit undefined when branch is not applicable (e.g., BYO mode)
           agentSessionId: handle.agentSessionId ?? undefined,
           lastAgentSessionId: handle.agentSessionId ?? undefined,

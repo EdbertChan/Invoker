@@ -882,6 +882,7 @@ async function wireSlackBot(deps: SlackBotDeps): Promise<any> {
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
 const RED = '\x1b[31m';
+const HEADLESS_DELEGATION_REQUEST_DEADLINE_MS = 120_000;
 
 // ══════════════════════════════════════════════════════════════
 // HEADLESS MODE
@@ -939,7 +940,10 @@ function startHeadlessMode(): void {
       // Delegating headless commands must never become the IPC server.
       // Otherwise a transient submitter can steal the transport socket away
       // from the actual shared mutation owner.
-      const delegationBus = new IpcBus(undefined, { allowServe: false });
+      const delegationBus = new IpcBus(undefined, {
+        allowServe: false,
+        requestDeadlineMs: HEADLESS_DELEGATION_REQUEST_DEADLINE_MS,
+      });
       try {
         await delegationBus.ready();
 
@@ -986,7 +990,10 @@ function startHeadlessMode(): void {
     }
 
     if (readOnlyMode && queueQueryMode && !standaloneMode) {
-      const delegationBus = new IpcBus(undefined, { allowServe: false });
+      const delegationBus = new IpcBus(undefined, {
+        allowServe: false,
+        requestDeadlineMs: HEADLESS_DELEGATION_REQUEST_DEADLINE_MS,
+      });
       try {
         await delegationBus.ready();
         const delegated = await tryDelegateQuery(delegationBus, { kind: 'queue' }, 5_000);

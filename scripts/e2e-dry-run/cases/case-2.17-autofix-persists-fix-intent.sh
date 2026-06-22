@@ -7,11 +7,13 @@ cd "$REPO_ROOT"
 
 export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=512"
 export INVOKER_UNSAFE_DISABLE_DB_WRITER_LOCK=1
+export INVOKER_GUI_OWNER_MODE=gui
 unset INVOKER_HEADLESS_STANDALONE
 unset INVOKER_DB_DIR
 
 TMP_HOME="$(mktemp -d "${TMPDIR:-/tmp}/invoker-e2e-home.XXXXXX")"
 export HOME="$TMP_HOME"
+export INVOKER_USER_DATA_DIR="$TMP_HOME/electron-user-data"
 mkdir -p "$HOME/.invoker"
 git config --global --add safe.directory "$REPO_ROOT"
 export INVOKER_REPO_CONFIG_PATH="$(mktemp "${TMPDIR:-/tmp}/invoker-e2e-config.XXXXXX")"
@@ -22,6 +24,8 @@ SUBMIT_LOG="$(mktemp "${TMPDIR:-/tmp}/invoker-e2e-2.17-submit.XXXXXX")"
 PLAN_PATH="$(mktemp "${TMPDIR:-/tmp}/invoker-e2e-2.17-plan.XXXXXX")"
 DB_PATH="$HOME/.invoker/invoker.db"
 OWNER_PID=""
+TASK_FAILURE_TIMEOUT_SECONDS="${INVOKER_E2E_AUTOFIX_TASK_FAILURE_TIMEOUT_SECONDS:-300}"
+FIX_INTENT_TIMEOUT_SECONDS="${INVOKER_E2E_AUTOFIX_INTENT_TIMEOUT_SECONDS:-120}"
 
 cleanup() {
   if [ -n "$OWNER_PID" ]; then
@@ -88,9 +92,51 @@ if [ -z "$WF_ID" ]; then
 fi
 TASK_ID="$WF_ID/fail-for-autofix"
 
+print_debug_state() {
+  python3 - <<'PY' "$DB_PATH" "$TASK_ID"
+import sqlite3, sys
+db_path, task_id = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db_path)
+print("recent task events:")
+for row in conn.execute("SELECT id, event_type, created_at FROM events WHERE task_id=? ORDER BY id DESC LIMIT 20", (task_id,)):
+    print(row)
+print("recent intents:")
+for row in conn.execute("SELECT id, workflow_id, channel, status, created_at FROM workflow_mutation_intents ORDER BY id DESC LIMIT 20"):
+    print(row)
+PY
+}
+
+echo "==> case 2.17: wait for failing task to finish"
+TASK_FAILED=0
+for i in $(seq 1 "$TASK_FAILURE_TIMEOUT_SECONDS"); do
+  if python3 - <<'PY' "$DB_PATH" "$TASK_ID"
+import sqlite3
+import sys
+
+db_path, task_id = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db_path)
+has_failed = conn.execute(
+    "SELECT 1 FROM events WHERE task_id = ? AND event_type = 'task.failed' LIMIT 1",
+    (task_id,),
+).fetchone() is not None
+raise SystemExit(0 if has_failed else 1)
+PY
+  then
+    TASK_FAILED=1
+    break
+  fi
+  sleep 1
+done
+
+if [ "$TASK_FAILED" -ne 1 ]; then
+  echo "FAIL case 2.17: expected task.failed before auto-fix verification"
+  print_debug_state
+  exit 1
+fi
+
 echo "==> case 2.17: verify failed delta enqueued persisted fix intent"
 FOUND=0
-for i in $(seq 1 90); do
+for i in $(seq 1 "$FIX_INTENT_TIMEOUT_SECONDS"); do
   if python3 - <<'PY' "$DB_PATH" "$TASK_ID"
 import json
 import sqlite3
@@ -139,17 +185,7 @@ done
 
 if [ "$FOUND" -ne 1 ]; then
   echo "FAIL case 2.17: expected task.failed + debug.auto-fix schedule-enqueued + persisted invoker:fix-with-agent intent"
-  python3 - <<'PY' "$DB_PATH" "$TASK_ID"
-import sqlite3, sys
-db_path, task_id = sys.argv[1], sys.argv[2]
-conn = sqlite3.connect(db_path)
-print("recent task events:")
-for row in conn.execute("SELECT id, event_type, created_at FROM events WHERE task_id=? ORDER BY id DESC LIMIT 20", (task_id,)):
-    print(row)
-print("recent intents:")
-for row in conn.execute("SELECT id, workflow_id, channel, status, created_at FROM workflow_mutation_intents ORDER BY id DESC LIMIT 20"):
-    print(row)
-PY
+  print_debug_state
   exit 1
 fi
 

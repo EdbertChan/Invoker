@@ -465,8 +465,9 @@ export async function runMergeGateActionImpl(
   // Use baseBranch as the ref because featureBranch may not exist yet
   // (it gets created inside consolidateAndMerge). Terminal restore does
   // `git checkout <branch>` to switch to featureBranch anyway.
+  const needsGateWorkspace = Boolean(featureBranch && (onFinish !== 'none' || mergeMode === 'external_review'));
   let gateWorkspacePath: string | undefined = opts.gateWorkspacePath;
-  if (!gateWorkspacePath && featureBranch) {
+  if (!gateWorkspacePath && needsGateWorkspace) {
     const baseCheckoutRef = await resolveBaseCheckoutRef(
       host,
       baseBranch,
@@ -480,8 +481,14 @@ export async function runMergeGateActionImpl(
     mergeTrace('GATE_WS_GATE_CLONE_CREATED', { taskId: task.id, gateWorkspacePath });
     console.log(`[merge-gate-workspace] gate clone created task=${task.id} path=${gateWorkspacePath}`);
   } else {
-    mergeTrace('GATE_WS_GATE_CLONE_SKIPPED', { taskId: task.id, reason: 'no_feature_branch' });
-    console.log(`[merge-gate-workspace] gate clone skipped task=${task.id} (no featureBranch on workflow)`);
+    mergeTrace('GATE_WS_GATE_CLONE_SKIPPED', {
+      taskId: task.id,
+      reason: featureBranch ? 'no_merge_or_review_work' : 'no_feature_branch',
+    });
+    console.log(
+      `[merge-gate-workspace] gate clone skipped task=${task.id} ` +
+        (featureBranch ? '(no merge/review work requested)' : '(no featureBranch on workflow)'),
+    );
   }
 
   if (featureBranch && (onFinish !== 'none' || mergeMode === 'external_review')) {

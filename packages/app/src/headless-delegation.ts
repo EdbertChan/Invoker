@@ -82,7 +82,16 @@ export async function tryDelegateResume(
 }
 
 function usesExtendedDelegationTimeout(command: string): boolean {
-  return command === 'rebase-retry' || command === 'rebase-recreate' || command === 'restart';
+  return command === 'rebase-retry'
+    || command === 'rebase-recreate'
+    || command === 'restart'
+    || command === 'recreate'
+    || command === 'retry-task'
+    || command === 'recreate-task';
+}
+
+function alwaysUsesExtendedDelegationTimeout(command: string): boolean {
+  return command === 'retry-task' || command === 'recreate-task';
 }
 
 function looksLikeWorkflowId(target: unknown): boolean {
@@ -97,6 +106,9 @@ export function delegationTimeoutMs(
   if (!usesExtendedDelegationTimeout(command)) {
     return DEFAULT_DELEGATION_TIMEOUT_MS;
   }
+  if (alwaysUsesExtendedDelegationTimeout(command)) {
+    return WORKFLOW_DELEGATION_TIMEOUT_MS;
+  }
 
   const resolvedTarget = resolveHeadlessTarget(args[1], targetLookup);
   if (resolvedTarget.kind === 'workflow') {
@@ -109,6 +121,9 @@ export async function resolveDelegationTimeoutMs(args: string[]): Promise<number
   const command = args[0] ?? '';
   if (!usesExtendedDelegationTimeout(command)) {
     return DEFAULT_DELEGATION_TIMEOUT_MS;
+  }
+  if (alwaysUsesExtendedDelegationTimeout(command)) {
+    return WORKFLOW_DELEGATION_TIMEOUT_MS;
   }
   return looksLikeWorkflowId(args[1])
     ? WORKFLOW_DELEGATION_TIMEOUT_MS

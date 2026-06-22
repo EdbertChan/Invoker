@@ -74,6 +74,15 @@ describe('headless→owner delegation', () => {
       expect(delegationTimeoutMs(['restart', 'wf-123'], targetLookup)).toBe(60_000);
     });
 
+    it('uses 60s timeout for workflow recreate', () => {
+      expect(delegationTimeoutMs(['recreate', 'wf-123'], targetLookup)).toBe(60_000);
+    });
+
+    it('uses 60s timeout for task reset commands', () => {
+      expect(delegationTimeoutMs(['retry-task', 'wf-123/task-1'], targetLookup)).toBe(60_000);
+      expect(delegationTimeoutMs(['recreate-task', 'wf-123/task-1'], targetLookup)).toBe(60_000);
+    });
+
     it('keeps task-scoped rebase-retry at the default timeout', () => {
       expect(delegationTimeoutMs(['rebase-retry', 'wf-123/task-1'], targetLookup)).toBe(5_000);
     });
@@ -279,6 +288,8 @@ describe('headless→owner delegation', () => {
       ['rebase-retry', ['rebase-retry', 'wf-1']],
       ['rebase-recreate', ['rebase-recreate', 'wf-1']],
       ['restart workflow', ['restart', 'wf-123']],
+      ['recreate workflow', ['recreate', 'wf-123']],
+      ['retry task', ['retry-task', 'wf-123/task-1']],
     ])('keeps %s pending at 5s and only times out at 60s', async (_label, args) => {
       const delegatedPromise = tryDelegateExec(
         args,

@@ -23,13 +23,19 @@ export class MergeGateExecutor extends BaseExecutor<MergeGateEntry> {
     const workflow = task.config.workflowId
       ? this.host.persistence.loadWorkflow(task.config.workflowId)
       : undefined;
-    const baseBranch = workflow?.baseBranch ?? this.host.defaultBranch ?? await this.host.detectDefaultBranch();
-    const baseCheckoutRef = normalizeBranchForGithubCli(baseBranch);
-    const workspacePath = await this.host.createMergeWorktree(
-      baseCheckoutRef,
-      'gate-' + task.id.replace(/[^a-zA-Z0-9_-]/g, '-'),
-      workflow?.repoUrl,
+    const onFinish = workflow?.onFinish ?? 'none';
+    const mergeMode = workflow?.mergeMode ?? 'manual';
+    const shouldCreateGateWorkspace = Boolean(
+      workflow?.featureBranch
+      && (onFinish !== 'none' || mergeMode === 'external_review'),
     );
+    const workspacePath = shouldCreateGateWorkspace
+      ? await this.host.createMergeWorktree(
+          normalizeBranchForGithubCli(workflow?.baseBranch ?? this.host.defaultBranch ?? await this.host.detectDefaultBranch()),
+          'gate-' + task.id.replace(/[^a-zA-Z0-9_-]/g, '-'),
+          workflow?.repoUrl,
+        )
+      : undefined;
 
     const handle = this.createHandle(request);
     handle.workspacePath = workspacePath;
@@ -117,7 +123,7 @@ export class MergeGateExecutor extends BaseExecutor<MergeGateEntry> {
     return task;
   }
 
-  private async run(handle: ExecutorHandle, task: TaskState, gateWorkspacePath: string): Promise<void> {
+  private async run(handle: ExecutorHandle, task: TaskState, gateWorkspacePath?: string): Promise<void> {
     const entry = this.getEntry(handle);
     if (!entry || entry.completed || entry.killed) return;
 
