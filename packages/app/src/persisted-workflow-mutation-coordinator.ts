@@ -22,8 +22,16 @@ export type WorkflowMutationContext = {
   signal: AbortSignal;
   intentId: number;
   workflowId: string;
+  channel: string;
+  args: unknown[];
   mutationTiming?: WorkflowMutationTiming;
 };
+
+export type WorkflowMutationDispatcher = (
+  channel: string,
+  args: unknown[],
+  context: WorkflowMutationContext,
+) => Promise<unknown>;
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -33,7 +41,7 @@ function envMs(name: string, fallback: number): number {
   return parsed;
 }
 
-class WorkflowMutationInvalidatedError extends Error {
+export class WorkflowMutationInvalidatedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'WorkflowMutationInvalidatedError';
@@ -61,7 +69,7 @@ export class PersistedWorkflowMutationCoordinator {
   constructor(
     private readonly persistence: SQLiteAdapter,
     private readonly ownerId: string,
-    private readonly dispatch: (channel: string, args: unknown[], context: WorkflowMutationContext) => Promise<unknown>,
+    private readonly dispatch: WorkflowMutationDispatcher,
     private readonly options?: { logger?: Logger },
   ) {
     this.enableTraceLogs = process.env.INVOKER_TRACE_MUTATION_QUEUE === '1';
@@ -279,6 +287,8 @@ export class PersistedWorkflowMutationCoordinator {
         signal: invalidation.abortController.signal,
         intentId: intent.id,
         workflowId,
+        channel: intent.channel,
+        args: intent.args,
         mutationTiming: timing,
       };
       const dispatchPromise = timing.span(
@@ -427,12 +437,29 @@ export class PersistedWorkflowMutationCoordinator {
           reason,
         });
       const invalidation = this.runningIntentInvalidations.get(activeIntentId);
-      invalidation?.abortController.abort(new WorkflowMutationInvalidatedError(reason));
-      invalidation?.reject(new WorkflowMutationInvalidatedError(reason));
+      const error = new WorkflowMutationInvalidatedError(reason);
+      if (invalidation) {
+        if (this.isFixLikeMutationIntent(activeIntent)) {
+          invalidation.abortController.abort(error);
+        }
+        invalidation.reject(error);
+      }
       process.stderr.write(
         `[workflow-mutation-coordinator] invalidated running intent ${activeIntentId} for ${workflowId} via ${fenceKind}#${newIntentId}\n`,
       );
     }
+  }
+
+  private isFixLikeMutationIntent(intent: WorkflowMutationIntent): boolean {
+    if (intent.channel === 'invoker:fix-with-agent') {
+      return true;
+    }
+    if (intent.channel !== 'headless.exec') {
+      return false;
+    }
+    const payload = intent.args[0] as { args?: unknown[] } | undefined;
+    const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
+    return rawArgs[0] === 'fix';
   }
 
   private hardPreemptFenceKind(channel: string, args: unknown[]): string | null {

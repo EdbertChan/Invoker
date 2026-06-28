@@ -33,6 +33,7 @@
  */
 
 import { app, dialog, ipcMain, Menu, type BrowserWindow } from 'electron';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -369,14 +370,24 @@ function buildCommandServiceInvalidationDeps() {
 let runtimeServices: RuntimeServices;
 let workflowMutationCoordinator: PersistedWorkflowMutationCoordinator | null = null;
 let launchDispatcher: LaunchDispatcher | null = null;
-const workflowMutationDispatcher = new Map<string, (...args: unknown[]) => Promise<unknown>>();
+type WorkflowMutationDispatchHandler = (args: unknown[], context: WorkflowMutationContext) => Promise<unknown>;
+const workflowMutationDispatcher = new Map<string, WorkflowMutationDispatchHandler>();
 /**
- * The mutation context for the currently executing workflow mutation.
- * Set by the coordinator dispatch callback before invoking the handler,
- * cleared afterward. Allows fix-with-agent and conflict-resolution
- * handlers to read the AbortSignal without changing every handler signature.
+ * Context for the currently executing workflow mutation, scoped through the
+ * async call chain so concurrent workflow drains cannot overwrite each other.
  */
-let activeMutationContext: WorkflowMutationContext | undefined;
+const mutationContextStorage = new AsyncLocalStorage<WorkflowMutationContext>();
+const activeMutationContext: {
+  readonly signal?: AbortSignal;
+  readonly mutationTiming?: WorkflowMutationContext['mutationTiming'];
+} = {
+  get signal() {
+    return mutationContextStorage.getStore()?.signal;
+  },
+  get mutationTiming() {
+    return mutationContextStorage.getStore()?.mutationTiming;
+  },
+};
 let hourlyBackupInterval: ReturnType<typeof setInterval> | null = null;
 let writerLock: DbWriterLockResult | null = null;
 const workflowMutationOwnerId = `owner-${process.pid}-${Date.now()}`;
@@ -1492,7 +1503,7 @@ function startHeadlessMode(): void {
         };
 
         if (!workflowMutationDispatcher.has('headless.exec')) {
-          workflowMutationDispatcher.set('headless.exec', async (payloadArg: unknown) => {
+          workflowMutationDispatcher.set('headless.exec', async ([payloadArg]) => {
             const payload = payloadArg as HeadlessExecMutationPayload;
             await runHeadless(payload.args, {
               ...headlessDeps,
@@ -1505,7 +1516,7 @@ function startHeadlessMode(): void {
           });
         }
         if (!workflowMutationDispatcher.has('invoker:fix-with-agent')) {
-          workflowMutationDispatcher.set('invoker:fix-with-agent', async (...fixArgs: unknown[]) => {
+          workflowMutationDispatcher.set('invoker:fix-with-agent', async (fixArgs) => {
             const { taskId, agentName, context } = parseFixWithAgentMutationArgs(fixArgs);
             const args = buildHeadlessFixArgs(taskId, agentName, context);
             await runHeadless(args, {
@@ -1527,12 +1538,7 @@ function startHeadlessMode(): void {
               if (!handler) {
                 throw new Error(`No workflow mutation dispatcher registered for ${channel}`);
               }
-              activeMutationContext = context;
-              try {
-                return await handler(...args);
-              } finally {
-                activeMutationContext = undefined;
-              }
+              return mutationContextStorage.run(context, () => handler(args, context));
             },
             { logger },
           );
@@ -2697,7 +2703,7 @@ function createEmbeddedTerminalBackendFromConfig(
     priority: WorkflowMutationPriority,
     handler: (...args: unknown[]) => Promise<TResult>,
   ): void {
-    workflowMutationDispatcher.set(channel, (...args: unknown[]) => handler(...args));
+    workflowMutationDispatcher.set(channel, async (args) => handler(...args));
     registerGuiMutationHandler(channel, async (...args: unknown[]) => (
       submitWorkflowMutation(resolveWorkflowId(...args), priority, channel, args)
     ));
@@ -3328,12 +3334,7 @@ function createEmbeddedTerminalBackendFromConfig(
           if (!handler) {
             throw new Error(`No workflow mutation dispatcher registered for ${channel}`);
           }
-          activeMutationContext = context;
-          try {
-            return await handler(...args);
-          } finally {
-            activeMutationContext = undefined;
-          }
+          return mutationContextStorage.run(context, () => handler(args, context));
         },
         { logger },
       );
@@ -3356,20 +3357,20 @@ function createEmbeddedTerminalBackendFromConfig(
     // ── IPC Delegation Handlers — peer → owner ────────────────
     // Peer processes delegate write-heavy commands to the owner process via IpcBus.
     if (ownerMode) {
-      workflowMutationDispatcher.set('headless.exec', async (payloadArg: unknown) => {
+      workflowMutationDispatcher.set('headless.exec', async ([payloadArg]) => {
         return executeHeadlessExec(payloadArg as HeadlessExecMutationPayload);
       });
-      workflowMutationDispatcher.set('api:approve-task', async (taskIdArg: unknown) => {
+      workflowMutationDispatcher.set('api:approve-task', async ([taskIdArg]) => {
         await performSharedApproveTask(String(taskIdArg), 'api');
       });
-      workflowMutationDispatcher.set('api:reject-task', async (taskIdArg: unknown, reasonArg?: unknown) => {
+      workflowMutationDispatcher.set('api:reject-task', async ([taskIdArg, reasonArg]) => {
         const taskId = String(taskIdArg);
         const reason = reasonArg === undefined ? undefined : String(reasonArg);
         const envelope = makeEnvelope('reject', 'surface', 'task', { taskId, reason });
         const result = await commandService.reject(envelope);
         if (!result.ok) throw new Error(result.error.message);
       });
-      workflowMutationDispatcher.set('surface:approve-task', async (taskIdArg: unknown) => {
+      workflowMutationDispatcher.set('surface:approve-task', async ([taskIdArg]) => {
         await performSharedApproveTask(String(taskIdArg), 'surface');
       });
       messageBus.onRequest('headless.owner-ping', async () => ({
@@ -3962,6 +3963,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.cancel-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         await finalizeMutationWithGlobalTopup({
           orchestrator,
@@ -4057,6 +4059,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.recreate-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const recreateWfEnvelope = makeEnvelope('recreate-workflow', 'ui', 'workflow', { workflowId });
         const recreateWfResult = activeMutationContext?.mutationTiming
@@ -4199,6 +4202,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.retry-workflow',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
         const result = activeMutationContext?.mutationTiming
@@ -4247,6 +4251,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.rebase-retry',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = await rebaseRetry(target, {
           logger,
@@ -4291,6 +4296,7 @@ function createEmbeddedTerminalBackendFromConfig(
           logger,
           context: 'ipc.rebase-recreate',
           mutationTiming: activeMutationContext?.mutationTiming,
+          signal: activeMutationContext?.signal,
         });
         const started = await rebaseRecreate(target, {
           logger,

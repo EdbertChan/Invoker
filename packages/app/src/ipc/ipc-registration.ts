@@ -4,6 +4,7 @@ import type { MessageBus } from '@invoker/transport';
 import type { TaskState } from '@invoker/workflow-core';
 import type { WorkflowMutationAcceptedResult } from '@invoker/contracts';
 import type { WorkflowMutationPriority } from '../workflow-mutation-coordinator.js';
+import type { WorkflowMutationContext } from '../persisted-workflow-mutation-coordinator.js';
 
 export interface GuiMutationPayload {
   channel: string;
@@ -79,7 +80,7 @@ export function registerGuiMutationHandler<TResult = unknown>(
 }
 
 export interface WorkflowScopedGuiMutationRegistrationContext extends GuiMutationRegistrationContext {
-  workflowMutationDispatcher: Map<string, (...args: unknown[]) => Promise<unknown>>;
+  workflowMutationDispatcher: Map<string, (args: unknown[], context: WorkflowMutationContext) => Promise<unknown>>;
   submitWorkflowMutation: (
     workflowId: string | undefined,
     priority: WorkflowMutationPriority,
@@ -95,7 +96,7 @@ export function registerWorkflowScopedGuiMutationHandler<TResult = unknown>(
   priority: WorkflowMutationPriority,
   handler: (...args: unknown[]) => Promise<TResult>,
 ): void {
-  context.workflowMutationDispatcher.set(channel, (...args: unknown[]) => handler(...args));
+  context.workflowMutationDispatcher.set(channel, async (args) => handler(...args));
   registerGuiMutationHandler(context, channel, async (...args: unknown[]) => {
     const workflowId = resolveWorkflowId(...args);
     return context.submitWorkflowMutation(workflowId, priority, channel, args);
