@@ -127,7 +127,6 @@ describe('task-runner-wiring', () => {
       repoRoot: '/repo',
       invokerConfig: {
         defaultBranch: 'main',
-        defaultExecution: { executionAgent: 'omp', executionModel: 'anthropic/claude-opus-4' },
         docker: { imageName: 'image' },
         autoFixCi: true,
       },
@@ -150,7 +149,6 @@ describe('task-runner-wiring', () => {
     const config = taskRunnerConstructor.mock.calls[0]?.[0] as any;
     expect(config.cwd).toBe('/repo');
     expect(config.dockerConfig).toEqual({ imageName: 'image', secretsFile: '/tmp/secrets.env' });
-    expect(config.defaultExecution).toEqual({ executionAgent: 'omp', executionModel: 'anthropic/claude-opus-4' });
     expect(config.remoteTargetsProvider()).toEqual({
       remote: {
         host: 'host',

@@ -8,7 +8,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import type { MachineCapabilities } from '@invoker/execution-engine';
 import { validateInvokerConfig } from './config-validation.js';
 const BUILT_IN_DEFAULT_EXECUTION_AGENT = 'codex';
 
@@ -38,6 +37,20 @@ export interface DefaultExecutionConfig {
    * Only applied when the resolved task executionAgent matches this default agent.
    */
   executionModel?: string;
+}
+
+export type MachineModelPolicy =
+  | { kind: 'implicit' }
+  | { kind: 'fixed'; model: string }
+  | { kind: 'select'; models: string[]; defaultModel: string };
+
+export interface MachineHarnessCapability {
+  modelPolicy: MachineModelPolicy;
+}
+
+export interface MachineCapabilities {
+  planning?: Record<string, MachineHarnessCapability>;
+  execution?: Record<string, MachineHarnessCapability>;
 }
 
 export interface InvokerConfig {

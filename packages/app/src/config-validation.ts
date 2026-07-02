@@ -1,5 +1,4 @@
-import type { MachineCapabilities } from '@invoker/execution-engine';
-import type { InvokerConfig } from './config.js';
+import type { InvokerConfig, MachineCapabilities } from './config.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
