@@ -15,6 +15,23 @@ trap invoker_e2e_cleanup EXIT
 cd "$INVOKER_E2E_REPO_ROOT"
 unset ELECTRON_RUN_AS_NODE
 
+
+query_tasks_snapshot_json() {
+  invoker_e2e_run_headless query tasks --workflow "$WF_ID" --output json 2>/dev/null || printf '[]'
+}
+
+query_audit_json_with_wal_retry() {
+  local task_id="$1"
+  local out
+  for _ in $(seq 1 10); do
+    if out="$(invoker_e2e_run_headless query audit "$task_id" --output json 2>/dev/null)"; then
+      printf '%s' "$out"
+      return 0
+    fi
+    sleep 1
+  done
+  invoker_e2e_run_headless query audit "$task_id" --output json
+}
 echo "==> case 2.16: delete-all"
 invoker_e2e_run_headless delete-all
 
@@ -98,7 +115,7 @@ recreate_snapshot_has_pending=0
 for i in 0 1 2 3 4 5; do
   KEEP_ST="$(invoker_e2e_task_status "$KEEP_TASK_ID" 2>/dev/null || true)"
   FAIL_ST="$(invoker_e2e_task_status "$FAIL_TASK_ID" 2>/dev/null || true)"
-  SNAP_JSON="$(invoker_e2e_run_headless query tasks --workflow "$WF_ID" --output json)"
+  SNAP_JSON="$(query_tasks_snapshot_json)"
   SNAP_COUNTS="$(printf '%s' "$SNAP_JSON" | python3 -c 'import json,sys; from collections import Counter; data=json.load(sys.stdin); c=Counter(t.get("status","") for t in data); print(" ".join(f"{k}:{c[k]}" for k in sorted(c)))')"
   echo "recreate t+$i keep=$KEEP_ST fail=$FAIL_ST counts=$SNAP_COUNTS"
 
@@ -110,7 +127,7 @@ done
 kill "$RECREATE_PID" 2>/dev/null || true
 wait "$RECREATE_PID" 2>/dev/null || true
 
-KEEP_PENDING_DELTA_S="$(invoker_e2e_run_headless query audit "$KEEP_TASK_ID" --output json | python3 -c 'import datetime as dt, json, sys; start=int(sys.argv[1]); data=json.load(sys.stdin); deltas=[]; 
+KEEP_PENDING_DELTA_S="$(query_audit_json_with_wal_retry "$KEEP_TASK_ID" | python3 -c 'import datetime as dt, json, sys; start=int(sys.argv[1]); data=json.load(sys.stdin); deltas=[]; 
 for e in data:
     if e.get("eventType")!="task.pending":
         continue
@@ -121,7 +138,7 @@ for e in data:
     if epoch >= start:
         deltas.append(epoch-start)
 print(min(deltas) if deltas else -1)' "$RECREATE_START_EPOCH")"
-FAIL_PENDING_DELTA_S="$(invoker_e2e_run_headless query audit "$FAIL_TASK_ID" --output json | python3 -c 'import datetime as dt, json, sys; start=int(sys.argv[1]); data=json.load(sys.stdin); deltas=[]; 
+FAIL_PENDING_DELTA_S="$(query_audit_json_with_wal_retry "$FAIL_TASK_ID" | python3 -c 'import datetime as dt, json, sys; start=int(sys.argv[1]); data=json.load(sys.stdin); deltas=[]; 
 for e in data:
     if e.get("eventType")!="task.pending":
         continue

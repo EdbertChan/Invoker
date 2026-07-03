@@ -2091,6 +2091,26 @@ describe('BaseExecutor.pushBranchToRemote', () => {
     expect(remoteBranches).toContain('invoker/task-push');
   });
 
+  it('pushes HEAD when the checked-out branch ref disappeared during finalization', async () => {
+    const pushSpy = vi.spyOn(executor as any, 'execGitSimpleWithNetworkTimeout')
+      .mockRejectedValueOnce(new Error('git push --force-with-lease origin invoker/task-race:refs/heads/invoker/task-race failed (code 1): error: src refspec invoker/task-race does not match any'))
+      .mockResolvedValueOnce('');
+    vi.spyOn(executor as any, 'execGitSimple').mockResolvedValue('invoker/task-race\n');
+
+    try {
+      const pushErr = await executor.testPushBranchToRemote(cloneDir, 'invoker/task-race');
+
+      expect(pushErr).toBeUndefined();
+      expect(pushSpy).toHaveBeenNthCalledWith(
+        2,
+        ['push', '--force-with-lease', 'origin', 'HEAD:refs/heads/invoker/task-race'],
+        cloneDir,
+      );
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it('returns an error message when branch does not exist on remote', async () => {
     const err = await executor.testPushBranchToRemote(cloneDir, 'nonexistent-branch');
     expect(err).toBeDefined();

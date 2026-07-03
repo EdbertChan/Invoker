@@ -853,31 +853,45 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     executionId?: string,
     branchRepoUrlOverride?: string,
   ): Promise<string | undefined> {
-    try {
-      const requestBranchRepoUrl = branchRepoUrlOverride ?? (executionId
-        ? this.entries.get(executionId)?.request.inputs.branchRepoUrl
-        : undefined);
-      const branchRepoUrl = requestBranchRepoUrl?.trim();
+    const requestBranchRepoUrl = branchRepoUrlOverride ?? (executionId
+      ? this.entries.get(executionId)?.request.inputs.branchRepoUrl
+      : undefined);
+    const branchRepoUrl = requestBranchRepoUrl?.trim();
+    const remote = branchRepoUrl ? BaseExecutor.BRANCH_REMOTE_NAME : 'origin';
+    const push = async (sourceRef: string): Promise<void> => {
       if (branchRepoUrl) {
         await ensureRemoteUrl({
           cwd,
-          remote: BaseExecutor.BRANCH_REMOTE_NAME,
+          remote,
           url: branchRepoUrl,
           context: { caller: `${this.type}.pushBranchToRemote`, detail: branch },
         });
-        await this.execGitSimpleWithNetworkTimeout(
-          ['push', '--force-with-lease', BaseExecutor.BRANCH_REMOTE_NAME, `${branch}:refs/heads/${branch}`],
-          cwd,
-        );
-      } else {
-        await this.execGitSimpleWithNetworkTimeout(['push', '--force-with-lease', 'origin', `${branch}:refs/heads/${branch}`], cwd);
       }
+      await this.execGitSimpleWithNetworkTimeout(
+        ['push', '--force-with-lease', remote, `${sourceRef}:refs/heads/${branch}`],
+        cwd,
+      );
+    };
+
+    try {
+      await push(branch);
       return undefined;
     } catch (err) {
-      const msg = `[${this.type}] pushBranchToRemote failed for ${branch}: ${err}\n`;
+      const errorText = err instanceof Error ? err.message : String(err);
+      if (/src refspec .* does not match any/i.test(errorText)) {
+        try {
+          const currentBranch = (await this.execGitSimple(['branch', '--show-current'], cwd)).trim();
+          if (currentBranch === branch) {
+            await push('HEAD');
+            return undefined;
+          }
+        } catch { /* fall through to original error */ }
+      }
+
+      const msg = `[${this.type}] pushBranchToRemote failed for ${branch}: ${errorText}\n`;
       console.warn(msg);
       if (executionId) this.emitOutput(executionId, msg);
-      return err instanceof Error ? err.message : String(err);
+      return errorText;
     }
   }
 
