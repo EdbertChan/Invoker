@@ -1171,6 +1171,43 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'merge-gate-no-inline-approve');
   });
 
+  test('confirm-merge-modal — heading and primary button labels match for onFinish=merge', async ({ page }) => {
+    await loadPlanAndSelectWorkflow(page, MERGE_GATE_NO_INLINE_APPROVE_PLAN);
+    await page
+      .locator('.react-flow__node[data-testid$="mg-no-inline-work"]')
+      .first()
+      .waitFor({ state: 'visible', timeout: 15000 });
+
+    const mergeGateTaskId = await page.evaluate(async () => {
+      const result = await window.invoker.getTasks();
+      const tasks = Array.isArray(result) ? result : result.tasks;
+      const mergeTask = tasks.find((task: { id: string }) => task.id.includes('__merge__'));
+      return mergeTask?.id ?? null;
+    });
+    expect(mergeGateTaskId).toBeTruthy();
+
+    await injectTaskStates(page, [
+      {
+        taskId: mergeGateTaskId!,
+        changes: { status: 'awaiting_approval', execution: { startedAt: new Date() } },
+      },
+    ]);
+
+    const mergeGateNode = page
+      .locator(`.react-flow__node[data-testid="${mergeGateTaskId}"], .react-flow__node[data-testid$="${mergeGateTaskId}"]`)
+      .first();
+    await expect(mergeGateNode).toBeVisible({ timeout: 15000 });
+    await mergeGateNode.click();
+    await page.getByTestId('inspector-approve-button').click();
+
+    const modal = page.locator('.fixed.inset-0');
+    await expect(modal.getByRole('heading', { name: 'Confirm Merge' })).toBeVisible();
+    await expect(modal.getByRole('button', { name: 'Confirm Merge' })).toBeVisible();
+
+    await captureScreenshot(page, 'confirm-merge-modal-labels-match');
+    await assertPageScreenshot(page, 'confirm-merge-modal-labels-match');
+  });
+
   test('closed-status-merge-gate — merge gate renders the terminal Closed status', async ({ page }) => {
     await loadPlanAndSelectWorkflow(page, MERGE_GATE_CLOSED_PLAN);
     await page
