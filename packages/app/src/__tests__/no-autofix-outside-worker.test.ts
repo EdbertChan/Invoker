@@ -66,6 +66,7 @@ const TRIGGER_SIGNALS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
   // `'ipc' | 'auto-fix'` and `source === 'auto-fix'` comparisons do not match.
   { name: "'auto-fix' source arg", pattern: /['"]auto-fix['"]\s*\)/ },
 ];
+ 
 
 /**
  * The ONLY files permitted to contain auto-fix trigger signals. Two categories:
