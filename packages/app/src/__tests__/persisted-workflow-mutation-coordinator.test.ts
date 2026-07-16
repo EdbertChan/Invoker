@@ -14,6 +14,21 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+function rejectOnAbort(context: WorkflowMutationContext, onAbort: (reason: unknown) => void): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const rejectWithReason = () => {
+      const reason = context.signal.reason ?? new Error('aborted');
+      onAbort(reason);
+      reject(reason);
+    };
+    if (context.signal.aborted) {
+      rejectWithReason();
+      return;
+    }
+    context.signal.addEventListener('abort', rejectWithReason, { once: true });
+  });
+}
+
 async function waitFor(condition: () => boolean, attempts: number = 20): Promise<void> {
   for (let i = 0; i < attempts; i += 1) {
     if (condition()) return;
@@ -409,6 +424,62 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     ]);
   });
 
+  it('aborts a running fix mutation when internal recreate-task preempts it', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({ id: 'wf-1',
+    name: 'wf-1', createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(), });
+
+    const order: string[] = [];
+    let fixContext: WorkflowMutationContext | undefined;
+    let abortReason: unknown;
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, args, context) => {
+        order.push(`${channel}:${String(args[0])}`);
+        if (channel === 'invoker:fix-with-agent') {
+          fixContext = context;
+          await rejectOnAbort(context, (reason) => { abortReason = reason; });
+        }
+      },
+    );
+
+    const runningFix = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void runningFix.catch(() => {});
+    await waitFor(() => fixContext !== undefined);
+
+    const recreateTask = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:recreate-task',
+      ['wf-1/target-task'],
+    );
+    await recreateTask;
+    await expect(runningFix).rejects.toThrow(/superseded by recreate intent/i);
+
+    expect(fixContext?.signal.aborted).toBe(true);
+    expect(abortReason).toBeInstanceOf(Error);
+    expect((abortReason as Error).message).toContain('Superseded by recreate intent #2');
+    expect(fixContext).toMatchObject({
+      intentId: 1,
+      workflowId: 'wf-1',
+      channel: 'invoker:fix-with-agent',
+      args: ['wf-1/blocker-task', null],
+      priority: 'normal',
+    });
+    expect(order).toEqual([
+      'invoker:fix-with-agent:wf-1/blocker-task',
+      'invoker:recreate-task:wf-1/target-task',
+    ]);
+  });
+
   it('invalidates an older running workflow intent when headless recreate-task is enqueued', async () => {
     const adapter = await SQLiteAdapter.create(':memory:');
     adapters.push(adapter);
@@ -638,13 +709,15 @@ describe('PersistedWorkflowMutationCoordinator', () => {
 
     const gate = deferred();
     const order: string[] = [];
+    let runningContext: WorkflowMutationContext | undefined;
     const coordinator = new PersistedWorkflowMutationCoordinator(
       adapter,
       'owner-1',
-      async (channel, args) => {
+      async (channel, args, context) => {
         const label = `${channel}:${String(args[0])}`;
         order.push(label);
         if (label.includes('hold-work')) {
+          runningContext = context;
           await gate.promise;
         }
       },
@@ -656,7 +729,8 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     const retryFence = coordinator.enqueue<void>('wf-1', 'high', 'invoker:retry-workflow', ['wf-1']);
     const newerQueued = coordinator.enqueue<void>('wf-1', 'normal', 'invoker:edit-task-agent', ['new-queued']);
 
-    await Promise.resolve();
+    await waitFor(() => runningContext !== undefined);
+    expect(runningContext?.signal.aborted).toBe(false);
     gate.resolve();
     await running;
     await retryFence;
@@ -1055,6 +1129,62 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(intents.find((intent) => intent.id === 1)?.status).toBe('failed');
     expect(intents.find((intent) => intent.id === 1)?.error).toContain('Superseded by delete intent #2');
     expect(intents.find((intent) => intent.id === 2)?.status).toBe('completed');
+    expect(order).toEqual([
+      'invoker:fix-with-agent:wf-1/blocker-task',
+      'invoker:delete-workflow:wf-1',
+    ]);
+  });
+
+  it('aborts a running fix mutation when internal delete-workflow preempts it', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    adapter.saveWorkflow({ id: 'wf-1',
+    name: 'wf-1', createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(), });
+
+    const order: string[] = [];
+    let fixContext: WorkflowMutationContext | undefined;
+    let abortReason: unknown;
+    const coordinator = new PersistedWorkflowMutationCoordinator(
+      adapter,
+      'owner-1',
+      async (channel, args, context) => {
+        order.push(`${channel}:${String(args[0])}`);
+        if (channel === 'invoker:fix-with-agent') {
+          fixContext = context;
+          await rejectOnAbort(context, (reason) => { abortReason = reason; });
+        }
+      },
+    );
+
+    const runningFix = coordinator.enqueue<void>(
+      'wf-1',
+      'normal',
+      'invoker:fix-with-agent',
+      ['wf-1/blocker-task', null],
+    );
+    void runningFix.catch(() => {});
+    await waitFor(() => fixContext !== undefined);
+
+    const deleteWf = coordinator.enqueue<void>(
+      'wf-1',
+      'high',
+      'invoker:delete-workflow',
+      ['wf-1'],
+    );
+    await deleteWf;
+    await expect(runningFix).rejects.toThrow(/superseded by delete intent/i);
+
+    expect(fixContext?.signal.aborted).toBe(true);
+    expect(abortReason).toBeInstanceOf(Error);
+    expect((abortReason as Error).message).toContain('Superseded by delete intent #2');
+    expect(fixContext).toMatchObject({
+      intentId: 1,
+      workflowId: 'wf-1',
+      channel: 'invoker:fix-with-agent',
+      args: ['wf-1/blocker-task', null],
+      priority: 'normal',
+    });
     expect(order).toEqual([
       'invoker:fix-with-agent:wf-1/blocker-task',
       'invoker:delete-workflow:wf-1',

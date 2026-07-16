@@ -1287,6 +1287,48 @@ describe('fixWithAgentAction', () => {
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
     expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
   });
+
+  it('passes cancellation signal to taskExecutor.fixWithAgent', async () => {
+    const signal = new AbortController().signal;
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: 'boom', workspacePath: '/tmp/task-a' },
+      })),
+      beginFixSession: vi.fn(() => ({ savedError: 'boom' })),
+      setFixAwaitingApproval: vi.fn(),
+      revertFixSession: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockResolvedValue(undefined),
+      resolveConflict: vi.fn(),
+    };
+
+    await fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+      commandService: makeCommandService(),
+    }, {
+      agentName: 'codex',
+      signal,
+    });
+
+    expect(taskExecutor.fixWithAgent).toHaveBeenCalledWith(
+      'task-a',
+      'test output',
+      'codex',
+      'boom',
+      undefined,
+      signal,
+    );
+  });
+
   it('rejects plain fixes without a saved workspace before fix execution', async () => {
     const orchestrator = {
       getTask: vi.fn(() => makeTask({
@@ -1405,6 +1447,51 @@ describe('fixWithAgentAction', () => {
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError);
     expect(result).toEqual({ kind: 'resolveConflict', autoApproved: false, started: [] });
+  });
+
+  it('passes cancellation signal to taskExecutor.resolveConflict', async () => {
+    const signal = new AbortController().signal;
+    const mergeError = JSON.stringify({
+      type: 'merge_conflict',
+      failedBranch: 'experiment/foo',
+      conflictFiles: ['src/foo.ts'],
+    });
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: mergeError, workspacePath: '/tmp/task-a' },
+      })),
+      beginFixSession: vi.fn(() => ({ savedError: mergeError })),
+      setFixAwaitingApproval: vi.fn(),
+      revertFixSession: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn(),
+      resolveConflict: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+      commandService: makeCommandService(),
+    }, {
+      agentName: 'claude',
+      signal,
+    });
+
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith(
+      'task-a',
+      mergeError,
+      'claude',
+      undefined,
+      signal,
+    );
   });
 
   it('dispatches text merge conflicts with a stale workspace to taskExecutor.resolveConflict', async () => {
