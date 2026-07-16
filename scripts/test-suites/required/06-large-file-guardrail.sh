@@ -5,6 +5,36 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
+node --input-type=module <<'NODE'
+import { readFileSync } from 'node:fs';
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+assert(
+  pkg.scripts?.['check:large-files'] === 'node scripts/check-large-files.mjs',
+  'package.json must expose check:large-files',
+);
+assert(
+  pkg.scripts?.['check:all']?.includes('pnpm run check:large-files'),
+  'package.json check:all must run check:large-files',
+);
+
+const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+assert(
+  ci.includes('command: pnpm run check:large-files'),
+  'CI quality checks must run pnpm run check:large-files',
+);
+assert(
+  ci.includes('bash scripts/test-suites/required/06-large-file-guardrail.sh'),
+  'CI required-fast guardrails must run the large-file proof suite',
+);
+NODE
+
 node "$ROOT/scripts/check-large-files.mjs"
 
 TMP_ROOT="$(mktemp -d)"
