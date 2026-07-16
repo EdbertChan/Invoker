@@ -7,12 +7,14 @@ import {
 import type { Logger, WorkflowMutationFailedEvent } from '@invoker/contracts';
 import { resolveHeadlessTarget } from './headless-command-classification.js';
 import { createWorkflowMutationTiming, type WorkflowMutationTiming } from './workflow-mutation-timing.js';
+import type { WorkflowMutationContext } from './workflow-mutation-coordinator.js';
 import {
   resolveHeadlessExecCommand,
   summarizeMutationFailureMessage,
 } from './mutation-failure-message.js';
 
 export type WorkflowMutationFailedHandler = (event: WorkflowMutationFailedEvent) => void;
+export type { WorkflowMutationContext } from './workflow-mutation-coordinator.js';
 
 type Deferred<T> = {
   resolve: (value: T) => void;
@@ -23,13 +25,6 @@ type InvalidationSignal = {
   promise: Promise<never>;
   reject: (error: unknown) => void;
   abortController: AbortController;
-};
-
-export type WorkflowMutationContext = {
-  signal: AbortSignal;
-  intentId: number;
-  workflowId: string;
-  mutationTiming?: WorkflowMutationTiming;
 };
 
 const TASK_SCOPED_MUTATION_CHANNELS = new Set([
@@ -360,6 +355,9 @@ export class PersistedWorkflowMutationCoordinator {
         signal: invalidation.abortController.signal,
         intentId: intent.id,
         workflowId,
+        channel: intent.channel,
+        args: intent.args,
+        priority: intent.priority,
         mutationTiming: timing,
       };
       const dispatchPromise = timing.span(

@@ -50,7 +50,13 @@ export interface ConflictResolverHost {
   execGitIn(args: string[], dir: string): Promise<string>;
   createMergeWorktree(ref: string, label: string, repoUrl?: string): Promise<string>;
   removeMergeWorktree(dir: string): Promise<void>;
-  spawnAgentFix(prompt: string, cwd: string, agentName?: string, executionModel?: string): Promise<{ stdout: string; sessionId: string }>;
+  spawnAgentFix(
+    prompt: string,
+    cwd: string,
+    agentName?: string,
+    executionModel?: string,
+    signal?: AbortSignal,
+  ): Promise<{ stdout: string; sessionId: string }>;
   getRemoteTargetConfig?(targetId: string): RemoteTargetConfig | undefined;
 }
 
@@ -62,6 +68,13 @@ const MAX_INLINE_PROMPT_BYTES = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_INLINE_PROMPT_BYTES;
 })();
 const DEBUG_IO_TAIL_CHARS = 2000;
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  throw new Error(`Agent fix aborted: ${String(reason ?? 'unknown')}`);
+}
 
 function tailText(value: unknown, maxChars: number = DEBUG_IO_TAIL_CHARS): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -171,7 +184,9 @@ export async function resolveConflictImpl(
   savedError?: string,
   agentName?: string,
   resolvedExecutionModel?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'resolve-conflict-start',
     agent: agentName ?? DEFAULT_EXECUTION_AGENT,
@@ -217,7 +232,7 @@ export async function resolveConflictImpl(
     if (!target) {
       throw new Error(`No remote target config for "${poolMemberId}" — cannot resolve conflict on remote`);
     }
-    await resolveConflictRemote(host, task, taskBranch, conflictInfo, rawCwd, target, agentName, resolvedExecutionModel);
+    await resolveConflictRemote(host, task, taskBranch, conflictInfo, rawCwd, target, agentName, resolvedExecutionModel, signal);
     return;
   }
 
@@ -272,9 +287,14 @@ export async function resolveConflictImpl(
         `5. Completing the merge with 'git commit --no-edit'`,
       ].join('\n');
       const executionModel = resolvedExecutionModel ?? resolveExecutionModelForAgent(task, agentName);
-      await host.spawnAgentFix(prompt, cwd, agentName, executionModel);
+      if (signal) {
+        await host.spawnAgentFix(prompt, cwd, agentName, executionModel, signal);
+      } else {
+        await host.spawnAgentFix(prompt, cwd, agentName, executionModel);
+      }
     }
 
+    throwIfAborted(signal);
     console.log(`[resolveConflict] Successfully resolved conflict for ${taskId}`);
     host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
       phase: 'resolve-conflict-success',
@@ -372,7 +392,9 @@ async function resolveConflictRemote(
   target: RemoteTargetConfig,
   agentName?: string,
   resolvedExecutionModel?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const conflictFilesList = conflictInfo.conflictFiles.join(', ');
   const prompt = [
     `The following git merge has conflicts that need to be resolved.`,
@@ -427,7 +449,11 @@ fi
     'bash', '-s',
   ];
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('ssh', sshArgs, { stdio: ['pipe', 'inherit', 'inherit'], env: cleanElectronEnv() });
+    const child = spawn('ssh', sshArgs, {
+      stdio: ['pipe', 'inherit', 'inherit'],
+      env: cleanElectronEnv(),
+      ...(signal ? { signal } : {}),
+    });
     child.stdin?.write(script);
     child.stdin?.end();
     child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`ssh conflict resolve failed (exit=${code})`)));
@@ -496,7 +522,9 @@ export async function fixWithAgentImpl(
   agentName?: string,
   savedError?: string,
   fixContext?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   host.persistence.logEvent?.(taskId, 'debug.auto-fix', {
     phase: 'fix-with-agent-start',
     agent: agentName ?? DEFAULT_EXECUTION_AGENT,
@@ -552,7 +580,9 @@ export async function fixWithAgentImpl(
       agentName,
       host.agentRegistry,
       executionModel,
+      signal,
     );
+    throwIfAborted(signal);
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${remoteAgentBin} (remote)] Output:\n${output}`);
     }
@@ -599,7 +629,10 @@ export async function fixWithAgentImpl(
       workspacePath: cwd,
       agent: agentLabel,
     });
-    const { stdout: output, sessionId } = await host.spawnAgentFix(prompt, cwd, agentName, executionModel);
+    const { stdout: output, sessionId } = signal
+      ? await host.spawnAgentFix(prompt, cwd, agentName, executionModel, signal)
+      : await host.spawnAgentFix(prompt, cwd, agentName, executionModel);
+    throwIfAborted(signal);
     if (output) {
       host.persistence.appendTaskOutput(taskId, `\n[Fix with ${agentLabel}] Output:\n${output}`);
     }
@@ -679,7 +712,9 @@ export function spawnRemoteAgentFixImpl(
   agentName?: string,
   agentRegistry?: AgentRegistry,
   executionModel?: string,
+  signal?: AbortSignal,
 ): Promise<{ stdout: string; sessionId: string }> {
+  throwIfAborted(signal);
   const promptTransport = materializeRemotePrompt(prompt);
   const { shellCommand: agentCmd, sessionId } = buildRemoteAgentCommand(
     promptTransport.effectivePrompt,
@@ -723,6 +758,7 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
     const child = spawn('ssh', sshArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
+      ...(signal ? { signal } : {}),
     });
     child.stdin?.write(script);
     child.stdin?.end();
@@ -755,7 +791,9 @@ export function spawnAgentFixViaRegistry(
   agent: ExecutionAgent,
   driver?: SessionDriver,
   executionModel?: string,
+  signal?: AbortSignal,
 ): Promise<{ stdout: string; sessionId: string }> {
+  throwIfAborted(signal);
   assertExecutionModelSupported(agent, executionModel);
   const promptTransport = materializeLocalPrompt(prompt);
   const spec = agent.buildFixCommand?.(promptTransport.effectivePrompt, { executionModel });
@@ -772,6 +810,7 @@ export function spawnAgentFixViaRegistry(
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: cleanElectronEnv(),
+      ...(signal ? { signal } : {}),
     });
     let stdout = '';
     let stderr = '';

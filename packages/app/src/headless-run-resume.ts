@@ -482,6 +482,7 @@ export async function headlessRebaseRetry(target: string, deps: HeadlessDeps): P
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.rebase-retry',
+    mutationContext: deps.signal ? { signal: deps.signal } : undefined,
     mutationTiming: deps.mutationTiming,
   });
   const te = createHeadlessExecutor(deps);
@@ -526,6 +527,7 @@ export async function headlessRebaseRecreate(workflowTarget: string, deps: Headl
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.rebase-recreate',
+    mutationContext: deps.signal ? { signal: deps.signal } : undefined,
     mutationTiming: deps.mutationTiming,
   });
   const te = createHeadlessExecutor(deps);
@@ -571,6 +573,7 @@ export async function headlessRecreateWorkflow(workflowId: string, deps: Headles
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.recreate-workflow',
+    mutationContext: deps.signal ? { signal: deps.signal } : undefined,
     mutationTiming: deps.mutationTiming,
   });
   const recreateWfEnvelope = makeEnvelope('recreate-workflow', 'headless', 'workflow', { workflowId });
@@ -777,6 +780,7 @@ export async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDe
     preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
     logger: deps.logger,
     context: 'headless.retry-workflow',
+    mutationContext: deps.signal ? { signal: deps.signal } : undefined,
     mutationTiming: deps.mutationTiming,
   });
   const envelope = makeEnvelope('retry-workflow', 'headless', 'workflow', { workflowId });

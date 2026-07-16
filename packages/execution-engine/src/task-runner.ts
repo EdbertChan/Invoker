@@ -1205,13 +1205,14 @@ export class TaskRunner {
     savedError?: string,
     agentName?: string,
     executionModel?: string,
+    signal?: AbortSignal,
   ): Promise<void> {
     const task = this.orchestrator.getTask(taskId);
     const explicitModel = executionModel?.trim();
     const resolvedModel = explicitModel && explicitModel.length > 0
       ? explicitModel
       : (task ? this.resolveExecutionModel(task) : undefined);
-    return this.withAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName, resolvedModel));
+    return this.withAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName, resolvedModel, signal));
   }
 
   /**
@@ -1224,10 +1225,11 @@ export class TaskRunner {
     agentName?: string,
     savedError?: string,
     fixContext?: string,
+    signal?: AbortSignal,
   ): Promise<void> {
     return this.withAttemptHeartbeat(
       taskId,
-      () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError, fixContext),
+      () => fixWithAgentImpl(this, taskId, taskOutput, agentName, savedError, fixContext, signal),
     );
   }
 
@@ -1334,6 +1336,7 @@ export class TaskRunner {
     cwd: string,
     agentName: string = DEFAULT_EXECUTION_AGENT,
     executionModel?: string,
+    signal?: AbortSignal,
   ): Promise<{ stdout: string; sessionId: string }> {
     if (!this.executionAgentRegistry) {
       throw new Error('executionAgentRegistry is required for spawnAgentFix');
@@ -1343,7 +1346,7 @@ export class TaskRunner {
       throw new Error(`Agent "${agentName}" does not support fix commands`);
     }
     const driver = this.executionAgentRegistry.getSessionDriver(agentName);
-    return spawnAgentFixViaRegistry(prompt, cwd, agent, driver, executionModel);
+    return spawnAgentFixViaRegistry(prompt, cwd, agent, driver, executionModel, signal);
   }
 
   async authorPrBodyWithSkill(args: {

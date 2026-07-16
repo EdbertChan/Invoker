@@ -71,6 +71,7 @@ function makeExecutionAgent(buildFixCommand: ExecutionAgent['buildFixCommand']):
     buildCommand: (fullPrompt: string) => ({ cmd: 'codex', args: ['exec', '--json', fullPrompt] }),
     buildResumeArgs: (sessionId: string) => ({ cmd: 'codex', args: ['resume', sessionId] }),
     buildFixCommand,
+    supportsModel: () => true,
   };
 }
 
@@ -167,6 +168,7 @@ describe('fix prompt transport for oversized prompts', () => {
       buildCommand: (fullPrompt: string) => ({ cmd: 'omp', args: ['-p', fullPrompt] }),
       buildResumeArgs: (sessionId: string) => ({ cmd: 'omp', args: ['resume', sessionId] }),
       buildFixCommand,
+      supportsModel: () => true,
     };
 
     vi.mocked(spawn).mockReturnValueOnce(mockSpawnChild('ok', 0) as any);
@@ -369,4 +371,3 @@ describe('spawn errors during agent fix surface diagnostic info', () => {
     expect(caught!.message).toContain('openai/codex#19945');
   });
 });
-

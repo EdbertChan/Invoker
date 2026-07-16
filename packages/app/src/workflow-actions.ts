@@ -847,7 +847,7 @@ export async function resolveConflictAction(
       explicitAgent: agentName,
       pathDefaultAgent: options?.pathDefaultAgent ?? resolveDefaultExecutionAgent(config),
     });
-    await taskExecutor.resolveConflict(taskId, savedError, settings.agent, settings.model);
+    await runTaskExecutorResolveConflict(taskExecutor, taskId, savedError, settings.agent, settings.model, signal);
     assertLineageCurrent(lineage, orchestrator, signal);
     return await finalizeAppliedFix(taskId, savedError, deps, signal, lineage);
   } catch (err) {
@@ -869,6 +869,38 @@ function resolveTaskRunnerDefaultExecutionAgent(taskExecutor: TaskRunner): strin
   const configured = (taskExecutor as { getDefaultExecutionAgent?: () => string | undefined })
     .getDefaultExecutionAgent?.()?.trim();
   return configured && configured.length > 0 ? configured : DEFAULT_EXECUTION_AGENT;
+}
+
+function runTaskExecutorResolveConflict(
+  taskExecutor: TaskRunner,
+  taskId: string,
+  savedError: string | undefined,
+  agentName: string | undefined,
+  executionModel: string | undefined,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal) {
+    return taskExecutor.resolveConflict(taskId, savedError, agentName, executionModel, signal);
+  }
+  return taskExecutor.resolveConflict(taskId, savedError, agentName, executionModel);
+}
+
+function runTaskExecutorFixWithAgent(
+  taskExecutor: TaskRunner,
+  taskId: string,
+  taskOutput: string,
+  agentName: string | undefined,
+  savedError: string | undefined,
+  fixContext?: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal) {
+    return taskExecutor.fixWithAgent(taskId, taskOutput, agentName, savedError, fixContext, signal);
+  }
+  if (fixContext !== undefined) {
+    return taskExecutor.fixWithAgent(taskId, taskOutput, agentName, savedError, fixContext);
+  }
+  return taskExecutor.fixWithAgent(taskId, taskOutput, agentName, savedError);
 }
 
 
@@ -944,20 +976,26 @@ export async function fixWithAgentAction(
         explicitAgent: options.agentName,
         pathDefaultAgent: resolveTaskRunnerDefaultExecutionAgent(taskExecutor),
       });
-      await taskExecutor.resolveConflict(
+      await runTaskExecutorResolveConflict(
+        taskExecutor,
         taskId,
         persistedSavedError,
         conflictSettings.agent,
         conflictSettings.model,
+        options.signal,
       );
     } else {
       const output = persistence.getTaskOutput(taskId);
       const fixContext = options.reviewGateContext?.fixContext;
-      if (fixContext !== undefined) {
-        await taskExecutor.fixWithAgent(taskId, output, effectiveAgentName, persistedSavedError, fixContext);
-      } else {
-        await taskExecutor.fixWithAgent(taskId, output, effectiveAgentName, persistedSavedError);
-      }
+      await runTaskExecutorFixWithAgent(
+        taskExecutor,
+        taskId,
+        output,
+        effectiveAgentName,
+        persistedSavedError,
+        fixContext,
+        options.signal,
+      );
     }
     assertLineageCurrent(lineage, orchestrator, options.signal);
     const result = await finalizeAppliedFix(taskId, persistedSavedError, deps, options.signal, lineage);
@@ -1307,15 +1345,25 @@ export async function autoFixOnFailure(
       const conflictSettings = resolveConflictResolutionSettings(loadConfig(), {
         pathDefaultAgent: agentSelection.selectedAgent,
       });
-      await taskExecutor.resolveConflict(
+      await runTaskExecutorResolveConflict(
+        taskExecutor,
         taskId,
         persistedSavedError,
         conflictSettings.agent,
         conflictSettings.model,
+        deps.signal,
       );
     } else {
       const output = persistence.getTaskOutput(taskId);
-      await taskExecutor.fixWithAgent(taskId, output, agentSelection.selectedAgent, persistedSavedError);
+      await runTaskExecutorFixWithAgent(
+        taskExecutor,
+        taskId,
+        output,
+        agentSelection.selectedAgent,
+        persistedSavedError,
+        undefined,
+        deps.signal,
+      );
     }
     assertLineageCurrent(lineage, orchestrator, deps.signal);
     const postRouteStrategy = selectAutoFixPostRouteStrategy(task);

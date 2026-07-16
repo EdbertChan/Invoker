@@ -1620,6 +1620,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
         preemptWorkflowExecution,
         logger,
         context: 'ipc.cancel-workflow',
+        mutationContext: context.getActiveMutationContext(),
         mutationTiming: activeMutationContext?.mutationTiming,
       });
       await finalizeMutationWithGlobalTopup({
@@ -1745,6 +1746,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
         preemptWorkflowExecution,
         logger,
         context: 'ipc.recreate-workflow',
+        mutationContext: context.getActiveMutationContext(),
         mutationTiming: activeMutationContext?.mutationTiming,
       });
       const recreateWfEnvelope = makeEnvelope('recreate-workflow', 'ui', 'workflow', { workflowId });
@@ -1887,6 +1889,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
         preemptWorkflowExecution,
         logger,
         context: 'ipc.retry-workflow',
+        mutationContext: context.getActiveMutationContext(),
         mutationTiming: activeMutationContext?.mutationTiming,
       });
       const envelope = makeEnvelope('retry-workflow', 'ui', 'workflow', { workflowId });
@@ -1935,6 +1938,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
         preemptWorkflowExecution,
         logger,
         context: 'ipc.rebase-retry',
+        mutationContext: context.getActiveMutationContext(),
         mutationTiming: activeMutationContext?.mutationTiming,
       });
       const started = await rebaseRetry(target, {
@@ -1979,6 +1983,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
         preemptWorkflowExecution,
         logger,
         context: 'ipc.rebase-recreate',
+        mutationContext: context.getActiveMutationContext(),
         mutationTiming: activeMutationContext?.mutationTiming,
       });
       const started = await rebaseRecreate(target, {
