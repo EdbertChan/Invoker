@@ -41,6 +41,25 @@ function splitCommand(commandText: string): HeadlessOwnerLaunchSpec {
   return { command: parts[0]!, args: parts.slice(1) };
 }
 
+function ensureHeadlessOwnerArgs(spec: HeadlessOwnerLaunchSpec): HeadlessOwnerLaunchSpec {
+  const argsWithoutOwnerServe = spec.args.filter((arg) => arg !== 'owner-serve');
+  const headlessIndex = argsWithoutOwnerServe.indexOf('--headless');
+  if (headlessIndex === -1) {
+    return {
+      command: spec.command,
+      args: [...argsWithoutOwnerServe, '--headless', 'owner-serve'],
+    };
+  }
+  return {
+    command: spec.command,
+    args: [
+      ...argsWithoutOwnerServe.slice(0, headlessIndex + 1),
+      'owner-serve',
+      ...argsWithoutOwnerServe.slice(headlessIndex + 1),
+    ],
+  };
+}
+
 export function buildElectronHeadlessArgs(
   mainJsPath: string,
   headlessArgs: readonly string[],
@@ -64,7 +83,7 @@ export function resolveHeadlessOwnerLaunchSpec(
 
   const overrideCommand = env.INVOKER_GUI_COMMAND?.trim();
   if (overrideCommand) {
-    return splitCommand(overrideCommand);
+    return ensureHeadlessOwnerArgs(splitCommand(overrideCommand));
   }
 
   const invokerUi = which('invoker-ui');
