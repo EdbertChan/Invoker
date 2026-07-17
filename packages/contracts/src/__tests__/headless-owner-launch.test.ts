@@ -26,7 +26,7 @@ describe('buildElectronHeadlessArgs', () => {
 });
 
 describe('resolveHeadlessOwnerLaunchSpec', () => {
-  it('prefers INVOKER_GUI_COMMAND when set', () => {
+  it('prefers INVOKER_GUI_COMMAND when set and appends headless owner args', () => {
     expect(resolveHeadlessOwnerLaunchSpec({
       repoRoot: '/repo',
       platform: 'linux',
@@ -35,7 +35,20 @@ describe('resolveHeadlessOwnerLaunchSpec', () => {
       existsSync: () => false,
     })).toEqual({
       command: '/usr/local/bin/custom-owner',
-      args: ['--flag'],
+      args: ['--flag', '--headless', 'owner-serve'],
+    });
+  });
+
+  it('does not duplicate --headless owner-serve when already present in INVOKER_GUI_COMMAND', () => {
+    expect(resolveHeadlessOwnerLaunchSpec({
+      repoRoot: '/repo',
+      platform: 'linux',
+      env: { INVOKER_GUI_COMMAND: '/usr/local/bin/custom-owner --headless owner-serve --flag' },
+      which: () => undefined,
+      existsSync: () => false,
+    })).toEqual({
+      command: '/usr/local/bin/custom-owner',
+      args: ['--headless', 'owner-serve', '--flag'],
     });
   });
 
