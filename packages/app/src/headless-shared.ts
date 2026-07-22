@@ -154,6 +154,7 @@ export function createHeadlessExecutor(
       secretsFile: resolveSecretsFilePath(deps.invokerConfig),
     },
     remoteTargetsProvider: () => loadConfig().remoteTargets ?? {},
+    provisionCommandByRepoProvider: () => loadConfig().provisionCommandByRepo ?? {},
     executionPoolsProvider: () => deps.invokerConfig.executionPools ?? {},
     reviewGateCiFailurePublisher: {
       publish: (trigger) => {

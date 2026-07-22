@@ -4,6 +4,10 @@
   "maxConcurrency": 6,
   "defaultExecutionAgent": "codex",
 
+  "provisionCommandByRepo": {
+    "https://github.com/Neko-Catpital-Labs/Invoker.git": "NODE_ENV=development pnpm install --frozen-lockfile",
+    "git@github.com:Neko-Catpital-Labs/Invoker.git": "NODE_ENV=development pnpm install --frozen-lockfile"
+  },
 
   "executors": {
     "worktree": {
@@ -30,7 +34,6 @@
       "maxConcurrentTasks": 1,
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
-      "provisionCommand": "pnpm install --frozen-lockfile",
       "remoteHeartbeatIntervalSeconds": 30
     },
     "build-server-b": {
@@ -42,7 +45,6 @@
       "maxConcurrentTasks": 1,
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
-      "provisionCommand": "pnpm install --frozen-lockfile",
       "remoteHeartbeatIntervalSeconds": 30
     }
   },

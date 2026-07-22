@@ -159,22 +159,23 @@ Minimal example:
   "autoFixRetries": 3,
   "autoFixAgent": "claude",
   "autoFixCi": false,
+  "provisionCommandByRepo": {
+    "https://github.com/Neko-Catpital-Labs/Invoker.git": "NODE_ENV=development pnpm install --frozen-lockfile"
+  },
   "remoteTargets": {
     "staging-a": {
       "host": "203.0.113.10",
       "user": "invoker",
       "sshKeyPath": "/home/you/.ssh/invoker_staging_a",
       "managedWorkspaces": true,
-      "remoteInvokerHome": "~/.invoker",
-      "provisionCommand": "pnpm install --frozen-lockfile"
+      "remoteInvokerHome": "~/.invoker"
     },
     "staging-b": {
       "host": "203.0.113.11",
       "user": "invoker",
       "sshKeyPath": "/home/you/.ssh/invoker_staging_b",
       "managedWorkspaces": true,
-      "remoteInvokerHome": "~/.invoker",
-      "provisionCommand": "pnpm install --frozen-lockfile"
+      "remoteInvokerHome": "~/.invoker"
     }
   }
 }

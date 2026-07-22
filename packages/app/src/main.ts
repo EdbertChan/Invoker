@@ -905,6 +905,7 @@ async function initServices(options?: InitServicesOptions): Promise<void> {
       cacheDir: path.resolve(invokerHomeRoot, 'repos'),
       maxWorktrees: effectiveMaxConcurrency,
       agentRegistry: executionAgentRegistry,
+      provisionCommandByRepoProvider: () => loadConfig().provisionCommandByRepo ?? {},
     }),
   );
   const taskRepository = new SqliteTaskRepository(persistence);

@@ -1933,3 +1933,37 @@ describe('WorktreeExecutor', () => {
     });
   });
 });
+
+describe('WorktreeExecutor provisionCommandByRepo', () => {
+  it('spawns the mapped provision command for the request repo', () => {
+    const executor = new WorktreeExecutor({
+      cacheDir: '/fake/cache',
+      worktreeBaseDir: '/fake/worktrees',
+      provisionCommandByRepoProvider: () => ({
+        'https://github.com/owner/repo.git': 'echo WORKTREE_REPO_PROVISION',
+      }),
+    });
+
+    const child = new EventEmitter() as ChildProcess & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      pid: number;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.pid = 4242;
+    mockedSpawn.mockReturnValue(child as any);
+
+    const { child: spawned } = (executor as any).provisionWorktree(
+      '/fake/worktrees/wt',
+      undefined,
+      'git@github.com:owner/repo.git',
+    );
+    expect(spawned).toBe(child);
+    expect(mockedSpawn).toHaveBeenCalled();
+    const [cmd, args] = mockedSpawn.mock.calls[mockedSpawn.mock.calls.length - 1];
+    expect(cmd).toBe('/bin/bash');
+    expect(args[0]).toBe('-c');
+    expect(String(args[1])).toContain('echo WORKTREE_REPO_PROVISION');
+  });
+});
