@@ -10,6 +10,7 @@ import { computeContentHash, buildExperimentBranchName } from './branch-utils.js
 import { planManagedWorktree } from './managed-worktree-controller.js';
 import { findManagedWorktreeForBranch, abbrevRefMatchesBranch } from './worktree-discovery.js';
 import { DEFAULT_WORKTREE_PROVISION_COMMAND } from './default-worktree-provision-command.js';
+import { resolveProvisionCommand } from './provision-command.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { DEFAULT_EXECUTION_AGENT } from './agent.js';
 import { computeRepoUrlHash, sanitizeBranchForPath } from './git-utils.js';
@@ -54,9 +55,15 @@ export interface SshExecutorConfig {
   remoteInvokerHome?: string;
   /**
    * Optional provision command to run in the worktree after creation (e.g., pnpm install).
-   * Only used in managed mode. Default: pnpm install --frozen-lockfile
+   * Only used in managed mode when no per-repo mapping matches.
+   * Default: pnpm install --frozen-lockfile
    */
   provisionCommand?: string;
+  /**
+   * Provider for top-level per-repo provision commands from Invoker config.
+   * Resolved per task from request.inputs.repoUrl in managed mode.
+   */
+  provisionCommandByRepoProvider?: () => Record<string, string>;
   /** Opt-in: export agent API keys from secretsFile into remote task shells. */
   useApiKey?: boolean;
   /** Optional local secrets file used when useApiKey is true. */
@@ -93,7 +100,8 @@ export class SshExecutor extends BaseExecutor<SshEntry> {
   private readonly agentRegistry?: AgentRegistry;
   private readonly managedWorkspaces: boolean;
   private readonly remoteInvokerHome: string;
-  private readonly provisionCommand: string;
+  private readonly targetProvisionCommand: string | undefined;
+  private readonly getProvisionCommandByRepo: () => Record<string, string>;
   private readonly useApiKey: boolean;
   private readonly secretsFile: string | undefined;
   private readonly remoteHeartbeatIntervalSeconds: number;
@@ -108,7 +116,8 @@ export class SshExecutor extends BaseExecutor<SshEntry> {
     this.agentRegistry = config.agentRegistry;
     this.managedWorkspaces = config.managedWorkspaces ?? false;
     this.remoteInvokerHome = config.remoteInvokerHome ?? '~/.invoker';
-    this.provisionCommand = config.provisionCommand ?? DEFAULT_WORKTREE_PROVISION_COMMAND;
+    this.targetProvisionCommand = config.provisionCommand;
+    this.getProvisionCommandByRepo = config.provisionCommandByRepoProvider ?? (() => ({}));
     this.useApiKey = config.useApiKey === true;
     this.secretsFile = config.secretsFile;
     const configuredRemoteHeartbeatInterval = config.remoteHeartbeatIntervalSeconds;
@@ -184,10 +193,18 @@ ${payload}
 `;
   }
 
-  private buildProvisionScript(): string {
+  private resolveProvisionCommandForRepo(repoUrl?: string): string {
+    return resolveProvisionCommand({
+      repoUrl,
+      byRepo: this.getProvisionCommandByRepo(),
+      fallback: this.targetProvisionCommand ?? DEFAULT_WORKTREE_PROVISION_COMMAND,
+    });
+  }
+
+  private buildProvisionScript(provisionCommand: string): string {
     return `#!/usr/bin/env bash
 set -e
-${this.provisionCommand}
+${provisionCommand}
 `;
   }
 
@@ -240,10 +257,14 @@ ${content}${content.endsWith('\n') ? '' : '\n'}${delimiter}
     payload: string;
     managed: boolean;
     envExports: string;
+    repoUrl?: string;
   }): string {
     const runner = this.buildRunnerScript();
     const payload = this.buildPayloadScript(options.payload);
-    const provision = options.managed ? this.buildProvisionScript() : undefined;
+    const provisionCommand = options.managed
+      ? this.resolveProvisionCommandForRepo(options.repoUrl)
+      : undefined;
+    const provision = provisionCommand ? this.buildProvisionScript(provisionCommand) : undefined;
     const heartbeatMarker = this.shellQuote(SshExecutor.REMOTE_HEARTBEAT_MARKER);
     const heartbeatIntervalSeconds = this.remoteHeartbeatIntervalSeconds;
     const stagingTokenExpression = this.buildStagingDirExpression(options.executionId, options.actionId);
@@ -253,7 +274,7 @@ chmod 700 "$PROVISION_PATH"
 `
       : '';
     const provisionLogLine = this.shellQuote(
-      `[SshExecutor] Provisioning remote worktree with: ${this.provisionCommand.slice(0, 50)}...`,
+      `[SshExecutor] Provisioning remote worktree with: ${(provisionCommand ?? '').slice(0, 50)}...`,
     );
     const runProvisionSection = provision
       ? `echo ${provisionLogLine}
@@ -793,6 +814,7 @@ ${runProvisionSection}stop_bootstrap_heartbeat
       payload,
       managed: true,
       envExports,
+      repoUrl: request.inputs.repoUrl,
     });
 
     bench('SshExecutor.startManagedWorkspace.spawnSshRemoteStdin.before', {

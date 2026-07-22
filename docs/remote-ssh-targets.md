@@ -16,6 +16,10 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
 
 ```json
 {
+  "provisionCommandByRepo": {
+    "https://github.com/Neko-Catpital-Labs/Invoker.git": "NODE_ENV=development pnpm install --frozen-lockfile",
+    "git@github.com:Neko-Catpital-Labs/Invoker.git": "NODE_ENV=development pnpm install --frozen-lockfile"
+  },
   "remoteTargets": {
     "staging-server": {
       "host": "192.168.1.100",
@@ -23,7 +27,6 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
       "sshKeyPath": "/home/user/.ssh/id_staging",
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
-      "provisionCommand": "pnpm install --frozen-lockfile",
       "remoteHeartbeatIntervalSeconds": 30
     },
     "staging-server-b": {
@@ -33,12 +36,13 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
       "port": 22,
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
-      "provisionCommand": "pnpm install --frozen-lockfile",
       "remoteHeartbeatIntervalSeconds": 30
     }
   }
 }
 ```
+
+Prefer top-level `provisionCommandByRepo` so every provisioning executor (local worktree and managed SSH) uses the same command for a given repository. GitHub SSH/HTTPS/`ssh://` spellings of the same repo match each other. Optional `remoteTargets.*.provisionCommand` remains a per-target fallback when no repo mapping matches.
 
 ### Fields
 
@@ -50,7 +54,7 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
 | `port` | number | no | SSH port (default: 22) |
 | `managedWorkspaces` | boolean | no | When true, Invoker clones/fetches the repo and manages per-task worktrees on the remote host |
 | `remoteInvokerHome` | string | no | Base directory used by managed remote workspaces (default: `~/.invoker`) |
-| `provisionCommand` | string | no | Command run after worktree creation in managed mode |
+| `provisionCommand` | string | no | Optional per-target fallback when `provisionCommandByRepo` has no match for the task repo |
 | `remoteHeartbeatIntervalSeconds` | number | no | Interval (seconds) for SSH remote workload heartbeat markers used by executing-stall detection (default: `30`) |
 
 ## Multiple SSH Targets

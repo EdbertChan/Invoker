@@ -98,6 +98,7 @@ export type TaskRunnerPoolHost = Pick<
   | 'sshExecutorCache'
   | 'runnerInstanceId'
   | 'getRemoteTargets'
+  | 'getProvisionCommandByRepo'
   | 'getExecutionPools'
   | 'resolveExecutionAgent'
   | 'resolveExecutionModel'
@@ -569,6 +570,7 @@ export function selectExecutor(
         );
       }
 
+      const provisionCommandByRepo = host.getProvisionCommandByRepo();
       const configFingerprint = JSON.stringify({
         host: target.host,
         user: target.user,
@@ -577,6 +579,7 @@ export function selectExecutor(
         managedWorkspaces: target.managedWorkspaces,
         remoteInvokerHome: target.remoteInvokerHome,
         provisionCommand: target.provisionCommand,
+        provisionCommandByRepo,
         use_api_key: target.use_api_key === true,
         secretsFile: target.secretsFile ?? host.dockerConfig.secretsFile,
         remoteHeartbeatIntervalSeconds: target.remoteHeartbeatIntervalSeconds,
@@ -603,6 +606,7 @@ export function selectExecutor(
         agentRegistry: host.executionAgentRegistry,
         managedWorkspaces: target.managedWorkspaces,
         provisionCommand: target.provisionCommand,
+        provisionCommandByRepoProvider: () => host.getProvisionCommandByRepo(),
         useApiKey: target.use_api_key,
         secretsFile: target.secretsFile ?? host.dockerConfig.secretsFile,
         remoteHeartbeatIntervalSeconds: target.remoteHeartbeatIntervalSeconds,

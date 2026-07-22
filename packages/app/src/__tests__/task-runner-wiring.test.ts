@@ -54,6 +54,7 @@ vi.mock('../config.js', () => ({
         host: 'host',
       },
     },
+    provisionCommandByRepo: {},
     executionPools: {
       pool: {
         members: [
@@ -145,6 +146,7 @@ describe('task-runner-wiring', () => {
         host: 'host',
       },
     });
+    expect(config.provisionCommandByRepoProvider()).toEqual({});
     expect(config.executionPoolsProvider()).toEqual({
       pool: {
         members: [
@@ -156,7 +158,7 @@ describe('task-runner-wiring', () => {
       },
     });
     expect(config.executionDefaultsProvider()).toEqual({ executionAgent: 'claude' });
-    expect(loadConfig).toHaveBeenCalledTimes(3);
+    expect(loadConfig).toHaveBeenCalledTimes(4);
 
     config.callbacks.onOutput('task-1', 'chunk');
     expect(taskRunnerConstructor.mock.calls[0]?.[0].callbacks.onOutput).toBe(config.callbacks.onOutput);

@@ -180,6 +180,11 @@ export interface TaskRunnerConfig {
     remoteHeartbeatIntervalSeconds?: number;
     maxConcurrentTasks?: number;
   }>;
+  /**
+   * Provider for top-level per-repo provision commands.
+   * Called at executor construction / provision time so config reloads apply.
+   */
+  provisionCommandByRepoProvider?: () => Record<string, string>;
   executionPoolsProvider?: () => Record<string, {
     members: Array<
       | { type: 'ssh'; id: string; maxConcurrentTasks?: number }
@@ -218,6 +223,7 @@ export class TaskRunner {
   /** @internal */ reviewGateCiFailurePublisher?: ReviewGateCiFailureLifecyclePublisher;
   /** @internal */ reviewGateCiFailureInFlight = new Set<string>();
   /** @internal */ getRemoteTargets: () => Record<string, RemoteTargetDisplay>;
+  /** @internal */ getProvisionCommandByRepo: () => Record<string, string>;
   /** @internal */ getExecutionPools: () => Record<string, ExecutionPoolConfig>;
   private getExecutionDefaults: () => { executionAgent?: string; executionModel?: string };
   /** @internal */ dockerConfig: { imageName?: string; secretsFile?: string };
@@ -333,6 +339,7 @@ export class TaskRunner {
     this.reviewProviderRegistry = config.reviewProviderRegistry;
     this.reviewGateCiFailurePublisher = config.reviewGateCiFailurePublisher;
     this.getRemoteTargets = config.remoteTargetsProvider ?? (() => ({}));
+    this.getProvisionCommandByRepo = config.provisionCommandByRepoProvider ?? (() => ({}));
     this.getExecutionPools = config.executionPoolsProvider ?? (() => ({}));
     this.getExecutionDefaults = config.executionDefaultsProvider ?? (() => ({}));
     this.dockerConfig = config.dockerConfig ?? {};

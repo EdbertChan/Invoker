@@ -92,6 +92,7 @@ type CliRuntimeConfig = {
     secretsFile?: string;
     remoteHeartbeatIntervalSeconds?: number;
   }>;
+  provisionCommandByRepo?: Record<string, string>;
   executionPools?: Record<string, {
     members: Array<
       | { type: 'ssh'; id: string; maxConcurrentTasks?: number }
@@ -386,6 +387,7 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
       cacheDir: join(dbDir, 'repos'),
       maxWorktrees: maxConcurrency,
       agentRegistry: executionAgentRegistry,
+      provisionCommandByRepoProvider: () => runtimeConfig.provisionCommandByRepo ?? {},
     }));
     const orchestrator = new Orchestrator({
       persistence,
@@ -407,6 +409,7 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
         imageName: runtimeConfig.docker?.imageName,
         secretsFile: runtimeConfig.docker?.secretsFile,
       },
+      provisionCommandByRepoProvider: () => runtimeConfig.provisionCommandByRepo ?? {},
       remoteTargetsProvider: () => loadRuntimeConfig(options.config).remoteTargets ?? {},
       executionPoolsProvider: () => loadRuntimeConfig(options.config).executionPools ?? {},
       executionAgentRegistry,

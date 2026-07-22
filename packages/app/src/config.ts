@@ -184,6 +184,13 @@ export interface InvokerConfig {
   slackRepos?: Record<string, string>;
   /** Repo URL used for Slack planning when the message carries no `[repo:]` tag. */
   defaultRepoUrl?: string;
+  /**
+   * Per-repository workspace provision commands (e.g. `pnpm install --frozen-lockfile`).
+   * Keys are repo URLs; GitHub SSH/HTTPS/`ssh://` spellings of the same repo match each other.
+   * Used by every provisioning executor (local worktree and managed SSH).
+   * SSH `remoteTargets.*.provisionCommand` remains an optional per-target fallback.
+   */
+  provisionCommandByRepo?: Record<string, string>;
   /** Maximum number of tasks that can run concurrently. Default: 6. */
   maxConcurrency?: number;
   /** Browser executable for opening external URLs (e.g. "firefox"). Default: Chrome. */

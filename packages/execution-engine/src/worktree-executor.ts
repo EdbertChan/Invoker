@@ -8,6 +8,7 @@ import { BaseExecutor, MergeConflictError, type BaseEntry } from './base-executo
 import { RepoPool } from './repo-pool.js';
 import { killProcessGroup, cleanElectronEnv, resolveExecutableOnCurrentPath, SIGKILL_TIMEOUT_MS } from './process-utils.js';
 import { DEFAULT_WORKTREE_PROVISION_COMMAND } from './default-worktree-provision-command.js';
+import { resolveProvisionCommand } from './provision-command.js';
 import {
   computeContentHash,
   buildExperimentBranchName,
@@ -43,6 +44,11 @@ export interface WorktreeExecutorConfig {
   heartbeatIntervalMs?: number;
   /** Maximum task duration in milliseconds. Default: 4 hours. */
   maxDurationMs?: number;
+  /**
+   * Provider for top-level per-repo provision commands from Invoker config.
+   * Called at provision time so config changes apply without rebuilding the executor.
+   */
+  provisionCommandByRepoProvider?: () => Record<string, string>;
 }
 
 const DEFAULT_WORKTREE_PROVISION_TIMEOUT_MS = 15 * 60 * 1000;
@@ -86,12 +92,14 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
   private readonly worktreeBaseDir: string;
   private readonly claudeCommand: string;
   private readonly agentRegistry?: import('./agent-registry.js').AgentRegistry;
+  private readonly getProvisionCommandByRepo: () => Record<string, string>;
   private pool: RepoPool;
 
   constructor(config: WorktreeExecutorConfig) {
     super(config.heartbeatIntervalMs, config.maxDurationMs);
     this.claudeCommand = config.claudeCommand ?? 'claude';
     this.agentRegistry = config.agentRegistry;
+    this.getProvisionCommandByRepo = config.provisionCommandByRepoProvider ?? (() => ({}));
     this.worktreeBaseDir =
       config.worktreeBaseDir ?? resolve(homedir(), '.invoker', 'worktrees');
     this.pool = new RepoPool({
@@ -407,7 +415,7 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     });
 
     bench('WorktreeExecutor.provisionWorktree.before');
-    const provisioning = this.provisionWorktree(acquired.worktreePath, executionId);
+    const provisioning = this.provisionWorktree(acquired.worktreePath, executionId, repoUrl);
     entry.process = provisioning.child;
     try {
       await provisioning.completion;
@@ -706,10 +714,19 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     }
   }
 
-  private provisionWorktree(dir: string, executionId?: string): { child: ChildProcess; completion: Promise<void> } {
+  private provisionWorktree(
+    dir: string,
+    executionId?: string,
+    repoUrl?: string,
+  ): { child: ChildProcess; completion: Promise<void> } {
     traceExecution(`[WorktreeExecutor] provisionWorktree begin dir=${dir}`);
     const t0 = Date.now();
-    const cmd = `set -euo pipefail; ${DEFAULT_WORKTREE_PROVISION_COMMAND}`;
+    const provisionCommand = resolveProvisionCommand({
+      repoUrl,
+      byRepo: this.getProvisionCommandByRepo(),
+      fallback: DEFAULT_WORKTREE_PROVISION_COMMAND,
+    });
+    const cmd = `set -euo pipefail; ${provisionCommand}`;
     const child = spawn('/bin/bash', ['-c', cmd], {
       cwd: dir,
       env: cleanElectronEnv(),

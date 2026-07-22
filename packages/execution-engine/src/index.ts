@@ -21,6 +21,11 @@ export {
   type SshTargetConnection,
 } from './ssh-transport-options.js';
 export { bashNormalizeTildePath, execRemoteCapture, shellPosixSingleQuote } from './ssh-git-exec.js';
+export {
+  resolveProvisionCommand,
+  type ResolveProvisionCommandOptions,
+} from './provision-command.js';
+export { DEFAULT_WORKTREE_PROVISION_COMMAND } from './default-worktree-provision-command.js';
 
 export * from './repo-pool.js';
 export * from './registry.js';
