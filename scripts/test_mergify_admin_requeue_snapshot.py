@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -201,6 +202,92 @@ class SnapshotFromDetail(unittest.TestCase):
         self.assertEqual(snap.latest_mergify.state, "dequeued")
         self.assertEqual(snap.latest_mergify.head_sha, HEAD)
 
+
+class GhClientCandidateDiscovery(unittest.TestCase):
+    def test_label_seed_expands_stack_metadata_to_unlabeled_bottom(self):
+        bottom = {
+            "number": 100,
+            "title": "bottom",
+            "labels": {"nodes": [{"name": "dequeued"}]},
+        }
+        upper = {
+            "number": 101,
+            "title": "upper",
+            "labels": {"nodes": [{"name": "admin-bypass"}]},
+        }
+        comments = {
+            101: [{
+                "created_at": "2026-07-19T00:00:00Z",
+                "body": '<!-- mergify-stack-data: {"stack_id":"s","pull_numbers_bottom_to_top":[100,101]} -->',
+            }],
+        }
+
+        class FakeGh(s.GhClient):
+            def __init__(self):
+                self.list_args = []
+                self.detail_calls = []
+                self.comment_calls = []
+
+            def _run_json(self, args):
+                self.list_args = list(args)
+                return [upper]
+
+            def pr_detail(self, repo, number):
+                self.detail_calls.append((repo, number))
+                return bottom if number == 100 else upper
+
+            def issue_comments(self, repo, number):
+                self.comment_calls.append((repo, number))
+                return comments.get(number, [])
+
+        client = FakeGh()
+        found = client.list_candidate_prs("Neko-Catpital-Labs/Invoker", "EdbertChan", [])
+
+        self.assertIn("--label", client.list_args)
+        self.assertIn("admin-bypass", client.list_args)
+        self.assertEqual([pr["number"] for pr in found], [101, 100])
+        self.assertEqual(client.detail_calls, [("Neko-Catpital-Labs/Invoker", 100)])
+        self.assertEqual(client.comment_calls, [("Neko-Catpital-Labs/Invoker", 101)])
+
+
+class GhClientLabelEdit(unittest.TestCase):
+    def test_add_label_uses_rest_issue_labels_endpoint(self):
+        client = s.GhClient()
+        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run") as run:
+            client.edit_label("Neko-Catpital-Labs/Invoker", 4157, add="admin-bypass")
+
+        run.assert_called_once_with(
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/Neko-Catpital-Labs/Invoker/issues/4157/labels",
+                "-f",
+                "labels[]=admin-bypass",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_remove_label_uses_rest_issue_labels_endpoint(self):
+        client = s.GhClient()
+        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run") as run:
+            client.edit_label("Neko-Catpital-Labs/Invoker", 4157, remove="merge-hold")
+
+        run.assert_called_once_with(
+            [
+                "gh",
+                "api",
+                "--method",
+                "DELETE",
+                "repos/Neko-Catpital-Labs/Invoker/issues/4157/labels/merge-hold",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -38,7 +38,10 @@ export function WorkflowNode({
       data-testid={`workflow-node-${workflow.id}`}
       role="button"
       tabIndex={0}
-      onClick={onClick}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
       onContextMenu={onContextMenu}
       onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -47,36 +50,36 @@ export function WorkflowNode({
         }
       }}
       className={[
-        'relative w-[220px] rounded-lg border bg-gray-900 pl-4 pr-3 py-3 text-left transition-all shadow-sm',
+        'relative w-[340px] rounded-xl border bg-background pl-5 pr-4 py-4 text-left transition-all shadow-sm',
         visual.borderClass,
-        selected ? 'ring-2 ring-blue-400/80' : '',
+        selected ? 'ring-2 ring-ring/70' : '',
         dimmed ? 'opacity-35' : 'opacity-100',
-        'hover:bg-gray-800/95',
+        'hover:bg-secondary/95',
       ].join(' ')}
     >
-      <div className={`absolute left-0 top-0 h-full w-1 rounded-l-lg ${visual.railClass}`} />
+      <div className={`absolute left-0 top-0 h-full w-1.5 rounded-l-xl ${visual.railClass}`} />
       {isWorkflowStatusActive(workflow.status) && visual.pulse && (
-        <div className={`absolute -left-1 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full ${visual.railClass} animate-ping`} />
+        <div className={`absolute -left-1.5 top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full ${visual.railClass} animate-ping`} />
       )}
       {detachedDependencyCount > 0 && (
         <div
           data-testid={`workflow-node-${workflow.id}-detached-lineage`}
           title={`Detached from ${detachedDependencyCount} upstream workflow${detachedDependencyCount === 1 ? '' : 's'}`}
-          className="absolute right-2 top-2 rounded border border-amber-400/35 bg-amber-950/45 px-1.5 py-0.5 text-[9px] font-medium uppercase leading-none text-amber-300"
+          className="absolute right-2.5 top-2.5 rounded border border-amber-400/35 bg-amber-950/45 px-1.5 py-0.5 text-[11px] font-medium uppercase leading-none text-amber-300"
         >
           Detached
         </div>
       )}
 
-      <div className={`text-[13px] font-semibold text-gray-100 truncate ${detachedDependencyCount > 0 ? 'pr-16' : ''}`}>
+      <div className={`text-[22px] font-semibold leading-snug text-foreground truncate ${detachedDependencyCount > 0 ? 'pr-16' : ''}`}>
         {workflow.name || workflow.id}
       </div>
-      <div className="mt-1 text-[11px] text-gray-400 truncate">{workflow.id}</div>
-      <div className={`mt-2 text-[10px] uppercase tracking-wide ${visual.textClass}`}>{statusLabel(workflow.status)}</div>
+      <div className="mt-1 text-base text-muted-foreground truncate">{workflow.id}</div>
+      <div className={`mt-2 text-[15px] uppercase tracking-wide ${visual.textClass}`}>{statusLabel(workflow.status)}</div>
       {showRunningTaskLine && (
         <div
           data-testid={`workflow-node-${workflow.id}-running-tasks`}
-          className="mt-1 text-[10px] text-gray-300"
+          className="mt-1 text-[15px] text-muted-foreground"
         >
           {runningTaskLabel(runningCount)}
         </div>
@@ -85,16 +88,16 @@ export function WorkflowNode({
         <div
           data-testid={`workflow-node-${workflow.id}-core-activity`}
           className={[
-            'mt-2 inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium',
+            'mt-2 inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[15px] font-medium',
             coreActivity.status === 'running'
-              ? 'border-blue-400/60 text-blue-200'
+              ? 'border-border-strong text-muted-foreground'
               : coreActivity.status === 'pending'
                 ? 'border-amber-400/60 text-amber-200'
                 : 'border-red-400/70 text-red-200',
           ].join(' ')}
         >
           {coreActivity.status === 'running' && (
-            <span className="h-1.5 w-1.5 rounded-full bg-blue-300 animate-pulse" />
+            <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
           )}
           {coreActivity.label}
         </div>

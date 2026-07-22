@@ -40,7 +40,7 @@ import { logCaughtException } from './logging.js';
 import { runMcpServer } from './mcp-server.js';
 import { runDoctor, runSetup } from './onboarding.js';
 
-const VERSION = '0.0.6';
+const VERSION = '0.0.7';
 
 type CliOptions = {
   dbDir?: string;
@@ -87,7 +87,6 @@ type CliRuntimeConfig = {
     port?: number;
     managedWorkspaces?: boolean;
     remoteInvokerHome?: string;
-    provisionCommand?: string;
     use_api_key?: boolean;
     secretsFile?: string;
     remoteHeartbeatIntervalSeconds?: number;
@@ -131,7 +130,7 @@ function usage(): string {
     'Usage:',
     '  invoker-cli run <plan.yaml> [--live|--standalone] [--db-dir <path>] [--config <path>] [--json]',
     '  invoker-cli doctor [--fix] [--json]',
-    '  invoker-cli setup [planner|slack] [--check|--from-env] [--json]',
+    '  invoker-cli setup [planner|slack] [--check|--from-env] [--yes] [--json]',
     '  invoker-cli mcp',
     '  invoker-cli worker [autofix|list]',
     '  invoker-cli --help',
@@ -224,7 +223,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
-async function discoverLiveOwner(bus: MessageBus, timeoutMs = 1_000): Promise<LiveOwnerInfo | null> {
+async function discoverLiveOwner(bus: MessageBus, timeoutMs = 10_000): Promise<LiveOwnerInfo | null> {
   try {
     const raw = await withTimeout(
       bus.request('headless.owner-ping', {}),
@@ -273,7 +272,7 @@ async function submitPlanToLiveOwner(
   planPath: string,
   bus: MessageBus,
   owner: LiveOwnerInfo,
-  timeoutMs = 5_000,
+  timeoutMs = 15_000,
 ): Promise<LiveSubmissionResult> {
   const absolutePlanPath = resolve(planPath);
   const raw = await withTimeout(
@@ -371,6 +370,7 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
   const persistence = await SQLiteAdapter.create(join(dbDir, 'invoker.db'), {
     ownerCapability: true,
     outputDir: join(dbDir, 'outputs'),
+    ...(options.json ? { slowQueryThresholdMs: 0 } : {}),
   });
   const stdoutWrite = process.stdout.write;
   if (options.json) {

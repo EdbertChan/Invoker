@@ -1,7 +1,7 @@
 /**
  * Headless "query" command family: the read-only `query <sub>` router
  * (workflows · tasks · task · queue · review-gate · action-graph · audit ·
- * session · worker-actions · cost · cost-events · costs · ui-perf · stats), the cost-event
+ * session · workers · worker-actions · cost · cost-events · costs · ui-perf · stats), the cost-event
  * collection/rollup
  * helpers, agent session resolution, and `query-select`.
  *
@@ -12,18 +12,31 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Attempt, TaskState } from '@invoker/workflow-core';
-import type { AgentSessionData, NormalizedCostEvent } from '@invoker/contracts';
-import type { AgentRegistry } from '@invoker/execution-engine';
+import type { AgentSessionData, NormalizedCostEvent, WorkerActionSummary, WorkerStatusSnapshot } from '@invoker/contracts';
+import { AUTO_FIX_WORKER_KIND, createWorkerRegistry, registerBuiltinWorkers, type AgentRegistry, type WorkerRuntimeDependencies } from '@invoker/execution-engine';
+import type { CostAttributionAttempt } from '@invoker/data-store';
 import type { CostGroupDimension } from './cost-rollup.js';
 import { buildCurrentActionGraphSnapshot } from './action-graph-snapshot.js';
+import { buildReviewGateQueryResponse } from './review-gate-query.js';
+
 import {
   type HeadlessDeps,
   type QueryFlags,
+  BOLD,
+  RESET,
   parseQueryFlags,
   restoreWorkflowForTask,
 } from './headless-shared.js';
 import { resolveDefaultExecutionAgent } from './config.js';
-import { listWorkerDecisions } from './worker-control.js';
+import { registerExternalWorkersFromConfig } from './external-worker-loader.js';
+import { loadAllEventsPaged } from './load-all-events-paged.js';
+import { AUTO_STARTED_OWNER_WORKER_KINDS, createLocalWorkerStatusSnapshot, listWorkerDecisions, toWorkerActionSummary } from './worker-control.js';
+import { renderWorkerLifecycle } from './headless-worker-lifecycle.js';
+import { createRendererUiPerfCounters } from './renderer-ui-perf.js';
+import {
+  collectRecoveryWorkerStatus,
+  type RecoveryWorkerStatus,
+} from './recovery-worker-observability.js';
 
 /**
  * The read-query family writes its formatted output through {@link writeOut}.
@@ -55,7 +68,7 @@ export type HeadlessQueryDeps = Pick<
 export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Promise<void> {
   const subCommand = args[0];
   if (!subCommand) {
-    throw new Error('Missing query sub-command. Usage: --headless query <workflows|workflow|tasks|task|queue|review-gate|action-graph|audit|session|worker-actions|worker-decisions|cost|cost-events|costs|ui-perf|stats>');
+    throw new Error('Missing query sub-command. Usage: --headless query <workflows|workflow|tasks|task|task-output|container-id|queue|review-gate|action-graph|audit|session|workers|worker-actions|worker-decisions|cost|cost-events|costs|ui-perf|stats|execution-leases>');
   }
   const flags = parseQueryFlags(args.slice(1));
 
@@ -159,6 +172,33 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
       }
       break;
     }
+    case 'task-output': {
+      const taskId = flags.positional[0];
+      if (!taskId) throw new Error('Usage: --headless query task-output <taskId>');
+      const resolved = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+      const output = deps.persistence.getTaskOutput(resolved);
+
+      switch (flags.output) {
+        case 'label': writeOut(output + '\n'); break;
+        case 'json':  writeOut(formatAsJson({ id: resolved, output }) + '\n'); break;
+        case 'jsonl': writeOut(formatAsJsonl([{ id: resolved, output }]) + '\n'); break;
+        default:      writeOut(output); break;
+      }
+      break;
+    }
+    case 'container-id': {
+      const taskId = flags.positional[0];
+      if (!taskId) throw new Error('Usage: --headless query container-id <taskId>');
+      const resolved = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
+      const containerId = deps.persistence.getContainerId(resolved);
+
+      switch (flags.output) {
+        case 'json':  writeOut(formatAsJson({ id: resolved, containerId }) + '\n'); break;
+        case 'jsonl': writeOut(formatAsJsonl([{ id: resolved, containerId }]) + '\n'); break;
+        default:      writeOut((containerId ?? '') + '\n'); break;
+      }
+      break;
+    }
     case 'review-gate': {
       const arg = flags.positional[0];
       if (!arg) throw new Error('Usage: --headless query review-gate <prNumber|prUrl> [--output text|json|jsonl|label]');
@@ -169,11 +209,20 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
         case 'label': writeOut(`${record?.workflowId ?? ''}\n`); break;
         case 'json':  writeOut(formatAsJson(record ?? {}) + '\n'); break;
         case 'jsonl': writeOut(formatAsJsonl(record ? [record] : []) + '\n'); break;
-        default:      writeOut(
-          record
-            ? `${record.workflowId}\t${record.reviewId ?? prNumber}\t${record.workflowStatus}\tgen=${record.workflowGeneration}\t${record.branch ?? ''}\n`
-            : `No Invoker workflow found for PR ${prNumber}.\n`,
-        ); break;
+        default:      if (!record) {
+          writeOut(`No Invoker workflow found for PR ${prNumber}.\n`);
+          break;
+        }
+        {
+          const workflow = deps.persistence.loadWorkflow(record.workflowId);
+          const tasks = deps.persistence.loadTasks(record.workflowId);
+          const gate = buildReviewGateQueryResponse({ workflowId: record.workflowId, workflow, tasks });
+          const substate = gate.substate ?? 'null';
+          writeOut(
+            `${record.workflowId}\t${record.reviewId ?? prNumber}\t${record.workflowStatus}\tgen=${record.workflowGeneration}\tsubstate=${substate}\t${record.branch ?? ''}\n`,
+          );
+        }
+        break;
       }
       break;
     }
@@ -182,7 +231,7 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
       for (const workflow of workflows) {
         deps.orchestrator.syncFromDb(workflow.id);
       }
-      const status = deps.orchestrator.getQueueStatus();
+      const status = deps.orchestrator.getQueueStatus({ refresh: false });
 
       switch (flags.output) {
         case 'label': {
@@ -228,7 +277,7 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
     case 'audit': {
       const taskId = flags.positional[0];
       if (!taskId) throw new Error('Usage: --headless query audit <taskId>');
-      const events = deps.persistence.getEvents(taskId);
+      const events = loadAllEventsPaged(deps.persistence, taskId);
 
       switch (flags.output) {
         case 'label': writeOut(events.map(e => `${e.taskId}:${e.eventType}`).join('\n') + '\n'); break;
@@ -244,6 +293,16 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
       // For non-text output, we'd need structured session data.
       // For now, session only supports text output; other formats fall through to text.
       await headlessSession(taskId, deps);
+      break;
+    }
+    case 'workers': {
+      const snapshot = createHeadlessWorkerStatusSnapshot(deps);
+      switch (flags.output) {
+        case 'label': writeOut(snapshot.workers.map((worker) => worker.kind).join('\n') + '\n'); break;
+        case 'json': writeOut(formatAsJson(snapshot) + '\n'); break;
+        case 'jsonl': writeOut(formatAsJsonl([snapshot]) + '\n'); break;
+        default: writeOut(formatWorkerStatusSnapshot(snapshot) + '\n'); break;
+      }
       break;
     }
     case 'worker-actions': {
@@ -287,9 +346,7 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
         dbPollCreated: 0,
         dbPollUpdatedAsCreated: 0,
         dbPollUpdatedAsUpdated: 0,
-        rendererReports: 0,
-        maxRendererEventLoopLagMs: 0,
-        maxRendererLongTaskMs: 0,
+        ...createRendererUiPerfCounters(),
       };
       switch (flags.output) {
         case 'label':
@@ -372,8 +429,61 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
       await headlessCosts(flags, deps);
       break;
     }
+    case 'execution-leases': {
+      const listLeases = deps.persistence.listExecutionResourceLeases?.bind(deps.persistence);
+      if (!listLeases) {
+        throw new Error('Persistence adapter does not support listExecutionResourceLeases');
+      }
+      const nowIso = new Date().toISOString();
+      const leases = listLeases()
+        .filter((lease) => lease.leaseExpiresAt > nowIso)
+        .map((lease) => ({
+          resourceKey: lease.resourceKey,
+          resourceType: lease.resourceType,
+          poolId: lease.poolId ?? null,
+          poolMemberId: lease.poolMemberId ?? null,
+          taskId: lease.taskId ?? null,
+          holderId: lease.holderId,
+          acquiredAt: lease.acquiredAt,
+          lastHeartbeatAt: lease.lastHeartbeatAt,
+          leaseExpiresAt: lease.leaseExpiresAt,
+        }));
+      switch (flags.output) {
+        case 'label':
+          writeOut(leases.map((lease) => lease.resourceKey).join('\n') + (leases.length > 0 ? '\n' : ''));
+          break;
+        case 'json':
+          writeOut(formatAsJson(leases) + '\n');
+          break;
+        case 'jsonl':
+          writeOut(formatAsJsonl(leases) + '\n');
+          break;
+        default: {
+          if (leases.length === 0) {
+            writeOut('No live execution resource leases.\n');
+            break;
+          }
+          const lines = [
+            'RESOURCE_KEY\tPOOL\tMEMBER\tTASK\tHOLDER\tEXPIRES',
+            ...leases.map((lease) => (
+              [
+                lease.resourceKey,
+                lease.poolId ?? '-',
+                lease.poolMemberId ?? '-',
+                lease.taskId ?? '-',
+                lease.holderId,
+                lease.leaseExpiresAt,
+              ].join('\t')
+            )),
+          ];
+          writeOut(lines.join('\n') + '\n');
+          break;
+        }
+      }
+      break;
+    }
     default:
-      throw new Error(`Unknown query sub-command: "${subCommand}". Use: workflows, workflow, tasks, task, queue, review-gate, action-graph, audit, session, worker-actions, cost, cost-events, costs, ui-perf, stats`);
+      throw new Error(`Unknown query sub-command: "${subCommand}". Use: workflows, workflow, tasks, task, task-output, container-id, queue, review-gate, action-graph, audit, session, workers, worker-actions, worker-decisions, cost, cost-events, costs, ui-perf, stats, execution-leases`);
   }
 }
 
@@ -442,8 +552,8 @@ type CostQueryDeps = Pick<HeadlessDeps, 'orchestrator' | 'persistence' | 'execut
 
 function resolveCostAttributionAttempt(
   task: TaskState,
-  attempts: readonly Attempt[],
-): Attempt | undefined {
+  attempts: readonly CostAttributionAttempt[],
+): CostAttributionAttempt | undefined {
   const sessionId = task.execution.agentSessionId?.trim();
   if (sessionId) {
     const exactSessionAttempt = attempts.find((attempt) => attempt.agentSessionId?.trim() === sessionId);
@@ -486,7 +596,7 @@ async function collectCostEvents(
     );
 
     for (const task of tasks) {
-      const attempts = deps.persistence.loadAttempts(task.id);
+      const attempts = deps.persistence.loadCostAttributionAttempts(task.id);
       const attributedAttempt = resolveCostAttributionAttempt(task, attempts);
       const ctx = buildAttributionContext({
         id: task.id,
@@ -713,7 +823,7 @@ export async function headlessSession(taskId: string | undefined, deps: Pick<Hea
   // Fallback: if current execution dropped agentSessionId, recover the most
   // recent session from task event payloads.
   if (!sessionId) {
-    const events = deps.persistence.getEvents(taskId) ?? [];
+    const events = loadAllEventsPaged(deps.persistence, taskId);
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const payload = events[i].payload;
       if (!payload) continue;
@@ -756,6 +866,104 @@ export async function headlessSession(taskId: string | undefined, deps: Pick<Hea
   }
 }
 
+function createHeadlessWorkerStatusSnapshot(
+  deps: Pick<HeadlessQueryDeps, 'persistence' | 'invokerConfig'>,
+): WorkerStatusSnapshot {
+  const registry = registerExternalWorkersFromConfig(
+    deps.invokerConfig?.externalWorkers,
+    registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>()),
+  );
+  return createLocalWorkerStatusSnapshot({
+    registry,
+    persistence: deps.persistence,
+    autoStartKinds: AUTO_STARTED_OWNER_WORKER_KINDS,
+  });
+}
+
+function formatWorkerStatusSnapshot(snapshot: WorkerStatusSnapshot): string {
+  const lines = [
+    `${BOLD}Workers${RESET}`,
+    `  generatedAt: ${snapshot.generatedAt}`,
+    `  count: ${snapshot.workers.length}`,
+  ];
+  for (const worker of snapshot.workers) {
+    const policy = worker.policyReason ? `${worker.policy} (${worker.policyReason})` : worker.policy;
+    const source = worker.source ? ` · ${worker.source}` : '';
+    const desired = worker.desiredEnabled === undefined ? '' : ` · desired=${worker.desiredEnabled}`;
+    lines.push(`  - ${worker.kind}: ${renderWorkerLifecycle(worker)} · ${policy}${desired}${source}`);
+  }
+  return lines.join('\n');
+}
+
+type RecoveryWorkerStatusWithActions = RecoveryWorkerStatus & {
+  recentActions?: WorkerActionSummary[];
+};
+
+function formatRecoveryWorkerStatus(status: RecoveryWorkerStatusWithActions): string {
+  const lines = [
+    `${BOLD}Recovery worker${RESET}`,
+    `  kind: ${status.kind}`,
+    `  workerId: ${status.workerId}`,
+    `  owner: ${status.owner}`,
+    `  lastWakeupAt: ${status.lastWakeupAt ?? 'never'}`,
+    `  lastScanAt: ${status.lastScanAt ?? 'never'}`,
+    `  lastSubmitAt: ${status.lastSubmitAt ?? 'never'}`,
+    `  lastSkip: ${status.lastSkipAt ?? 'never'}${status.lastSkipReason ? ` (${status.lastSkipReason} task=${status.lastSkipTaskId})` : ''}`,
+    `  counts: wakeups=${status.wakeups} scans=${status.scans} submissions=${status.submissions} skips=${status.skips}`,
+  ];
+  if (status.recent.length > 0) {
+    lines.push('');
+    lines.push(`${BOLD}Recent recovery decisions${RESET}`);
+    for (const event of status.recent) {
+      const reason = event.reason ? ` reason=${event.reason}` : '';
+      const phase = event.phase ? ` phase=${event.phase}` : '';
+      lines.push(`  ${event.at} ${event.taskId} ${event.action}${phase}${reason}`);
+    }
+  }
+  if (status.recentActions && status.recentActions.length > 0) {
+    lines.push('');
+    lines.push(`${BOLD}Recent worker actions${RESET}`);
+    for (const action of status.recentActions) {
+      const task = action.taskId ? ` task=${action.taskId}` : '';
+      const reason = action.reason ? ` reason=${action.reason}` : '';
+      const summary = action.summary ? ` — ${action.summary}` : '';
+      lines.push(
+        `  ${action.updatedAt} ${action.workerKind}/${action.actionType} [${action.status}]${task}${reason}${summary}`,
+      );
+    }
+  }
+  return lines.join('\n');
+}
+
+export async function renderWorkerStatus(
+  flagArgs: string[],
+  deps: Pick<HeadlessQueryDeps, 'persistence'>,
+): Promise<void> {
+  const flags = parseQueryFlags(flagArgs);
+  const status = collectRecoveryWorkerStatus(deps.persistence);
+  const recentActions = deps.persistence.listWorkerActions?.({ workerKind: AUTO_FIX_WORKER_KIND, limit: 5 })
+    .map(toWorkerActionSummary) ?? [];
+  const statusWithActions: RecoveryWorkerStatusWithActions = {
+    ...status,
+    recentActions,
+  };
+  const { formatAsJson, formatAsJsonl } = await import('./formatter.js');
+  switch (flags.output) {
+    case 'label':
+      writeOut(`${status.workerId}\n`);
+      break;
+    case 'json':
+      writeOut(formatAsJson(statusWithActions) + '\n');
+      break;
+    case 'jsonl':
+      writeOut(formatAsJsonl([statusWithActions]) + '\n');
+      break;
+    default:
+      writeOut(formatRecoveryWorkerStatus(statusWithActions) + '\n');
+      break;
+  }
+}
+
 /**
  * Top-level read-only headless commands that the writable owner can answer on
  * behalf of a non-owner caller. Mirrors the read-command routing in
@@ -786,6 +994,13 @@ async function dispatchReadOnlyHeadlessQuery(args: string[], deps: HeadlessQuery
       return headlessQuery(['audit', ...args.slice(1)], deps);
     case 'session':
       return headlessQuery(['session', ...args.slice(1)], deps);
+    case 'worker': {
+      const workerSub = args[1] ?? 'list';
+      if (workerSub === 'status') {
+        return renderWorkerStatus(args.slice(2), deps);
+      }
+      throw new Error(`worker ${workerSub} is not a delegatable read-only query`);
+    }
     default:
       throw new Error(`Command "${String(command)}" is not a delegatable read-only query`);
   }

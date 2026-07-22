@@ -8,7 +8,7 @@
  * transactions. Row mapping keeps coming from sqlite-row-mappers.ts; the
  * adapter retains one-line delegates for every method here.
  */
-import type { TaskState, TaskStateChanges, Attempt } from '@invoker/workflow-core';
+import type { TaskState, TaskStateChanges, Attempt, TaskExecution } from '@invoker/workflow-core';
 import {
   assertTaskConsistent,
   isDiscardedAttempt,
@@ -16,6 +16,7 @@ import {
 } from '@invoker/workflow-core';
 import { mapRowToTask, mapRowToAttempt } from './sqlite-row-mappers.js';
 import type { SqliteExecutor } from './sqlite-executor.js';
+import type { CostAttributionAttempt } from './attempt-read-models.js';
 
 const ACTION_GRAPH_RECENT_ATTEMPT_LIMIT = 3;
 
@@ -41,6 +42,71 @@ export class SqliteTaskAttemptRepository {
     private readonly mutators: TaskAttemptMutators,
   ) {}
 
+  private hasCrashPreservationTableCache: boolean | null = null;
+
+  private hasCrashPreservationTable(): boolean {
+    if (this.hasCrashPreservationTableCache !== null) return this.hasCrashPreservationTableCache;
+    const row = this.exec.queryOne(
+      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'task_crash_preservation'",
+    ) as { present?: number } | undefined;
+    this.hasCrashPreservationTableCache = row?.present === 1;
+    return this.hasCrashPreservationTableCache;
+  }
+
+  private syncCrashPreservationState(
+    taskId: string,
+    beforeTask: TaskState | undefined,
+    changes: Partial<TaskExecution>,
+  ): void {
+    const crashKeys = [
+      'crashPreservedAt',
+      'crashPreservedOwnerPid',
+      'crashPreservedReportPath',
+      'crashPreservedDiagnosticSummary',
+    ] as const satisfies readonly (keyof TaskExecution)[];
+    if (!crashKeys.some((key) => key in changes)) return;
+    const next = { ...(beforeTask?.execution ?? {}), ...changes };
+    if (next.crashPreservedAt instanceof Date) {
+      this.exec.execRun(
+        `INSERT INTO task_crash_preservation (
+            task_id,
+            preserved_at,
+            owner_pid,
+            diagnostic_report_path,
+            diagnostic_summary
+          ) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(task_id) DO UPDATE SET
+            preserved_at = excluded.preserved_at,
+            owner_pid = excluded.owner_pid,
+            diagnostic_report_path = excluded.diagnostic_report_path,
+            diagnostic_summary = excluded.diagnostic_summary`,
+        [
+          taskId,
+          next.crashPreservedAt.toISOString(),
+          next.crashPreservedOwnerPid ?? null,
+          next.crashPreservedReportPath ?? null,
+          next.crashPreservedDiagnosticSummary ?? null,
+        ],
+      );
+      return;
+    }
+    this.exec.execRun('DELETE FROM task_crash_preservation WHERE task_id = ?', [taskId]);
+  }
+
+  private taskSelectColumns(alias: string): string {
+    if (!this.hasCrashPreservationTable()) return `${alias}.*`;
+    return `${alias}.*,
+             cp.preserved_at AS crash_preserved_at,
+             cp.owner_pid AS crash_preserved_owner_pid,
+             cp.diagnostic_report_path AS crash_preserved_report_path,
+             cp.diagnostic_summary AS crash_preserved_diagnostic_summary`;
+  }
+
+  private taskSelectJoin(alias: string): string {
+    if (!this.hasCrashPreservationTable()) return '';
+    return ` LEFT JOIN task_crash_preservation cp ON cp.task_id = ${alias}.id`;
+  }
+
   // ── Task CRUD ────────────────────────────────────────────
 
   saveTask(workflowId: string, task: TaskState): void {
@@ -65,6 +131,7 @@ export class SqliteTaskAttemptRepository {
         review_url, review_id, review_status, review_provider_id, review_gate,
         is_fixing_with_ai,
         execution_generation,
+        selected_attempt_id,
         pool_member_id,
         docker_image,
         execution_agent,
@@ -86,6 +153,7 @@ export class SqliteTaskAttemptRepository {
         ?, ?, ?, ?,
         ?, ?,
         ?, ?, ?, ?, ?,
+        ?,
         ?,
         ?,
         ?,
@@ -147,6 +215,7 @@ export class SqliteTaskAttemptRepository {
       exec.reviewGate ? JSON.stringify(exec.reviewGate) : null,
       exec.isFixingWithAI ? 1 : 0,
       exec.generation ?? 0,
+      exec.selectedAttemptId ?? null,
       (cfg as { poolMemberId?: string }).poolMemberId ?? null,
       cfg.dockerImage ?? null,
       cfg.executionAgent ?? null,
@@ -154,9 +223,13 @@ export class SqliteTaskAttemptRepository {
       exec.agentName ?? null,
       task.taskStateVersion ?? 1,
     ]);
+    this.syncCrashPreservationState(task.id, undefined, task.execution);
   }
 
   updateTask(taskId: string, changes: TaskStateChanges): void {
+    const beforeTask = this.loadTask(taskId);
+    if (!beforeTask) return;
+
     const setClauses: string[] = [];
     const values: unknown[] = [];
 
@@ -226,6 +299,7 @@ export class SqliteTaskAttemptRepository {
     }
 
     if (changes.execution) {
+      this.syncCrashPreservationState(taskId, beforeTask, changes.execution);
       const execution = changes.execution as Record<string, unknown>;
       const execMap: Record<string, string> = {
         blockedBy: 'blocked_by',
@@ -304,8 +378,6 @@ export class SqliteTaskAttemptRepository {
     }
 
 
-    const beforeTask = this.loadTask(taskId);
-    if (!beforeTask) return;
     assertTaskConsistent({
       ...beforeTask,
       ...changes,
@@ -349,12 +421,22 @@ export class SqliteTaskAttemptRepository {
   }
 
   loadTasks(workflowId: string): TaskState[] {
-    const rows = this.exec.queryAll('SELECT * FROM tasks WHERE workflow_id = ?', [workflowId]);
+    const rows = this.exec.queryAll(
+      `SELECT ${this.taskSelectColumns('t')}
+       FROM tasks t${this.taskSelectJoin('t')}
+       WHERE t.workflow_id = ?`,
+      [workflowId],
+    );
     return rows.map((row) => this.reconcileTaskFromSelectedAttempt(mapRowToTask(row)));
   }
 
   loadTask(taskId: string): TaskState | undefined {
-    const row = this.exec.queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    const row = this.exec.queryOne(
+      `SELECT ${this.taskSelectColumns('t')}
+       FROM tasks t${this.taskSelectJoin('t')}
+       WHERE t.id = ?`,
+      [taskId],
+    );
     if (!row) return undefined;
     return this.reconcileTaskFromSelectedAttempt(mapRowToTask(row));
   }
@@ -373,8 +455,9 @@ export class SqliteTaskAttemptRepository {
 
   loadAllCompletedTasks(): Array<TaskState & { workflowName: string }> {
     const rows = this.exec.queryAll(`
-      SELECT t.*, w.name AS workflow_name
-      FROM tasks t
+      SELECT ${this.taskSelectColumns('t')},
+             w.name AS workflow_name
+      FROM tasks t${this.taskSelectJoin('t')}
       JOIN workflows w ON w.id = t.workflow_id
       WHERE t.status = 'completed'
       ORDER BY t.completed_at DESC
@@ -383,6 +466,33 @@ export class SqliteTaskAttemptRepository {
       ...mapRowToTask(row),
       workflowName: row.workflow_name as string,
     }));
+  }
+
+  loadAllHistoryTasks(): Array<TaskState & { workflowName: string; lastEventAt: string | null; eventCount: number }> {
+    const rows = this.exec.queryAll(`
+      SELECT ${this.taskSelectColumns('t')},
+             w.name AS workflow_name,
+             e.max_created_at AS last_event_at,
+             COALESCE(e.event_count, 0) AS event_count
+      FROM tasks t${this.taskSelectJoin('t')}
+      JOIN workflows w ON w.id = t.workflow_id
+      LEFT JOIN (
+        SELECT task_id, MAX(created_at) AS max_created_at, COUNT(*) AS event_count
+        FROM events
+        GROUP BY task_id
+      ) e ON e.task_id = t.id
+      WHERE COALESCE(e.event_count, 0) > 0 OR t.status != 'pending'
+      ORDER BY COALESCE(e.max_created_at, t.completed_at, t.started_at, t.created_at) DESC
+    `);
+    return rows.map((row) => {
+      const task = this.reconcileTaskFromSelectedAttempt(mapRowToTask(row));
+      return {
+        ...task,
+        workflowName: row.workflow_name as string,
+        lastEventAt: (row.last_event_at as string | null) ?? null,
+        eventCount: Number(row.event_count ?? 0),
+      };
+    });
   }
 
   // ── Scalar task-column getters ───────────────────────────
@@ -528,6 +638,22 @@ export class SqliteTaskAttemptRepository {
     return rows.map((row) => mapRowToAttempt(row));
   }
 
+  loadCostAttributionAttempts(nodeId: string): CostAttributionAttempt[] {
+    const rows = this.exec.queryAll(
+      `SELECT id, node_id, agent_session_id, created_at
+       FROM attempts
+       WHERE node_id = ?
+       ORDER BY created_at ASC`,
+      [nodeId],
+    );
+    return rows.map((row) => ({
+      id: String(row.id),
+      nodeId: String(row.node_id),
+      agentSessionId: row.agent_session_id ? String(row.agent_session_id) : undefined,
+      createdAt: new Date(String(row.created_at)),
+    }));
+  }
+
   loadActionGraphAttempts(
     nodeId: string,
     selectedAttemptId?: string,
@@ -671,6 +797,25 @@ export class SqliteTaskAttemptRepository {
     const attempt = this.loadAttempt(attemptId);
     if (!attempt) return task;
 
+    if (attempt.status === 'failed' || isDiscardedAttempt(attempt)) {
+      const [activeAfter] = this.findActiveAttemptsAfter(task.id, attempt, 1);
+      if (activeAfter) {
+        const cleaned: TaskState = {
+          ...task,
+          execution: {
+            ...task.execution,
+            error: undefined,
+            exitCode: undefined,
+            completedAt: undefined,
+          },
+        };
+        if (activeAfter.status === 'needs_input') {
+          return { ...cleaned, status: 'needs_input' };
+        }
+        return cleaned;
+      }
+    }
+
     if (isDiscardedAttempt(attempt)) {
       return {
         ...task,
@@ -728,5 +873,20 @@ export class SqliteTaskAttemptRepository {
     }
 
     return task;
+  }
+
+  private findActiveAttemptsAfter(nodeId: string, selected: Attempt, limit = 1): Attempt[] {
+    const cappedLimit = Math.max(0, Math.floor(limit));
+    if (cappedLimit === 0) return [];
+    const rows = this.exec.queryAll(
+      `SELECT * FROM attempts
+       WHERE node_id = ?
+         AND created_at > ?
+         AND status IN ('pending', 'claimed', 'running', 'needs_input')
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [nodeId, selected.createdAt.toISOString(), cappedLimit],
+    );
+    return rows.map((row) => mapRowToAttempt(row));
   }
 }

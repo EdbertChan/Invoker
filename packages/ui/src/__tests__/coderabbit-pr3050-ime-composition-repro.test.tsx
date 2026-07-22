@@ -29,7 +29,8 @@ describe('CodeRabbit PR #3050 — Enter-to-submit ignores IME composition', () =
   });
 
   async function openPlanningTerminal() {
-    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+    fireEvent.click(await screen.findByTestId('sidebar-home'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Options' }));
     await waitFor(() => {
       expect(screen.getByTestId('invoker-terminal-harness')).toHaveValue('codex');
     });

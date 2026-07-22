@@ -252,7 +252,7 @@ export function cancelTaskImpl(
     const neverStarted =
       id !== rootId &&
       !t.execution.startedAt &&
-      (t.status === 'pending' || t.status === 'blocked');
+      (t.status === 'pending' || (t.status as string) === 'queued' || t.status === 'blocked');
 
     if (neverStarted) {
       const blockedChanges: TaskStateChanges = {
@@ -312,6 +312,7 @@ export function cancelWorkflowImpl(
 
   const cancellable: Partial<Record<TaskStatus, true>> = {
     pending: true,
+    queued: true as Partial<Record<TaskStatus, true>>['queued'],
     running: true,
     fixing_with_ai: true,
     blocked: true,
@@ -381,11 +382,14 @@ export function deferTaskImpl(
   const id = task.id;
   host.invalidateLaunchArtifactsForTasks([id], 'task deferred');
 
-  // Transition running → pending. A deferred launch must not retain the
-  // launch-claimed phase; otherwise it can be mistaken for an actively
+  // Transition launching/running → queued. A deferred launch must not retain
+  // the launch-claimed phase; otherwise it can be mistaken for an actively
   // dispatchable launch with no executor owner.
-  const changes: TaskStateChanges = buildTaskResetChanges('defer');
-  const deferUpdated = host.writeResetAndSync(task, 'defer', changes);
+  const changes: TaskStateChanges = {
+    ...buildTaskResetChanges('defer'),
+    status: 'queued' as TaskStateChanges['status'],
+  };
+  const deferUpdated = host.writeAndSync(id, changes);
   const delta: TaskDelta = host.buildUpdateDelta(task, deferUpdated, changes);
   host.persistence.logEvent?.(id, 'task.deferred', {
     ...changes,

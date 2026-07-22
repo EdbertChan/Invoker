@@ -84,6 +84,7 @@ export type TaskGraphEvent =
       workflows: WorkflowMeta[];
       reason: string;
       streamSequence: number;
+      forced?: boolean;
     };
 
 
@@ -140,9 +141,62 @@ export interface TaskEvent {
   createdAt: string;
 }
 
+/** Max rows returned by a single `invoker:get-events` page. */
+export const MAX_EVENTS_PAGE = 100;
+
+/** Required pagination options for `invoker:get-events`. */
+export interface GetEventsOptions {
+  /** Default `'desc'` (newest first). */
+  sortBy?: 'asc' | 'desc';
+  /** Required page size; must be 1..MAX_EVENTS_PAGE. */
+  limit: number;
+  /** Optional cursor: return events with id strictly less than this (older). */
+  beforeId?: number;
+}
+
+export interface NormalizedGetEventsOptions {
+  sortBy: 'asc' | 'desc';
+  limit: number;
+  beforeId?: number;
+}
+
+/**
+ * Validate and normalize get-events pagination options.
+ * Rejects missing/invalid limit and pages larger than MAX_EVENTS_PAGE.
+ */
+export function normalizeGetEventsOptions(raw: unknown): NormalizedGetEventsOptions {
+  if (raw === undefined || raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('getEvents requires options with a numeric limit');
+  }
+  const opts = raw as Record<string, unknown>;
+  if (typeof opts.limit !== 'number' || !Number.isFinite(opts.limit)) {
+    throw new Error('getEvents options.limit is required and must be a finite number');
+  }
+  const limit = Math.floor(opts.limit);
+  if (limit <= 0 || limit > MAX_EVENTS_PAGE) {
+    throw new Error(`getEvents options.limit must be between 1 and ${MAX_EVENTS_PAGE}`);
+  }
+  const sortBy = opts.sortBy === 'asc' ? 'asc' : 'desc';
+  if (opts.beforeId === undefined) {
+    return { sortBy, limit };
+  }
+  if (typeof opts.beforeId !== 'number' || !Number.isFinite(opts.beforeId)) {
+    throw new Error('getEvents options.beforeId must be a finite number when provided');
+  }
+  return { sortBy, limit, beforeId: Math.floor(opts.beforeId) };
+}
+
+export interface TaskHistoryEntry extends TaskState {
+  workflowName: string;
+  lastEventAt: string | null;
+  eventCount: number;
+}
+
 export interface QueueStatus {
   maxConcurrency: number;
   runningCount: number;
+  activeExecutionCount?: number;
+  launchingCount?: number;
   running: Array<{ taskId: string; description: string }>;
   queued: Array<{ taskId: string; priority: number; description: string }>;
 }
@@ -160,6 +214,28 @@ export type WorkerActionStatus =
   | 'skipped'
   | 'abandoned'
   | 'cancelled';
+export type WorkerSource = 'built-in' | 'external';
+export type WorkerAvailability = 'available' | 'unknown';
+export type WorkerLogSource = 'worker_actions' | 'task_events';
+
+export interface WorkerLogEntry {
+  id: string;
+  workerKind: string;
+  source: WorkerLogSource;
+  actionType?: string;
+  eventType?: string;
+  workflowId?: string;
+  taskId?: string;
+  subjectType?: string;
+  subjectId?: string;
+  externalKey?: string;
+  status?: WorkerActionStatus;
+  summary?: string;
+  payload?: unknown;
+  createdAt: string;
+  updatedAt?: string;
+}
+
 
 export interface WorkerActionSummary {
   id: string;
@@ -199,6 +275,7 @@ export interface WorkerRecoverySummary {
   skips: number;
 }
 
+
 export interface WorkerStatusEntry {
   kind: string;
   note: string;
@@ -208,6 +285,7 @@ export interface WorkerStatusEntry {
   policy: WorkerPolicyStatus;
   policyReason?: string;
   autoStarts: boolean;
+  desiredEnabled?: boolean;
   startable: boolean;
   stoppable: boolean;
   controlDisabledReason?: string;
@@ -215,7 +293,11 @@ export interface WorkerStatusEntry {
   stoppedAt?: string;
   lastError?: string;
   recentActions: WorkerActionSummary[];
+  recentLogs?: WorkerLogEntry[];
   recovery?: WorkerRecoverySummary;
+  source?: WorkerSource;
+  availability?: WorkerAvailability;
+  running?: boolean;
 }
 
 export interface WorkerStatusSnapshot {
@@ -362,17 +444,25 @@ export interface PlanningPresetOption {
   isDefault: boolean;
 }
 
+export interface InAppPlanningPlanSummaryTaskGroup {
+  workflow: string | null;
+  tasks: string[];
+}
+
 export interface InAppPlanningPlanSummary {
   name: string;
   taskCount: number;
   workflowCount?: number;
   steps: string[];
+  taskGroups: InAppPlanningPlanSummaryTaskGroup[];
 }
 export type InAppPlanningSessionStatus =
   | 'still_discussing'
   | 'waiting_for_answer'
   | 'draft_ready'
   | 'submitted';
+
+export type PlanningTerminalMode = 'chat' | 'tmux';
 
 export interface InAppPlanningChatLine {
   id: number;
@@ -392,6 +482,12 @@ export interface InAppPlanningSessionSummary {
   draftPlanSummary?: InAppPlanningPlanSummary;
   submittedWorkflowId?: string;
   submittedPlanName?: string;
+  terminalMode?: PlanningTerminalMode;
+  terminalSessionId?: string;
+  terminalStatus?: 'running' | 'exited';
+  terminalExitCode?: number;
+  terminalOutputSnapshot?: string;
+  terminalUpdatedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -416,6 +512,10 @@ export type InAppPlanningListSessionsResponse = {
   sessions: InAppPlanningSessionSummary[];
 };
 
+export interface InAppPlanningStreamEvent {
+  sessionId: string;
+  chunk: string;
+}
 
 export interface InAppPlanningChatRequest {
   sessionId?: string;
@@ -460,6 +560,15 @@ export interface InAppPlanningResetRequest {
 
 export type InAppPlanningResetResponse = { ok: true };
 
+export interface InAppPlanningSetTerminalModeRequest {
+  sessionId: string;
+  mode: PlanningTerminalMode;
+}
+
+export type InAppPlanningSetTerminalModeResponse =
+  | { ok: true }
+  | { ok: false; error: string };
+
 
 
 export interface WorkflowListEntry {
@@ -485,11 +594,47 @@ export interface WorkflowMutationAcceptedResult {
   channel: string;
 }
 
+export interface StartReadyRequest {
+  recreateFailed?: boolean;
+  recreateFailedAndPending?: boolean;
+  recreateFailedPendingAndRunning?: boolean;
+  /** Recreate failed + pending/queued + running + completed (finished) workflows. */
+  recreateAll?: boolean;
+  dryRun?: boolean;
+}
+
+export interface StartReadyPreview {
+  readyTaskIds: string[];
+  recoverableTaskIds: string[];
+  failedWorkflowIds: string[];
+  pendingWorkflowIds: string[];
+  runningWorkflowIds: string[];
+  completedWorkflowIds?: string[];
+  skipped: {
+    awaitingApproval: number;
+    reviewReady: number;
+    blocked: number;
+    failedTasks: number;
+    pendingTasks: number;
+    runningTasks: number;
+    completedTasks?: number;
+  };
+}
+
+export interface StartReadyResult {
+  preview: StartReadyPreview;
+  started: TaskState[];
+  recreatedWorkflowIds: string[];
+  dryRun: boolean;
+}
+
 export interface WorkflowMutationFailedEvent {
   intentId: number;
   workflowId: string;
   channel: string;
   taskId?: string;
+  /** Present for headless.exec failures — the CLI subcommand (e.g. fix, approve). */
+  headlessCommand?: string;
   message: string;
   failedAt: string;
 }
@@ -617,7 +762,7 @@ export interface SystemDiagnostics {
   readiness?: PrerequisiteReport | PrerequisiteCheck[];
 }
 
-export type RuntimeMode = 'local-owner' | 'daemon-owner' | 'read-only';
+export type RuntimeMode = 'local-owner' | 'daemon-owner' | 'read-only' | 'connection-lost';
 
 export interface RuntimeStatus {
   ownerMode: boolean;
@@ -641,6 +786,8 @@ export interface RuntimeStatus {
 export interface TerminalSessionDescriptor {
   sessionId: string;
   taskId: string;
+  kind?: 'task' | 'planning';
+  planningSessionId?: string;
   status: 'running' | 'exited';
   exitCode?: number;
   cwd?: string;
@@ -656,12 +803,16 @@ export interface TerminalSessionDescriptor {
 export interface TerminalOutputEvent {
   sessionId: string;
   taskId: string;
+  kind?: 'task' | 'planning';
+  planningSessionId?: string;
   data: string;
 }
 
 export interface TerminalExitEvent {
   sessionId: string;
   taskId: string;
+  kind?: 'task' | 'planning';
+  planningSessionId?: string;
   exitCode?: number;
 }
 
@@ -689,6 +840,18 @@ export interface SearchOptions {
   limit?: number;
   offset?: number;
 }
+
+export interface InAppPlanningDeleteRequest {
+  sessionId: string;
+}
+
+export type InAppPlanningDeleteResponse =
+  | { ok: true }
+  | { ok: false; error: string };
+
+export type InAppPlanningDeleteSubmittedResponse =
+  | { ok: true; deletedSessionIds: string[] }
+  | { ok: false; error: string };
 
 // ── Invoke Channel Registry ─────────────────────────────────
 // Each key is the channel name string; value is { request, response }.
@@ -720,6 +883,38 @@ export const IpcChannels = {
     request: [request: InAppPlanningResetRequest];
     response: InAppPlanningResetResponse;
   },
+  'invoker:planning-chat-delete': {} as {
+    request: [request: InAppPlanningDeleteRequest];
+    response: InAppPlanningDeleteResponse;
+  },
+  'invoker:planning-chat-delete-submitted': {} as {
+    request: [];
+    response: InAppPlanningDeleteSubmittedResponse;
+  },
+  'invoker:planning-chat-set-terminal-mode': {} as {
+    request: [request: InAppPlanningSetTerminalModeRequest];
+    response: InAppPlanningSetTerminalModeResponse;
+  },
+  'invoker:planning-terminal-open': {} as {
+    request: [planningSessionId: string];
+    response: OpenTerminalResponse;
+  },
+  'invoker:planning-terminal-list': {} as {
+    request: [];
+    response: TerminalSessionDescriptor[];
+  },
+  'invoker:planning-terminal-write': {} as {
+    request: [sessionId: string, data: string];
+    response: { ok: boolean; reason?: string };
+  },
+  'invoker:planning-terminal-resize': {} as {
+    request: [sessionId: string, cols: number, rows: number];
+    response: { ok: boolean; reason?: string };
+  },
+  'invoker:planning-terminal-close': {} as {
+    request: [sessionId: string];
+    response: { ok: boolean; reason?: string };
+  },
   'invoker:get-planning-presets': {} as {
     request: [];
     response: PlanningPresetOption[];
@@ -731,6 +926,10 @@ export const IpcChannels = {
   'invoker:start': {} as {
     request: [];
     response: TaskState[];
+  },
+  'invoker:start-ready': {} as {
+    request: [request?: StartReadyRequest];
+    response: StartReadyResult;
   },
   'invoker:resume-workflow': {} as {
     request: [];
@@ -779,7 +978,7 @@ export const IpcChannels = {
     response: void;
   },
   'invoker:get-events': {} as {
-    request: [taskId: string];
+    request: [taskId: string, options?: GetEventsOptions];
     response: TaskEvent[];
   },
   'invoker:get-status': {} as {
@@ -797,6 +996,10 @@ export const IpcChannels = {
   'invoker:get-all-completed-tasks': {} as {
     request: [];
     response: Array<TaskState & { workflowName: string }>;
+  },
+  'invoker:get-history-tasks': {} as {
+    request: [];
+    response: TaskHistoryEntry[];
   },
 
   // Task Actions
@@ -960,6 +1163,10 @@ export const IpcChannels = {
     request: [];
     response: WorkerStatusSnapshot;
   },
+  'invoker:get-workers': {} as {
+    request: [];
+    response: WorkerStatusSnapshot;
+  },
   'invoker:get-worker-action-history': {} as {
     request: [request: WorkerActionHistoryRequest];
     response: WorkerActionHistoryResponse;
@@ -1092,6 +1299,38 @@ export const IpcTestOnlyChannels = {
     ];
     response: void;
   },
+  'invoker:seed-main-process-hitch-fixture': {} as {
+    request: [];
+    response: {
+      workflowId: string;
+      taskCount: number;
+      eventCount: number;
+      workerActionCount: number;
+    };
+  },
+  'invoker:ingest-worker-actions': {} as {
+    request: [actions: Array<Record<string, unknown>>];
+    response: void;
+  },
+  'invoker:seed-stress-fixture': {} as {
+    request: [options?: {
+      workflowCount?: number;
+      tasksPerWorkflow?: number;
+      eventsPerTask?: number;
+      nowIso?: string;
+      stuckLaunchingSlots?: number;
+      launchAgeMs?: number;
+    }];
+    response: {
+      workflowCount: number;
+      taskCount: number;
+      running: number;
+      launching: number;
+      fixing: number;
+      pending: number;
+      failed: number;
+    };
+  },
 } as const;
 
 // ── Event Channel Registry ──────────────────────────────────
@@ -1118,6 +1357,12 @@ export const IpcEventChannels = {
   },
   'invoker:workflow-mutation-failed': {} as {
     payload: WorkflowMutationFailedEvent;
+  },
+  'invoker:runtime-status': {} as {
+    payload: RuntimeStatus;
+  },
+  'invoker:planning-chat-stream': {} as {
+    payload: InAppPlanningStreamEvent;
   },
 } as const;
 

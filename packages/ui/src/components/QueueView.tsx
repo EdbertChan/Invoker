@@ -1,16 +1,19 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import type { TaskState, WorkerActionSummary, WorkerStatusEntry, WorkerStatusSnapshot } from '../types.js';
+import type { QueueStatus, TaskState, WorkerActionSummary, WorkerStatusEntry, WorkerStatusSnapshot, WorkflowMeta } from '../types.js';
 import { getStatusColor } from '../lib/colors.js';
 import {
   displayWorkerTaskId,
   formatWorkerValue,
   getActiveWorkerActions,
   getWorkerDisplayCopy,
+  resolveWorkerActionTarget,
 } from '../lib/worker-display.js';
 import { WorkerActivityCard } from './WorkerActivityCard.js';
 
 interface QueueViewProps {
   tasks: Map<string, TaskState>;
+  workflows: Map<string, WorkflowMeta>;
+  queueStatus?: QueueStatus | null;
   workerStatus: WorkerStatusSnapshot | null;
   readOnly: boolean;
   onStartWorker: (kind: string) => Promise<void> | void;
@@ -26,23 +29,27 @@ type WorkerActionRow = {
   worker: WorkerStatusEntry;
 };
 
-
-function actionTargetLabel(action: WorkerActionSummary, tasks: Map<string, TaskState>): string {
-  if (action.taskId) {
-    return tasks.get(action.taskId)?.description || displayWorkerTaskId(action.taskId);
-  }
-  return `${formatWorkerValue(action.subjectType)} ${action.subjectId}`;
-}
-
 function actionRowKey(row: WorkerActionRow): string {
   return `${row.worker.kind}:${row.action.id}`;
 }
 
-function actionTargetTask(action: WorkerActionSummary, tasks: Map<string, TaskState>): TaskState | null {
-  return action.taskId ? tasks.get(action.taskId) ?? null : null;
+function relatedTaskLabel(taskId: string, tasks: Map<string, TaskState>): string {
+  return tasks.get(taskId)?.description || displayWorkerTaskId(taskId);
 }
 
-export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStopWorker, onTaskClick, selectedTaskId, selectedWorkerKind, onSelectWorker }: QueueViewProps) {
+export function QueueView({
+  tasks,
+  workflows,
+  queueStatus = null,
+  workerStatus,
+  readOnly,
+  onStartWorker,
+  onStopWorker,
+  onTaskClick,
+  selectedTaskId,
+  selectedWorkerKind,
+  onSelectWorker,
+}: QueueViewProps) {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -68,6 +75,14 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
     ),
     [workerStatus],
   );
+  const queueRunning = queueStatus?.running ?? [];
+  const queueQueued = queueStatus?.queued ?? [];
+
+  const queueTaskLabel = useCallback(
+    (entry: { taskId: string; description?: string }) =>
+      entry.description || tasks.get(entry.taskId)?.description || displayWorkerTaskId(entry.taskId),
+    [tasks],
+  );
 
   const toggleExpanded = useCallback((rowKey: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -91,14 +106,52 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
   );
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[minmax(20rem,24rem)_minmax(28rem,1fr)] overflow-hidden bg-gray-900">
-      <section data-testid="action-queue-section" className="flex h-full min-h-0 flex-col overflow-hidden border-r border-gray-800">
-        <div className="shrink-0 border-b border-gray-800 p-4">
-          <h3 className="text-lg font-semibold text-gray-100">
+    <div className="grid h-full min-h-0 grid-cols-[minmax(20rem,24rem)_minmax(28rem,1fr)] grid-rows-[minmax(0,1fr)] overflow-hidden bg-background">
+      <section data-testid="action-queue-section" className="flex h-full min-h-0 flex-col overflow-hidden border-r border-border">
+        <div className="shrink-0 border-b border-border p-4">
+          <h3 className="text-lg font-semibold text-foreground">
             Worker Actions ({actionRows.length})
           </h3>
-          <div className="mt-1 text-sm text-gray-400">
+          <div className="mt-1 text-sm text-muted-foreground">
             Only work started by a worker process appears here.
+          </div>
+        </div>
+
+        <div className="shrink-0 border-b border-border px-4 py-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <section data-testid="running-queue-section-running" className="rounded-md border border-border bg-card/60 p-3">
+              <div className="text-sm font-medium text-foreground">
+                In flight ({queueRunning.length})
+              </div>
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
+                Concurrency slots (executing + launching)
+              </div>
+              <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                {queueRunning.length > 0 ? (
+                  queueRunning.map((entry) => (
+                    <div key={entry.taskId} className="truncate" title={queueTaskLabel(entry)}>
+                      {queueTaskLabel(entry)}
+                    </div>
+                  ))
+                ) : (
+                  <div>No running tasks.</div>
+                )}
+              </div>
+            </section>
+            <section data-testid="running-queue-section-queued" className="rounded-md border border-border bg-card/60 p-3">
+              <div className="text-sm font-medium text-foreground">Queued ({queueQueued.length})</div>
+              <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                {queueQueued.length > 0 ? (
+                  queueQueued.map((entry) => (
+                    <div key={entry.taskId} className="truncate" title={queueTaskLabel(entry)}>
+                      {queueTaskLabel(entry)}
+                    </div>
+                  ))
+                ) : (
+                  <div>No queued tasks.</div>
+                )}
+              </div>
+            </section>
           </div>
         </div>
 
@@ -106,7 +159,8 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
           <div className="space-y-1">
             {actionRows.map((row) => {
               const { action, worker } = row;
-              const task = actionTargetTask(action, tasks);
+              const target = resolveWorkerActionTarget(action, tasks, workflows);
+              const task = target.task;
               const rowKey = actionRowKey(row);
               const taskId = action.taskId;
               const upstream = task?.dependencies ?? [];
@@ -115,6 +169,11 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
               const isExpanded = expandedRows.has(rowKey);
               const colors = getStatusColor(action.status);
               const copy = getWorkerDisplayCopy(worker.kind);
+              const secondaryParts = [
+                copy.name,
+                formatWorkerValue(action.actionType),
+                ...(target.workflowName ? [target.workflowName] : []),
+              ];
               return (
                 <div
                   key={rowKey}
@@ -125,7 +184,7 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
                   className={`rounded-xl border ${
                     taskId && selectedTaskId === taskId
                       ? 'border-cyan-500/80 bg-cyan-950/30 ring-1 ring-cyan-500/60'
-                      : 'border-gray-800 bg-gray-850/60 hover:border-gray-700 hover:bg-gray-800/80'
+                      : 'border-border bg-card/60 hover:border-border hover:bg-secondary/80'
                   }`}
                 >
                   <div className="flex items-stretch">
@@ -133,7 +192,7 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
                       <button
                         type="button"
                         onClick={(e) => toggleExpanded(rowKey, e)}
-                        className="flex w-8 shrink-0 items-center justify-center rounded-l-xl text-sm text-gray-400 hover:bg-gray-700 hover:text-gray-100"
+                        className="flex w-8 shrink-0 items-center justify-center rounded-l-xl text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
                         aria-label={isExpanded ? 'Collapse relationships' : 'Expand relationships'}
                         aria-expanded={isExpanded}
                         data-testid={`queue-rels-toggle-action-${taskId}`}
@@ -150,17 +209,17 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
                       className={`min-w-0 flex-1 p-3 text-left ${task ? 'cursor-pointer' : 'cursor-default'}`}
                     >
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-sm font-medium text-gray-100">{copy.name}</span>
+                        <span className="truncate text-sm font-medium text-foreground">{target.taskTitle}</span>
                         <span className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${colors.bg} ${colors.border} ${colors.text}`}>
                           <span className={`h-1.5 w-1.5 rounded-full ${colors.dot}`} aria-hidden="true" />
                           {formatWorkerValue(action.status)}
                         </span>
                       </div>
-                      <div className="mt-1 truncate text-xs text-gray-400">
-                        {formatWorkerValue(action.actionType)} · {actionTargetLabel(action, tasks)}
+                      <div className="mt-1 truncate text-xs text-muted-foreground">
+                        {secondaryParts.join(' · ')}
                       </div>
                       {action.summary ? (
-                        <div className="mt-1 truncate text-xs text-gray-500">{action.summary}</div>
+                        <div className="mt-1 truncate text-xs text-muted-foreground">{action.summary}</div>
                       ) : null}
                       {taskId && !task ? (
                         <div className="mt-1 truncate text-xs text-amber-300">Target task is not loaded.</div>
@@ -168,25 +227,25 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
                     </button>
                   </div>
                   {isExpanded && taskId && (
-                    <div className="mx-3 mb-3 border-t border-gray-700 pb-1 pt-2 text-xs" data-testid={`rels-${taskId}`}>
+                    <div className="mx-3 mb-3 border-t border-border pb-1 pt-2 text-xs" data-testid={`rels-${taskId}`}>
                       {upstream.length > 0 && (
                         <div className="mb-1">
-                          <span className="text-gray-500">upstream: </span>
+                          <span className="text-muted-foreground">upstream: </span>
                           {upstream.map((depId) => (
                             <button
                               key={depId}
                               type="button"
                               onClick={(e) => handleRelatedClick(depId, e)}
-                              className="mr-1 inline-block cursor-pointer rounded bg-blue-900 px-1.5 py-0.5 text-blue-300 hover:bg-blue-800"
+                              className="mr-1 inline-block cursor-pointer rounded bg-secondary px-1.5 py-0.5 text-foreground hover:bg-secondary"
                             >
-                              {displayWorkerTaskId(depId)}
+                              {relatedTaskLabel(depId, tasks)}
                             </button>
                           ))}
                         </div>
                       )}
                       {downstream.length > 0 && (
                         <div>
-                          <span className="text-gray-500">downstream: </span>
+                          <span className="text-muted-foreground">downstream: </span>
                           {downstream.map((depId) => (
                             <button
                               key={depId}
@@ -194,7 +253,7 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
                               onClick={(e) => handleRelatedClick(depId, e)}
                               className="mr-1 inline-block cursor-pointer rounded bg-green-900 px-1.5 py-0.5 text-green-300 hover:bg-green-800"
                             >
-                              {displayWorkerTaskId(depId)}
+                              {relatedTaskLabel(depId, tasks)}
                             </button>
                           ))}
                         </div>
@@ -205,7 +264,7 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
               );
             })}
             {actionRows.length === 0 && (
-              <div className="rounded-xl border border-gray-800 bg-gray-850/60 p-4 text-sm text-gray-400">
+              <div className="rounded-xl border border-border bg-card/60 p-4 text-sm text-muted-foreground">
                 No worker action is running.
               </div>
             )}
@@ -214,7 +273,7 @@ export function QueueView({ tasks, workerStatus, readOnly, onStartWorker, onStop
       </section>
 
       <section data-testid="worker-processes-section" className="flex h-full min-h-0 flex-col overflow-hidden">
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div data-testid="worker-process-scroll" className="min-h-0 flex-1 overflow-y-auto p-4">
           <WorkerActivityCard
             snapshot={workerStatus}
             selectedWorkerKind={selectedWorkerKind}

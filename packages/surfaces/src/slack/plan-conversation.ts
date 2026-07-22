@@ -11,9 +11,18 @@
  */
 
 import { spawn } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type { ConversationRepository } from '@invoker/data-store';
+import { formatCodexPlannerStdout } from '@invoker/execution-engine';
 import type { LogFn } from '../surface.js';
+import {
+  buildUnverifiedNotice,
+  captureRepoState,
+  looksLikeCompletionClaim,
+  repoStateUnchanged,
+} from './agent-turn-verification.js';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -109,6 +118,8 @@ export interface PlanConversationConfig {
   preferStackedWorkflows?: boolean;
   /** Optional callback for raw stdout chunks emitted by the planner subprocess. */
   onRawPlannerOutput?: RawPlannerOutputHandler;
+  /** Opt in to a scoping-first planning conversation before YAML drafting. Default: false. */
+  conversationalPlanning?: boolean;
   /** Logging callback. Defaults to console.log/console.error. */
   log?: LogFn;
   /**
@@ -130,6 +141,10 @@ export interface PlanConversationConfig {
 const CONFIRMATION_PATTERNS = [
   /^yes$/i,
   /^y$/i,
+  /^yes please$/i,
+  /^ok$/i,
+  /^okay$/i,
+  /^approve$/i,
   /^go$/i,
   /^go ahead$/i,
   /^execute$/i,
@@ -138,9 +153,11 @@ const CONFIRMATION_PATTERNS = [
   /^proceed$/i,
   /^do it$/i,
   /^confirm$/i,
+  /^submit$/i,
   /^lgtm$/i,
   /^ship it$/i,
   /^approved$/i,
+  /^sounds good$/i,
 ];
 
 export function isConfirmation(text: string): boolean {
@@ -164,7 +181,41 @@ export function isNegation(text: string): boolean {
   return NEGATION_PATTERNS.some((re) => re.test(trimmed));
 }
 
+function isExplicitDraftRequest(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return [
+    /\bdraft\b.*\b(yaml\s+)?plan\b/,
+    /\b(generate|write|create|produce)\b.*\b(yaml\s+)?plan\b/,
+    /\b(yaml\s+)?plan\b.*\b(draft|yaml)\b/,
+    /\bgo ahead\b.*\bdraft\b/,
+    /\bdraft it\b/,
+  ].some((re) => re.test(normalized));
+}
+
+function previousAssistantAskedToDraft(messages: ConversationMessage[]): boolean {
+  for (let i = messages.length - 2; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== 'assistant') continue;
+    return /\bdraft\b/i.test(msg.content)
+      && /\b(plan|yaml)\b/i.test(msg.content)
+      && msg.content.includes('?');
+  }
+  return false;
+}
+
+function isDraftingAuthorizedForPrompt(messages: ConversationMessage[]): boolean {
+  const latest = messages[messages.length - 1];
+  if (!latest || latest.role !== 'user') return false;
+  if (isExplicitDraftRequest(latest.content)) return true;
+  return isConfirmation(latest.content) && previousAssistantAskedToDraft(messages);
+}
+
 // ── System Prompt ───────────────────────────────────────────
+
+export const SLACK_LOCAL_REPRO_POLICY = `Execution boundary:
+- Inside your worktree you are unrestricted. Read, grep, edit, build, and run tests freely. Reproducing a bug locally is always allowed and never needs permission.
+- Never run anything that changes state outside your worktree: \`git push\`, \`gh pr create\`/\`edit\`/\`merge\`, \`gh\` label writes, \`mergify stack push\`, \`scripts/safe-stack-push.mjs\`, or \`scripts/land-stack.mjs --execute\`.
+- If the request needs any of those, stop and hand off: describe the change, post the plan, and ask the user to confirm. Do not perform it yourself and do not offer a manual workaround for it.`;
 
 function buildAgentSystemPrompt(): string {
   return `You are a normal coding agent running in a git worktree for a Slack thread.
@@ -173,8 +224,11 @@ Default behavior:
 - Treat the thread like an ordinary OMP/Codex coding session.
 - Answer questions, run local commands, inspect files, edit code, and run focused verification when useful.
 - Do NOT generate Invoker YAML in this thread. If the user asks for an Invoker plan, tell them to start a new plan thread with \`plan: <request>\` — plan drafts from an agent thread cannot be submitted.
-- Do NOT submit or start an Invoker workflow. Agent threads reject \`submit\`; only a \`plan:\` thread can be submitted.
-- Keep Slack replies short and concrete: changed files, verification, and any remaining risk.`;
+- Do NOT submit or start an Invoker workflow. Do NOT invoke \`invoker-cli\`, \`invoker_submit_plan\`, \`invoker_validate_plan\`, \`submit-plan.sh\`, or the \`plan-to-invoker\` skill's Harness handoff mode to do so. Agent threads reject \`submit\`; only a \`plan:\` thread can be submitted.
+- Keep Slack replies short and concrete: changed files, verification, and any remaining risk.
+- To share a generated file (screenshot, diagram, report), write it inside your worktree and link it by absolute path as a markdown link, e.g. \`[chart](/abs/path/in/worktree/chart.png)\`. Files linked that way are uploaded to the thread. Files written outside your worktree cannot be shared, so do not put artifacts in /tmp.
+
+${SLACK_LOCAL_REPRO_POLICY}`;
 }
 
 function buildStackedWorkflowPrompt(repoUrlLine: string, defaultBranch: string): string {
@@ -213,16 +267,37 @@ workflows:
 When submitted, Invoker creates one workflow per child in listed order. Each downstream workflow is based on the previous workflow's feature branch and waits on the previous merge gate.`;
 }
 
-function buildPlanSystemPrompt(defaultBranch: string, repoUrl?: string, preferStackedWorkflows = false): string {
+export interface BuildPlanSystemPromptOptions {
+  conversationalPlanning?: boolean;
+  draftingAuthorized?: boolean;
+  preferStackedWorkflows?: boolean;
+  planFilePath?: string;
+}
+
+function buildDirectPlanSystemPrompt(
+  defaultBranch: string,
+  repoUrl?: string,
+  preferStackedWorkflows = false,
+  planFilePath?: string,
+): string {
   const repoUrlLine = repoUrl
     ? `repoUrl: "${repoUrl}"          # git clone URL for the repository`
-    : `repoUrl: "git@github.com:user/repo.git"  # git clone URL for the repository`;
+    : 'repoUrl: "<ask the user for this>"  # no repo is configured for this thread';
   const stackedWorkflowSection = preferStackedWorkflows
     ? `\n${buildStackedWorkflowPrompt(repoUrlLine, defaultBranch)}\n`
     : '';
+  const outputInstruction = planFilePath
+    ? `This is the delivery rule stated at the top. Write the COMPLETE YAML plan to the file at \`${planFilePath}\`, and reply in chat with only a one-or-two-sentence summary. Never paste the YAML into chat.`
+    : 'When ready, output the plan inside a \`\`\`yaml code block.';
+  const deliveryDirective = planFilePath
+    ? `HOW TO DELIVER THE PLAN (read first): write the COMPLETE YAML plan to the file at \`${planFilePath}\` using your file-writing tool, then reply in chat with ONLY a short summary — one or two sentences. NEVER paste the YAML plan into your chat reply; Invoker reads it from the file and shows the user a per-task summary. Every YAML block below is the format for that file, not for your chat reply. A pasted plan gets cut off at your output limit, which is the exact problem the file avoids.\n\n`
+    : '';
+  const repoUrlDirective = repoUrl
+    ? ''
+    : 'NO REPO CONFIGURED (read first): this thread has no target repository configured — not via a `[repo:]` tag and not via a default. Before drafting any YAML, ask the user which repository this plan targets (a `[repo:<alias>]` tag, or a full git clone URL) and wait for their reply. Never invent, guess, or copy the `repoUrl` placeholder shown below literally into a plan.\n\n';
   return `You are an assistant for the Invoker orchestrator. The user explicitly requested an Invoker plan.
 
-Generate a YAML task plan as described below. Answer simple follow-up questions directly only when they are about the plan being drafted.
+${repoUrlDirective}${deliveryDirective}Generate a YAML task plan as described below. Answer simple follow-up questions directly only when they are about the plan being drafted.
 
 A plan has this structure:
 \`\`\`yaml
@@ -266,11 +341,67 @@ Rules:
    - If Invoker config auto-routes heavyweight commands, keep discovered test/build commands as normal command tasks unless the task must name a specific remote target
    - NEVER invent test file names. Verify the test file exists before referencing it in a command.
 7. Use meaningful task IDs (kebab-case).
-8. When ready, output the plan inside a \`\`\`yaml code block.
+8. ${outputInstruction}
 9. Always include \`dependencies\` (even if empty array).
-10. After generating a plan, tell the user they can submit it by replying with \`submit\`.
-11. NEVER generate bash commands or shell scripts to execute plans. The orchestrator handles plan execution automatically after explicit Slack approval.
+10. After generating a plan, include a short post-plan summary that tells the user they can confirm execution. The confirmation instruction MUST be exactly this standalone line:
+Reply \`submit\` to submit it.
+Do NOT place that line inline in a sentence.
+11. NEVER submit, validate, or execute this plan yourself. Do NOT invoke \`invoker-cli\` (with any flags), \`invoker_submit_plan\`, \`invoker_validate_plan\`, \`submit-plan.sh\`, or the \`plan-to-invoker\` skill's Harness handoff mode. This rule overrides that skill's handoff instructions in this Slack thread. The Slack orchestrator validates and executes the plan after the user replies \`submit\` and approves it. If the user instead says \`execute\`, \`run it\`, \`yes\`, or \`go\` before submitting, remind them to reply with \`submit\`; never run it yourself.
 12. Choose \`mergeMode\` deliberately. For reviewable implementation plans, set \`mergeMode: external_review\` so changes land through the canonical GitHub-backed review gate. Keep \`mergeMode: manual\` (the default) for verification-only plans that should not open a review, and use \`mergeMode: automatic\` only when the user explicitly wants changes merged without review.`;
+}
+
+function buildConversationalPlanSystemPrompt(
+  defaultBranch: string,
+  repoUrl: string | undefined,
+  options: BuildPlanSystemPromptOptions,
+): string {
+  const draftingAuthorized = options.draftingAuthorized ?? false;
+  const draftingInstructions = draftingAuthorized
+    ? `
+The user has explicitly approved drafting. You may now produce the YAML task plan.
+
+Use the authorized drafting contract below:
+${buildDirectPlanSystemPrompt(defaultBranch, repoUrl, options.preferStackedWorkflows ?? false, options.planFilePath)}`
+    : `
+Drafting is not authorized yet. Do NOT output a \`\`\`yaml code block, do NOT write a draft plan file, and do NOT tell the user the plan can be executed.
+
+Before drafting is authorized:
+1. Ask scoping questions first when the request is broad, ambiguous, risky, or missing constraints.
+2. Discuss relevant edge cases, corner cases, architecture choices, ambiguity, and likely historic reasons for the current code shape.
+3. Explore the codebase as needed, then use what you learned by referencing specific files, components, and patterns.
+4. When enough information exists, explain like the user is five: summarize assumptions, goals, and a high-level task outline in plain language.
+5. End by asking whether the user wants you to draft the YAML plan.`;
+
+  return `You are an assistant for the Invoker orchestrator in conversational planning mode.
+
+This session is a planning conversation before any task plan exists. Your job is to help scope the work clearly before drafting.
+
+For simple, self-contained requests (counting lines of code, checking versions, running a quick command, answering questions about the codebase), answer directly without drafting a plan.
+
+For implementation work, prefer a scoping conversation first. Do not rush directly to YAML unless the user has clearly approved drafting a plan.
+${draftingInstructions}
+
+When responding in conversational planning mode, be concrete, call out tradeoffs, and keep the next question or draft-authorization request easy to answer.`;
+}
+
+export function buildPlanSystemPrompt(
+  defaultBranch: string,
+  repoUrl?: string,
+  options: BuildPlanSystemPromptOptions | boolean = {},
+  planFilePath?: string,
+): string {
+  const resolvedOptions: BuildPlanSystemPromptOptions = typeof options === 'boolean'
+    ? { preferStackedWorkflows: options, planFilePath }
+    : options;
+  if (resolvedOptions.conversationalPlanning) {
+    return buildConversationalPlanSystemPrompt(defaultBranch, repoUrl, resolvedOptions);
+  }
+  return buildDirectPlanSystemPrompt(
+    defaultBranch,
+    repoUrl,
+    resolvedOptions.preferStackedWorkflows ?? false,
+    resolvedOptions.planFilePath,
+  );
 }
 
 // ── Dangerous Command Detection ─────────────────────────────
@@ -312,7 +443,7 @@ export class PlanConversation {
   private messages: ConversationMessage[] = [];
   private _submittedPlanText: string | null = null;
   private _planSubmitted = false;
-  private workingDir?: string;
+  readonly workingDir?: string;
   private timeoutMs: number;
   private threadTs?: string;
   private conversationRepo?: ConversationRepository;
@@ -320,11 +451,13 @@ export class PlanConversation {
   private repoUrl?: string;
   private experimentalPlanner?: boolean;
   private preferStackedWorkflows?: boolean;
+  private conversationalPlanning: boolean;
   private log: LogFn;
   private onRawPlannerOutput?: RawPlannerOutputHandler;
   private plannerRetryLimit: number;
   private plannerRetryBaseDelayMs: number;
   private _initialized = false;
+  private _lastTurnReasoning: string[] = [];
 
   constructor(config: PlanConversationConfig) {
     this.cursorCommand = config.cursorCommand ?? 'agent';
@@ -340,6 +473,7 @@ export class PlanConversation {
     this.repoUrl = config.repoUrl;
     this.experimentalPlanner = config.experimentalPlanner;
     this.preferStackedWorkflows = config.preferStackedWorkflows;
+    this.conversationalPlanning = config.conversationalPlanning ?? false;
     this.onRawPlannerOutput = config.onRawPlannerOutput;
     this.plannerRetryLimit = Math.max(0, config.plannerRetryLimit ?? DEFAULT_PLANNER_RETRY_LIMIT);
     this.plannerRetryBaseDelayMs = Math.max(0, config.plannerRetryBaseDelayMs ?? DEFAULT_PLANNER_RETRY_BASE_DELAY_MS);
@@ -399,22 +533,40 @@ export class PlanConversation {
     if (!this._initialized) await this.init();
     const tInit = Date.now();
 
+    this.resetPlanDraftFile();
     this.messages.push({ role: 'user', content: userMessage });
 
     const prompt = this.buildCursorPrompt();
     const tPrompt = Date.now();
     this.log('plan-conversation', 'info', `[CONV] Turn ${turn}: promptLen=${prompt.length}, historyMsgs=${this.messages.length - 1}, promptPreview="${prompt.slice(0, 500).replace(/\n/g, '\\n')}"`);
 
+    const repoStateBefore = this.mode === 'agent'
+      ? await captureRepoState(this.workingDir)
+      : null;
     const response = await this.spawnPlanner(prompt);
     const tCursor = Date.now();
-    this.log('plan-conversation', 'info', `[CONV] Turn ${turn}: responseLen=${response.length}, responsePreview="${response.slice(0, 500).replace(/\n/g, '\\n')}"`);
+    const formatted = formatCodexPlannerStdout(response);
+    let message = formatted.message;
+    const repoStateAfter = this.mode === 'agent'
+      ? await captureRepoState(this.workingDir)
+      : null;
+    if (looksLikeCompletionClaim(message) && repoStateUnchanged(repoStateBefore, repoStateAfter)) {
+      message = `${message}\n\n${buildUnverifiedNotice()}`;
+    }
+    this._lastTurnReasoning = formatted.reasoning;
+    this.log('plan-conversation', 'info', `[CONV] Turn ${turn}: responseLen=${response.length}, messageLen=${message.length}, reasoningParts=${formatted.reasoning.length}, responsePreview="${message.slice(0, 500).replace(/\n/g, '\\n')}"`);
 
-    this.messages.push({ role: 'assistant', content: response });
+    this.messages.push({ role: 'assistant', content: message });
     this.saveState();
     const tSave = Date.now();
 
     this.log('plan-conversation', 'info', `[PERF] sendMessage: init=${tInit - t0}ms, buildPrompt=${tPrompt - tInit}ms, cursor=${tCursor - tPrompt}ms, saveState=${tSave - tCursor}ms, total=${tSave - t0}ms`);
-    return response;
+    return message;
+  }
+
+  /** Reasoning summaries from the most recent planner turn (Codex JSONL), if any. */
+  get lastTurnReasoning(): string[] {
+    return this._lastTurnReasoning;
   }
 
   /** Returns the raw plan text that was submitted via confirmation, or null. */
@@ -433,7 +585,44 @@ export class PlanConversation {
 
   /** Returns the last complete YAML plan drafted in this conversation, or null. */
   getDraftedPlan(): string | null {
-    return this.extractLastPlanFromMessages();
+    return this.readPlanDraftFile() ?? this.extractLastPlanFromMessages();
+  }
+
+  // The planner writes the full YAML plan here so its chat reply can stay a
+  // short summary instead of an inline block that truncates when the model hits
+  // its output limit. Gated on workingDir + threadTs; without both, planning
+  // falls back to inline extraction unchanged. `.invoker/` is gitignored.
+  planDraftFilePath(): string | null {
+    if (!this.workingDir || !this.threadTs) return null;
+    const safeId = this.threadTs.replace(/[^a-zA-Z0-9._-]/g, '_');
+    return join(this.workingDir, '.invoker', 'plan-drafts', `${safeId}.yaml`);
+  }
+
+  private readPlanDraftFile(): string | null {
+    const path = this.planDraftFilePath();
+    if (!path) return null;
+    try {
+      if (!existsSync(path)) return null;
+      const content = readFileSync(path, 'utf8').trim();
+      return content.length > 0 ? content : null;
+    } catch (err) {
+      this.log('plan-conversation', 'error', `Failed to read plan draft file ${path}: ${err}`);
+      return null;
+    }
+  }
+
+  // Remove any prior turn's plan file and ensure the directory exists, so a fresh
+  // write is required each turn (getDraftedPlan must never return a stale plan)
+  // and the planner's write into it succeeds.
+  private resetPlanDraftFile(): void {
+    const path = this.planDraftFilePath();
+    if (!path) return;
+    try {
+      rmSync(path, { force: true });
+      mkdirSync(dirname(path), { recursive: true });
+    } catch (err) {
+      this.log('plan-conversation', 'error', `Failed to reset plan draft file ${path}: ${err}`);
+    }
   }
 
   /** Returns the conversation history. */
@@ -459,7 +648,12 @@ export class PlanConversation {
    */
   buildCursorPrompt(): string {
     const systemPrompt = this.mode === 'plan'
-      ? buildPlanSystemPrompt(this.defaultBranch ?? 'main', this.repoUrl, this.preferStackedWorkflows)
+      ? buildPlanSystemPrompt(this.defaultBranch ?? 'main', this.repoUrl, {
+          conversationalPlanning: this.conversationalPlanning,
+          draftingAuthorized: this.conversationalPlanning && isDraftingAuthorizedForPrompt(this.messages),
+          preferStackedWorkflows: this.preferStackedWorkflows,
+          planFilePath: this.planDraftFilePath() ?? undefined,
+        })
       : buildAgentSystemPrompt();
     const parts: string[] = [systemPrompt];
 
@@ -476,7 +670,9 @@ export class PlanConversation {
     if (lastMessage) {
       parts.push(`\nUser's latest message:\n${lastMessage.content}`);
       parts.push(this.mode === 'plan'
-        ? '\nRespond to the latest message. If it requires a plan, explore the codebase and generate one.'
+        ? (this.conversationalPlanning
+            ? '\nRespond to the latest message in conversational planning mode. Scope first, and only draft YAML when the user has explicitly approved drafting.'
+            : '\nRespond to the latest message. If it requires a plan, explore the codebase and generate one.')
         : '\nRespond to the latest message as a normal coding agent in this worktree.');
     }
 

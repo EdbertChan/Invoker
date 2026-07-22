@@ -12,7 +12,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SlackSurface } from '../slack/slack-surface.js';
-import { splitForSlack } from '../slack/slack-message-helpers.js';
+import { redactAbsolutePaths, sanitizeSlashCommands, sanitizeSlackOutbound, splitForSlack } from '../slack/slack-message-helpers.js';
 import type { SurfaceCommand } from '../surface.js';
 
 // ── Mock @slack/bolt ────────────────────────────────────────
@@ -252,6 +252,67 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
       expect(receivedCommands).toEqual([
         expect.objectContaining({ type: 'start_plan', planText }),
       ]);
+    });
+
+    it('clears a leftover Processing ack when plan: is empty', async () => {
+      surface = new SlackSurface({
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        anthropicApiKey: 'test-anthropic-key',
+      });
+      await surface.start(async () => {});
+
+      const app = surface.getApp() as any;
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+      const say = vi.fn().mockImplementation(async ({ text }) => {
+        const ts = `${Date.now()}.${Math.random().toString(36).substr(2, 6)}`;
+        apiCalls.push({ method: 'postMessage', channel: 'C-test', text, ts });
+        return { ts, ok: true };
+      });
+
+      await mentionHandler({
+        event: { text: '<@UBOT123456> plan:', ts: '3333.001', user: 'U123' },
+        say,
+      });
+
+      expect(apiCalls[0]).toEqual(expect.objectContaining({
+        method: 'postMessage',
+        text: 'Processing your request...',
+      }));
+      expect(apiCalls.some((c) => c.method === 'delete' && c.ts === apiCalls[0].ts)).toBe(true);
+      expect(mockSendMessage).not.toHaveBeenCalled();
+    });
+
+    it('clears a leftover Processing ack when the planner throws', async () => {
+      surface = new SlackSurface({
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        anthropicApiKey: 'test-anthropic-key',
+      });
+      mockSendMessage.mockRejectedValue(new Error('planner crashed'));
+      await surface.start(async () => {});
+
+      const app = surface.getApp() as any;
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+      const say = vi.fn().mockImplementation(async ({ text }) => {
+        const ts = `${Date.now()}.${Math.random().toString(36).substr(2, 6)}`;
+        apiCalls.push({ method: 'postMessage', channel: 'C-test', text, ts });
+        return { ts, ok: true };
+      });
+
+      await mentionHandler({
+        event: { text: '<@UBOT123456> fix the typo', ts: '4444.001', user: 'U123' },
+        say,
+      });
+
+      const ack = apiCalls.find((c) => c.method === 'postMessage' && c.text === 'Processing your request...');
+      expect(ack).toBeTruthy();
+      expect(apiCalls.some((c) => c.method === 'postMessage' && c.text?.includes('planner crashed'))).toBe(true);
+      expect(apiCalls.some((c) => c.method === 'delete' && c.ts === ack?.ts)).toBe(true);
     });
   });
 
@@ -659,6 +720,47 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
       expect(updates[0].text).toBe('First response');
       expect(updates[1].text).toBe('Second response');
     });
+  });
+});
+
+describe('sanitizeSlashCommands', () => {
+  it('replaces hallucinated /invoker commands but keeps /invoker conversations', () => {
+    expect(sanitizeSlashCommands('run `/invoker start_plan` now')).toBe(
+      'reply with "yes", "go", or "execute" to confirm now',
+    );
+    expect(sanitizeSlashCommands('Please `/invoker approve task-1`')).toBe(
+      'Please reply with "yes", "go", or "execute" to confirm',
+    );
+    expect(sanitizeSlashCommands('use /invoker conversations list')).toBe(
+      'use /invoker conversations list',
+    );
+  });
+
+  it('does not rewrite ordinary Invoker prose', () => {
+    expect(sanitizeSlashCommands('This thread can’t create or submit an Invoker plan')).toBe(
+      'This thread can’t create or submit an Invoker plan',
+    );
+    expect(sanitizeSlashCommands('I can’t submit or execute an Invoker plan; try submit')).toBe(
+      'I can’t submit or execute an Invoker plan; try submit',
+    );
+    expect(sanitizeSlashCommands('Start a new Invoker workflow channel')).toBe(
+      'Start a new Invoker workflow channel',
+    );
+  });
+});
+
+describe('redactAbsolutePaths', () => {
+  it('collapses host absolute paths to a short tail', () => {
+    const input = 'Changed: [tsup.config.ts](/home/invoker/.invoker/slack-manager/planning-clones/64a63486912a/packages/app/tsup.config.ts:5)';
+    expect(redactAbsolutePaths(input)).toBe(
+      'Changed: [tsup.config.ts](…/packages/app/tsup.config.ts:5)',
+    );
+  });
+
+  it('is applied by sanitizeSlackOutbound', () => {
+    expect(sanitizeSlackOutbound('see /Users/edbert/Documents/GitHub/Invoker/packages/app/foo.ts')).toBe(
+      'see …/packages/app/foo.ts',
+    );
   });
 });
 

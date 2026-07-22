@@ -53,6 +53,13 @@ invoker_e2e_ensure_branch_aliases() {
 invoker_e2e_allow_repo_git_ops() {
   (
     cd "$INVOKER_E2E_REPO_ROOT"
+    # Executors clone the repo with `git clone file://<root>`. In CI containers
+    # the checkout is owned by a different uid than the container user, so git
+    # rejects the source with "detected dubious ownership in repository at
+    # <root>/.git". safe.directory=<root> does NOT cover the check on <root>/.git
+    # — only the "*" wildcard does — so set both. Executors inherit this global
+    # config through the shared HOME.
+    git config --global --add safe.directory "*" >/dev/null 2>&1 || true
     git config --global --add safe.directory "$INVOKER_E2E_REPO_ROOT" >/dev/null 2>&1 || true
   )
 }
@@ -245,6 +252,31 @@ invoker_e2e_app_ui_build_is_fresh() {
   return 0
 }
 
+invoker_e2e_workspace_install_is_stale() {
+  local install_metadata="$INVOKER_E2E_REPO_ROOT/node_modules/.modules.yaml"
+  [ ! -f "$install_metadata" ] || [ "$INVOKER_E2E_REPO_ROOT/pnpm-lock.yaml" -nt "$install_metadata" ]
+}
+
+invoker_e2e_workspace_dependencies_are_ready() {
+  [ -f "$INVOKER_E2E_REPO_ROOT/node_modules/.modules.yaml" ] \
+    && [ -x "$INVOKER_E2E_REPO_ROOT/packages/ui/node_modules/.bin/vite" ] \
+    && [ -x "$INVOKER_E2E_REPO_ROOT/node_modules/.bin/tsup" ] \
+    && [ -x "$INVOKER_E2E_REPO_ROOT/packages/app/node_modules/.bin/electron" ] \
+    && ! invoker_e2e_workspace_install_is_stale
+}
+
+invoker_e2e_ensure_workspace_dependencies() {
+  if invoker_e2e_workspace_dependencies_are_ready; then
+    return 0
+  fi
+
+  echo "==> e2e: bootstrapping workspace dependencies"
+  (
+    cd "$INVOKER_E2E_REPO_ROOT" && \
+    pnpm install --frozen-lockfile
+  )
+}
+
 invoker_e2e_ensure_app_built() {
   # Containerized CI steps can lose checkout's temporary safe.directory config
   # before this helper runs, so re-establish it before the first git call.
@@ -253,7 +285,7 @@ invoker_e2e_ensure_app_built() {
   git_dir="$(git -C "$INVOKER_E2E_REPO_ROOT" rev-parse --git-dir)"
   local build_lock_dir="$git_dir/invoker-e2e-build.lock"
   local wait_secs=0
-  if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && invoker_e2e_app_ui_build_is_fresh; then
+  if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && invoker_e2e_workspace_dependencies_are_ready && invoker_e2e_app_ui_build_is_fresh; then
     echo "==> e2e: reusing existing app/ui build artifacts"
     return 0
   fi
@@ -262,7 +294,7 @@ invoker_e2e_ensure_app_built() {
   else
     echo "==> e2e: waiting for shared app/ui build lock"
     while [ -d "$build_lock_dir" ]; do
-      if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && invoker_e2e_app_ui_build_is_fresh; then
+      if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && invoker_e2e_workspace_dependencies_are_ready && invoker_e2e_app_ui_build_is_fresh; then
         echo "==> e2e: shared build completed by another shard"
         return 0
       fi
@@ -273,7 +305,7 @@ invoker_e2e_ensure_app_built() {
         return 1
       fi
     done
-    if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && invoker_e2e_app_ui_build_is_fresh; then
+    if [ "${INVOKER_E2E_FORCE_BUILD:-0}" != "1" ] && invoker_e2e_workspace_dependencies_are_ready && invoker_e2e_app_ui_build_is_fresh; then
       echo "==> e2e: shared build completed by another shard"
       return 0
     fi
@@ -283,6 +315,7 @@ invoker_e2e_ensure_app_built() {
     fi
     trap 'rmdir "$build_lock_dir" 2>/dev/null || true' RETURN
   fi
+  invoker_e2e_ensure_workspace_dependencies
   echo "==> e2e: building @invoker/ui and @invoker/app"
   (
     cd "$INVOKER_E2E_REPO_ROOT" && \
@@ -457,7 +490,7 @@ invoker_e2e_task_status() {
   local task_id="$1"
   invoker_e2e_run_headless task-status "$task_id" 2>/dev/null \
     | sed 's/\x1b\[[0-9;]*m//g' \
-    | grep -E '^(pending|running|completed|failed|awaiting_approval|review_ready|fixing_with_ai|closed|skipped)$' \
+    | grep -E '^(pending|running|completed|failed|blocked|awaiting_approval|review_ready|fixing_with_ai|closed|skipped)$' \
     | tail -1
 }
 

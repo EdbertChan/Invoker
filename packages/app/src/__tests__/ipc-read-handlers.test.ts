@@ -118,6 +118,7 @@ describe('registerReadOnlyIpcHandlers', () => {
         { from: 'runtime', to: 'ui' },
       ],
       ready: false,
+      substate: 'review_open',
     });
   });
 
@@ -177,6 +178,72 @@ describe('registerReadOnlyIpcHandlers', () => {
     });
     expect(listWorkerActions).toHaveBeenCalledWith({ workerKind: 'autofix', limit: 2, offset: 3 });
   });
+  it('get-history-tasks returns persistence history rows in owner mode', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>();
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler);
+      }),
+    };
+    const historyRows = [
+      {
+        id: 't1',
+        description: 'History task',
+        status: 'completed',
+        workflowName: 'Plan A',
+        lastEventAt: '2026-07-01T00:00:00Z',
+        eventCount: 3,
+      },
+    ];
+    const loadAllHistoryTasks = vi.fn(() => historyRows);
+
+    registerReadOnlyIpcHandlers({
+      ipcMain: ipcMain as never,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+      persistence: { loadAllHistoryTasks } as never,
+      getOrchestrator: () => ({}) as never,
+      agentRegistry: {} as never,
+      loadTaskByIdFromPersistence: () => undefined,
+      resolveAgentSession: vi.fn(async () => null),
+      getOwnerMode: () => true,
+      getMessageBus: () => ({ request: vi.fn() }),
+      recordStartupDuration: vi.fn(),
+      getTaskDeltaStreamSequence: () => 1,
+    });
+
+    await expect(handlers.get('invoker:get-history-tasks')?.({})).resolves.toEqual(historyRows);
+    expect(loadAllHistoryTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it('get-history-tasks falls back to local persistence when owner has no handler', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>();
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler);
+      }),
+    };
+    const historyRows = [{ id: 'local-hist', workflowName: 'Local', lastEventAt: null, eventCount: 0 }];
+    registerReadOnlyIpcHandlers({
+      ipcMain: ipcMain as never,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+      persistence: { loadAllHistoryTasks: vi.fn(() => historyRows) } as never,
+      getOrchestrator: () => ({}) as never,
+      agentRegistry: {} as never,
+      loadTaskByIdFromPersistence: () => undefined,
+      resolveAgentSession: vi.fn(async () => null),
+      getOwnerMode: () => false,
+      getMessageBus: () => ({
+        request: vi.fn(() =>
+          Promise.reject(Object.assign(new Error('No request handler registered for channel: headless.query'), { code: 'NO_HANDLER' })),
+        ),
+      }),
+      recordStartupDuration: vi.fn(),
+      getTaskDeltaStreamSequence: () => 0,
+    });
+
+    await expect(handlers.get('invoker:get-history-tasks')?.({})).resolves.toEqual(historyRows);
+  });
+
   it('does not expose renderer write tools to read handlers', () => {
     expectReadContextWriteToolsAreAbsent();
   });
@@ -214,6 +281,39 @@ describe('registerReadOnlyIpcHandlers', () => {
     const handlers = registerViewer(() =>
       Promise.reject(Object.assign(new Error('No request handler registered for channel: headless.query'), { code: 'NO_HANDLER' })));
     await expect(handlers.get('invoker:list-workflows')?.({})).resolves.toEqual([{ id: 'LOCAL-FALLBACK' }]);
+  });
+
+  it('notifies when owner query delegation finds no mutation owner', async () => {
+    const onMutationOwnerUnavailable = vi.fn();
+    const handlers = new Map<string, (...args: unknown[]) => unknown>();
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler);
+      }),
+    };
+    registerReadOnlyIpcHandlers({
+      ipcMain: ipcMain as never,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+      persistence: { listWorkflows: vi.fn(() => [{ id: 'LOCAL-FALLBACK' }]) } as never,
+      getOrchestrator: () => ({}) as never,
+      agentRegistry: {} as never,
+      loadTaskByIdFromPersistence: () => undefined,
+      resolveAgentSession: vi.fn(async () => null),
+      getOwnerMode: () => false,
+      getMessageBus: () => ({
+        request: vi.fn(async () => {
+          throw Object.assign(new Error('No request handler registered for channel: headless.query'), { code: 'NO_HANDLER' });
+        }),
+      }),
+      onMutationOwnerUnavailable,
+      recordStartupDuration: vi.fn(),
+      getTaskDeltaStreamSequence: () => 0,
+    });
+
+    await expect(handlers.get('invoker:list-workflows')?.({})).resolves.toEqual([{ id: 'LOCAL-FALLBACK' }]);
+    expect(onMutationOwnerUnavailable).toHaveBeenCalledWith(
+      'No request handler registered for channel: headless.query',
+    );
   });
 
 });

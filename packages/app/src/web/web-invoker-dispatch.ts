@@ -17,6 +17,7 @@ import type {
   BundledSkillsStatus,
   Logger,
   SystemDiagnostics,
+  WorkerStatusSnapshot,
 } from '@invoker/contracts';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { AgentRegistry } from '@invoker/execution-engine';
@@ -24,6 +25,7 @@ import type { ExternalGatePolicyUpdate, Orchestrator } from '@invoker/workflow-c
 import { resolveDefaultTaskExecutionSettings, type InvokerConfig } from '../config.js';
 import { listInAppPlanningPresets } from '../in-app-planner.js';
 import type { ApiMutationFacade } from '../api-server.js';
+import { getEventsPage } from '../get-events-page.js';
 import { buildReviewGateQueryResponse } from '../review-gate-query.js';
 import { buildCurrentActionGraphSnapshot } from '../action-graph-snapshot.js';
 import { collectSystemDiagnostics } from '../system-diagnostics.js';
@@ -46,6 +48,7 @@ export interface WebInvokerDispatchDeps {
   getSystemDiagnostics?: () => SystemDiagnostics;
   getBundledSkillsStatus?: () => BundledSkillsStatus;
   checkPrStatuses?: () => void | Promise<void>;
+  getWorkers?: () => WorkerStatusSnapshot;
   logger?: Logger;
 }
 
@@ -105,7 +108,10 @@ export function buildWebInvokerDispatch(deps: WebInvokerDispatchDeps): WebInvoke
       case 'invoker:get-status':
         return orchestrator.getWorkflowStatus();
       case 'invoker:get-queue-status':
-        return orchestrator.getQueueStatus();
+        return orchestrator.getQueueStatus({ refresh: false });
+      case 'invoker:get-worker-status':
+      case 'invoker:get-workers':
+        return deps.getWorkers?.() ?? { generatedAt: new Date().toISOString(), workers: [] };
       case 'invoker:get-action-graph':
         return buildCurrentActionGraphSnapshot({
           orchestrator,
@@ -113,13 +119,15 @@ export function buildWebInvokerDispatch(deps: WebInvokerDispatchDeps): WebInvoke
           invokerConfig: deps.loadConfig(),
         });
       case 'invoker:get-events':
-        return persistence.getEvents(String(args[0]));
+        return getEventsPage(persistence, String(args[0]), args[1]);
       case 'invoker:get-task-output':
         return persistence.getTaskOutput(String(args[0]));
       case 'invoker:get-task-by-id':
         return orchestrator.getTask(String(args[0])) ?? null;
       case 'invoker:get-all-completed-tasks':
         return persistence.loadAllCompletedTasks();
+      case 'invoker:get-history-tasks':
+        return persistence.loadAllHistoryTasks();
       case 'invoker:get-review-gate':
         return reviewGate(String(args[0]));
       case 'invoker:get-claude-session':
@@ -237,6 +245,16 @@ export function buildWebInvokerDispatch(deps: WebInvokerDispatchDeps): WebInvoke
       case 'invoker:terminal-resize':
       case 'invoker:terminal-close':
         return { ok: false, reason: 'unsupported' };
+      case 'invoker:planning-terminal-open':
+        return { opened: false, reason: 'Planning terminals are not available in the web UI' };
+      case 'invoker:planning-terminal-list':
+        return [];
+      case 'invoker:planning-chat-set-terminal-mode':
+        return { ok: false, error: 'Planning tmux is not available in the web UI' };
+      case 'invoker:planning-terminal-write':
+      case 'invoker:planning-terminal-resize':
+      case 'invoker:planning-terminal-close':
+        return { ok: false, reason: 'unsupported' };
 
       // ── Mutations not exposed on the facade / global lifecycle ──
       case 'invoker:select-experiment':
@@ -247,6 +265,7 @@ export function buildWebInvokerDispatch(deps: WebInvokerDispatchDeps): WebInvoke
       case 'invoker:replace-task':
       case 'invoker:load-plan':
       case 'invoker:start':
+      case 'invoker:start-ready':
       case 'invoker:stop':
       case 'invoker:clear':
       case 'invoker:resume-workflow':

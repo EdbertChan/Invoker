@@ -7,7 +7,6 @@ export interface KimiExecutionAgentConfig {
   command?: string;
   configDir?: string;
   containerHomePath?: string;
-  yolo?: boolean;
 }
 
 const KIMI_SUPPORTED_MODELS: readonly ExecutionModelOption[] = [
@@ -28,13 +27,11 @@ export class KimiExecutionAgent implements ExecutionAgent {
   private readonly command: string;
   private readonly configDir: string;
   private readonly containerHomePath: string;
-  private readonly yolo: boolean;
 
   constructor(config: KimiExecutionAgentConfig = {}) {
     this.command = config.command ?? process.env.INVOKER_KIMI_COMMAND ?? 'kimi';
     this.configDir = config.configDir ?? join(homedir(), '.kimi-code');
     this.containerHomePath = config.containerHomePath ?? '/home/invoker';
-    this.yolo = config.yolo ?? true;
   }
 
   buildCommand(fullPrompt: string, options: AgentCommandBuildOptions = {}): AgentCommandSpec {
@@ -54,6 +51,10 @@ export class KimiExecutionAgent implements ExecutionAgent {
       args: this.buildArgs(prompt, options.executionModel),
       sessionId,
     };
+  }
+  supportsModel(executionModel: string): boolean {
+    const normalized = executionModel.trim().toLowerCase();
+    return normalized.includes('kimi') || normalized.includes('moonshot');
   }
 
   buildResumeArgs(sessionId: string): { cmd: string; args: string[] } {
@@ -76,8 +77,11 @@ export class KimiExecutionAgent implements ExecutionAgent {
   }
 
   private buildArgs(prompt: string, executionModel?: string): string[] {
+    // Kimi's `-p` prompt mode runs non-interactively and auto-approves tool
+    // use on its own. The kimi CLI rejects combining `--prompt` with an
+    // approval flag (`--yolo`, `--auto`, `--plan`) — it exits with
+    // "Cannot combine --prompt with --yolo." — so we pass no approval flag.
     return [
-      ...(this.yolo ? ['--yolo'] : []),
       ...(executionModel ? ['--model', executionModel] : []),
       '-p',
       prompt,

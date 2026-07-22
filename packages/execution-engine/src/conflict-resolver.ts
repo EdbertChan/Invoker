@@ -15,7 +15,7 @@ import type { Orchestrator } from '@invoker/workflow-core';
 import { OrchestratorError, OrchestratorErrorCode, parseMergeConflictError } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import { buildAgentExitFailureDetail, cleanElectronEnv, resolveExecutableOnCurrentPath } from './process-utils.js';
-import { DEFAULT_EXECUTION_AGENT, type ExecutionAgent } from './agent.js';
+import { assertExecutionModelSupported, DEFAULT_EXECUTION_AGENT, type ExecutionAgent } from './agent.js';
 import type { SessionDriver } from './session-driver.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { buildWorktreeListScript, createSshRemoteScriptError } from './ssh-git-exec.js';
@@ -304,6 +304,16 @@ function shellQuote(s: string): string {
 }
 
 /**
+ * Remote `bash -s` invocation for an agent command, forwarding the local PATH so
+ * a bare agent binary (e.g. `codex`) resolves on the remote — mirroring how
+ * ssh-executor runs task payloads. Without this the fix/resolve agent dies with
+ * "command not found" even though normal task execution on the same host works.
+ */
+export function remoteAgentShellInvocation(remotePath: string = process.env.PATH ?? ''): string[] {
+  return remotePath ? ['env', `PATH=${remotePath}`, 'bash', '-s'] : ['bash', '-s'];
+}
+
+/**
  * Build the shell command to run an agent on a remote host.
  * Uses the agent registry when available; falls back to claude CLI.
  */
@@ -424,7 +434,7 @@ fi
       user: target.user,
       host: target.host,
     }, { batchMode: true }),
-    'bash', '-s',
+    ...remoteAgentShellInvocation(),
   ];
   await new Promise<void>((resolve, reject) => {
     const child = spawn('ssh', sshArgs, { stdio: ['pipe', 'inherit', 'inherit'], env: cleanElectronEnv() });
@@ -713,7 +723,7 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
       user: target.user,
       host: target.host,
     }, { batchMode: true }),
-    'bash', '-s',
+    ...remoteAgentShellInvocation(),
   ];
 
   console.log(`[spawnAgentFix] remote agent command: ${agentCmd}`);
@@ -756,6 +766,7 @@ export function spawnAgentFixViaRegistry(
   driver?: SessionDriver,
   executionModel?: string,
 ): Promise<{ stdout: string; sessionId: string }> {
+  assertExecutionModelSupported(agent, executionModel);
   const promptTransport = materializeLocalPrompt(prompt);
   const spec = agent.buildFixCommand?.(promptTransport.effectivePrompt, { executionModel });
   if (!spec) {
@@ -820,7 +831,7 @@ function execRemoteSsh(target: RemoteTargetConfig, script: string, phase?: strin
       user: target.user,
       host: target.host,
     }, { batchMode: true }),
-    'bash', '-s',
+    ...remoteAgentShellInvocation(),
   ];
 
   return new Promise((resolve, reject) => {
