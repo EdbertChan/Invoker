@@ -1,17 +1,14 @@
-import type { QueueStatus } from '@invoker/contracts';
 import type { JSX } from 'react';
-import type { TaskState, WorkflowMeta, WorkerStatusSnapshot } from '../types.js';
+import type { WorkerStatusSnapshot } from '../types.js';
 import type { SidebarSurface } from '../lib/workflow-progress-surfaces.js';
-import { getAttentionTaskEntries, getRunningTaskEntries, getSortedWorkflows } from '../lib/workflow-progress-surfaces.js';
 import { countActiveWorkerActions } from '../lib/worker-display.js';
 import {
   AttentionIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  GraphIcon,
   InvokerIcon,
   MoonIcon,
-  PlanningTerminalIcon,
-  RunningIcon,
   SettingsIcon,
   SunIcon,
   WorkerIcon,
@@ -20,15 +17,15 @@ import {
 import type { ThemeMode } from '../lib/theme.js';
 
 interface LeftStatusColumnProps {
-  workflows: Map<string, WorkflowMeta>;
-  tasks: Map<string, TaskState>;
-  queueStatus: QueueStatus | null;
+  workflowCount: number;
+  attentionCount: number;
   workerStatus: WorkerStatusSnapshot | null;
   selectedSurface: SidebarSurface;
   collapsed: boolean;
   onSelectSurface: (surface: SidebarSurface) => void;
   onToggleCollapsed: () => void;
   planningSessionCount: number;
+  planningAttentionCount: number;
   onOpenSettings: () => void;
   theme: ThemeMode;
   onToggleTheme: () => void;
@@ -61,36 +58,32 @@ function navButtonClass(selected: boolean, collapsed: boolean): string {
 function countClass(tone: SourceItem['tone']): string {
   const base = 'border border-border';
   if (tone === 'attention') return `${base} text-amber-300`;
-  if (tone === 'running') return `${base} text-blue-300`;
+  if (tone === 'running') return `${base} text-foreground`;
   return `${base} text-muted-foreground`;
 }
 
 export function LeftStatusColumn({
-  workflows,
-  tasks,
-  queueStatus,
+  workflowCount,
+  attentionCount,
   workerStatus,
   selectedSurface,
   collapsed,
   onSelectSurface,
   onToggleCollapsed,
   planningSessionCount,
+  planningAttentionCount,
   onOpenSettings,
   theme,
   onToggleTheme,
 }: LeftStatusColumnProps): JSX.Element {
-  const workflowEntries = getSortedWorkflows(workflows, tasks);
-  const attentionEntries = getAttentionTaskEntries(tasks, workflows);
-  const runningEntries = getRunningTaskEntries(tasks, workflows, queueStatus);
   const runningWorkers = workerStatus?.workers.filter((worker) => worker.lifecycle === 'running').length ?? 0;
   const registeredWorkers = workerStatus?.workers.length ?? 0;
   const activeWorkerActions = workerStatus ? countActiveWorkerActions(workerStatus.workers) : 0;
 
   const sources: SourceItem[] = [
-    { key: 'attention', label: 'Needs Attention', count: attentionEntries.length, tone: 'attention', icon: <AttentionIcon className={ICON_CLASS} /> },
-    { key: 'running', label: 'Running', count: runningEntries.length, tone: 'running', icon: <RunningIcon className={ICON_CLASS} /> },
+    { key: 'attention', label: 'Needs Attention', count: attentionCount, tone: 'attention', icon: <AttentionIcon className={ICON_CLASS} /> },
     { key: 'workers', label: 'Workers', count: registeredWorkers, tone: activeWorkerActions > 0 ? 'running' : 'neutral', icon: <WorkerIcon className={ICON_CLASS} /> },
-    { key: 'workflows', label: 'Workflows', count: workflowEntries.length, tone: 'neutral', icon: <WorkflowsIcon className={ICON_CLASS} /> },
+    { key: 'workflows', label: 'Workflows', count: workflowCount, tone: 'neutral', icon: <WorkflowsIcon className={ICON_CLASS} /> },
   ];
 
   return (
@@ -112,28 +105,41 @@ export function LeftStatusColumn({
         className={[
           'rounded-md text-left transition-colors duration-100 hover:bg-sidebar-accent/60',
           collapsed ? 'px-2 py-2.5 text-center' : 'px-2.5 py-2',
+          selectedSurface === 'home' ? 'bg-sidebar-accent text-sidebar-accent-foreground' : '',
         ].join(' ')}
       >
         {collapsed ? (
-          <div className="inline-flex text-sidebar-foreground">
+          <div className="relative inline-flex h-9 w-9 items-center justify-center text-sidebar-foreground">
             <InvokerIcon className={ICON_CLASS} />
+            {planningAttentionCount > 0 && (
+              <span className={`absolute -right-1 -top-1 rounded-full px-1.5 py-0.5 text-[10px] leading-none bg-background ${countClass('neutral')}`}>
+                {planningAttentionCount}
+              </span>
+            )}
           </div>
         ) : (
-          <div className="flex items-center gap-3">
-            <span className="inline-flex rounded-md border border-border bg-sidebar-accent/60 p-1.5 text-sidebar-foreground">
-              <InvokerIcon className={ICON_CLASS} />
-            </span>
-            <div>
-              <div className="text-sm font-semibold text-sidebar-foreground">Invoker</div>
-              <div className="mt-0.5 text-[11px] text-muted-foreground">Home</div>
+          <div className="flex w-full items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="inline-flex rounded-md border border-border bg-sidebar-accent/60 p-1.5 text-sidebar-foreground">
+                <InvokerIcon className={ICON_CLASS} />
+              </span>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-sidebar-foreground">Invoker</div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">Planning chats</div>
+              </div>
             </div>
+            {planningAttentionCount > 0 && (
+              <span className={`rounded-full px-2 py-0.5 text-[11px] ${countClass('neutral')}`}>
+                {planningAttentionCount}
+              </span>
+            )}
           </div>
         )}
       </button>
 
       <button
         type="button"
-        aria-label="Planning Terminal"
+        aria-label="Plan graph"
         data-testid="sidebar-planning"
         data-sidebar-nav-item
         data-sidebar-nav-order="2"
@@ -146,24 +152,21 @@ export function LeftStatusColumn({
       >
         {collapsed ? (
           <div className="relative inline-flex h-9 w-9 items-center justify-center">
-            <span><PlanningTerminalIcon className={ICON_CLASS} /></span>
-            {planningSessionCount > 0 && (
-              <span className={`absolute -right-1 -top-1 rounded-full px-1.5 py-0.5 text-[10px] leading-none bg-background ${countClass('neutral')}`}>
-                {planningSessionCount}
-              </span>
-            )}
+            <span><GraphIcon className={ICON_CLASS} /></span>
           </div>
         ) : (
           <>
             <span className="flex min-w-0 items-center gap-3">
               <span className="inline-flex rounded-md border border-border bg-sidebar-accent/40 p-1.5 text-muted-foreground">
-                <PlanningTerminalIcon className={ICON_CLASS} />
+                <GraphIcon className={ICON_CLASS} />
               </span>
-              <span className="truncate">Planning Terminal</span>
+              <span className="truncate">Plan graph</span>
             </span>
-            <span className={`rounded-full px-2 py-0.5 text-[11px] ${countClass('neutral')}`}>
-              {planningSessionCount}
-            </span>
+            {workflowCount > 0 && (
+              <span className={`rounded-full px-2 py-0.5 text-[11px] ${countClass('neutral')}`}>
+                {workflowCount}
+              </span>
+            )}
           </>
         )}
       </button>
@@ -209,31 +212,27 @@ export function LeftStatusColumn({
           );
         })}
       </nav>
+      <span data-testid="sidebar-running" hidden aria-hidden="true">Running</span>
 
       {!collapsed && (
         <div className="mt-6 flex-1 overflow-y-auto scrollbar-sleek px-2.5 text-xs text-muted-foreground">
           {selectedSurface === 'workflows' && (
-            workflowEntries.length === 0
+            workflowCount === 0
               ? 'No workflows yet'
-              : `${workflowEntries.length} workflow${workflowEntries.length === 1 ? '' : 's'} ready to browse.`
+              : `${workflowCount} workflow${workflowCount === 1 ? '' : 's'} ready to browse.`
           )}
           {selectedSurface === 'attention' && (
-            attentionEntries.length === 0
+            attentionCount === 0
               ? 'Nothing needs a decision right now.'
-              : `${attentionEntries.length} item${attentionEntries.length === 1 ? ' needs' : 's need'} attention.`
-          )}
-          {selectedSurface === 'running' && (
-            runningEntries.length === 0
-              ? 'No tasks are running right now.'
-              : `${runningEntries.length} task${runningEntries.length === 1 ? '' : 's'} active now.`
+              : `${attentionCount} item${attentionCount === 1 ? ' needs' : 's need'} attention.`
           )}
           {selectedSurface === 'workers' && (
             workerStatus === null
               ? 'Worker status is not available yet.'
               : `${runningWorkers} process${runningWorkers === 1 ? '' : 'es'} running · ${activeWorkerActions} active action${activeWorkerActions === 1 ? '' : 's'}`
           )}
-          {selectedSurface === 'home' && 'Plan graph details live here.'}
-          {selectedSurface === 'planning' && `${planningSessionCount} planning chat${planningSessionCount === 1 ? '' : 's'}.`}
+          {selectedSurface === 'home' && `${planningSessionCount} planning chat${planningSessionCount === 1 ? '' : 's'}.`}
+          {selectedSurface === 'planning' && 'Workflow graph and task terminals.'}
         </div>
       )}
 

@@ -136,6 +136,18 @@ export interface InvokerConfig {
    * then to the built-in default agent.
    */
   autoFixAgent?: string;
+  /**
+   * Preferred execution agent for resolve-conflict (git merge conflicts).
+   * When unset, resolve-conflict uses the entry-point path default
+   * (explicit CLI/UI agent, then defaultExecutionAgent / autoFixAgent).
+   */
+  conflictResolutionAgent?: string;
+  /**
+   * Preferred execution model for resolve-conflict only.
+   * When set, wins over task.config.executionModel / defaultExecutionModel
+   * so conflict resolution can use a cheaper model than normal task work.
+   */
+  conflictResolutionModel?: string;
   /** Default execution harness for prompt-backed tasks when the task does not override it. */
   defaultExecutionAgent?: string;
   /** Default execution model for prompt-backed tasks when the task does not override it. */
@@ -235,13 +247,11 @@ export interface InvokerConfig {
     /**
      * Remote invoker home directory (e.g., ~/.invoker). Only used in managed mode.
      * Default: ~/.invoker
+     *
+     * Invoker does not run repo bootstrap automatically. If a repo needs hydration,
+     * make the task command run the repo-owned setup explicitly.
      */
     remoteInvokerHome?: string;
-    /**
-     * Optional provision command to run in the worktree after creation (e.g., pnpm install).
-     * Only used in managed mode. Default: pnpm install --frozen-lockfile
-     */
-    provisionCommand?: string;
     /**
      * When true, export agent API keys from the local secrets file into SSH task/fix
      * shells. Default false so remote Claude/Codex CLI account auth is preserved.
@@ -401,7 +411,51 @@ export function resolveDefaultTaskExecutionSettings(config: InvokerConfig): Defa
     ...(configuredModel && configuredModel.length > 0 ? { executionModel: configuredModel } : {}),
   };
 }
+export function resolveAutoFixExecutionModel(config: InvokerConfig): string | undefined {
+  const autoFixAgent = config.autoFixAgent?.trim();
+  if (!autoFixAgent) return undefined;
+  const defaults = resolveDefaultTaskExecutionSettings(config);
+  return autoFixAgent === defaults.executionAgent ? defaults.executionModel : undefined;
+}
 
+
+
+export interface ConflictResolutionSettings {
+  agent?: string;
+  model?: string;
+}
+
+/**
+ * Resolve agent/model for resolve-conflict.
+ *
+ * Precedence for agent: explicitAgent → conflictResolutionAgent → pathDefaultAgent.
+ * Model: conflictResolutionModel when set (wins over task/default execution models).
+ */
+export function resolveConflictResolutionSettings(
+  config: Pick<InvokerConfig, 'conflictResolutionAgent' | 'conflictResolutionModel'>,
+  options?: {
+    explicitAgent?: string;
+    pathDefaultAgent?: string;
+  },
+): ConflictResolutionSettings {
+  const explicit = options?.explicitAgent?.trim();
+  const configAgent = config.conflictResolutionAgent?.trim();
+  const configModel = config.conflictResolutionModel?.trim();
+  const pathDefault = options?.pathDefaultAgent?.trim();
+
+  const agent = (explicit && explicit.length > 0)
+    ? explicit
+    : (configAgent && configAgent.length > 0)
+      ? configAgent
+      : (pathDefault && pathDefault.length > 0)
+        ? pathDefault
+        : undefined;
+
+  return {
+    ...(agent ? { agent } : {}),
+    ...(configModel && configModel.length > 0 ? { model: configModel } : {}),
+  };
+}
 
 export type EmbeddedTerminalBackendConfig = 'bash' | 'pty';
 

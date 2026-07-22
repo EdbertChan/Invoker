@@ -1,11 +1,12 @@
 import type { IpcMain } from 'electron';
-import type { Logger, SearchOptions, WorkerActionHistoryRequest, WorkerActionHistoryResponse, WorkerDecisionsRequest, WorkerDecisionsResponse } from '@invoker/contracts';
+import type { GetEventsOptions, Logger, SearchOptions, WorkerActionHistoryRequest, WorkerActionHistoryResponse, WorkerDecisionsRequest, WorkerDecisionsResponse } from '@invoker/contracts';
 import { resolveInvokerHomeRoot } from '@invoker/contracts';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import { DEFAULT_EXECUTION_AGENT, type AgentRegistry } from '@invoker/execution-engine';
 import type { Orchestrator, TaskState } from '@invoker/workflow-core';
 import type { MessageBus } from '@invoker/transport';
 import { loadConfig } from './config.js';
+import { getEventsPage } from './get-events-page.js';
 import { buildReviewGateQueryResponse } from './review-gate-query.js';
 import { buildTaskGraphSnapshot } from './web/task-graph-snapshot.js';
 import { listWorkerActionHistory, listWorkerDecisions } from './worker-control.js';
@@ -25,6 +26,8 @@ export interface RegisterReadOnlyIpcHandlersContext {
   ) => Promise<unknown>;
   getOwnerMode?: () => boolean;
   getMessageBus?: () => Pick<MessageBus, 'request'>;
+  /** Called when owner query delegation finds no reachable mutation owner. */
+  onMutationOwnerUnavailable?: (reason: string) => void;
   recordStartupDuration: (label: string, startedAtMs: number, fields?: Record<string, unknown>) => void;
   getTaskDeltaStreamSequence: () => number;
 }
@@ -61,6 +64,7 @@ export function registerReadOnlyIpcHandlers(context: RegisterReadOnlyIpcHandlers
     resolveAgentSession,
     getOwnerMode,
     getMessageBus,
+    onMutationOwnerUnavailable,
     recordStartupDuration,
     getTaskDeltaStreamSequence,
   } = context;
@@ -83,6 +87,7 @@ export function registerReadOnlyIpcHandlers(context: RegisterReadOnlyIpcHandlers
       if (code !== 'NO_HANDLER' && !message.includes('No request handler registered')) {
         throw err;
       }
+      onMutationOwnerUnavailable?.(message);
       logger.warn(
         `${kind} owner delegation found no owner handler; falling back to local read-only snapshot: ${message}`,
         { module: 'ipc' },
@@ -165,8 +170,9 @@ export function registerReadOnlyIpcHandlers(context: RegisterReadOnlyIpcHandlers
     return { tasks, workflows, streamSequence };
   });
 
-  ipcMain.handle('invoker:get-events', (_event, taskId: string) =>
-    delegatedRead('events', { taskId }, 'events', () => persistence.getEvents(taskId)));
+  ipcMain.handle('invoker:get-events', (_event, taskId: string, options: GetEventsOptions) =>
+    delegatedRead('events', { taskId, options }, 'events', () =>
+      getEventsPage(persistence, String(taskId), options)));
   ipcMain.handle('invoker:get-status', async () => (
     await delegateOwnerQuery('workflow-status') ?? getOrchestrator().getWorkflowStatus()
   ));
@@ -182,6 +188,8 @@ export function registerReadOnlyIpcHandlers(context: RegisterReadOnlyIpcHandlers
     delegatedRead('output-tail', { taskId }, 'tail', () => persistence.getOutputTail(taskId)));
   ipcMain.handle('invoker:get-all-completed-tasks', () =>
     delegatedRead('all-completed-tasks', {}, 'tasks', () => persistence.loadAllCompletedTasks()));
+  ipcMain.handle('invoker:get-history-tasks', () =>
+    delegatedRead('history-tasks', {}, 'tasks', () => persistence.loadAllHistoryTasks()));
   ipcMain.handle('invoker:get-worker-action-history', (_event, request: WorkerActionHistoryRequest) =>
     delegatedRead<WorkerActionHistoryResponse>(
       'worker-action-history',

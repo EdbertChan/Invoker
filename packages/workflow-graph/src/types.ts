@@ -9,6 +9,7 @@
 
 export type TaskStatus =
   | 'pending'
+  | 'queued'
   | 'running'
   | 'fixing_with_ai'
   | 'completed'
@@ -19,7 +20,6 @@ export type TaskStatus =
   | 'review_ready'
   | 'awaiting_approval'
   | 'stale';
-
 // ── Task Config (definition / spec) ────────────────────────
 // Copied wholesale when cloning/forking: clone.config = original.config
 
@@ -141,6 +141,13 @@ export type ReviewGateArtifactStatus =
   | 'discarded'
   | 'unknown';
 
+export interface MergeGateFailedCheck {
+  readonly name: string;
+  readonly conclusion?: string;
+  readonly detailsUrl?: string;
+  readonly summary?: string;
+}
+
 export interface ReviewGateArtifact {
   readonly id: string;
   readonly title?: string;
@@ -154,6 +161,9 @@ export interface ReviewGateArtifact {
   readonly required: boolean;
   readonly status: ReviewGateArtifactStatus;
   readonly rawStatus?: string;
+  readonly checksState?: 'pending' | 'success' | 'failure';
+  readonly failedChecks?: readonly MergeGateFailedCheck[];
+  readonly mergeState?: 'clean' | 'dirty' | 'unknown';
   readonly dependsOn?: readonly string[];
   readonly generation: number;
   readonly createdAt?: string;
@@ -229,6 +239,10 @@ export interface TaskExecution {
     readonly conflictFiles: readonly string[];
   };
   readonly selectedAttemptId?: string;
+  readonly crashPreservedAt?: Date;
+  readonly crashPreservedOwnerPid?: number;
+  readonly crashPreservedReportPath?: string;
+  readonly crashPreservedDiagnosticSummary?: string;
 }
 
 // ── Task State ──────────────────────────────────────────────
@@ -304,6 +318,10 @@ export function createTaskState(
     execution: { generation: 0 },
     taskStateVersion: 1,
   };
+}
+
+export function isCrashPreservedExecution(execution: TaskExecution | undefined | null): boolean {
+  return Boolean(execution?.crashPreservedAt);
 }
 
 // ── Attempt Status ──────────────────────────────────────────

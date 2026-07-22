@@ -9,11 +9,23 @@ function makeHandlers(over: Partial<OwnerReadQueryHandlers> = {}): OwnerReadQuer
   return {
     ownerModeLabel: 'gui',
     onActivity: vi.fn(),
-    getUiPerfStats: vi.fn(() => ({ mainDeltaToUi: 7 })),
+    getUiPerfStats: vi.fn(() => ({
+      mainDeltaToUi: 7,
+      maxRendererEventLoopLagMs: 12,
+      maxRendererLongTaskMs: 34,
+      planningTypingLagReports: 3,
+      maxPlanningTypingLagMs: 41,
+      planningChatInputChangeReports: 2,
+      maxPlanningChatInputHandlerMs: 17,
+      planningChatInputCommitReports: 1,
+      maxPlanningChatInputCommitMs: 29,
+    })),
     resetUiPerfStats: vi.fn(),
     getQueueStatus: vi.fn(() => ({ runningCount: 2 })),
     listWorkerActionHistory: vi.fn((request) => ({ workerKind: request.workerKind, actions: [], limit: request.limit ?? 20, offset: request.offset ?? 0, hasMore: false })),
+    listWorkerDecisions: vi.fn((request) => ({ decision: request.decision, actions: [], limit: request.limit ?? 20, offset: request.offset ?? 0, hasMore: false })),
     getWorkerStatus: vi.fn(() => ({ generatedAt: 'now', workers: [] })),
+    getWorkers: vi.fn(() => ({ generatedAt: 'workers-now', workers: [] })),
     getWorkflowStatus: vi.fn(() => ({ 'wf-1': 'running' })),
     getTasksSnapshot: vi.fn(({ refresh }) => ({ tasks: [], workflows: [], refreshed: refresh })),
     getActionGraphSnapshot: vi.fn(() => ({ nodes: [] })),
@@ -27,6 +39,7 @@ function makeHandlers(over: Partial<OwnerReadQueryHandlers> = {}): OwnerReadQuer
     getOutputTail: vi.fn(() => ({ tail: 1 })),
     replayOutput: vi.fn((id: string, off: number) => [{ id, off }]),
     getAllCompletedTasks: vi.fn(() => [{ id: 'done' }]),
+    getHistoryTasks: vi.fn(() => [{ id: 'hist-1', workflowName: 'Plan', lastEventAt: '2026-07-01T00:00:00Z', eventCount: 2 }]),
     ...over,
   };
 }
@@ -34,7 +47,18 @@ function makeHandlers(over: Partial<OwnerReadQueryHandlers> = {}): OwnerReadQuer
 describe('answerOwnerReadQuery', () => {
   it('ui-perf merges the owner label with the stats; reset only when asked', () => {
     const h = makeHandlers({ ownerModeLabel: 'standalone' });
-    expect(answerOwnerReadQuery({ kind: 'ui-perf' }, h)).toEqual({ ownerMode: 'standalone', mainDeltaToUi: 7 });
+    expect(answerOwnerReadQuery({ kind: 'ui-perf' }, h)).toEqual({
+      ownerMode: 'standalone',
+      mainDeltaToUi: 7,
+      maxRendererEventLoopLagMs: 12,
+      maxRendererLongTaskMs: 34,
+      planningTypingLagReports: 3,
+      maxPlanningTypingLagMs: 41,
+      planningChatInputChangeReports: 2,
+      maxPlanningChatInputHandlerMs: 17,
+      planningChatInputCommitReports: 1,
+      maxPlanningChatInputCommitMs: 29,
+    });
     expect(h.resetUiPerfStats).not.toHaveBeenCalled();
     answerOwnerReadQuery({ kind: 'ui-perf', reset: true }, h);
     expect(h.resetUiPerfStats).toHaveBeenCalledTimes(1);
@@ -44,6 +68,7 @@ describe('answerOwnerReadQuery', () => {
     const h = makeHandlers();
     expect(answerOwnerReadQuery({ kind: 'queue' }, h)).toEqual({ runningCount: 2 });
     expect(answerOwnerReadQuery({ kind: 'worker-status' }, h)).toEqual({ workerStatus: { generatedAt: 'now', workers: [] } });
+    expect(answerOwnerReadQuery({ kind: 'workers' }, h)).toEqual({ generatedAt: 'workers-now', workers: [] });
     expect(answerOwnerReadQuery({ kind: 'worker-action-history', workerKind: 'autofix', limit: 2, offset: 4 }, h)).toEqual({
       workerActionHistory: { workerKind: 'autofix', actions: [], limit: 2, offset: 4, hasMore: false },
     });
@@ -65,8 +90,10 @@ describe('answerOwnerReadQuery', () => {
     expect(answerOwnerReadQuery({ kind: 'workflow', workflowId: 'wf-9' }, h)).toEqual({ workflow: { id: 'wf-9' }, tasks: [] });
     expect(h.loadWorkflowBundle).toHaveBeenCalledWith('wf-9');
     expect(answerOwnerReadQuery({ kind: 'review-gate', workflowId: 'wf-9' }, h)).toEqual({ reviewGate: { gate: true } });
-    expect(answerOwnerReadQuery({ kind: 'events', taskId: 't-1' }, h)).toEqual({ events: [{ e: 1 }] });
-    expect(h.getEvents).toHaveBeenCalledWith('t-1');
+    expect(answerOwnerReadQuery({ kind: 'events', taskId: 't-1', limit: 50, sortBy: 'desc' }, h)).toEqual({
+      events: [{ e: 1 }],
+    });
+    expect(h.getEvents).toHaveBeenCalledWith('t-1', { limit: 50, sortBy: 'desc' });
     expect(answerOwnerReadQuery({ kind: 'task-by-id', taskId: 't-1' }, h)).toEqual({ task: { id: 't-1' } });
     expect(answerOwnerReadQuery({ kind: 'task-output', taskId: 't-1' }, h)).toEqual({ output: 'output-text' });
     expect(answerOwnerReadQuery({ kind: 'output-chunks', taskId: 't-1' }, h)).toEqual({ chunks: [{ c: 1 }] });
@@ -74,6 +101,10 @@ describe('answerOwnerReadQuery', () => {
     expect(answerOwnerReadQuery({ kind: 'replay-output', taskId: 't-1', fromOffset: 42 }, h)).toEqual({ chunks: [{ id: 't-1', off: 42 }] });
     expect(h.replayOutput).toHaveBeenCalledWith('t-1', 42);
     expect(answerOwnerReadQuery({ kind: 'all-completed-tasks' }, h)).toEqual({ tasks: [{ id: 'done' }] });
+    expect(answerOwnerReadQuery({ kind: 'history-tasks' }, h)).toEqual({
+      tasks: [{ id: 'hist-1', workflowName: 'Plan', lastEventAt: '2026-07-01T00:00:00Z', eventCount: 2 }],
+    });
+    expect(h.getHistoryTasks).toHaveBeenCalledTimes(1);
   });
 
   it('null-coalesces task-by-id, review-gate, and output-tail', () => {
@@ -134,6 +165,7 @@ describe('buildOwnerReadQueryHandlers', () => {
         getOutputTail: () => ({ t: 1 }),
         replayOutputFrom: (id: string, off: number) => [{ id, off }],
         loadAllCompletedTasks: () => [{ id: 'done' }],
+        loadAllHistoryTasks: () => [{ id: 'hist-1', workflowName: 'Plan', lastEventAt: null, eventCount: 0 }],
         listWorkerActions: vi.fn(() => []),
       },
     };
@@ -146,6 +178,7 @@ describe('buildOwnerReadQueryHandlers', () => {
       resetUiPerfStats: () => {},
       getStreamSequence: () => 5,
       getWorkerStatus: () => ({ generatedAt: 'now', workers: [] }),
+      getWorkers: () => ({ generatedAt: 'workers-now', workers: [] }),
       resolveInvokerHomeRoot: () => '/home',
       orchestrator: { ...f.orchestrator, ...orch } as never,
       persistence: { ...f.persistence, ...persist } as never,
@@ -156,13 +189,15 @@ describe('buildOwnerReadQueryHandlers', () => {
   it('passes reads straight through to persistence', () => {
     const h = build();
     expect(h.listWorkflows()).toEqual([{ id: 'wf' }]);
-    expect(h.getEvents('t1')).toEqual([{ e: 1 }]);
+    expect(h.getEvents('t1', { limit: 50, sortBy: 'desc' })).toEqual([{ e: 1 }]);
     expect(h.getTaskOutput('t1')).toBe('out');
     expect(h.getTaskById('t1')).toEqual({ id: 't1' });
     expect(h.getOutputChunks('t1')).toEqual([{ c: 1 }]);
     expect(h.replayOutput('t1', 9)).toEqual([{ id: 't1', off: 9 }]);
     expect(h.getAllCompletedTasks()).toEqual([{ id: 'done' }]);
+    expect(h.getHistoryTasks()).toEqual([{ id: 'hist-1', workflowName: 'Plan', lastEventAt: null, eventCount: 0 }]);
     expect(h.getWorkerStatus()).toEqual({ generatedAt: 'now', workers: [] });
+    expect(h.getWorkers()).toEqual({ generatedAt: 'workers-now', workers: [] });
     expect(h.listWorkerActionHistory({ workerKind: 'autofix', limit: 1, offset: 2 })).toEqual({
       workerKind: 'autofix',
       actions: [],

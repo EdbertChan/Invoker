@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { PlanConversation, extractYamlPlan, globToRegex, isDangerousCommand, isConfirmation } from '../slack/plan-conversation.js';
+import { PlanConversation, buildPlanSystemPrompt, extractYamlPlan, globToRegex, isDangerousCommand, isConfirmation } from '../slack/plan-conversation.js';
 import { parse as parseYaml } from 'yaml';
 import * as child_process from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // ── Mock child_process.spawn ────────────────────────────────
 
@@ -405,6 +409,11 @@ describe('isConfirmation', () => {
   it('detects "yes"', () => expect(isConfirmation('yes')).toBe(true));
   it('detects "Yes"', () => expect(isConfirmation('Yes')).toBe(true));
   it('detects "y"', () => expect(isConfirmation('y')).toBe(true));
+  it('detects "yes please"', () => expect(isConfirmation('yes please')).toBe(true));
+  it('detects "ok"', () => expect(isConfirmation('ok')).toBe(true));
+  it('detects "okay"', () => expect(isConfirmation('okay')).toBe(true));
+  it('detects "approve"', () => expect(isConfirmation('approve')).toBe(true));
+  it('detects "sounds good"', () => expect(isConfirmation('sounds good')).toBe(true));
   it('detects "go"', () => expect(isConfirmation('go')).toBe(true));
   it('detects "go ahead"', () => expect(isConfirmation('go ahead')).toBe(true));
   it('detects "execute"', () => expect(isConfirmation('execute')).toBe(true));
@@ -413,6 +422,7 @@ describe('isConfirmation', () => {
   it('detects "proceed"', () => expect(isConfirmation('proceed')).toBe(true));
   it('detects "do it"', () => expect(isConfirmation('do it')).toBe(true));
   it('detects "confirm"', () => expect(isConfirmation('confirm')).toBe(true));
+  it('detects "submit"', () => expect(isConfirmation('submit')).toBe(true));
   it('detects "lgtm"', () => expect(isConfirmation('lgtm')).toBe(true));
   it('detects "yes!" with trailing punctuation', () => expect(isConfirmation('yes!')).toBe(true));
   it('detects " yes " with whitespace', () => expect(isConfirmation(' yes ')).toBe(true));
@@ -433,6 +443,31 @@ describe('PlanConversation', () => {
     mockCursorResponse('What kind of project is this?');
     const reply = await conversation.sendMessage('I want to add a REST API');
     expect(reply).toBe('What kind of project is this?');
+  });
+
+  it('formats Codex JSONL into agent message and exposes reasoning', async () => {
+    const jsonl = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'tid-1' }),
+      JSON.stringify({ type: 'turn.started' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'item_0', type: 'reasoning', text: 'Greet the user and ask what to plan.' },
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { id: 'item_1', type: 'agent_message', text: 'Hello. What should we plan?' },
+      }),
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 2 } }),
+    ].join('\n');
+    mockCursorResponse(jsonl);
+    const reply = await conversation.sendMessage('hello');
+    expect(reply).toBe('Hello. What should we plan?');
+    expect(reply).not.toContain('thread.started');
+    expect(conversation.lastTurnReasoning).toEqual(['Greet the user and ask what to plan.']);
+    expect(conversation.history[1]).toEqual({
+      role: 'assistant',
+      content: 'Hello. What should we plan?',
+    });
   });
 
   it('tracks conversation history', async () => {
@@ -521,6 +556,44 @@ describe('PlanConversation', () => {
     expect(prompt).toContain('State concise assumptions');
     expect(prompt).toContain('Show a short plan preview');
     expect(prompt).not.toContain('generate the YAML plan directly');
+  });
+
+  it('conversational planning asks for scope before drafting', async () => {
+    const conversational = new PlanConversation({ conversationalPlanning: true });
+    mockCursorResponse('What behavior should change first?');
+
+    await conversational.sendMessage('Build better planning');
+
+    const prompt = mockSpawn.mock.calls[0][1][1] as string;
+    expect(prompt).toContain('conversational planning mode');
+    expect(prompt).toContain('Drafting is not authorized yet');
+    expect(prompt).toContain('Ask scoping questions first');
+    expect(prompt).toContain('edge cases, corner cases, architecture choices, ambiguity');
+    expect(prompt).toContain('explain like the user is five');
+    expect(prompt).toContain('asking whether the user wants you to draft the YAML plan');
+    expect(prompt).not.toContain('name: "Plan Name"');
+    expect(prompt).not.toContain('Generate a YAML task plan');
+  });
+
+  it('conversational planning treats confirmation without YAML as draft approval', async () => {
+    const conversational = new PlanConversation({ conversationalPlanning: true });
+    (conversational as any).messages.push({
+      role: 'assistant',
+      content: 'I understand the scope. Would you like me to draft the YAML plan?',
+    });
+    mockCursorResponse(VALID_YAML_PLAN);
+
+    const reply = await conversational.sendMessage('yes');
+
+    expect(reply).toBe(VALID_YAML_PLAN);
+    expect(conversational.planSubmitted).toBe(false);
+    expect(conversational.submittedPlanText).toBeNull();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const prompt = mockSpawn.mock.calls[0][1][1] as string;
+    expect(prompt).toContain('The user has explicitly approved drafting');
+    expect(prompt).toContain('name: "Plan Name"');
+    expect(prompt).toContain('Generate a YAML task plan');
+    expect(prompt).toContain('Reply `submit` to submit it.');
   });
 
   it('submittedPlanText is null before confirmation', async () => {
@@ -653,6 +726,52 @@ describe('PlanConversation', () => {
     ]);
   });
 
+  it('marks an unverified completion claim when the worktree is unchanged', async () => {
+    const workingDir = mkdtempSync(join(tmpdir(), 'invoker-agent-claim-'));
+    execFileSync('git', ['init'], { cwd: workingDir });
+    const claim = 'Fixed.\nChanged: Slack routing.\nVerified: 4 files, 211 tests passed.';
+    const conv = new PlanConversation({ mode: 'agent', workingDir });
+
+    try {
+      mockCursorResponse(claim);
+
+      await expect(conv.sendMessage('fix the Slack routing')).resolves.toBe(
+        `${claim}\n\nNote: no working-tree changes or new commits were detected in this session checkout, so this completion summary could not be verified.`,
+      );
+    } finally {
+      rmSync(workingDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not mark a completion claim when the planner creates a commit', async () => {
+    const workingDir = mkdtempSync(join(tmpdir(), 'invoker-agent-commit-'));
+    execFileSync('git', ['init'], { cwd: workingDir });
+    execFileSync('git', ['config', 'user.email', 'invoker@example.test'], { cwd: workingDir });
+    execFileSync('git', ['config', 'user.name', 'Invoker'], { cwd: workingDir });
+    const claim = 'Fixed.\nVerified: tests passed.';
+    const conv = new PlanConversation({ mode: 'agent', workingDir });
+    const proc = new EventEmitter() as any;
+    proc.stdout = new EventEmitter();
+    proc.stderr = new EventEmitter();
+    proc.kill = vi.fn();
+
+    try {
+      mockSpawn.mockReturnValueOnce(proc);
+      const reply = conv.sendMessage('fix the Slack routing');
+      setTimeout(() => {
+        writeFileSync(join(workingDir, 'fixed.txt'), 'fixed\n');
+        execFileSync('git', ['add', 'fixed.txt'], { cwd: workingDir });
+        execFileSync('git', ['commit', '-m', 'fix routing'], { cwd: workingDir });
+        proc.stdout.emit('data', Buffer.from(claim));
+        proc.emit('close', 0);
+      }, 0);
+
+      await expect(reply).resolves.toBe(claim);
+    } finally {
+      rmSync(workingDir, { recursive: true, force: true });
+    }
+  });
+
   it('emits partial stdout before planner failure without persisting assistant history', async () => {
     const chunks: string[] = [];
     const repo = {
@@ -730,6 +849,14 @@ describe('PlanConversation', () => {
 });
 
 describe('PlanConversation prompt construction', () => {
+  it('buildPlanSystemPrompt defaults to direct YAML draft behavior', () => {
+    const prompt = buildPlanSystemPrompt('main');
+    expect(prompt).toContain('YAML task plan');
+    expect(prompt).toContain('name: "Plan Name"');
+    expect(prompt).toContain('Generate a YAML task plan');
+    expect(prompt).toContain('Every implementation task MUST have a corresponding test task');
+  });
+
   it('buildCursorPrompt includes system prompt for first message', () => {
     const conv = new PlanConversation({ defaultBranch: 'master' });
     (conv as any).messages.push({ role: 'user', content: 'Hello' });
@@ -738,6 +865,17 @@ describe('PlanConversation prompt construction', () => {
     expect(prompt).toContain('master');
     expect(prompt).toContain('Hello');
     expect(prompt).not.toContain('Conversation History');
+  });
+
+  it('agent-mode system prompt allows local repro but bans mutating shared state', () => {
+    const conv = new PlanConversation({ mode: 'agent' });
+    (conv as any).messages.push({ role: 'user', content: 'Why do we get extra merge stacks?' });
+    const prompt = conv.buildCursorPrompt();
+    expect(prompt).toContain('Inside your worktree you are unrestricted');
+    expect(prompt).toContain('Reproducing a bug locally is always allowed');
+    expect(prompt).toContain('mergify stack push');
+    expect(prompt).toContain('scripts/land-stack.mjs --execute');
+    expect(prompt).toContain('ask the user to confirm');
   });
 
   it('buildCursorPrompt includes history for multi-turn', () => {
@@ -761,11 +899,49 @@ describe('PlanConversation prompt construction', () => {
     expect(prompt).toContain('repoUrl: "git@github.com:test/repo.git"');
   });
 
-  it('system prompt includes generic repoUrl placeholder when not configured', () => {
+  it('system prompt tells the model to ask the user for the repo when none is configured', () => {
     const conv = new PlanConversation({});
     (conv as any).messages.push({ role: 'user', content: 'Hello' });
     const prompt = conv.buildCursorPrompt();
-    expect(prompt).toContain('repoUrl: "git@github.com:user/repo.git"');
+    expect(prompt).toContain('NO REPO CONFIGURED');
+    expect(prompt).toContain('ask the user which repository this plan targets');
+    expect(prompt).not.toContain('repoUrl: "git@github.com:user/repo.git"');
+  });
+
+  it('requires the submit instruction as a standalone post-plan summary line', () => {
+    const conv = new PlanConversation({});
+    (conv as any).messages.push({ role: 'user', content: 'Build a feature' });
+    const prompt = conv.buildCursorPrompt();
+    const submitLine = 'Reply `submit` to submit it.';
+
+    expect(prompt.split('\n').filter((line) => line === submitLine)).toHaveLength(1);
+    expect(prompt.match(/Reply `submit` to submit it\./g)).toHaveLength(1);
+    expect(prompt).toContain('short post-plan summary');
+    expect(prompt).toContain('Do NOT place that line inline in a sentence.');
+  });
+
+  it('keeps existing plan delivery, stack, and merge mode guidance', () => {
+    const conv = new PlanConversation({});
+    (conv as any).messages.push({ role: 'user', content: 'Build a feature' });
+    const prompt = conv.buildCursorPrompt();
+
+    expect(prompt).toContain('mergeMode: external_review');
+    expect(prompt).toContain('Prefer small reviewable slices');
+    expect(prompt).toContain('The Slack orchestrator validates and executes the plan after the user replies `submit` and approves it.');
+  });
+
+  it('delegates Slack plan submission to the orchestrator', () => {
+    const conv = new PlanConversation({});
+    (conv as any).messages.push({ role: 'user', content: 'Build a feature' });
+    const prompt = conv.buildCursorPrompt();
+
+    expect(prompt).toContain('Do NOT invoke `invoker-cli` (with any flags)');
+    expect(prompt).toContain('`invoker_submit_plan`');
+    expect(prompt).toContain('`invoker_validate_plan`');
+    expect(prompt).toContain('`submit-plan.sh`');
+    expect(prompt).toContain('Harness handoff mode');
+    expect(prompt).toContain('This rule overrides that skill\'s handoff instructions in this Slack thread');
+    expect(prompt).toContain('remind them to reply with `submit`; never run it yourself');
   });
 
   it('system prompt requires discovered verification commands for target repos', () => {
@@ -805,7 +981,7 @@ describe('PlanConversation prompt construction', () => {
     expect(prompt).toContain('Build the Workers Surface');
   });
 
-  it('agent mode refuses Invoker YAML and redirects to plan:', () => {
+  it('agent mode refuses Invoker YAML and redirects within the same thread', () => {
     // Agent threads can never submit a plan — handleLobbySubmit rejects a submit
     // unless conversationMode === 'plan'. So the agent prompt must not offer to
     // draft Invoker YAML (which would be an un-submittable dead end); it must
@@ -819,9 +995,17 @@ describe('PlanConversation prompt construction', () => {
     // Agent mode must refuse YAML unconditionally and point at `plan:`.
     expect(prompt).toContain('Do NOT generate Invoker YAML');
     expect(prompt).toContain('plan:');
+    expect(prompt).toContain('same thread');
+    expect(prompt).not.toContain('start a new plan thread');
+    expect(prompt).toContain('only the final user-facing message');
     // The old loophole permitted YAML "unless the user explicitly asks" — that
     // produced drafts Slack silently rejects on submit.
     expect(prompt).not.toContain('unless the user explicitly asks');
+    expect(prompt).toContain('Do NOT invoke `invoker-cli`');
+    expect(prompt).toContain('`invoker_submit_plan`');
+    expect(prompt).toContain('`invoker_validate_plan`');
+    expect(prompt).toContain('`submit-plan.sh`');
+    expect(prompt).toContain('Harness handoff mode');
   });
 });
 

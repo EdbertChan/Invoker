@@ -48,6 +48,7 @@ async function launchApp(paths: { dbDir: string; userDataDir: string; ipcSocketP
     env: {
       ...process.env,
       NODE_ENV: 'test',
+          INVOKER_TEST_WORKFLOW_IDS: '1',
       INVOKER_USER_DATA_DIR: paths.userDataDir,
       INVOKER_DISABLE_SLACK: '1',
       TZ: 'UTC',
@@ -166,7 +167,7 @@ base.describe('Embedded terminal restart persistence', () => {
       await terminalPane.click();
       await page.keyboard.type('printf "before-restart-terminal-sentinel\\n"');
       await page.keyboard.press('Enter');
-      await expect(terminalPane.getByText('before-restart-terminal-sentinel')).toBeVisible({ timeout: 10000 });
+      await expect(terminalPane.getByText('before-restart-terminal-sentinel', { exact: true })).toBeVisible({ timeout: 10000 });
 
       const before = await page.evaluate(() => window.invoker.terminalList());
       expect(before).toHaveLength(1);
@@ -185,7 +186,7 @@ base.describe('Embedded terminal restart persistence', () => {
       await expect(page.getByTestId('terminal-drawer')).toHaveAttribute('data-state', 'partial', { timeout: 10000 });
       await expect(page.getByTestId(`terminal-tab-${fullTaskId}`)).toBeVisible();
       const restoredPane = page.getByTestId(`terminal-pane-${fullTaskId}`);
-      await expect(restoredPane.getByText('before-restart-terminal-sentinel')).toBeVisible({ timeout: 10000 });
+      await expect(restoredPane.getByText('before-restart-terminal-sentinel', { exact: true })).toBeVisible({ timeout: 10000 });
       await page.screenshot({
         path: path.join(process.cwd(), 'visual-proof-terminal-restart.png'),
         fullPage: true,
@@ -194,7 +195,7 @@ base.describe('Embedded terminal restart persistence', () => {
       await restoredPane.click();
       await page.keyboard.type('printf "after-restart-terminal-sentinel\\n"');
       await page.keyboard.press('Enter');
-      await expect(restoredPane.getByText('after-restart-terminal-sentinel')).toBeVisible({ timeout: 10000 });
+      await expect(restoredPane.getByText('after-restart-terminal-sentinel', { exact: true })).toBeVisible({ timeout: 10000 });
     } finally {
       if (app) await closeApp(app).catch(() => undefined);
       rmSync(testDir, { recursive: true, force: true });

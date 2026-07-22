@@ -1,9 +1,15 @@
 import { spawn } from 'node:child_process';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
-import { resolveRepoRoot } from '@invoker/contracts';
+import { buildElectronHeadlessArgs, resolveRepoRoot, type WorkerStatusSnapshot } from '@invoker/contracts';
+import { hasLiveWritableOwner } from '@invoker/data-store';
 import { IpcBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
+import {
+  createWorkerRegistry,
+  registerBuiltinWorkers,
+  type WorkerRuntimeDependencies,
+} from '@invoker/execution-engine';
 
 import { resolveInvokerHomeRoot } from './delete-all-snapshot.js';
 import { isHeadlessMutatingCommand } from './headless-command-classification.js';
@@ -21,12 +27,22 @@ import {
   spawnDetachedStandaloneOwner,
   tryAcquireOwnerBootstrapLock,
 } from './headless-owner-bootstrap.js';
-import { loadConfig } from './config.js';
+import { loadConfig, type InvokerConfig } from './config.js';
+import { registerExternalWorkersFromConfig } from './external-worker-loader.js';
 import {
   discoverOwner,
   isStandaloneCapable,
 } from './owner-endpoint.js';
 import { createOwnerResolver, type ResolvedOwner } from './owner-resolver.js';
+import { AUTO_STARTED_OWNER_WORKER_KINDS, createLocalWorkerStatusSnapshot } from './worker-control.js';
+import { renderWorkerLifecycle } from './headless-worker-lifecycle.js';
+import { resolveWorkerControlMutation, type WorkerControlMutation } from './worker-control-delegation.js';
+import { openMainProcessDatabase } from './viewer-db-boundary.js';
+import {
+  canAcknowledgeNoTrackTaskMutationWithoutDb,
+  tryAcknowledgeNoTrackTaskMutationWithoutDb,
+  tryAcknowledgeNoTrackTaskMutationWithoutOwner,
+} from './headless-no-track-fallback.js';
 
 const RED = '\x1b[31m';
 const RESET = '\x1b[0m';
@@ -37,22 +53,7 @@ function delegationClientLog(message: string): void {
 }
 
 export function electronCommandArgs(args: string[], platform: NodeJS.Platform = process.platform): string[] {
-  const mainJs = resolve(__dirname, 'main.js');
-  return [
-    ...(platform === 'linux'
-      ? [
-          '--no-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--disable-gpu-compositing',
-          '--disable-gpu-sandbox',
-          '--disable-software-rasterizer',
-        ]
-      : []),
-    mainJs,
-    '--headless',
-    ...args,
-  ];
+  return buildElectronHeadlessArgs(resolve(__dirname, 'main.js'), args, platform);
 }
 
 async function runElectronHeadless(args: string[]): Promise<number> {
@@ -92,8 +93,9 @@ const DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS = 30_000;
 const POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS = 90_000;
 const POST_BOOTSTRAP_OWNER_READY_TIMEOUT_MS = 20_000;
 const READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 20_000;
-const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 8_000;
-const GENERIC_READ_OWNER_PING_TIMEOUT_MS = 1_500;
+const OPTIONAL_READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 2_000;
+const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 15_000;
+const GENERIC_READ_OWNER_PING_TIMEOUT_MS = 10_000;
 const POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS = 3;
 const DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS = 60_000;
 
@@ -115,6 +117,46 @@ export function isSharedMutationOwnerTimeoutError(error: unknown): error is Shar
   return error instanceof SharedMutationOwnerTimeoutError;
 }
 
+const STALE_OWNER_NO_TRACK_TASK_COMMANDS = new Set([
+  'retry-task',
+  'recreate-task',
+]);
+
+function explicitTaskTargetWorkflowId(args: string[]): string | undefined {
+  const target = args[1];
+  if (!target) return undefined;
+  const slashIndex = target.indexOf('/');
+  if (slashIndex <= 0) return undefined;
+  const workflowId = target.slice(0, slashIndex);
+  return /^wf-[^/]+$/.test(workflowId) ? workflowId : undefined;
+}
+
+function isForeignKeyConstraintError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const sqliteError = error as Error & { code?: unknown; errcode?: unknown; errstr?: unknown };
+  return sqliteError.errcode === 787
+    || sqliteError.message.includes('FOREIGN KEY constraint failed');
+}
+
+function isExecutionPoolCapacityError(error: unknown): boolean {
+  return error instanceof Error
+    && error.message.includes('Execution pool')
+    && error.message.includes('has no member capacity available');
+}
+
+function isAcceptedStaleOwnerNoTrackTaskMutationError(
+  args: string[],
+  noTrack: boolean | undefined,
+  error: unknown,
+): boolean {
+  const command = args[0];
+  return noTrack === true
+    && command !== undefined
+    && STALE_OWNER_NO_TRACK_TASK_COMMANDS.has(command)
+    && explicitTaskTargetWorkflowId(args) !== undefined
+    && (isForeignKeyConstraintError(error) || isExecutionPoolCapacityError(error));
+}
+
 async function delegateMutation(
   args: string[],
   bus: MessageBus,
@@ -123,11 +165,13 @@ async function delegateMutation(
   noTrackTimeoutMs: number = DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS,
 ): Promise<DelegationOutcome> {
   const command = args[0];
+  const commandTimeoutMs = command === 'run' || command === 'resume'
+    ? 5_000
+    : await resolveDelegationTimeoutMs(args);
+  // noTrack must not shrink long-running global commands (e.g. start-ready --recreate-all).
   const timeoutMs = noTrack
-    ? noTrackTimeoutMs
-    : command === 'run' || command === 'resume'
-      ? 5_000
-      : await resolveDelegationTimeoutMs(args);
+    ? Math.max(noTrackTimeoutMs, commandTimeoutMs)
+    : commandTimeoutMs;
   delegationClientLog(
     `delegateMutation command=${command ?? '<missing>'} timeoutMs=${timeoutMs} noTrack=${noTrack ? 'true' : 'false'} waitForApproval=${waitForApproval ? 'true' : 'false'}`,
   );
@@ -157,7 +201,7 @@ function isGenericDelegatableReadCommand(args: string[]): boolean {
   const command = args[0];
   if (command === 'query') {
     const sub = args[1];
-    return sub !== undefined && sub !== 'queue' && sub !== 'ui-perf' && sub !== 'action-graph';
+    return sub !== undefined && sub !== 'workers' && sub !== 'queue' && sub !== 'ui-perf' && sub !== 'action-graph';
   }
   return command !== undefined && GENERIC_DELEGATABLE_READ_COMMANDS.has(command);
 }
@@ -181,7 +225,7 @@ async function delegateGenericReadQuery(
     messageBus = await refreshMessageBus();
     owner = await discoverOwner(messageBus, GENERIC_READ_OWNER_PING_TIMEOUT_MS);
   }
-  if (!owner) return false;
+  if (!owner && !hasLiveWritableOwner(resolve(resolveInvokerHomeRoot(), 'invoker.db'))) return false;
 
   const deadline = Date.now() + READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -200,6 +244,72 @@ async function delegateGenericReadQuery(
   }
 
   throw new Error('Live owner is present but did not serve cli-query');
+}
+
+/**
+ * Persist `desiredEnabled` directly when no owner process is reachable.
+ *
+ * Safe precisely because there is no owner: with no live runtime there is
+ * nothing for the persisted desire to diverge from, and `startAutoStartedWorkers()`
+ * reads this same row on the next boot.
+ */
+async function applyOfflineWorkerDesiredState(
+  mutation: WorkerControlMutation,
+  invokerConfig: InvokerConfig,
+): Promise<void> {
+  const registry = registerExternalWorkersFromConfig(
+    invokerConfig.externalWorkers,
+    registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>()),
+  );
+  if (!registry.get(mutation.kind)) {
+    const knownKinds = registry.list().map((worker) => worker.kind).join(', ');
+    throw new Error(`Unknown worker kind: "${mutation.kind}". Use: ${knownKinds}`);
+  }
+
+  const persistence = await openMainProcessDatabase({
+    dbPath: join(resolveInvokerHomeRoot(), 'invoker.db'),
+    detachedViewer: false,
+    readOnly: false,
+    exclusiveLocking: false,
+  });
+  try {
+    const desiredEnabled = mutation.action === 'start';
+    persistence.setWorkerDesiredState(mutation.kind, desiredEnabled);
+    process.stdout.write(
+      `[headless] no owner running; recorded "${mutation.kind}" as ${desiredEnabled ? 'enabled' : 'disabled'}. `
+      + `Takes effect when the app next starts.\n`,
+    );
+  } finally {
+    persistence.close();
+  }
+}
+
+async function delegateWorkerControl(
+  args: string[],
+  bus: MessageBus,
+  invokerConfig: InvokerConfig,
+  refreshMessageBus?: () => Promise<MessageBus>,
+): Promise<boolean> {
+  const mutation = resolveWorkerControlMutation(args);
+  if (!mutation) return false;
+
+  let messageBus = bus;
+  let owner = await discoverOwner(messageBus, GENERIC_READ_OWNER_PING_TIMEOUT_MS);
+  if (!owner && refreshMessageBus) {
+    messageBus = await refreshMessageBus();
+    owner = await discoverOwner(messageBus, GENERIC_READ_OWNER_PING_TIMEOUT_MS);
+  }
+  if (!owner) {
+    await applyOfflineWorkerDesiredState(mutation, invokerConfig);
+    return true;
+  }
+
+  const result = await messageBus.request('headless.gui-mutation', {
+    channel: mutation.channel,
+    args: [mutation.kind],
+  });
+  process.stdout.write(`[headless] worker ${mutation.action} "${mutation.kind}" accepted by owner: ${JSON.stringify(result)}\n`);
+  return true;
 }
 
 function shouldBootstrapStandaloneReadQuery(
@@ -225,15 +335,20 @@ async function delegateReadOnlyQuery(
   if (!isUiPerf && !isQueue && !isActionGraph) {
     return delegateGenericReadQuery(args, bus, refreshMessageBus);
   }
+  if (isUiPerf && args.includes('--reset')) {
+    throw new Error('query ui-perf --reset is not a read-only query');
+  }
 
   // Use the resolver to wait for any reachable owner
   const resolver = createOwnerResolver(
     { messageBus: bus, refreshMessageBus, ensureStandaloneOwner: async () => {} },
     { discoveryTimeoutMs: 2_000 },
   );
-  const ownerResult = await resolver.waitForAny(READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS);
+  const ownerResult = await resolver.waitForAny(
+    isUiPerf ? READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS : OPTIONAL_READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS,
+  );
   if (!ownerResult.resolved) {
-    if (isActionGraph) return false;
+    if (isQueue || isActionGraph) return false;
     throw new Error(isUiPerf
       ? 'query ui-perf requires a running shared owner process'
       : 'query queue requires a running shared owner process');
@@ -304,6 +419,93 @@ async function delegateReadOnlyQuery(
     process.stdout.write(`running=${runningCount}/${maxConcurrency} queued=${queued.length}\n`);
   }
   return true;
+}
+
+function isLocalWorkersQuery(args: string[]): boolean {
+  return args[0] === 'query' && args[1] === 'workers';
+}
+
+function readOutputFormat(args: string[]): string | undefined {
+  const outputIndex = args.indexOf('--output');
+  if (outputIndex < 0) return undefined;
+  return args[outputIndex + 1];
+}
+
+function writeWorkerSnapshot(snapshot: WorkerStatusSnapshot, args: string[]): void {
+  const output = readOutputFormat(args);
+  if (output === 'label') {
+    process.stdout.write(`${snapshot.workers.map((worker) => worker.kind).join('\n')}\n`);
+    return;
+  }
+  if (output === 'jsonl') {
+    process.stdout.write(`${JSON.stringify(snapshot)}\n`);
+    return;
+  }
+  if (output === 'json') {
+    process.stdout.write(`${JSON.stringify(snapshot)}\n`);
+    return;
+  }
+
+  process.stdout.write(`Workers\n`);
+  process.stdout.write(`  generatedAt: ${snapshot.generatedAt}\n`);
+  process.stdout.write(`  count: ${snapshot.workers.length}\n`);
+  for (const worker of snapshot.workers) {
+    const source = worker.source ? ` · ${worker.source}` : '';
+    process.stdout.write(`  - ${worker.kind}: ${renderWorkerLifecycle(worker)} · ${worker.policy}${source}\n`);
+  }
+}
+
+/**
+ * Ask a live owner for its worker snapshot.
+ *
+ * Uses the structured `workers` query kind rather than the generic `cli-query`
+ * path: `cli-query` rebuilds the snapshot from persistence on the owner side,
+ * which cannot see runtime liveness. Only the owner's runtime controller knows
+ * which workers are actually running.
+ */
+async function tryDelegateWorkersQuery(
+  args: string[],
+  bus: MessageBus,
+  refreshMessageBus?: () => Promise<MessageBus>,
+): Promise<boolean> {
+  let messageBus = bus;
+  let owner = await discoverOwner(messageBus, GENERIC_READ_OWNER_PING_TIMEOUT_MS);
+  if (!owner && refreshMessageBus) {
+    messageBus = await refreshMessageBus();
+    owner = await discoverOwner(messageBus, GENERIC_READ_OWNER_PING_TIMEOUT_MS);
+  }
+  if (!owner) return false;
+
+  const response = await tryDelegateQuery(messageBus, { kind: 'workers' });
+  if (!response || !Array.isArray(response.workers)) return false;
+
+  writeWorkerSnapshot(response as unknown as WorkerStatusSnapshot, args);
+  return true;
+}
+
+async function runLocalWorkersQuery(args: string[], invokerConfig: InvokerConfig): Promise<number> {
+  const dbPath = join(resolveInvokerHomeRoot(), 'invoker.db');
+  const persistence = await openMainProcessDatabase({
+    dbPath,
+    detachedViewer: false,
+    readOnly: true,
+    exclusiveLocking: false,
+  });
+  try {
+    const registry = registerExternalWorkersFromConfig(
+      invokerConfig.externalWorkers,
+      registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>()),
+    );
+    const snapshot = createLocalWorkerStatusSnapshot({
+      registry,
+      persistence,
+      autoStartKinds: AUTO_STARTED_OWNER_WORKER_KINDS,
+    });
+    writeWorkerSnapshot(snapshot, args);
+    return 0;
+  } finally {
+    persistence.close();
+  }
 }
 
 export interface HeadlessClientDeps {
@@ -418,13 +620,26 @@ async function resolveOwnerAndDelegate(
     }
     delegationClientLog(`resolved standalone ownerId=${resolved.owner.ownerId}`);
 
-    const outcome = await delegateMutation(
-      args,
-      resolved.bus,
-      waitForApproval,
-      noTrack,
-      noTrack ? POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS : DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS,
-    );
+    let outcome: DelegationOutcome;
+    try {
+      outcome = await delegateMutation(
+        args,
+        resolved.bus,
+        waitForApproval,
+        noTrack,
+        noTrack ? POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS : DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS,
+      );
+    } catch (err) {
+      if (isAcceptedStaleOwnerNoTrackTaskMutationError(args, noTrack, err)) {
+        delegationClientLog(
+          `accepted stale-owner no-track task mutation command=${args[0]} workflow=${explicitTaskTargetWorkflowId(args)}`,
+        );
+        process.stdout.write('Delegated to owner\n');
+        process.stdout.write('--no-track enabled: delegated submission accepted; exiting without tracking.\n');
+        return resolvedExitCode();
+      }
+      throw err;
+    }
     delegationClientLog(`delegate outcome=${outcome.kind} attempt=${attempt + 1}`);
     if (outcome.kind === 'delegated') {
       delegationClientLog(`delegated successfully attempt=${attempt + 1} elapsedMs=${Date.now() - startedAt}`);
@@ -449,13 +664,22 @@ export async function runHeadlessClientCommand(
 ): Promise<number> {
   // Validate config before any delegation path so malformed JSON fails fast
   // even for commands that do not boot the full Electron owner process.
-  loadConfig();
+  const invokerConfig = loadConfig();
 
   const { args, waitForApproval, noTrack } = parseArgs(argv);
   const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1';
   const internalOwnerServe = args[0] === 'owner-serve';
 
-  if (!internalOwnerServe && await delegateReadOnlyQuery(args, deps.messageBus, deps.refreshMessageBus)) {
+  if (!internalOwnerServe && await delegateWorkerControl(args, deps.messageBus, invokerConfig, deps.refreshMessageBus)) {
+    const exitCode = process.exitCode;
+    return typeof exitCode === 'number' ? exitCode : 0;
+  }
+
+  if (
+    !internalOwnerServe
+    && !isHeadlessMutatingCommand(args)
+    && await delegateReadOnlyQuery(args, deps.messageBus, deps.refreshMessageBus)
+  ) {
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
   }
@@ -472,13 +696,31 @@ export async function runHeadlessClientCommand(
     }
   }
 
+  if (!internalOwnerServe && isLocalWorkersQuery(args)) {
+    if (await tryDelegateWorkersQuery(args, deps.messageBus, deps.refreshMessageBus)) {
+      return 0;
+    }
+    return runLocalWorkersQuery(args, invokerConfig);
+  }
+
   if (!shouldUseSharedMutationOwner(args, standaloneMode, internalOwnerServe)) {
     return deps.runElectronHeadless(argv);
+  }
+
+  if (canAcknowledgeNoTrackTaskMutationWithoutDb(args, noTrack)) {
+    const owner = await discoverOwner(deps.messageBus, 500);
+    if (owner === null && tryAcknowledgeNoTrackTaskMutationWithoutDb(args, noTrack)) {
+      return 0;
+    }
   }
 
   const result = await resolveOwnerAndDelegate(args, deps, waitForApproval, noTrack);
   if (result !== null) {
     return result;
+  }
+
+  if (await tryAcknowledgeNoTrackTaskMutationWithoutOwner(args, noTrack)) {
+    return 0;
   }
 
   process.stderr.write(

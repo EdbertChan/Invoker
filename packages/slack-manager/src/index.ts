@@ -19,14 +19,33 @@ import { ConversationRepository, SQLiteAdapter, WorkflowChannelRepository } from
 
 import { IpcInvokerClient } from './invoker-client.js';
 import { createInvokerLauncher } from './invoker-launcher.js';
+import { resolveDefaultHarnessPreset, readDefaultSlackHarnessPreset } from './runtime-config.js';
 import { createRunWorkflowOp } from './workflow-ops.js';
 import { createCommandHandler } from './command-handler.js';
 import { startEventSubscription } from './event-subscription.js';
 import { createPlanningCommandBuilder, createPrepareRepoCheckout, createGatherWorkflowContext } from './host-seams.js';
 import { createWatchdog } from './watchdog.js';
 import { errMessage } from './util.js';
+const VERSION = '0.0.7';
 
 const REQUIRED_ENV = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'SLACK_SIGNING_SECRET', 'SLACK_CHANNEL_ID'];
+
+if (process.argv.includes('--version') || process.argv.includes('-V')) {
+  console.log(VERSION);
+  process.exit(0);
+}
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log(`invoker-slack ${VERSION}
+
+Usage: invoker-slack [--version] [--help]
+
+Standalone Slack manager daemon. Loads credentials from
+~/.invoker/.slack-owner.env (or INVOKER_SLACK_OWNER_ENV) and drives Invoker
+over IPC. Install via: npm i -g @neko-catpital-labs/invoker-slack
+`);
+  process.exit(0);
+}
 
 function makeLog(): { log: (level: string, message: string) => void; logFn: (source: string, level: string, message: string) => void } {
   const log = (level: string, message: string): void => {
@@ -71,13 +90,15 @@ async function main(): Promise<void> {
 
   const repoRoot = process.env.INVOKER_REPO_ROOT ?? process.cwd();
   const repoUrl = detectRepoUrl(repoRoot, log);
+  const configDefaultHarnessPreset = readDefaultSlackHarnessPreset();
+  const defaultHarnessPreset = resolveDefaultHarnessPreset(process.env.INVOKER_SLACK_DEFAULT_PRESET, configDefaultHarnessPreset);
 
   const launcher = createInvokerLauncher({
     repoRoot,
     logPath: path.join(homedir(), '.invoker', 'gui.log'),
     log,
   });
-  const client = new IpcInvokerClient({ spawnInvoker: launcher.spawnInvoker, log });
+  const client = new IpcInvokerClient({ spawnInvoker: launcher.spawnInvoker, log, pingTimeoutMs: 10_000 });
 
   const runWorkflowOp = createRunWorkflowOp(client, log);
   const gatherWorkflowContext = createGatherWorkflowContext({ client, conversationRepo, workflowChannelRepo, log });
@@ -90,7 +111,7 @@ async function main(): Promise<void> {
     lobbyChannelId: process.env.SLACK_LOBBY_CHANNEL_ID ?? process.env.SLACK_CHANNEL_ID,
     cursorCommand: process.env.CURSOR_COMMAND ?? 'agent',
     model: process.env.CURSOR_MODEL,
-    defaultHarnessPreset: process.env.INVOKER_SLACK_DEFAULT_PRESET,
+    defaultHarnessPreset,
     workingDir: repoRoot,
     conversationRepo,
     workflowChannelRepo,

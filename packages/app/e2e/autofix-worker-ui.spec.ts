@@ -40,7 +40,7 @@ test('worker-triggered autofix reaches approval UI with mocked Claude', async ({
         return payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
       };
 
-      const events = await window.invoker.getEvents(taskId);
+      const events = await window.invoker.getEvents(taskId, { limit: 100, sortBy: 'desc' });
       return events.some((event: { eventType: string }) => event.eventType === 'task.failed')
         && events.some((event: { eventType: string; payload?: unknown }) => {
           const payload = parsePayload(event.payload);
@@ -55,8 +55,10 @@ test('worker-triggered autofix reaches approval UI with mocked Claude', async ({
     { timeout: 10000 },
   );
 
+  await page.evaluate(() => window.invoker.refreshTaskGraph());
+  await page.waitForTimeout(1000);
   const node = page.locator('.react-flow__node[data-testid$="/task-fail"]');
-  await expect(node.locator('text=/APPROVE/')).toBeVisible({ timeout: 5000 });
+  await expect(node.locator('text=/Approve/i')).toBeVisible({ timeout: 5000 });
   await expect(node.locator('text=FIXING WITH AI')).not.toBeVisible();
 
   await node.click();

@@ -88,10 +88,6 @@ function baseConfig() {
   };
 }
 
-function wordCount(text: string): number {
-  return text.replace(/[`*_"]/g, '').trim().split(/\s+/).filter(Boolean).length;
-}
-
 function mentionHandler(surface: SlackSurface): Function {
   const app = surface.getApp() as any;
   return app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')!.handler;
@@ -183,12 +179,36 @@ describe('parseWorkflowStatusQuery', () => {
   });
 });
 describe('parseThreadRequest', () => {
-  it('defaults to a normal agent thread and requires an explicit plan prefix for Invoker YAML', () => {
+  it('defaults to a normal agent thread unless the request clearly asks for an Invoker plan', () => {
     expect(parseThreadRequest('fix the Slack routing bug')).toEqual({ mode: 'agent', text: 'fix the Slack routing bug' });
     expect(parseThreadRequest('local: fix the Slack routing bug')).toEqual({ mode: 'agent', text: 'fix the Slack routing bug' });
     expect(parseThreadRequest('run local: report back how many workflows are running')).toEqual({ mode: 'agent', text: 'report back how many workflows are running' });
     expect(parseThreadRequest('plan: fix the Slack routing bug')).toEqual({ mode: 'plan', text: 'fix the Slack routing bug' });
     expect(parseThreadRequest('draft an Invoker plan: fix the Slack routing bug')).toEqual({ mode: 'plan', text: 'fix the Slack routing bug' });
+    expect(parseThreadRequest('plan fix the Slack routing bug')).toEqual({ mode: 'plan', text: 'fix the Slack routing bug' });
+    expect(parseThreadRequest('make that fix via Invoker')).toEqual({ mode: 'plan', text: 'make that fix' });
+    expect(parseThreadRequest('draft an Invoker plan for the Slack routing bug')).toEqual({ mode: 'plan', text: 'the Slack routing bug' });
+    expect(parseThreadRequest('turn the discussion above into a plan')).toEqual({
+      mode: 'plan',
+      text: 'turn the discussion above into a plan',
+    });
+    expect(parseThreadRequest('why are you dumping the chain of thought')).toEqual({
+      mode: 'agent',
+      text: 'why are you dumping the chain of thought',
+    });
+  });
+
+  it('treats a sole fenced plan: block as plan mode', () => {
+    const fenced = '```text\nplan: Prove and fix the adverse UI test issues\n```';
+    expect(parseThreadRequest(fenced)).toEqual({
+      mode: 'plan',
+      text: 'Prove and fix the adverse UI test issues',
+    });
+  });
+
+  it('does not treat a fence nested after prose as a plan opt-in', () => {
+    const mixed = 'please help\n\n```text\nplan: do not treat this as plan mode\n```';
+    expect(parseThreadRequest(mixed)).toEqual({ mode: 'agent', text: mixed });
   });
 });
 
@@ -269,6 +289,23 @@ describe('workflow channel creation', () => {
 
     expect(repo.getByWorkflowId('wf-1-2')?.channelId).toBe('C_EXIST');
   });
+
+  it('tells the lobby when the requester invite fails', async () => {
+    const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
+    const client = (surface.getApp() as any).client;
+    client.conversations.invite.mockRejectedValueOnce({ data: { error: 'missing_scope' } });
+
+    await surface.handleEvent({
+      type: 'workflow_created', workflowId: 'wf-1-2', requestedBy: 'U1',
+      lobbyChannel: 'CLOBBY', lobbyThreadTs: 't1',
+    });
+
+    expect(repo.getByWorkflowId('wf-1-2')?.channelId).toBe('C_NEW');
+    const lobbyPost = client.chat.postMessage.mock.calls.find((c: any[]) => c[0].channel === 'CLOBBY')?.[0];
+    expect(lobbyPost?.text).toContain('could not invite you');
+    expect(lobbyPost?.text).toContain('missing_scope');
+    expect(lobbyPost?.text).not.toBe('Created <#C_NEW> for workflow `wf-1-2`.');
+  });
 });
 
 // ── Outbound routing ─────────────────────────────────────────
@@ -302,6 +339,52 @@ describe('outbound routing', () => {
     });
     expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'CLOBBY' }));
   });
+  it('posts a replacement progress card when chat.update rejects invalid_blocks', async () => {
+    const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
+    const client = (surface.getApp() as any).client;
+    client.chat.postMessage
+      .mockResolvedValueOnce({ ts: 'progress-1' })
+      .mockResolvedValueOnce({ ts: 'progress-2' });
+
+    const progress = {
+      workflowId: 'wf-1-2',
+      name: 'Workflow',
+      percentComplete: 25,
+      counts: { total: 4, completed: 1, failed: 0, closed: 0, running: 1, pending: 2 },
+      tasks: [{ id: 'wf-1-2/api', name: 'API', status: 'running', phase: 'executing' }],
+    };
+
+    await surface.handleEvent({ type: 'workflow_progress', progress });
+    client.chat.update.mockRejectedValueOnce({ data: { error: 'invalid_blocks' } });
+    await surface.handleEvent({ type: 'workflow_progress', progress });
+
+    expect(client.chat.update).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C123', ts: 'progress-1' }));
+    expect(client.chat.postMessage).toHaveBeenCalledTimes(2);
+    expect(((surface as any).progressCardTs as Map<string, string>).get('wf-1-2')).toBe('progress-2');
+  });
+
+  it('posts a replacement task card when chat.update rejects invalid_blocks', async () => {
+    const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
+    const client = (surface.getApp() as any).client;
+    client.chat.postMessage
+      .mockResolvedValueOnce({ ts: 'task-1' })
+      .mockResolvedValueOnce({ ts: 'task-2' });
+
+    await surface.handleEvent({
+      type: 'task_delta',
+      delta: { type: 'updated', taskId: 'wf-1-2/api', changes: { status: 'running' }, taskStateVersion: 1, previousTaskStateVersion: 0 },
+    });
+    client.chat.update.mockRejectedValueOnce({ data: { error: 'invalid_blocks' } });
+    await surface.handleEvent({
+      type: 'task_delta',
+      delta: { type: 'updated', taskId: 'wf-1-2/api', changes: { status: 'completed', summary: 'done' }, taskStateVersion: 2, previousTaskStateVersion: 1 },
+    });
+
+    expect(client.chat.update).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C123', ts: 'task-1' }));
+    expect(client.chat.postMessage).toHaveBeenCalledTimes(2);
+    expect(surface.getTaskMessages().get('wf-1-2/api')).toBe('task-2');
+  });
+
 });
 
 // ── In-channel assistant ─────────────────────────────────────
@@ -457,6 +540,75 @@ describe('lobby verb routing', () => {
     expect(prompt).toContain('Do NOT generate a YAML plan');
   });
 
+  it('lets a lobby question repro locally but hands off anything that mutates shared state', () => {
+    const prompt = buildLobbyQuestionPrompt('can you land the top of the stack for me?');
+    expect(prompt).toContain('Reproducing a bug locally is always allowed');
+    expect(prompt).toContain('mergify stack push');
+    expect(prompt).toContain('scripts/land-stack.mjs --execute');
+    expect(prompt).toContain('plan: <request>');
+    expect(prompt).toContain('same thread');
+    expect(prompt).toContain('only the final user-facing answer');
+    expect(prompt).not.toContain('start a plan thread');
+  });
+
+  it('returns only the final Codex message from one-shot Slack replies', async () => {
+    const raw = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'reasoning', text: 'Inspecting the repository.' },
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'Progress update.' },
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'Final user-facing answer.' },
+      }),
+    ].join('\n');
+    mockSpawn.mockImplementationOnce(() => mockProcess(raw));
+    const surface = lobbySurface();
+
+    await expect((surface as any).runOneShotPlanner({ tool: 'codex' }, 'answer this')).resolves.toBe(
+      'Final user-facing answer.',
+    );
+  });
+
+  // Repro: the Slack thread that prompted this asked the bot to investigate a
+  // landing failure. It routed as `question` — the one lobby path whose prompt
+  // never told it to keep its hands off shared state.
+  it('carries the execution boundary into the planner command a lobby question actually spawns', async () => {
+    const prompts: string[] = [];
+    mockSpawn
+      .mockImplementationOnce(() => mockProcess('{"intent":"question","operation":"none","target":"none"}'))
+      .mockImplementationOnce(() => mockProcess('Here is what went wrong.'));
+    const surface = lobbySurface(true, {
+      planningCommandBuilder: ({ prompt }: { prompt: string }) => {
+        prompts.push(prompt);
+        return { command: 'cursor', args: ['--print', prompt] };
+      },
+    });
+    await surface.start(async (cmd) => { received.push(cmd); });
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+
+    await mentionHandler(surface)({
+      event: {
+        text: '<@BOT> why do we get extra merge stacks when we babysit landing these workflows?',
+        ts: 't1', user: 'U1', channel: 'CLOBBY',
+      },
+      say,
+    });
+
+    expect(prompts).toHaveLength(2);
+    const answerPrompt = prompts[1];
+    expect(answerPrompt).toContain('Never run anything that changes state outside your worktree');
+    expect(answerPrompt).toContain('mergify stack push');
+    expect(answerPrompt).toContain('scripts/land-stack.mjs --execute');
+    expect(answerPrompt).toContain('Reproducing a bug locally is always allowed');
+    expect(received).toHaveLength(0);
+  });
+
   it('stages a bulk verb for confirmation, then runs it on a plain `yes`', async () => {
     runWorkflowOp.mockResolvedValue({ ok: true, summary: 'recreate: 3 ok' });
     const surface = lobbySurface();
@@ -489,6 +641,37 @@ describe('lobby verb routing', () => {
     expect(runWorkflowOp).not.toHaveBeenCalled();
     expect(say2).toHaveBeenCalledWith(expect.objectContaining({ text: 'Cancelled.' }));
   });
+
+  it('notifies when a near-yes reply drops a pending approval', async () => {
+    const surface = lobbySurface();
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+    await mentionHandler(surface)({ event: { text: '<@BOT> recreate all', ts: 't1', user: 'U1' }, say });
+
+    const say2 = vi.fn().mockResolvedValue({ ts: 'b' });
+    await messageHandler(surface)({
+      event: { thread_ts: 't1', ts: 't2', user: 'U1', text: 'yes please add more tests' },
+      say: say2,
+    });
+    expect(runWorkflowOp).not.toHaveBeenCalled();
+    expect(say2).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('Dropped the pending approval'),
+    }));
+  });
+
+  it('accepts ok as confirmation for a staged bulk verb', async () => {
+    runWorkflowOp.mockResolvedValue({ ok: true, summary: 'recreate: 3 ok' });
+    const surface = lobbySurface();
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+    await mentionHandler(surface)({ event: { text: '<@BOT> recreate all', ts: 't1', user: 'U1' }, say });
+
+    const say2 = vi.fn().mockResolvedValue({ ts: 'b' });
+    await messageHandler(surface)({ event: { thread_ts: 't1', ts: 't2', user: 'U1', text: 'ok' }, say: say2 });
+    expect(runWorkflowOp).toHaveBeenCalledTimes(1);
+    expect(say2).toHaveBeenCalledWith(expect.objectContaining({ text: 'recreate: 3 ok' }));
+  });
+
   it('confirms a bulk verb via the Approve button: acks instantly and posts the result in-thread', async () => {
     runWorkflowOp.mockResolvedValue({ ok: true, summary: 'recreate: 3 ok' });
     const surface = lobbySurface();
@@ -759,7 +942,7 @@ describe('lobby verb routing', () => {
     expect(say).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('No Invoker plan draft') }));
   });
 
-  it('submit shows a short plain-English plan summary and emits start_plan on confirmation', async () => {
+  it('submit shows every task in the plan summary and emits start_plan on confirmation', async () => {
     const surface = lobbySurface();
     await surface.start(async (cmd) => { received.push(cmd); });
     const say = vi.fn().mockResolvedValue({ ts: 'a' });
@@ -784,14 +967,13 @@ tasks:
 
     const say2 = vi.fn().mockResolvedValue({ ts: 'b' });
     await mentionHandler(surface)({ event: { text: '<@BOT> submit', thread_ts: 't1', ts: 't2', user: 'U1' }, say: say2 });
-    // Shows the ELI5 step summary, does not submit yet.
+    // Shows a deterministic per-task summary in execution order, does not submit yet.
     const confirmationText = say2.mock.calls[0][0].text as string;
-    expect(confirmationText).toContain('steps in order');
-    expect(confirmationText).toContain('First: Add a simple /health endpoint for ...');
-    expect(confirmationText).toContain('Then: Wire the new /health route through ...');
-    expect(confirmationText).toContain('Then 2 more.');
-    expect(confirmationText).not.toContain('without changing unrelated endpoints');
-    expect(wordCount(confirmationText)).toBeLessThanOrEqual(40);
+    expect(confirmationText).toContain('4 tasks');
+    expect(confirmationText).toContain('Add a simple /health endpoint for uptime checks');
+    expect(confirmationText).toContain('Wire the new /health route through the HTTP server');
+    expect(confirmationText).toContain('Add regression coverage for healthy and unhealthy responses');
+    expect(confirmationText).toContain('Run the focused surface test suite and record the result');
     expect(received.some((c) => c.type === 'start_plan')).toBe(false);
 
     const say3 = vi.fn().mockResolvedValue({ ts: 'c' });

@@ -1,8 +1,16 @@
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { DEFAULT_DRAFTER_MCP_PACKAGE_SPEC, resolveInvokerHomeRoot, type Logger } from '@invoker/contracts';
+import {
+  DEFAULT_DRAFTER_MCP_PACKAGE_SPEC,
+  resolveHeadlessOwnerLaunchSpec,
+  resolveInvokerHomeRoot,
+  resolveRepoRoot,
+  type HeadlessOwnerLaunchSpec,
+  type Logger,
+} from '@invoker/contracts';
 import { SQLiteAdapter, SqliteTaskRepository } from '@invoker/data-store';
 import {
   AUTO_FIX_WORKER_KIND,
@@ -40,7 +48,7 @@ import { logCaughtException } from './logging.js';
 import { runMcpServer } from './mcp-server.js';
 import { runDoctor, runSetup } from './onboarding.js';
 
-const VERSION = '0.0.6';
+const VERSION = '0.0.7';
 
 type CliOptions = {
   dbDir?: string;
@@ -71,6 +79,8 @@ type LiveSubmissionResult = {
 type CliDeps = {
   createMessageBus?: () => Promise<MessageBus> | MessageBus;
   runMcpServer?: () => Promise<void>;
+  resolveOwnerLaunchSpec?: (repoRoot: string) => HeadlessOwnerLaunchSpec;
+  spawnProcess?: typeof spawn;
 };
 
 type CliRuntimeConfig = {
@@ -87,7 +97,6 @@ type CliRuntimeConfig = {
     port?: number;
     managedWorkspaces?: boolean;
     remoteInvokerHome?: string;
-    provisionCommand?: string;
     use_api_key?: boolean;
     secretsFile?: string;
     remoteHeartbeatIntervalSeconds?: number;
@@ -130,15 +139,17 @@ function usage(): string {
   return [
     'Usage:',
     '  invoker-cli run <plan.yaml> [--live|--standalone] [--db-dir <path>] [--config <path>] [--json]',
+    '  invoker-cli owner serve',
     '  invoker-cli doctor [--fix] [--json]',
-    '  invoker-cli setup [planner|slack] [--check|--from-env] [--json]',
+    '  invoker-cli setup [planner|slack] [--check|--from-env] [--yes] [--json]',
     '  invoker-cli mcp',
     '  invoker-cli worker [autofix|list]',
     '  invoker-cli --help',
     '  invoker-cli --version',
     '',
     'Commands:',
-    '  run <plan.yaml>  Submit to a live Invoker UI when available, otherwise run standalone.',
+    '  run <plan.yaml>  Submit to a live Invoker owner when available, otherwise run standalone.',
+    '  owner serve     Start a headless Invoker owner process.',
     '  doctor          Validate tools, config, and your default planning preset.',
     '  setup [planner|slack]  Run the setup wizard, or directly configure planner MCP or Slack.',
     '  mcp             Start the Invoker MCP stdio server.',
@@ -150,7 +161,7 @@ function usage(): string {
     `  --planner-package <spec>  Planner MCP package spec for \`setup planner\`. Defaults to ${DEFAULT_DRAFTER_MCP_PACKAGE_SPEC}.`,
     '  --target <path>       MCP config path for planner setup. Defaults to ~/.invoker/mcp.json.',
     '  --uninstall           Remove the experimental planner MCP entry and disable its Invoker flag.',
-    '  --live           Require a running Invoker UI owner and submit over IPC.',
+    '  --live           Require a running Invoker owner and submit over IPC.',
     '  --standalone     Skip IPC and run with an isolated CLI database.',
     '  --db-dir <path>  Runtime database directory. Defaults to ~/.invoker-cli',
     '  --config <path>  Optional config path reserved for CLI runtime configuration.',
@@ -224,7 +235,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
   }
 }
 
-async function discoverLiveOwner(bus: MessageBus, timeoutMs = 1_000): Promise<LiveOwnerInfo | null> {
+async function discoverLiveOwner(bus: MessageBus, timeoutMs = 10_000): Promise<LiveOwnerInfo | null> {
   try {
     const raw = await withTimeout(
       bus.request('headless.owner-ping', {}),
@@ -232,10 +243,12 @@ async function discoverLiveOwner(bus: MessageBus, timeoutMs = 1_000): Promise<Li
     );
     if (!raw || typeof raw !== 'object') return null;
     const response = raw as Record<string, unknown>;
-    if (response.mode !== 'gui') return null;
+    if (typeof response.mode !== 'string' || response.mode.length === 0) {
+      return null;
+    }
     return {
       ownerId: typeof response.ownerId === 'string' ? response.ownerId : '',
-      mode: 'gui',
+      mode: response.mode,
     };
   } catch (err) {
     if (err instanceof TransportError && err.code === TransportErrorCode.NO_HANDLER) {
@@ -273,7 +286,7 @@ async function submitPlanToLiveOwner(
   planPath: string,
   bus: MessageBus,
   owner: LiveOwnerInfo,
-  timeoutMs = 5_000,
+  timeoutMs = 15_000,
 ): Promise<LiveSubmissionResult> {
   const absolutePlanPath = resolve(planPath);
   const raw = await withTimeout(
@@ -371,6 +384,7 @@ async function runPlan(planPath: string, options: CliOptions): Promise<RunResult
   const persistence = await SQLiteAdapter.create(join(dbDir, 'invoker.db'), {
     ownerCapability: true,
     outputDir: join(dbDir, 'outputs'),
+    ...(options.json ? { slowQueryThresholdMs: 0 } : {}),
   });
   const stdoutWrite = process.stdout.write;
   if (options.json) {
@@ -579,6 +593,28 @@ async function runWorker(definition: WorkerDefinition<WorkerRuntimeDependencies>
   process.stdout.write(`${workerDisplayName(definition.kind)} worker stopped.\n`);
   return 0;
 }
+async function runHeadlessOwnerServe(deps: CliDeps): Promise<number> {
+  const repoRoot = resolveRepoRoot(__dirname, { fallback: resolve(__dirname, '../../../..') });
+  const launchSpec = (deps.resolveOwnerLaunchSpec ?? resolveHeadlessOwnerLaunchSpec)(repoRoot);
+  const child = (deps.spawnProcess ?? spawn)(launchSpec.command, launchSpec.args, {
+    cwd: launchSpec.cwd,
+    env: {
+      ...process.env,
+      LIBGL_ALWAYS_SOFTWARE: process.platform === 'linux' ? '1' : process.env.LIBGL_ALWAYS_SOFTWARE,
+    },
+    stdio: 'inherit',
+  });
+  return await new Promise<number>((resolveExit, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (signal) {
+        reject(new Error(`headless owner exited with signal ${signal}`));
+        return;
+      }
+      resolveExit(code ?? 0);
+    });
+  });
+}
 
 export async function main(argv: string[] = process.argv.slice(2), deps: CliDeps = {}): Promise<number> {
   let bus: MessageBus | undefined;
@@ -592,6 +628,12 @@ export async function main(argv: string[] = process.argv.slice(2), deps: CliDeps
     if (argv[0] === 'mcp') {
       await (deps.runMcpServer ?? runMcpServer)();
       return 0;
+    }
+    if (argv[0] === 'owner') {
+      if (argv[1] !== 'serve') {
+        throw new Error('Unknown owner command. Usage: invoker-cli owner serve');
+      }
+      return await runHeadlessOwnerServe(deps);
     }
     if (argv[0] === 'worker') {
       const subcommand = argv[1] ?? 'list';
@@ -628,7 +670,7 @@ export async function main(argv: string[] = process.argv.slice(2), deps: CliDeps
     }
 
     if (parsed.options.mode === 'live' && parsed.options.dbDir) {
-      throw new Error('--db-dir cannot be used with --live because the UI owner database is authoritative');
+      throw new Error('--db-dir cannot be used with --live because the owner database is authoritative');
     }
 
     if (parsed.options.mode !== 'standalone') {
@@ -636,7 +678,7 @@ export async function main(argv: string[] = process.argv.slice(2), deps: CliDeps
       const owner = await discoverLiveOwner(bus);
       if (owner) {
         if (parsed.options.dbDir) {
-          throw new Error('--db-dir cannot be used when a live UI owner accepts the run; use --standalone to force an isolated database');
+          throw new Error('--db-dir cannot be used when a live owner accepts the run; use --standalone to force an isolated database');
         }
         const submitted = await submitPlanToLiveOwner(parsed.planPath, bus, owner);
         printRunResult({
@@ -649,7 +691,7 @@ export async function main(argv: string[] = process.argv.slice(2), deps: CliDeps
         return 0;
       }
       if (parsed.options.mode === 'live') {
-        throw new Error('No running Invoker UI owner is reachable; start the UI or omit --live to run standalone');
+        throw new Error('No running Invoker owner is reachable; start the owner or omit --live to run standalone');
       }
     }
 

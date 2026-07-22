@@ -1,6 +1,14 @@
 import type { Orchestrator } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import type { WorkerActionHistoryRequest, WorkerActionHistoryResponse, WorkerDecisionsRequest, WorkerDecisionsResponse, WorkerStatusSnapshot } from '@invoker/contracts';
+import type {
+  GetEventsOptions,
+  WorkerActionHistoryRequest,
+  WorkerActionHistoryResponse,
+  WorkerDecisionsRequest,
+  WorkerDecisionsResponse,
+  WorkerStatusSnapshot,
+} from '@invoker/contracts';
+import { getEventsPage } from './get-events-page.js';
 import { buildReviewGateQueryResponse } from './review-gate-query.js';
 import { isHeadlessReadOnlyCommand } from './headless-command-classification.js';
 import { runReadOnlyHeadlessQueryToString, type HeadlessQueryDeps } from './headless-query-list.js';
@@ -32,19 +40,21 @@ export interface OwnerReadQueryHandlers {
   listWorkerActionHistory: (request: WorkerActionHistoryRequest) => WorkerActionHistoryResponse;
   listWorkerDecisions: (request: WorkerDecisionsRequest) => WorkerDecisionsResponse;
   getWorkerStatus: () => WorkerStatusSnapshot;
+  getWorkers: () => WorkerStatusSnapshot;
   getWorkflowStatus: (workflowId?: string) => Record<string, unknown>;
   getTasksSnapshot: (opts: { refresh: boolean }) => Record<string, unknown>;
   getActionGraphSnapshot: () => Record<string, unknown>;
   listWorkflows: () => unknown[];
   loadWorkflowBundle: (workflowId: string) => Record<string, unknown>;
   getReviewGate: (workflowId: string) => unknown;
-  getEvents: (taskId: string) => unknown[];
+  getEvents: (taskId: string, options: GetEventsOptions) => unknown[];
   getTaskById: (taskId: string) => unknown;
   getTaskOutput: (taskId: string) => string;
   getOutputChunks: (taskId: string) => unknown[];
   getOutputTail: (taskId: string) => unknown;
   replayOutput: (taskId: string, fromOffset: number) => unknown;
   getAllCompletedTasks: () => unknown[];
+  getHistoryTasks: () => unknown[];
 }
 
 export function answerOwnerReadQuery(
@@ -62,6 +72,9 @@ export function answerOwnerReadQuery(
     reason?: string;
     limit?: number;
     offset?: number;
+    beforeId?: number;
+    sortBy?: 'asc' | 'desc';
+    options?: GetEventsOptions;
   };
   const { kind, reset } = body;
   handlers.onActivity?.();
@@ -101,6 +114,8 @@ export function answerOwnerReadQuery(
       return handlers.getQueueStatus();
     case 'worker-status':
       return { workerStatus: handlers.getWorkerStatus() };
+    case 'workers':
+      return handlers.getWorkers() as unknown as Record<string, unknown>;
     case 'worker-action-history':
       return { workerActionHistory: handlers.listWorkerActionHistory(workerActionHistoryRequest()) };
     case 'worker-decisions':
@@ -119,8 +134,16 @@ export function answerOwnerReadQuery(
       return handlers.loadWorkflowBundle(requiredString(body.workflowId, 'workflowId'));
     case 'review-gate':
       return { reviewGate: handlers.getReviewGate(requiredString(body.workflowId, 'workflowId')) ?? null };
-    case 'events':
-      return { events: handlers.getEvents(requiredString(body.taskId, 'taskId')) };
+    case 'events': {
+      const options: GetEventsOptions = body.options ?? {
+        limit: body.limit as number,
+        ...(body.sortBy !== undefined ? { sortBy: body.sortBy } : {}),
+        ...(body.beforeId !== undefined ? { beforeId: body.beforeId } : {}),
+      };
+      return {
+        events: handlers.getEvents(requiredString(body.taskId, 'taskId'), options),
+      };
+    }
     case 'task-by-id':
       return { task: handlers.getTaskById(requiredString(body.taskId, 'taskId')) ?? null };
     case 'task-output':
@@ -133,6 +156,8 @@ export function answerOwnerReadQuery(
       return { chunks: handlers.replayOutput(requiredString(body.taskId, 'taskId'), replayOffset(body.fromOffset)) };
     case 'all-completed-tasks':
       return { tasks: handlers.getAllCompletedTasks() };
+    case 'history-tasks':
+      return { tasks: handlers.getHistoryTasks() };
     default:
       throw new Error(`Unsupported headless query: ${String(kind)}`);
   }
@@ -178,6 +203,7 @@ type ReadPersistence = Pick<
   | 'getOutputTail'
   | 'replayOutputFrom'
   | 'loadAllCompletedTasks'
+  | 'loadAllHistoryTasks'
   | 'listWorkerActions'
 >;
 
@@ -188,6 +214,7 @@ export interface OwnerReadQueryDeps {
   resetUiPerfStats: () => void;
   getStreamSequence: () => number;
   getWorkerStatus: () => WorkerStatusSnapshot;
+  getWorkers: () => WorkerStatusSnapshot;
   resolveInvokerHomeRoot: () => string;
   orchestrator: ReadOrchestrator;
   persistence: ReadPersistence;
@@ -203,8 +230,9 @@ export function buildOwnerReadQueryHandlers(deps: OwnerReadQueryDeps): OwnerRead
     onActivity: deps.onActivity,
     getUiPerfStats: deps.getUiPerfStats,
     resetUiPerfStats: deps.resetUiPerfStats,
-    getQueueStatus: () => orchestrator.getQueueStatus() as unknown as Record<string, unknown>,
+    getQueueStatus: () => orchestrator.getQueueStatus({ refresh: false }) as unknown as Record<string, unknown>,
     getWorkerStatus: deps.getWorkerStatus,
+    getWorkers: deps.getWorkers,
     listWorkerActionHistory: (request: WorkerActionHistoryRequest) => listWorkerActionHistory(persistence, request),
     listWorkerDecisions: (request: WorkerDecisionsRequest) => listWorkerDecisions(persistence, request),
     getWorkflowStatus: (workflowId?: string) => orchestrator.getWorkflowStatus(workflowId) as unknown as Record<string, unknown>,
@@ -231,12 +259,14 @@ export function buildOwnerReadQueryHandlers(deps: OwnerReadQueryDeps): OwnerRead
       if (!workflow) return null;
       return buildReviewGateQueryResponse({ workflowId, workflow, tasks: persistence.loadTasks(workflowId) });
     },
-    getEvents: (taskId: string) => persistence.getEvents(taskId),
+    getEvents: (taskId: string, options: GetEventsOptions) =>
+      getEventsPage(persistence, taskId, options),
     getTaskById: (taskId: string) => persistence.loadTask(taskId),
     getTaskOutput: (taskId: string) => persistence.getTaskOutput(taskId),
     getOutputChunks: (taskId: string) => persistence.getOutputChunks(taskId),
     getOutputTail: (taskId: string) => persistence.getOutputTail(taskId),
     replayOutput: (taskId: string, fromOffset: number) => persistence.replayOutputFrom(taskId, fromOffset),
     getAllCompletedTasks: () => persistence.loadAllCompletedTasks(),
+    getHistoryTasks: () => persistence.loadAllHistoryTasks(),
   };
 }

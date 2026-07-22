@@ -4,7 +4,60 @@
  * These functions have ZERO Slack API dependencies — they operate only on strings.
  */
 
+import { isAbsolute, resolve, sep } from 'node:path';
+
 const SLACK_CHUNK_LIMIT = 3_800;
+
+export const MAX_ARTIFACT_UPLOADS = 10;
+export const MAX_ARTIFACT_BATCH_BYTES = 25 * 1024 * 1024;
+
+export interface ArtifactExtraction {
+  paths: string[];
+  rejected: { path: string; reason: string }[];
+}
+
+const MARKDOWN_LINK = /\[[^\]]*\]\(([^)\s]+)\)/g;
+
+/**
+ * Collect artifact paths an agent deliberately markdown-linked in its reply, keeping
+ * only those inside the thread's own worktree.
+ *
+ * The reply text is influenced by untrusted content the agent may have read, and the
+ * caller uploads these paths using a token the agent does not own. Confining them to
+ * `workingDir` is what stops a linked `~/.ssh/id_rsa` from reaching Slack, so the
+ * boundary check must run on the resolved path and must not be relaxed.
+ *
+ * Only absolute links are considered: relative ones are ordinary prose references to
+ * repo files, not a request to share them.
+ */
+export function extractArtifactPaths(text: string, workingDir: string): ArtifactExtraction {
+  const root = resolve(workingDir);
+  const prefix = root + sep;
+  const paths: string[] = [];
+  const rejected: { path: string; reason: string }[] = [];
+  const seen = new Set<string>();
+
+  for (const match of text.matchAll(MARKDOWN_LINK)) {
+    const raw = match[1].startsWith('file://') ? match[1].slice('file://'.length) : match[1];
+    if (!isAbsolute(raw)) continue;
+
+    const candidate = resolve(raw);
+    if (candidate !== root && !candidate.startsWith(prefix)) {
+      rejected.push({ path: candidate, reason: 'outside thread worktree' });
+      continue;
+    }
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+
+    if (paths.length >= MAX_ARTIFACT_UPLOADS) {
+      rejected.push({ path: candidate, reason: `exceeds ${MAX_ARTIFACT_UPLOADS}-file limit` });
+      continue;
+    }
+    paths.push(candidate);
+  }
+
+  return { paths, rejected };
+}
 
 /**
  * Split text into Slack-safe chunks, preserving formatting.
@@ -156,10 +209,32 @@ export function splitCodeBlockChunk(text: string, limit: number): string[] {
  * The inner Claude sometimes invents non-existent commands like "/invoker start_plan".
  * This replaces any such references (except /invoker conversations, which is real)
  * with the correct user instruction.
+ *
+ * Requires a leading `/` so ordinary prose like "an Invoker plan" is left alone.
  */
 export function sanitizeSlashCommands(text: string): string {
   return text.replace(
-    /(?:use |run |type |try )?`?\/?invoker\s+(?!conversations\b)\w+[^`\n]*`?/gi,
+    /(?:use |run |type |try )?`?\/invoker\s+(?!conversations\b)\w+[^`\n]*`?/gi,
     'reply with "yes", "go", or "execute" to confirm',
   );
+}
+
+/** Collapse host absolute paths so Slack replies do not leak checkout layout. */
+export function redactAbsolutePaths(text: string): string {
+  return text.replace(
+    /(?:\/(?:home|Users|var|tmp|private\/tmp|opt|usr\/local)\/[^\s)\]`'"<>]+)/g,
+    (path) => {
+      const lineMatch = path.match(/:\d+(?:-\d+)?$/);
+      const lineSuffix = lineMatch?.[0] ?? '';
+      const cleaned = lineSuffix ? path.slice(0, -lineSuffix.length) : path;
+      const parts = cleaned.split('/').filter(Boolean);
+      const tail = parts.slice(-3).join('/');
+      return `…/${tail}${lineSuffix}`;
+    },
+  );
+}
+
+/** Outbound Slack text scrub: drop hallucinated slash-commands and absolute paths. */
+export function sanitizeSlackOutbound(text: string): string {
+  return redactAbsolutePaths(sanitizeSlashCommands(text));
 }

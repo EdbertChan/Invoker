@@ -74,10 +74,19 @@ export function deriveWorkflowGraph(
   }
 
   return {
-    nodes: nodes.sort((a, b) => a.name.localeCompare(b.name)),
+    nodes: nodes.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
     edges,
     missingDependencies: [...missingDependencies].sort(),
   };
+}
+
+export function workflowGraphLayoutKey(graph: WorkflowGraph): string {
+  return JSON.stringify({
+    nodes: graph.nodes.map((node) => node.id).sort(),
+    edges: graph.edges
+      .map((edge) => `${edge.kind}:${edge.source}->${edge.target}`)
+      .sort(),
+  });
 }
 
 function hasWorkflowEdge(
@@ -104,9 +113,9 @@ function addWorkflowEdge(
 
 export function layoutWorkflowGraph(
   graph: WorkflowGraph,
-  horizontalSpacing = 280,
-  verticalSpacing = 150,
-  componentGap = 120,
+  horizontalSpacing = 380,
+  verticalSpacing = 132,
+  componentGap = 72,
 ): Map<string, WorkflowPosition> {
   const positions = new Map<string, WorkflowPosition>();
   if (graph.nodes.length === 0) return positions;

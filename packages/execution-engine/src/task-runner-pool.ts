@@ -23,7 +23,7 @@ import { MergeGateExecutor } from './merge-gate-executor.js';
 import { SshExecutor } from './ssh-executor.js';
 import type { MergeRunnerHost } from './merge-runner.js';
 import { computePoolMemberCooldownMs } from './task-runner-launch-support.js';
-import type { TaskRunner } from './task-runner.js';
+import type { ActiveExecutionEntry, TaskRunner } from './task-runner.js';
 
 // ── Types ────────────────────────────────────────────────
 
@@ -73,7 +73,6 @@ export type RemoteTargetDisplay = {
   port?: number;
   managedWorkspaces?: boolean;
   remoteInvokerHome?: string;
-  provisionCommand?: string;
   use_api_key?: boolean;
   secretsFile?: string;
   remoteHeartbeatIntervalSeconds?: number;
@@ -113,7 +112,7 @@ export function poolMemberKey(member: ExecutionPoolMember): string {
   return `${member.type}:${member.id}`;
 }
 
-function poolMemberLoad(host: TaskRunnerPoolHost, poolId: string, memberKey: string): number {
+function memoryPoolMemberLoad(host: TaskRunnerPoolHost, poolId: string, memberKey: string): number {
   let load = 0;
   for (const selection of host.pendingPoolSelections.values()) {
     if (selection.poolId === poolId && selection.memberKey === memberKey) load += 1;
@@ -124,13 +123,36 @@ function poolMemberLoad(host: TaskRunnerPoolHost, poolId: string, memberKey: str
   return load;
 }
 
+function sshHostLeaseLoad(host: TaskRunnerPoolHost, member: Extract<ExecutionPoolMember, { type: 'ssh' }>): number | undefined {
+  const target = host.getRemoteTargets()[member.id];
+  if (!target) return undefined;
+  const resourceKey = sshResourceKey(target);
+  const countFn = host.persistence.countExecutionResourceLeases?.bind(host.persistence);
+  if (countFn) return countFn(resourceKey);
+  const listFn = host.persistence.listExecutionResourceLeases?.bind(host.persistence);
+  if (!listFn) return undefined;
+  const nowIso = new Date().toISOString();
+  return listFn().filter((lease) => (
+    lease.resourceKey === resourceKey
+    && (!lease.leaseExpiresAt || lease.leaseExpiresAt > nowIso)
+  )).length;
+}
+
+function poolMemberLoad(host: TaskRunnerPoolHost, poolId: string, member: ExecutionPoolMember): number {
+  if (member.type === 'ssh') {
+    const leaseLoad = sshHostLeaseLoad(host, member);
+    if (leaseLoad !== undefined) return leaseLoad;
+  }
+  return memoryPoolMemberLoad(host, poolId, poolMemberKey(member));
+}
+
 function poolMemberLimit(pool: ExecutionPoolConfig, member: ExecutionPoolMember): number | undefined {
   return member.maxConcurrentTasks ?? pool.maxConcurrentTasksPerMember;
 }
 
 function poolMemberHasCapacity(host: TaskRunnerPoolHost, poolId: string, pool: ExecutionPoolConfig, member: ExecutionPoolMember): boolean {
   const limit = poolMemberLimit(pool, member);
-  return limit === undefined || poolMemberLoad(host, poolId, poolMemberKey(member)) < limit;
+  return limit === undefined || poolMemberLoad(host, poolId, member) < limit;
 }
 
 function isPoolMemberDown(host: TaskRunnerPoolHost, memberKey: string, now: number = Date.now()): boolean {
@@ -219,8 +241,7 @@ export function selectPoolMember(
     .filter((member) => !excludedMemberKeys.has(poolMemberKey(member)))
     .filter((member) => !isPoolMemberDown(host, poolMemberKey(member)))
     .map((member, index) => {
-      const memberKey = poolMemberKey(member);
-      const load = poolMemberLoad(host, poolId, memberKey);
+      const load = poolMemberLoad(host, poolId, member);
       const limit = poolMemberLimit(pool, member);
       return {
         member,
@@ -256,7 +277,7 @@ function poolCapacitySnapshot(
     return {
       memberId: member.id,
       memberType: member.type,
-      load: poolMemberLoad(host, poolId, memberKey),
+      load: poolMemberLoad(host, poolId, member),
       limit: poolMemberLimit(pool, member),
       excluded: excludedMemberKeys.has(memberKey),
       down,
@@ -322,8 +343,14 @@ function leaseHolderId(host: TaskRunnerPoolHost, taskId: string, attemptId: stri
 
 export function acquirePoolSelectionLease(host: TaskRunnerPoolHost, task: TaskState, attemptId: string, selection: PoolSelection | undefined): boolean {
   if (!selection || selection.member.type !== 'ssh') return true;
+  if (selection.leaseResourceKey && selection.leaseHolderId) {
+    host.persistence.renewExecutionResourceLease?.(selection.leaseResourceKey, selection.leaseHolderId);
+    return true;
+  }
   const target = host.getRemoteTargets()[selection.member.id];
   if (!target) return true;
+  const pool = host.getExecutionPools()[selection.poolId];
+  const maxHolders = pool ? poolMemberLimit(pool, selection.member) : undefined;
   const resourceKey = sshResourceKey(target);
   const holderId = leaseHolderId(host, task.id, attemptId);
   const acquired = host.persistence.claimExecutionResourceLease?.({
@@ -333,6 +360,7 @@ export function acquirePoolSelectionLease(host: TaskRunnerPoolHost, task: TaskSt
     taskId: task.id,
     poolId: selection.poolId,
     poolMemberId: selection.member.id,
+    maxHolders: maxHolders ?? 1,
     metadata: {
       runnerInstanceId: host.runnerInstanceId,
       pid: process.pid,
@@ -452,55 +480,166 @@ export function takeResolvedExecutionSelection(host: TaskRunnerPoolHost, taskId:
   return resolvedExecution;
 }
 
+function releaseAndKillOrphanedExecution(
+  host: TaskRunnerPoolHost,
+  attemptId: string,
+  entry: ActiveExecutionEntry,
+  reason: string,
+): void {
+  host.activeExecutions.delete(attemptId);
+  host.logger?.warn?.(
+    `[TaskRunner] reclaimed ${reason} execution slot task=${entry.taskId} staleAttempt=${attemptId} ` +
+      `member=${entry.poolMemberKey ?? 'n/a'}; a prior attempt's executor was never reaped`,
+    {
+      taskId: entry.taskId,
+      staleAttempt: attemptId,
+      member: entry.poolMemberKey,
+      reason,
+      module: 'task-runner',
+    },
+  );
+  if (entry.leaseResourceKey && entry.leaseHolderId) {
+    host.persistence.releaseExecutionResourceLease?.(entry.leaseResourceKey, entry.leaseHolderId);
+  }
+  const onKillError = (err: unknown) =>
+    host.logger?.warn?.(
+      `[TaskRunner] best-effort kill of ${reason} execution failed task=${entry.taskId} attempt=${attemptId}`,
+      { err, module: 'task-runner' },
+    );
+  try {
+    void Promise.resolve(entry.executor.kill(entry.handle)).catch(onKillError);
+  } catch (err) {
+    onKillError(err);
+  }
+}
+
+/**
+ * Reclaim any in-memory execution slot this task still holds from a prior
+ * attempt whose executor was never reaped — a superseded/recreated launch
+ * whose kill hook no-oped or whose orphaned executor never fired `onComplete`.
+ * Left in `activeExecutions`, that stale entry counts against member capacity
+ * forever ({@link poolMemberLoad}), so every member can read full while nothing
+ * runs. Mirrors the `pendingPoolSelections` self-heal in `selectExecutor`; the
+ * current attempt is never touched. Best-effort kills the orphan so freeing the
+ * slot cannot over-subscribe the member.
+ */
+function reclaimSupersededExecutionSlots(host: TaskRunnerPoolHost, task: TaskState): void {
+  const liveAttemptId = task.execution.selectedAttemptId;
+  if (liveAttemptId === undefined) return;
+  for (const [attemptId, entry] of host.activeExecutions) {
+    if (entry.taskId !== task.id || attemptId === liveAttemptId) continue;
+    releaseAndKillOrphanedExecution(host, attemptId, entry, 'superseded');
+  }
+}
+
+/**
+ * Reclaim in-memory slots for attempts that are no longer any task's live
+ * `selectedAttemptId`. Same-task superseded reclaim does not free capacity for
+ * *other* tasks waiting on a wedged member; this pass does, using orchestrator
+ * truth so genuinely live executions are never dropped.
+ */
+function reclaimOrphanedExecutionSlots(host: TaskRunnerPoolHost & MergeRunnerHost): void {
+  const getTask = host.orchestrator?.getTask?.bind(host.orchestrator);
+  if (!getTask) return;
+  const allTasks = host.orchestrator.getAllTasks?.() ?? [];
+  const knownTaskIds = new Set(allTasks.map((task) => task.id));
+  for (const [attemptId, entry] of [...host.activeExecutions.entries()]) {
+    const task = getTask(entry.taskId);
+    if (task) {
+      if (task.execution.selectedAttemptId === attemptId) continue;
+      releaseAndKillOrphanedExecution(host, attemptId, entry, 'orphaned');
+      continue;
+    }
+    // Missing task record: only reclaim when the orchestrator has a non-empty
+    // task set and this id is absent (deleted). Empty getAllTasks() is common
+    // in stubs / early boot and must not wipe live map entries.
+    if (allTasks.length === 0 || knownTaskIds.has(entry.taskId)) continue;
+    releaseAndKillOrphanedExecution(host, attemptId, entry, 'orphaned');
+  }
+}
+
+function clearPendingPoolSelection(host: TaskRunnerPoolHost, taskId: string): void {
+  const previous = host.pendingPoolSelections.get(taskId);
+  if (previous) {
+    releasePoolSelectionLease(host, previous);
+    host.pendingPoolSelections.delete(taskId);
+  }
+}
+
+function reservePoolMemberSelection(
+  host: TaskRunnerPoolHost,
+  task: TaskState,
+  poolId: string,
+  pool: ExecutionPoolConfig,
+  member: ExecutionPoolMember,
+  resolvedExecution: ResolvedExecutionSelection,
+): PoolSelection | undefined {
+  const selection: PoolSelection = {
+    poolId,
+    member,
+    memberKey: poolMemberKey(member),
+    selectionStrategy: pool.selectionStrategy ?? 'roundRobin',
+    resolvedExecution,
+  };
+  host.pendingPoolSelections.set(task.id, selection);
+  if (member.type !== 'ssh') return selection;
+  const attemptId = task.execution.selectedAttemptId ?? `${task.id}:select`;
+  if (acquirePoolSelectionLease(host, task, attemptId, selection)) return selection;
+  host.pendingPoolSelections.delete(task.id);
+  return undefined;
+}
+
 export function selectExecutor(
   host: TaskRunnerPoolHost & MergeRunnerHost,
   task: TaskState,
   excludedPoolMemberKeys: Set<string> = new Set(),
 ): SelectedExecutor {
-  let effectiveType = task.config.runnerKind ?? (task.config.isMergeNode ? 'merge' : undefined);
+  let effectiveType = task.config.isMergeNode
+    ? 'merge'
+    : task.config.runnerKind;
   let selectedPoolMemberId: string | undefined;
   const explicitPoolMemberId = (task.config as { poolMemberId?: string }).poolMemberId;
   let resolvedExecution: ResolvedExecutionSelection = {
     executionAgent: host.resolveExecutionAgent(task),
     executionModel: host.resolveExecutionModel(task),
   };
-  host.pendingPoolSelections.delete(task.id);
+  clearPendingPoolSelection(host, task.id);
+  reclaimSupersededExecutionSlots(host, task);
+  reclaimOrphanedExecutionSlots(host);
 
   if (task.config.poolId && explicitPoolMemberId) {
     const pool = host.getExecutionPools()[task.config.poolId];
-    const member = pool?.members.find((candidate) => candidate.type === 'ssh' && candidate.id === explicitPoolMemberId);
+    const member = pool?.members.find((candidate) => candidate.id === explicitPoolMemberId);
     if (pool && member) {
       if (
         excludedPoolMemberKeys.has(poolMemberKey(member))
         || !poolMemberHasCapacity(host, task.config.poolId, pool, member)
+        || !reservePoolMemberSelection(host, task, task.config.poolId, pool, member, resolvedExecution)
       ) {
         throw poolCapacityError(host, task, task.config.poolId, pool, excludedPoolMemberKeys);
       }
       effectiveType = member.type;
       selectedPoolMemberId = member.id;
-      host.pendingPoolSelections.set(task.id, {
-        poolId: task.config.poolId,
-        member,
-        memberKey: poolMemberKey(member),
-        selectionStrategy: pool.selectionStrategy ?? 'roundRobin',
-        resolvedExecution,
-      });
     }
   } else if (task.config.poolId) {
     const pool = host.getExecutionPools()[task.config.poolId];
-    const member = pool ? selectPoolMember(host, task.config.poolId, pool, excludedPoolMemberKeys) : undefined;
-    if (member) {
-      effectiveType = member.type;
-      selectedPoolMemberId = member.type === 'ssh' ? member.id : undefined;
-      host.pendingPoolSelections.set(task.id, {
-        poolId: task.config.poolId,
-        member,
-        memberKey: poolMemberKey(member),
-        selectionStrategy: pool.selectionStrategy ?? 'roundRobin',
-        resolvedExecution,
-      });
-    } else if (pool) {
-      throw poolCapacityError(host, task, task.config.poolId, pool, excludedPoolMemberKeys);
+    if (pool) {
+      const attempted = new Set(excludedPoolMemberKeys);
+      let reserved: PoolSelection | undefined;
+      while (true) {
+        const member = selectPoolMember(host, task.config.poolId, pool, attempted);
+        if (!member) break;
+        reserved = reservePoolMemberSelection(host, task, task.config.poolId, pool, member, resolvedExecution);
+        if (reserved) {
+          effectiveType = member.type;
+          selectedPoolMemberId = member.id;
+          break;
+        }
+        attempted.add(poolMemberKey(member));
+      }
+      if (!reserved) {
+        throw poolCapacityError(host, task, task.config.poolId, pool, attempted);
+      }
     }
   }
   if (
@@ -576,7 +715,6 @@ export function selectExecutor(
         port: target.port,
         managedWorkspaces: target.managedWorkspaces,
         remoteInvokerHome: target.remoteInvokerHome,
-        provisionCommand: target.provisionCommand,
         use_api_key: target.use_api_key === true,
         secretsFile: target.secretsFile ?? host.dockerConfig.secretsFile,
         remoteHeartbeatIntervalSeconds: target.remoteHeartbeatIntervalSeconds,
@@ -602,7 +740,6 @@ export function selectExecutor(
         port: target.port,
         agentRegistry: host.executionAgentRegistry,
         managedWorkspaces: target.managedWorkspaces,
-        provisionCommand: target.provisionCommand,
         useApiKey: target.use_api_key,
         secretsFile: target.secretsFile ?? host.dockerConfig.secretsFile,
         remoteHeartbeatIntervalSeconds: target.remoteHeartbeatIntervalSeconds,
