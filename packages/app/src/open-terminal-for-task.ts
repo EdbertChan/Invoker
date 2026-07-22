@@ -212,7 +212,11 @@ export function resolveTaskTerminalSpec(
         reason: `Cannot open terminal for SSH task "${taskId}": remote target "${targetId}" is not configured.`,
       };
     }
-    executor = new SshExecutor({ ...target, agentRegistry: opts.executionAgentRegistry });
+    executor = new SshExecutor({
+      ...target,
+      agentRegistry: opts.executionAgentRegistry,
+      provisionCommandByRepoProvider: () => loadConfig().provisionCommandByRepo ?? {},
+    });
   } else if (!executor) {
     if (repairedMeta.runnerKind === 'docker') {
       const docker = new DockerExecutor({
@@ -228,6 +232,7 @@ export function resolveTaskTerminalSpec(
         cacheDir: path.resolve(invokerHome, 'repos'),
         maxWorktrees,
         agentRegistry: opts.executionAgentRegistry,
+        provisionCommandByRepoProvider: () => loadConfig().provisionCommandByRepo ?? {},
       });
       executorRegistry.register('worktree', worktree);
       executor = worktree;

@@ -89,6 +89,7 @@ export function rebuildTaskRunner(deps: TaskRunnerWiringDeps): TaskRunner {
       secretsFile: resolveSecretsFilePath(deps.invokerConfig),
     },
     remoteTargetsProvider: () => loadConfig().remoteTargets ?? {},
+    provisionCommandByRepoProvider: () => loadConfig().provisionCommandByRepo ?? {},
     executionPoolsProvider: () => loadConfig().executionPools ?? {},
     executionDefaultsProvider: () => resolveDefaultTaskExecutionSettings(loadConfig()),
     reviewGateCiFailurePublisher: {
