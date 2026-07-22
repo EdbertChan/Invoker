@@ -850,4 +850,59 @@ describe('headless-client', () => {
     expect(stdout).toHaveBeenCalledWith('{"maxConcurrency":4,"runningCount":1,"running":[{"taskId":"wf-1/root","description":"root task"}],"queued":[]}\n');
     stdout.mockRestore();
   });
+
+  it('keeps delegating query queue when discovery misses but a live owner holds the DB', async () => {
+    const dbPath = join(dbDir, 'invoker.db');
+    writeFileSync(dbPath, '');
+    writeFileSync(`${dbPath}-wal`, '');
+    writeFileSync(`${dbPath}.owner`, String(process.pid), 'utf-8');
+
+    const firstBus = new LocalBus();
+    const secondBus = new LocalBus();
+    secondBus.onRequest('headless.query', async (payload) => {
+      expect(payload).toEqual({ kind: 'queue' });
+      return {
+        maxConcurrency: 2,
+        runningCount: 0,
+        running: [],
+        queued: [{ taskId: 'wf-busy/root', description: 'queued' }],
+      };
+    });
+
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const runElectronHeadless = vi.fn(async () => 23);
+    const refreshMessageBus = vi.fn().mockResolvedValue(secondBus);
+
+    const exitCode = await runHeadlessClientCommand(['query', 'queue', '--output', 'json'], {
+      messageBus: firstBus,
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      refreshMessageBus,
+      runElectronHeadless,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(runElectronHeadless).not.toHaveBeenCalled();
+    expect(stdout).toHaveBeenCalledWith(
+      '{"maxConcurrency":2,"runningCount":0,"running":[],"queued":[{"taskId":"wf-busy/root","description":"queued"}]}\n',
+    );
+    stdout.mockRestore();
+  }, 30_000);
+
+  it('falls back for query action-graph when discovery misses even if a live owner holds the DB', async () => {
+    const dbPath = join(dbDir, 'invoker.db');
+    writeFileSync(dbPath, '');
+    writeFileSync(`${dbPath}-wal`, '');
+    writeFileSync(`${dbPath}.owner`, String(process.pid), 'utf-8');
+
+    const runElectronHeadless = vi.fn(async () => 0);
+    const exitCode = await runHeadlessClientCommand(['query', 'action-graph', '--output', 'json'], {
+      messageBus: new LocalBus(),
+      ensureStandaloneOwner: vi.fn(async () => {}),
+      refreshMessageBus: vi.fn(async () => new LocalBus()),
+      runElectronHeadless,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(runElectronHeadless).toHaveBeenCalledWith(['query', 'action-graph', '--output', 'json']);
+  }, 30_000);
 });
