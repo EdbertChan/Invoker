@@ -28,7 +28,7 @@ import { createPlanningCommandBuilder, createPrepareRepoCheckout, createGatherWo
 import { createWatchdog } from './watchdog.js';
 import { errMessage } from './util.js';
 import { acquireSlackConsumerLock } from './slack-consumer-lock.js';
-const VERSION = '0.0.7';
+const VERSION = '0.0.8';
 
 const REQUIRED_ENV = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'SLACK_SIGNING_SECRET', 'SLACK_CHANNEL_ID'];
 
