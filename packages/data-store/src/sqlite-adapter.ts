@@ -18,6 +18,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -26,20 +27,11 @@ import type {
   TaskState,
   TaskStateChanges,
   Attempt,
-  TaskStatus,
-  WorkflowDerivedStatus,
-  WorkflowRollup,
-  WorkflowRollupTaskSummary,
   ExternalDependencyChange,
   DetachedExternalDependency,
 } from '@invoker/workflow-core';
 import { DISPATCH_LEASE_MS } from '@invoker/contracts';
-import type { InAppPlanningChatLine, InAppPlanningPlanSummary, InAppPlanningSessionStatus, SearchResultItem, SearchOptions } from '@invoker/contracts';
-import {
-  assertWorkflowConsistent,
-  assertWorkflowPatchConsistent,
-  computeWorkflowRollupFromSummaries,
-} from '@invoker/workflow-core';
+import type { InAppPlanningChatLine, InAppPlanningPlanSummary, InAppPlanningSessionStatus, PlanningTerminalMode, SearchResultItem, SearchOptions } from '@invoker/contracts';
 import type {
   ExecutionResourceLeaseReleaseRow,
   LaunchDispatchInvalidationRow,
@@ -49,22 +41,25 @@ import type {
   WorkflowSaveInput,
   WorkflowTaskSnapshot,
   TaskEvent,
+  TaskEventListFilters,
   ActivityLogEntry,
   Conversation,
   ConversationMessage,
+  SlackLaunchContext,
+  SlackPendingConfirmation,
   WorkflowChannel,
   WorkerActionListFilters,
   WorkerActionRecord,
   WorkerActionWrite,
+  WorkerDesiredStateRecord,
   TerminalSessionPatch,
   TerminalSessionRecord,
   InAppPlanningSessionPatch,
   InAppPlanningSessionRecord,
 } from './adapter.js';
+import type { CostAttributionAttempt } from './attempt-read-models.js';
 import { SCHEMA_DDL } from './sqlite-schema.js';
 import {
-  mapRowToWorkflow,
-  mapRowToTask,
   mapRowToTaskLaunchDispatch,
   mapRowToWorkflowMutationIntent,
   mapRowToWorkflowMutationLease,
@@ -77,36 +72,16 @@ import {
   readSpoolLinesFromFile,
   readLastSpoolLinesFromFile,
 } from './sqlite-output-spool.js';
+import { SlowQueryAggregator, type SlowQueryShapeStats } from './slow-query-aggregator.js';
 import type { SqliteExecutor } from './sqlite-executor.js';
 import * as migrations from './sqlite-migrations.js';
 import { SqliteTaskAttemptRepository } from './sqlite-task-attempt-repository.js';
+import { SqliteWorkflowRepository, type WorkflowMetadataChanges } from './sqlite-workflow-repository.js';
 
 function normalizeWorkerActionStatus(status: string): string {
   return status === 'canceled' ? 'cancelled' : status;
 }
 
-type WorkflowMetadataChanges = Partial<
-  Pick<
-    Workflow,
-    | 'name'
-    | 'description'
-    | 'visualProof'
-    | 'planFile'
-    | 'repoUrl'
-    | 'intermediateRepoUrl'
-    | 'branch'
-    | 'onFinish'
-    | 'baseBranch'
-    | 'featureBranch'
-    | 'mergeMode'
-    | 'reviewProvider'
-    | 'externalDependencies'
-    | 'externalDependencyChanges'
-    | 'detachedExternalDependencies'
-    | 'generation'
-    | 'updatedAt'
-  >
->;
 type NativeSqlite = typeof import('node:sqlite');
 
 let nativeSqlite: Promise<NativeSqlite> | undefined;
@@ -131,6 +106,62 @@ export interface OutputChunk {
 
 const SQLITE_EPHEMERAL_DATABASE = ':memory:';
 
+function ownerMarkerPath(dbPath: string): string {
+  return `${dbPath}.owner`;
+}
+
+/**
+ * PID of the writable owner currently holding `dbPath`, or null when none is
+ * live. A marker left behind by a crashed owner reports null so a dead process
+ * can never lock readers out permanently.
+ */
+function readLiveOwnerPid(dbPath: string): number | null {
+  const marker = ownerMarkerPath(dbPath);
+  if (!existsSync(marker)) return null;
+  let pid: number;
+  try {
+    pid = Number.parseInt(readFileSync(marker, 'utf-8').trim(), 10);
+  } catch {
+    return null;
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (pid === process.pid) return pid;
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
+export function hasLiveWritableOwner(dbPath: string): boolean {
+  const sidecarsExist = existsSync(`${dbPath}-wal`) || existsSync(`${dbPath}-shm`);
+  return sidecarsExist && readLiveOwnerPid(dbPath) !== null;
+}
+
+function writeOwnerMarker(dbPath: string): void {
+  try {
+    writeFileSync(ownerMarkerPath(dbPath), String(process.pid), 'utf-8');
+  } catch (err) {
+    console.warn(
+      `[SQLiteAdapter] Could not write owner marker for ${dbPath}: ${err instanceof Error ? err.message : String(err)}. ` +
+      'Read-only opens cannot detect this owner and will be allowed alongside it.',
+    );
+  }
+}
+
+function clearOwnerMarker(dbPath: string): void {
+  const marker = ownerMarkerPath(dbPath);
+  try {
+    if (existsSync(marker) && readLiveOwnerPid(dbPath) === process.pid) rmSync(marker, { force: true });
+  } catch (err) {
+    console.warn(
+      `[SQLiteAdapter] Could not clear owner marker for ${dbPath}: ${err instanceof Error ? err.message : String(err)}. ` +
+      'A stale marker is ignored once this PID exits.',
+    );
+  }
+}
+
 interface SQLiteAdapterOptions {
   readOnly?: boolean;
   ownerCapability?: boolean;
@@ -145,12 +176,65 @@ interface SQLiteAdapterOptions {
    * opener of the database file — a concurrent open is rejected with SQLITE_BUSY.
    */
   exclusiveLocking?: boolean;
+  slowQueryThresholdMs?: number;
+  onSlowQuery?: (info: SlowQueryInfo) => void;
+}
+
+export interface SlowQueryInfo {
+  durationMs: number;
+  sql: string;
+  rowCount?: number;
 }
 
 export type EphemeralSQLiteAdapterOptions = Pick<
   SQLiteAdapterOptions,
   'outputTailLimit' | 'outputDir' | 'activityLogMaxRows'
 >;
+
+const DEFAULT_SLOW_QUERY_SUMMARY_TOP_N = 10;
+const DEFAULT_SLOW_QUERY_SUMMARY_INTERVAL_MS = 30_000;
+const SLOW_QUERY_SUMMARY_SQL_PREVIEW_LENGTH = 240;
+
+function formatSlowQuerySummaryLine(index: number, stats: SlowQueryShapeStats): string {
+  const maxRows = stats.maxRows === undefined ? '' : ` maxRows=${stats.maxRows}`;
+  const firstSeen = new Date(stats.firstSeenAtMs).toISOString();
+  const lastSeen = new Date(stats.lastSeenAtMs).toISOString();
+  const sql = stats.shape.slice(0, SLOW_QUERY_SUMMARY_SQL_PREVIEW_LENGTH);
+
+  return `${index + 1}. max=${stats.maxMs.toFixed(1)}ms p95=${stats.p95Ms.toFixed(1)}ms ` +
+    `p50=${stats.p50Ms.toFixed(1)}ms count=${stats.count}${maxRows} ` +
+    `seen=${firstSeen}..${lastSeen} sql=${sql}`;
+}
+
+function formatSlowQuerySummary(
+  thresholdMs: number,
+  aggregator: SlowQueryAggregator,
+): string {
+  const topQueries = aggregator.topN(DEFAULT_SLOW_QUERY_SUMMARY_TOP_N);
+  const lines = topQueries.map((stats, index) => formatSlowQuerySummaryLine(index, stats));
+  return [
+    `[SQLiteAdapter] slow query summary threshold=${thresholdMs.toFixed(1)}ms ` +
+      `events=${aggregator.totalCount} shapes=${aggregator.shapeCount} top=${topQueries.length}`,
+    ...lines,
+  ].join('\n');
+}
+
+function createDefaultSlowQuerySink(thresholdMs: number): (info: SlowQueryInfo) => void {
+  const aggregator = new SlowQueryAggregator();
+  let lastSummaryAtMs = 0;
+
+  return (info) => {
+    aggregator.record(info);
+
+    const now = Date.now();
+    const shouldSummarize =
+      lastSummaryAtMs === 0 || now - lastSummaryAtMs >= DEFAULT_SLOW_QUERY_SUMMARY_INTERVAL_MS;
+    if (!shouldSummarize) return;
+
+    console.warn(formatSlowQuerySummary(thresholdMs, aggregator));
+    lastSummaryAtMs = now;
+  };
+}
 
 export type WorkflowMutationPriority = 'high' | 'normal';
 export type WorkflowMutationIntentStatus = 'queued' | 'running' | 'completed' | 'failed';
@@ -442,8 +526,15 @@ type InAppPlanningSessionRow = {
   preset_key?: unknown;
   status?: unknown;
   draft_plan_summary_json?: unknown;
+  draft_plan_text?: unknown;
   submitted_workflow_id?: unknown;
   submitted_plan_name?: unknown;
+  terminal_mode?: unknown;
+  terminal_session_id?: unknown;
+  terminal_status?: unknown;
+  terminal_exit_code?: unknown;
+  terminal_output_snapshot?: unknown;
+  terminal_updated_at?: unknown;
   pending_response?: unknown;
   created_at?: unknown;
   updated_at?: unknown;
@@ -473,6 +564,14 @@ function isInAppPlanningSessionStatus(value: unknown): value is InAppPlanningSes
     || value === 'waiting_for_answer'
     || value === 'draft_ready'
     || value === 'submitted';
+}
+
+function isPlanningTerminalMode(value: unknown): value is PlanningTerminalMode {
+  return value === 'chat' || value === 'tmux';
+}
+
+function isPlanningTerminalStatus(value: unknown): value is 'running' | 'exited' | undefined {
+  return value === undefined || value === null || value === 'running' || value === 'exited';
 }
 
 function isInAppPlanningMessageRole(value: unknown): value is InAppPlanningChatLine['role'] {
@@ -507,11 +606,22 @@ function parseInAppPlanningPlanSummary(value: unknown): InAppPlanningPlanSummary
   ) {
     throw new Error('planning summary has invalid shape');
   }
+  const taskGroups = Array.isArray(candidate.taskGroups)
+    ? candidate.taskGroups.filter(
+      (group): group is InAppPlanningPlanSummary['taskGroups'][number] =>
+        !!group
+        && typeof group === 'object'
+        && (group.workflow === null || typeof group.workflow === 'string')
+        && Array.isArray(group.tasks)
+        && group.tasks.every((task) => typeof task === 'string'),
+    )
+    : [];
   return {
     name: candidate.name,
     taskCount: candidate.taskCount,
     ...(candidate.workflowCount === undefined ? {} : { workflowCount: candidate.workflowCount }),
     steps: candidate.steps,
+    taskGroups,
   };
 }
 
@@ -526,11 +636,14 @@ export class SQLiteAdapter implements PersistenceAdapter {
   private outputDir: string;
   private spoolNextOffsetCache = new Map<string, number>();
   private writeTransactionDepth = 0;
-  private lastWorkflowTaskSnapshotStats: Record<string, unknown> | null = null;
   private readonly activityLogMaxRows: number;
   private activityLogWritesSincePrune = 0;
+  private eventCounterFallbackLogged = false;
   private readonly exclusiveLocking: boolean;
   private readonly taskAttemptRepo: SqliteTaskAttemptRepository;
+  private readonly workflowRepo: SqliteWorkflowRepository;
+  private readonly slowQueryThresholdMs: number;
+  private readonly onSlowQuery: ((info: SlowQueryInfo) => void) | null;
 
   /**
    * Non-null only when this adapter was opened via the corruption-recovery
@@ -555,11 +668,20 @@ export class SQLiteAdapter implements PersistenceAdapter {
     this.outputDir = options?.outputDir ?? this.resolveOutputDir(dbPath);
     this.activityLogMaxRows = options?.activityLogMaxRows ?? DEFAULT_ACTIVITY_LOG_MAX_ROWS;
     this.exclusiveLocking = options?.exclusiveLocking === true;
+    this.slowQueryThresholdMs = options?.slowQueryThresholdMs ?? 25;
+    this.onSlowQuery = options?.onSlowQuery
+      ?? (this.slowQueryThresholdMs > 0
+        ? createDefaultSlowQuerySink(this.slowQueryThresholdMs)
+        : null);
     this.corruptionRecovery = corruptionRecovery;
     this.taskAttemptRepo = new SqliteTaskAttemptRepository(this.executor, {
       updateTask: (taskId, changes) => this.updateTask(taskId, changes),
       updateAttempt: (attemptId, changes) => this.updateAttempt(attemptId, changes),
     });
+    this.workflowRepo = new SqliteWorkflowRepository(
+      this.executor,
+      (task) => this.taskAttemptRepo.reconcileTaskFromSelectedAttempt(task),
+    );
     this.configureConnection(dbPath !== null);
     if (!this.readOnly) {
       this.initSchema();
@@ -605,11 +727,19 @@ export class SQLiteAdapter implements PersistenceAdapter {
       );
     }
 
+    // Sidecar files alone cannot prove a writable owner is live: opening a
+    // WAL-mode database read-only creates -wal/-shm itself, and a read-only
+    // connection has no write access to checkpoint them away on close. Gating
+    // on mere existence therefore lets the first reader wedge every reader
+    // after it. Only a live owner may turn a reader away.
     if (isFile && options?.readOnly === true && (existsSync(`${dbPath}-wal`) || existsSync(`${dbPath}-shm`))) {
-      throw new Error(
-        `Cannot open SQLite database read-only while WAL sidecars exist for ${dbPath}. ` +
-        'Close the writable owner cleanly before opening a file-backed read-only adapter.',
-      );
+      const ownerPid = readLiveOwnerPid(dbPath);
+      if (ownerPid !== null) {
+        throw new Error(
+          `Cannot open SQLite database read-only while writable owner PID ${ownerPid} holds live WAL sidecars for ${dbPath}. ` +
+          'Close the writable owner cleanly before opening a file-backed read-only adapter.',
+        );
+      }
     }
 
     // Enforce owner-only writable initialization for file-backed databases
@@ -629,6 +759,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
     try {
       const { DatabaseSync } = await loadNativeSqlite();
       const db = new DatabaseSync(dbPath, { readOnly: options?.readOnly === true });
+      if (isFile && requestWritable && options?.ownerCapability) writeOwnerMarker(dbPath);
       return new SQLiteAdapter(db, isFile ? dbPath : null, options);
     } catch (err) {
       if (!isFile || options?.readOnly === true || !existsSync(dbPath) || !isDatabaseCorruptionError(err)) {
@@ -725,11 +856,21 @@ export class SQLiteAdapter implements PersistenceAdapter {
 
   // ── SQLite Helpers ───────────────────────────────────────
 
+  private noteSlowQuery(startedAt: number, sql: string, rowCount?: number): void {
+    if (this.slowQueryThresholdMs <= 0 || !this.onSlowQuery) return;
+    const durationMs = performance.now() - startedAt;
+    if (durationMs < this.slowQueryThresholdMs) return;
+    this.onSlowQuery({ durationMs, sql, ...(rowCount === undefined ? {} : { rowCount }) });
+  }
+
   /** Run a single-row SELECT, returning the row as an object or undefined. */
   private queryOne(sql: string, params: unknown[] = []): Record<string, unknown> | undefined {
+    const startedAt = performance.now();
     const stmt = this.db.prepare(sql);
     try {
-      return stmt.get(...(paramsToArgs(params) as any[])) as Record<string, unknown> | undefined;
+      const row = stmt.get(...(paramsToArgs(params) as any[])) as Record<string, unknown> | undefined;
+      this.noteSlowQuery(startedAt, sql, row === undefined ? 0 : 1);
+      return row;
     } finally {
       stmt.free();
     }
@@ -737,9 +878,12 @@ export class SQLiteAdapter implements PersistenceAdapter {
 
   /** Run a multi-row SELECT, returning an array of row objects. */
   private queryAll(sql: string, params: unknown[] = []): Record<string, unknown>[] {
+    const startedAt = performance.now();
     const stmt = this.db.prepare(sql);
     try {
-      return stmt.all(...(paramsToArgs(params) as any[])) as Record<string, unknown>[];
+      const rows = stmt.all(...(paramsToArgs(params) as any[])) as Record<string, unknown>[];
+      this.noteSlowQuery(startedAt, sql, rows.length);
+      return rows;
     } finally {
       stmt.free();
     }
@@ -754,7 +898,9 @@ export class SQLiteAdapter implements PersistenceAdapter {
   /** Run an INSERT/UPDATE/DELETE. File-backed durability is handled by SQLite/WAL. */
   private execRun(sql: string, params: unknown[] = []): void {
     this.ensureWritable();
+    const startedAt = performance.now();
     this.db.run(sql, params as any[]);
+    this.noteSlowQuery(startedAt, sql);
     this.dirty = true;
   }
 
@@ -857,40 +1003,6 @@ export class SQLiteAdapter implements PersistenceAdapter {
     migrations.migrateGatePolicyApprovedToCompleted(this.executor);
   }
 
-  private buildWorkflowAfterChanges(
-    before: Workflow,
-    changes: WorkflowMetadataChanges,
-    updatedAt: string,
-  ): Workflow {
-    const after: Workflow = { ...before, updatedAt };
-    const applyPatchKeyToValidationCopy = <K extends keyof WorkflowMetadataChanges>(key: K): void => {
-      if (Object.prototype.hasOwnProperty.call(changes, key)) {
-        (after as WorkflowMetadataChanges)[key] = changes[key];
-      }
-    };
-
-    // Mirror updateWorkflow patch semantics before writing: missing key means
-    // unchanged; present key, even undefined, means apply the clear and validate it.
-    applyPatchKeyToValidationCopy('name');
-    applyPatchKeyToValidationCopy('description');
-    applyPatchKeyToValidationCopy('visualProof');
-    applyPatchKeyToValidationCopy('planFile');
-    applyPatchKeyToValidationCopy('repoUrl');
-    applyPatchKeyToValidationCopy('intermediateRepoUrl');
-    applyPatchKeyToValidationCopy('branch');
-    applyPatchKeyToValidationCopy('onFinish');
-    applyPatchKeyToValidationCopy('baseBranch');
-    applyPatchKeyToValidationCopy('featureBranch');
-    applyPatchKeyToValidationCopy('mergeMode');
-    applyPatchKeyToValidationCopy('reviewProvider');
-    applyPatchKeyToValidationCopy('externalDependencies');
-    applyPatchKeyToValidationCopy('externalDependencyChanges');
-    applyPatchKeyToValidationCopy('detachedExternalDependencies');
-    applyPatchKeyToValidationCopy('generation');
-
-    return after;
-  }
-
   private migrateTaskExternalDependenciesToWorkflows(): void {
     migrations.migrateTaskExternalDependenciesToWorkflows(this.executor);
   }
@@ -930,288 +1042,35 @@ export class SQLiteAdapter implements PersistenceAdapter {
   // ── Workflows ─────────────────────────────────────────
 
   saveWorkflow(workflow: WorkflowSaveInput): void {
-    assertWorkflowConsistent(workflow);
-    this.execRun(`
-      INSERT OR REPLACE INTO workflows (id, name, description, visual_proof, plan_file, repo_url, intermediate_repo_url, branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode, review_provider, external_dependencies, external_dependency_changes, detached_external_dependencies, generation, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      workflow.id, workflow.name,
-      workflow.description ?? null,
-      workflow.visualProof ? 1 : 0,
-      workflow.planFile ?? null, workflow.repoUrl ?? null, workflow.intermediateRepoUrl ?? null, workflow.branch ?? null,
-      workflow.onFinish ?? null, workflow.baseBranch ?? null, null, workflow.featureBranch ?? null,
-      workflow.mergeMode ?? null,
-      workflow.reviewProvider ?? null,
-      workflow.externalDependencies ? JSON.stringify(workflow.externalDependencies) : null,
-      workflow.externalDependencyChanges ? JSON.stringify(workflow.externalDependencyChanges) : null,
-      workflow.detachedExternalDependencies ? JSON.stringify(workflow.detachedExternalDependencies) : null,
-      workflow.generation ?? 0,
-      workflow.createdAt, workflow.updatedAt,
-    ]);
+    this.workflowRepo.saveWorkflow(workflow);
   }
 
   updateWorkflow(workflowId: string, changes: WorkflowMetadataChanges): void {
-    const setClauses: string[] = [];
-    const values: unknown[] = [];
-    const columnMap: Record<string, string> = {
-      name: 'name',
-      description: 'description',
-      planFile: 'plan_file',
-      repoUrl: 'repo_url',
-      intermediateRepoUrl: 'intermediate_repo_url',
-      branch: 'branch',
-      onFinish: 'on_finish',
-      baseBranch: 'base_branch',
-      featureBranch: 'feature_branch',
-      mergeMode: 'merge_mode',
-      reviewProvider: 'review_provider',
-    };
-    for (const [key, column] of Object.entries(columnMap)) {
-      if (key in changes) {
-        setClauses.push(`${column} = ?`);
-        values.push((changes as any)[key] ?? null);
-      }
-    }
-    if (changes.visualProof !== undefined) {
-      setClauses.push('visual_proof = ?');
-      values.push(changes.visualProof ? 1 : 0);
-    }
-    if (changes.baseBranch !== undefined) {
-      // handled by columnMap; kept for backward-compatible patch shapes
-    }
-    if (changes.generation !== undefined) {
-      setClauses.push('generation = ?');
-      values.push(changes.generation);
-    }
-    if (changes.mergeMode !== undefined) {
-      // handled by columnMap; kept for backward-compatible patch shapes
-    }
-    // Presence semantics (matching updateTask's config.externalDependencies):
-    // key present with undefined ⇒ clear the column; key absent ⇒ unchanged.
-    // detachWorkflowInternal clears a dependent's last dependency by passing
-    // `externalDependencies: undefined` — a skip-if-undefined check here left
-    // dangling dependencies behind after upstream workflow deletion.
-    if ('externalDependencies' in changes) {
-      setClauses.push('external_dependencies = ?');
-      values.push(changes.externalDependencies ? JSON.stringify(changes.externalDependencies) : null);
-    }
-    if ('externalDependencyChanges' in changes) {
-      setClauses.push('external_dependency_changes = ?');
-      values.push(changes.externalDependencyChanges ? JSON.stringify(changes.externalDependencyChanges) : null);
-    }
-    if ('detachedExternalDependencies' in changes) {
-      setClauses.push('detached_external_dependencies = ?');
-      values.push(changes.detachedExternalDependencies ? JSON.stringify(changes.detachedExternalDependencies) : null);
-    }
-    const updatedAt = changes.updatedAt ?? new Date().toISOString();
-    setClauses.push('updated_at = ?');
-    values.push(updatedAt);
-    if (setClauses.length === 0) return;
-
-    const before = this.loadWorkflow(workflowId);
-    if (!before) return;
-    const after = this.buildWorkflowAfterChanges(before, changes, updatedAt);
-    assertWorkflowPatchConsistent(before, after, changes);
-
-    values.push(workflowId);
-    this.execRun(`UPDATE workflows SET ${setClauses.join(', ')} WHERE id = ?`, values);
+    this.workflowRepo.updateWorkflow(workflowId, changes);
   }
 
   loadWorkflow(workflowId: string): Workflow | undefined {
-    const row = this.queryOne('SELECT * FROM workflows WHERE id = ?', [workflowId]);
-    if (!row) return undefined;
-    const rollup = this.loadWorkflowRollups([workflowId]).get(workflowId);
-    return this.rowToWorkflow(row, rollup);
+    return this.workflowRepo.loadWorkflow(workflowId);
   }
 
   listWorkflows(): Workflow[] {
-    const rows = this.queryAll(
-      'SELECT * FROM workflows ORDER BY created_at DESC',
-    );
-    const workflowIds = rows.map((row: any) => String(row.id));
-    const rollups = this.loadWorkflowRollups(workflowIds);
-    return rows.map((row: any) => this.rowToWorkflow(row, rollups.get(String(row.id))));
+    return this.workflowRepo.listWorkflows();
   }
 
   findReviewGateByPr(pr: string): ReviewGateLookup | undefined {
-    // The PR↔workflow link lives only on the merge node, as either the bare PR
-    // number (review_id) or the full PR URL (review_url ending in /pull/<pr>).
-    const rows = this.queryAll(
-      `SELECT t.id AS mergeTaskId,
-              t.workflow_id AS workflowId,
-              t.review_id AS reviewId,
-              t.review_url AS reviewUrl,
-              t.branch AS branch,
-              t.selected_attempt_id AS selectedAttemptId,
-              t.status AS mergeTaskStatus,
-              w.generation AS workflowGeneration,
-              w.base_branch AS baseBranch
-         FROM tasks t
-         JOIN workflows w ON w.id = t.workflow_id
-        WHERE t.is_merge_node = 1 AND (t.review_id = ? OR t.review_url LIKE ?)`,
-      [pr, `%/pull/${pr}`],
-    );
-    if (rows.length === 0) return undefined;
-
-    // workflows has no status column — status is a derived rollup. Compute it
-    // per candidate so re-published PRs (multiple merge nodes) can prefer the
-    // live workflow, then the highest generation.
-    const workflowIds = [...new Set(rows.map((row) => String(row.workflowId)))];
-    const rollups = this.loadWorkflowRollups(workflowIds);
-    const TERMINAL = new Set<WorkflowDerivedStatus>(['completed', 'failed', 'closed']);
-
-    const candidates = rows.map((row) => {
-      const workflowStatus = rollups.get(String(row.workflowId))?.status ?? 'pending';
-      return { row, workflowStatus, terminal: TERMINAL.has(workflowStatus) };
-    });
-    candidates.sort((a, b) => {
-      if (a.terminal !== b.terminal) return a.terminal ? 1 : -1; // non-terminal first
-      return Number(b.row.workflowGeneration ?? 0) - Number(a.row.workflowGeneration ?? 0);
-    });
-
-    const { row, workflowStatus } = candidates[0];
-    const str = (value: unknown): string | undefined =>
-      value == null ? undefined : String(value);
-    return {
-      workflowId: String(row.workflowId),
-      mergeTaskId: String(row.mergeTaskId),
-      reviewId: str(row.reviewId),
-      reviewUrl: str(row.reviewUrl),
-      branch: str(row.branch),
-      baseBranch: str(row.baseBranch),
-      workflowStatus,
-      workflowGeneration: Number(row.workflowGeneration ?? 0),
-      mergeTaskStatus: str(row.mergeTaskStatus),
-      selectedAttemptId: str(row.selectedAttemptId),
-    };
+    return this.workflowRepo.findReviewGateByPr(pr);
   }
 
   searchWorkflowsAndTasks(query: string, opts?: SearchOptions): SearchResultItem[] {
-    if (!query.trim()) {
-      return [];
-    }
-    const safeQuery = `%${query.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`;
-    const type = opts?.type ?? 'all';
-    const limit = Math.min(opts?.limit ?? 20, 50);
-    const offset = opts?.offset ?? 0;
-    
-    const results: SearchResultItem[] = [];
-    
-    if (type === 'workflows' || type === 'all') {
-      const workflows = this.queryAll(
-        `SELECT id, name, description, plan_file, repo_url, branch, created_at FROM workflows 
-         WHERE name LIKE ? OR description LIKE ? OR plan_file LIKE ? OR repo_url LIKE ? OR branch LIKE ? 
-         LIMIT ? OFFSET ?`,
-        [safeQuery, safeQuery, safeQuery, safeQuery, safeQuery, limit, offset]
-      ) as Array<{ id: string; name?: string | null; created_at: string }>;
-      // Batch load rollups for status
-      const workflowIds = workflows.map((row) => row.id);
-      const rollups = workflowIds.length > 0 ? this.loadWorkflowRollups(workflowIds) : new Map();
-      for (const row of workflows) {
-        const rollup = rollups.get(row.id);
-        const status = rollup?.status ?? 'pending';
-        results.push({
-          kind: 'workflow',
-          id: row.id,
-          workflowId: undefined,
-          title: row.name || 'Unnamed workflow',
-          subtitle: `Workflow · ${status}`,
-          status,
-          createdAt: row.created_at,
-        });
-      }
-    }
-    
-    if (type === 'tasks' || type === 'all') {
-      const tasks = this.queryAll(
-        `SELECT id, workflow_id, description, command, prompt, summary, problem, approach, test_plan, repro_command, status, created_at FROM tasks 
-         WHERE description LIKE ? OR command LIKE ? OR prompt LIKE ? OR summary LIKE ? OR problem LIKE ? OR approach LIKE ? OR test_plan LIKE ? OR repro_command LIKE ? 
-         LIMIT ? OFFSET ?`,
-        [safeQuery, safeQuery, safeQuery, safeQuery, safeQuery, safeQuery, safeQuery, safeQuery, limit, offset]
-      ) as Array<{
-        id: string;
-        workflow_id?: string | null;
-        description?: string | null;
-        status?: string | null;
-        created_at: string;
-      }>;
-      // Map workflow IDs to names for subtitle
-      const workflowIds = [...new Set(tasks.map((task) => task.workflow_id).filter((id): id is string => typeof id === 'string' && id.length > 0))];
-      const workflowNameMap = new Map<string, string>();
-      if (workflowIds.length > 0) {
-        const placeholders = workflowIds.map(() => '?').join(',');
-        const workflowRows = this.queryAll(
-          `SELECT id, name FROM workflows WHERE id IN (${placeholders})`,
-          workflowIds
-        ) as Array<{ id: string; name?: string | null }>;
-        for (const wf of workflowRows) {
-          workflowNameMap.set(wf.id, wf.name || 'Unnamed workflow');
-        }
-      }
-      for (const row of tasks) {
-        const workflowName = row.workflow_id ? workflowNameMap.get(row.workflow_id) : undefined;
-        results.push({
-          kind: 'task',
-          id: row.id,
-          workflowId: row.workflow_id || undefined,
-          title: row.description || 'Unnamed task',
-          subtitle: workflowName ? `Task · ${workflowName}` : '',
-          status: row.status || '',
-          createdAt: row.created_at,
-        });
-      }
-    }
-    
-    // Return workflows first, then tasks (preserving order within each category)
-    return results;
+    return this.workflowRepo.searchWorkflowsAndTasks(query, opts);
   }
 
   loadWorkflowTaskSnapshot(): WorkflowTaskSnapshot {
-    const totalStartedAt = Date.now();
-    const workflowQueryStartedAt = Date.now();
-    const workflowRows = this.queryAll('SELECT * FROM workflows ORDER BY created_at DESC');
-    const workflowMetadataQueryMs = Date.now() - workflowQueryStartedAt;
-    const taskQueryStartedAt = Date.now();
-    const taskRows = this.queryAll('SELECT * FROM tasks ORDER BY workflow_id ASC, id ASC');
-    const taskQueryMs = Date.now() - taskQueryStartedAt;
-    const tasksByWorkflowId = new Map<string, TaskState[]>();
-    const workflowIds = workflowRows.map((row: any) => String(row.id));
-    const rollupStartedAt = Date.now();
-    const rollups = this.computeWorkflowRollupsFromRows(workflowIds, taskRows);
-    const rollupComputationMs = Date.now() - rollupStartedAt;
-    const tasks: TaskState[] = [];
-
-    const deserializeStartedAt = Date.now();
-    for (const row of taskRows) {
-      const task = this.reconcileTaskFromSelectedAttempt(this.rowToTask(row));
-      tasks.push(task);
-      const workflowId = task.config.workflowId ?? '';
-      if (!workflowId) continue;
-      const workflowTasks = tasksByWorkflowId.get(workflowId) ?? [];
-      workflowTasks.push(task);
-      tasksByWorkflowId.set(workflowId, workflowTasks);
-    }
-    const taskDeserializeReconcileMs = Date.now() - deserializeStartedAt;
-
-    const snapshot = {
-      workflows: workflowRows.map((row: any) => this.rowToWorkflow(row, rollups.get(String(row.id)))),
-      tasks,
-      tasksByWorkflowId,
-    };
-    this.lastWorkflowTaskSnapshotStats = {
-      workflowMetadataQueryMs,
-      taskQueryMs,
-      rollupComputationMs,
-      taskDeserializeReconcileMs,
-      totalMs: Date.now() - totalStartedAt,
-      workflowCount: snapshot.workflows.length,
-      taskCount: tasks.length,
-    };
-    return snapshot;
+    return this.workflowRepo.loadWorkflowTaskSnapshot();
   }
 
   getLastWorkflowTaskSnapshotStats(): Record<string, unknown> | null {
-    return this.lastWorkflowTaskSnapshotStats ? { ...this.lastWorkflowTaskSnapshotStats } : null;
+    return this.workflowRepo.getLastWorkflowTaskSnapshotStats();
   }
 
   // ── Tasks ─────────────────────────────────────────────
@@ -1351,19 +1210,33 @@ export class SQLiteAdapter implements PersistenceAdapter {
           preset_key,
           status,
           draft_plan_summary_json,
+          draft_plan_text,
           submitted_workflow_id,
           submitted_plan_name,
+          terminal_mode,
+          terminal_session_id,
+          terminal_status,
+          terminal_exit_code,
+          terminal_output_snapshot,
+          terminal_updated_at,
           pending_response,
           created_at,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET
           title = excluded.title,
           preset_key = excluded.preset_key,
           status = excluded.status,
           draft_plan_summary_json = excluded.draft_plan_summary_json,
+          draft_plan_text = excluded.draft_plan_text,
           submitted_workflow_id = excluded.submitted_workflow_id,
           submitted_plan_name = excluded.submitted_plan_name,
+          terminal_mode = excluded.terminal_mode,
+          terminal_session_id = excluded.terminal_session_id,
+          terminal_status = excluded.terminal_status,
+          terminal_exit_code = excluded.terminal_exit_code,
+          terminal_output_snapshot = excluded.terminal_output_snapshot,
+          terminal_updated_at = excluded.terminal_updated_at,
           pending_response = excluded.pending_response,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at`,
@@ -1373,8 +1246,15 @@ export class SQLiteAdapter implements PersistenceAdapter {
           record.presetKey,
           record.status,
           record.draftPlanSummary ? JSON.stringify(record.draftPlanSummary) : null,
+          record.draftPlanText ?? null,
           record.submittedWorkflowId ?? null,
           record.submittedPlanName ?? null,
+          record.terminalMode ?? 'chat',
+          record.terminalSessionId ?? null,
+          record.terminalStatus ?? null,
+          record.terminalExitCode ?? null,
+          record.terminalOutputSnapshot ?? '',
+          record.terminalUpdatedAt ?? null,
           record.pendingResponse ? 1 : 0,
           record.createdAt,
           record.updatedAt,
@@ -1418,6 +1298,10 @@ export class SQLiteAdapter implements PersistenceAdapter {
         setClauses.push('draft_plan_summary_json = ?');
         values.push(patch.draftPlanSummary ? JSON.stringify(patch.draftPlanSummary) : null);
       }
+      if (Object.hasOwn(patch, 'draftPlanText')) {
+        setClauses.push('draft_plan_text = ?');
+        values.push(patch.draftPlanText ?? null);
+      }
       if (Object.hasOwn(patch, 'submittedWorkflowId')) {
         setClauses.push('submitted_workflow_id = ?');
         values.push(patch.submittedWorkflowId ?? null);
@@ -1425,6 +1309,30 @@ export class SQLiteAdapter implements PersistenceAdapter {
       if (Object.hasOwn(patch, 'submittedPlanName')) {
         setClauses.push('submitted_plan_name = ?');
         values.push(patch.submittedPlanName ?? null);
+      }
+      if (Object.hasOwn(patch, 'terminalMode')) {
+        setClauses.push('terminal_mode = ?');
+        values.push(patch.terminalMode ?? 'chat');
+      }
+      if (Object.hasOwn(patch, 'terminalSessionId')) {
+        setClauses.push('terminal_session_id = ?');
+        values.push(patch.terminalSessionId ?? null);
+      }
+      if (Object.hasOwn(patch, 'terminalStatus')) {
+        setClauses.push('terminal_status = ?');
+        values.push(patch.terminalStatus ?? null);
+      }
+      if (Object.hasOwn(patch, 'terminalExitCode')) {
+        setClauses.push('terminal_exit_code = ?');
+        values.push(patch.terminalExitCode ?? null);
+      }
+      if (Object.hasOwn(patch, 'terminalOutputSnapshot')) {
+        setClauses.push('terminal_output_snapshot = ?');
+        values.push(patch.terminalOutputSnapshot ?? '');
+      }
+      if (Object.hasOwn(patch, 'terminalUpdatedAt')) {
+        setClauses.push('terminal_updated_at = ?');
+        values.push(patch.terminalUpdatedAt ?? null);
       }
       if (Object.hasOwn(patch, 'pendingResponse')) {
         setClauses.push('pending_response = ?');
@@ -1547,6 +1455,10 @@ export class SQLiteAdapter implements PersistenceAdapter {
     return this.taskAttemptRepo.loadAllCompletedTasks();
   }
 
+  loadAllHistoryTasks(): Array<TaskState & { workflowName: string; lastEventAt: string | null; eventCount: number }> {
+    return this.taskAttemptRepo.loadAllHistoryTasks();
+  }
+
   deleteTask(taskId: string): void {
     this.runTransaction(() => {
       this.db.run('DELETE FROM task_launch_dispatch WHERE task_id = ?', [taskId]);
@@ -1616,6 +1528,10 @@ export class SQLiteAdapter implements PersistenceAdapter {
       this.db.run('DELETE FROM worker_actions');
       this.db.run('DELETE FROM execution_resource_leases');
       this.db.run('DELETE FROM events');
+      // The AFTER DELETE trigger keeps event_type_counters exact on row-by-row
+      // deletes, but reset the counters explicitly here so a full wipe is correct
+      // even if SQLite ever applies the truncate optimization to the bare DELETE.
+      this.db.run('DELETE FROM event_type_counters');
       this.db.run('DELETE FROM task_output');
       this.db.run('DELETE FROM attempts');
       this.db.run('DELETE FROM output_spool');
@@ -1685,20 +1601,168 @@ export class SQLiteAdapter implements PersistenceAdapter {
   }
 
   getEvents(taskId: string): TaskEvent[];
-  getEvents(taskId: string, sortBy: 'asc' | 'desc', limit: number): TaskEvent[];
-  getEvents(taskId: string, sortBy: 'asc' | 'desc' = 'asc', limit?: number): TaskEvent[] {
+  getEvents(taskId: string, sortBy: 'asc' | 'desc', limit: number, beforeId?: number): TaskEvent[];
+  getEvents(
+    taskId: string,
+    sortBy: 'asc' | 'desc' = 'asc',
+    limit?: number,
+    beforeId?: number,
+  ): TaskEvent[] {
     const orderBy = sortBy === 'desc' ? 'DESC' : 'ASC';
-    const rows = limit === undefined
-      ? this.queryAll(
+    if (limit === undefined) {
+      const rows = this.queryAll(
         `SELECT * FROM events WHERE task_id = ? ORDER BY id ${orderBy}`,
         [taskId],
-      )
-      : limit <= 0
-        ? []
-        : this.queryAll(
-          `SELECT * FROM events WHERE task_id = ? ORDER BY id ${orderBy} LIMIT ?`,
-          [taskId, Math.floor(limit)],
+      );
+      return rows.map((row: any) => this.rowToTaskEvent(row));
+    }
+    if (limit <= 0) return [];
+    const pageLimit = Math.floor(limit);
+    if (beforeId !== undefined) {
+      const rows = this.queryAll(
+        `SELECT * FROM events WHERE task_id = ? AND id < ? ORDER BY id ${orderBy} LIMIT ?`,
+        [taskId, Math.floor(beforeId), pageLimit],
+      );
+      return rows.map((row: any) => this.rowToTaskEvent(row));
+    }
+    const rows = this.queryAll(
+      `SELECT * FROM events WHERE task_id = ? ORDER BY id ${orderBy} LIMIT ?`,
+      [taskId, pageLimit],
+    );
+    return rows.map((row: any) => this.rowToTaskEvent(row));
+  }
+
+  getEventsByTypes(
+    eventTypes: readonly string[],
+    sortBy: 'asc' | 'desc' = 'desc',
+    limit = 50,
+  ): TaskEvent[] {
+    if (eventTypes.length === 0 || limit <= 0) return [];
+    const pageLimit = Math.floor(limit);
+    const orderBy = sortBy === 'desc' ? 'DESC' : 'ASC';
+    // One multi-type IN + ORDER BY created_at forces USE TEMP B-TREE over every
+    // matching row before LIMIT. Query each type via idx_events_type_created
+    // with LIMIT, then merge in process.
+    const merged: TaskEvent[] = [];
+    for (const eventType of eventTypes) {
+      const rows = this.queryAll(
+        `SELECT * FROM events
+         WHERE event_type = ?
+         ORDER BY created_at ${orderBy}, id ${orderBy}
+         LIMIT ?`,
+        [eventType, pageLimit],
+      );
+      for (const row of rows) {
+        merged.push(this.rowToTaskEvent(row));
+      }
+    }
+    merged.sort((a, b) => {
+      const byCreated = a.createdAt.localeCompare(b.createdAt);
+      if (byCreated !== 0) return sortBy === 'desc' ? -byCreated : byCreated;
+      return sortBy === 'desc' ? b.id - a.id : a.id - b.id;
+    });
+    return merged.slice(0, pageLimit);
+  }
+
+  countEventsByTypes(eventTypes: readonly string[]): Array<{
+    eventType: string;
+    count: number;
+    lastCreatedAt: string | null;
+  }> {
+    if (eventTypes.length === 0) return [];
+    const counts = this.readEventTypeCounts(eventTypes);
+    return eventTypes.map((eventType) => ({
+      eventType,
+      count: counts.get(eventType) ?? 0,
+      lastCreatedAt: this.maxCreatedAtForEventType(eventType),
+    }));
+  }
+
+  // Lifetime count per type in O(types): an indexed lookup into the
+  // trigger-maintained event_type_counters table instead of a COUNT(*) scan of
+  // the events table (linear — ~140ms at 2M rows on the main thread). Falls back
+  // to the exact-but-linear COUNT(*) GROUP BY when the counter table is absent —
+  // a read-only open of a database written before the backfill migration ran.
+  private readEventTypeCounts(eventTypes: readonly string[]): Map<string, number> {
+    const placeholders = eventTypes.map(() => '?').join(', ');
+    try {
+      const rows = this.queryAll(
+        `SELECT event_type AS eventType, count
+         FROM event_type_counters
+         WHERE event_type IN (${placeholders})`,
+        [...eventTypes],
+      );
+      return new Map(rows.map((row) => [String(row.eventType), Number(row.count ?? 0)]));
+    } catch (err) {
+      if (!this.eventCounterFallbackLogged) {
+        this.eventCounterFallbackLogged = true;
+        console.warn(
+          '[SQLiteAdapter] event_type_counters unavailable; falling back to linear COUNT(*). '
+          + `Cause: ${err instanceof Error ? err.message : String(err)}`,
         );
+      }
+      const rows = this.queryAll(
+        `SELECT event_type AS eventType, COUNT(*) AS count
+         FROM events
+         WHERE event_type IN (${placeholders})
+         GROUP BY event_type`,
+        [...eventTypes],
+      );
+      return new Map(rows.map((row) => [String(row.eventType), Number(row.count ?? 0)]));
+    }
+  }
+
+  // MAX(created_at) for a single type is an index seek on idx_events_type_created
+  // (O(log n)); the grouped form (MAX ... GROUP BY) degrades to a full scan, so
+  // resolve one type at a time.
+  private maxCreatedAtForEventType(eventType: string): string | null {
+    const row = this.queryOne(
+      'SELECT MAX(created_at) AS lastCreatedAt FROM events WHERE event_type = ?',
+      [eventType],
+    );
+    return (row?.lastCreatedAt as string | null) ?? null;
+  }
+
+  private rowToTaskEvent(row: any): TaskEvent {
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      eventType: row.event_type,
+      payload: row.payload ?? undefined,
+      createdAt: row.created_at,
+    };
+  }
+
+  listTaskEvents(filters: TaskEventListFilters = {}): TaskEvent[] {
+    if (filters.limit !== undefined && Math.floor(filters.limit) <= 0) {
+      return [];
+    }
+    if (filters.eventTypes && filters.eventTypes.length === 0) {
+      return [];
+    }
+
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filters.taskId) {
+      where.push('task_id = ?');
+      params.push(filters.taskId);
+    }
+    if (filters.eventTypes) {
+      where.push(`event_type IN (${filters.eventTypes.map(() => '?').join(', ')})`);
+      params.push(...filters.eventTypes);
+    }
+
+    const orderBy = filters.sortBy === 'asc' ? 'ASC' : 'DESC';
+    let limitSql = '';
+    if (filters.limit !== undefined) {
+      limitSql = ' LIMIT ?';
+      params.push(Math.floor(filters.limit));
+    }
+
+    const rows = this.queryAll(
+      `SELECT * FROM events ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY id ${orderBy}${limitSql}`,
+      params,
+    );
     return rows.map((row: any) => ({
       id: row.id,
       taskId: row.task_id,
@@ -1839,6 +1903,38 @@ export class SQLiteAdapter implements PersistenceAdapter {
     return rows.map((row) => this.rowToWorkerAction(row));
   }
 
+  getWorkerDesiredState(workerKind: string): WorkerDesiredStateRecord | undefined {
+    const row = this.queryOne(
+      'SELECT worker_kind, desired_enabled, updated_at FROM worker_desired_states WHERE worker_kind = ?',
+      [workerKind],
+    );
+    return row ? this.rowToWorkerDesiredState(row) : undefined;
+  }
+
+  setWorkerDesiredState(workerKind: string, desiredEnabled: boolean): WorkerDesiredStateRecord {
+    const updatedAt = new Date().toISOString();
+    this.execRun(
+      `INSERT INTO worker_desired_states (worker_kind, desired_enabled, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(worker_kind) DO UPDATE SET
+         desired_enabled = excluded.desired_enabled,
+         updated_at = excluded.updated_at`,
+      [workerKind, desiredEnabled ? 1 : 0, updatedAt],
+    );
+    const saved = this.getWorkerDesiredState(workerKind);
+    if (!saved) {
+      throw new Error(`Failed to persist worker desired state for ${workerKind}`);
+    }
+    return saved;
+  }
+
+  listWorkerDesiredStates(): WorkerDesiredStateRecord[] {
+    const rows = this.queryAll(
+      'SELECT worker_kind, desired_enabled, updated_at FROM worker_desired_states ORDER BY worker_kind ASC',
+    );
+    return rows.map((row) => this.rowToWorkerDesiredState(row));
+  }
+
   // ── Queries ─────────────────────────────────────────
 
   getSelectedExperiment(taskId: string): string | null {
@@ -1941,8 +2037,12 @@ export class SQLiteAdapter implements PersistenceAdapter {
   }
 
   deleteConversation(threadTs: string): void {
-    this.execRun('DELETE FROM conversation_messages WHERE thread_ts = ?', [threadTs]);
-    this.execRun('DELETE FROM conversations WHERE thread_ts = ?', [threadTs]);
+    this.runTransaction(() => {
+      this.db.run('DELETE FROM slack_launch_contexts WHERE thread_ts = ?', [threadTs]);
+      this.db.run('DELETE FROM slack_pending_confirmations WHERE thread_ts = ?', [threadTs]);
+      this.db.run('DELETE FROM conversation_messages WHERE thread_ts = ?', [threadTs]);
+      this.db.run('DELETE FROM conversations WHERE thread_ts = ?', [threadTs]);
+    });
   }
 
   listActiveConversations(): Conversation[] {
@@ -1961,21 +2061,47 @@ export class SQLiteAdapter implements PersistenceAdapter {
     }));
   }
 
+  listActivePlanConversations(channelId: string, userId: string): Conversation[] {
+    const rows = this.queryAll(`
+      SELECT * FROM conversations
+      WHERE channel_id = ? AND user_id = ? AND mode = 'plan' AND plan_submitted = 0
+      ORDER BY updated_at DESC
+    `, [channelId, userId]);
+    return rows.map((row: any) => ({
+      threadTs: row.thread_ts as string,
+      channelId: row.channel_id as string,
+      userId: row.user_id as string,
+      mode: this.normalizeConversationMode(row.mode),
+      extractedPlan: (row.extracted_plan as string) ?? null,
+      planSubmitted: row.plan_submitted === 1,
+      createdAt: row.created_at as string,
+      updatedAt: row.updated_at as string,
+    }));
+  }
+
   deleteConversationsOlderThan(cutoffIso: string): number {
-    this.ensureWritable();
-    // Delete messages first (FK constraint)
-    this.db.run(`
-      DELETE FROM conversation_messages WHERE thread_ts IN (
-        SELECT thread_ts FROM conversations WHERE updated_at < ?
-      )
-    `, [cutoffIso]);
-    this.db.run(
-      'DELETE FROM conversations WHERE updated_at < ?',
-      [cutoffIso],
-    );
-    const changes = this.db.getRowsModified();
-    this.dirty = true;
-    return changes;
+    return this.runTransaction(() => {
+      this.db.run(`
+        DELETE FROM slack_launch_contexts WHERE thread_ts IN (
+          SELECT thread_ts FROM conversations WHERE updated_at < ?
+        )
+      `, [cutoffIso]);
+      this.db.run(`
+        DELETE FROM slack_pending_confirmations WHERE thread_ts IN (
+          SELECT thread_ts FROM conversations WHERE updated_at < ?
+        )
+      `, [cutoffIso]);
+      this.db.run(`
+        DELETE FROM conversation_messages WHERE thread_ts IN (
+          SELECT thread_ts FROM conversations WHERE updated_at < ?
+        )
+      `, [cutoffIso]);
+      this.db.run(
+        'DELETE FROM conversations WHERE updated_at < ?',
+        [cutoffIso],
+      );
+      return this.db.getRowsModified();
+    });
   }
 
   // ── Conversation Messages ──────────────────────────────
@@ -1993,6 +2119,14 @@ export class SQLiteAdapter implements PersistenceAdapter {
     `, [threadTs, nextSeq, role, content]);
   }
 
+  countMessages(threadTs: string): number {
+    const row = this.queryOne(
+      'SELECT COUNT(*) AS count FROM conversation_messages WHERE thread_ts = ?',
+      [threadTs],
+    ) as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
   loadMessages(threadTs: string): ConversationMessage[] {
     const rows = this.queryAll(
       'SELECT * FROM conversation_messages WHERE thread_ts = ? ORDER BY seq ASC',
@@ -2008,13 +2142,100 @@ export class SQLiteAdapter implements PersistenceAdapter {
     }));
   }
 
+  // ── Slack Plan Submission Session State ─────────────────
+
+  saveSlackLaunchContext(context: SlackLaunchContext): void {
+    this.execRun(`
+      INSERT OR REPLACE INTO slack_launch_contexts
+        (thread_ts, repo_url, harness_preset, working_dir, requested_by, lobby_channel_id)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [
+      context.threadTs,
+      context.repoUrl,
+      context.harnessPreset,
+      context.workingDir,
+      context.requestedBy,
+      context.lobbyChannelId,
+    ]);
+  }
+
+  loadSlackLaunchContext(threadTs: string): SlackLaunchContext | undefined {
+    const row = this.queryOne(
+      'SELECT * FROM slack_launch_contexts WHERE thread_ts = ?',
+      [threadTs],
+    ) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      threadTs: row.thread_ts as string,
+      repoUrl: row.repo_url as string,
+      harnessPreset: row.harness_preset as string,
+      workingDir: row.working_dir as string,
+      requestedBy: row.requested_by as string,
+      lobbyChannelId: row.lobby_channel_id as string,
+    };
+  }
+
+  deleteSlackLaunchContext(threadTs: string): void {
+    this.execRun('DELETE FROM slack_launch_contexts WHERE thread_ts = ?', [threadTs]);
+  }
+
+  saveSlackPendingConfirmation(confirmation: SlackPendingConfirmation): void {
+    this.execRun(`
+      INSERT OR REPLACE INTO slack_pending_confirmations
+        (confirm_key, thread_ts, channel_id, user_id, kind, payload_json, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      confirmation.confirmKey,
+      confirmation.threadTs,
+      confirmation.channelId,
+      confirmation.userId,
+      confirmation.kind,
+      confirmation.payloadJson,
+      confirmation.createdAt,
+      confirmation.expiresAt,
+    ]);
+  }
+
+  loadSlackPendingConfirmation(confirmKey: string): SlackPendingConfirmation | undefined {
+    const row = this.queryOne(
+      'SELECT * FROM slack_pending_confirmations WHERE confirm_key = ?',
+      [confirmKey],
+    ) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      confirmKey: row.confirm_key as string,
+      threadTs: row.thread_ts as string,
+      channelId: row.channel_id as string,
+      userId: row.user_id as string,
+      kind: row.kind as string,
+      payloadJson: row.payload_json as string,
+      createdAt: row.created_at as string,
+      expiresAt: row.expires_at as string,
+    };
+  }
+
+  deleteSlackPendingConfirmation(confirmKey: string): void {
+    this.execRun('DELETE FROM slack_pending_confirmations WHERE confirm_key = ?', [confirmKey]);
+  }
+
+  purgeExpiredSlackPendingConfirmations(nowIso: string): number {
+    this.ensureWritable();
+    this.db.run(
+      'DELETE FROM slack_pending_confirmations WHERE expires_at <= ?',
+      [nowIso],
+    );
+    const changes = this.db.getRowsModified();
+    this.dirty = true;
+    return changes;
+  }
+
   // ── Workflow Channels (Slack workflow↔channel mapping) ──
 
   saveWorkflowChannel(rec: WorkflowChannel): void {
     this.execRun(`
       INSERT OR REPLACE INTO workflow_channels
-        (workflow_id, channel_id, requested_by, lobby_channel_id, lobby_thread_ts, harness_preset, repo_url, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (workflow_id, channel_id, requested_by, lobby_channel_id, lobby_thread_ts, harness_preset, repo_url, progress_card_ts, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       rec.workflowId,
       rec.channelId,
@@ -2023,6 +2244,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       rec.lobbyThreadTs ?? null,
       rec.harnessPreset ?? null,
       rec.repoUrl ?? null,
+      rec.progressCardTs ?? null,
       rec.createdAt,
     ]);
   }
@@ -2036,6 +2258,7 @@ export class SQLiteAdapter implements PersistenceAdapter {
       lobbyThreadTs: (row.lobby_thread_ts as string) ?? undefined,
       harnessPreset: (row.harness_preset as string) ?? undefined,
       repoUrl: (row.repo_url as string) ?? undefined,
+      progressCardTs: (row.progress_card_ts as string) ?? undefined,
       createdAt: row.created_at as string,
     };
   }
@@ -2260,6 +2483,10 @@ export class SQLiteAdapter implements PersistenceAdapter {
     return this.taskAttemptRepo.loadAttempts(nodeId);
   }
 
+  loadCostAttributionAttempts(nodeId: string): CostAttributionAttempt[] {
+    return this.taskAttemptRepo.loadCostAttributionAttempts(nodeId);
+  }
+
   loadActionGraphAttempts(
     nodeId: string,
     selectedAttemptId?: string,
@@ -2349,78 +2576,12 @@ export class SQLiteAdapter implements PersistenceAdapter {
       this.checkpointWal('PASSIVE');
     }
     this.db.close();
+    if (this.dbPath && !this.readOnly) {
+      clearOwnerMarker(this.dbPath);
+    }
   }
 
   // ── Helpers ───────────────────────────────────────────
-
-  private loadWorkflowRollups(workflowIds: string[]): Map<string, WorkflowRollup> {
-    const rollups = new Map<string, WorkflowRollup>();
-    if (workflowIds.length === 0) return rollups;
-
-    const placeholders = workflowIds.map(() => '?').join(', ');
-    const taskRows = this.queryAll(
-      `SELECT id, workflow_id, description, status, dependencies, error, protocol_error_code, protocol_error_message,
-              pending_fix_error, exit_code, completed_at, agent_session_id, agent_name,
-              review_url, input_prompt, is_fixing_with_ai
-       FROM tasks
-       WHERE workflow_id IN (${placeholders})
-       ORDER BY id ASC`,
-      workflowIds,
-    );
-
-    return this.computeWorkflowRollupsFromRows(workflowIds, taskRows);
-  }
-
-  private computeWorkflowRollupsFromRows(
-    workflowIds: string[],
-    taskRows: Record<string, unknown>[],
-  ): Map<string, WorkflowRollup> {
-    const rollups = new Map<string, WorkflowRollup>();
-    const tasksByWorkflow = new Map<string, WorkflowRollupTaskSummary[]>();
-    for (const row of taskRows as any[]) {
-      const workflowId = String(row.workflow_id);
-      const tasks = tasksByWorkflow.get(workflowId) ?? [];
-      tasks.push({
-        id: String(row.id),
-        description: String(row.description),
-        status: row.status as TaskStatus,
-        dependencies: JSON.parse(row.dependencies || '[]'),
-        execution: {
-          error: row.error ?? undefined,
-          protocolErrorCode: row.protocol_error_code ?? undefined,
-          protocolErrorMessage: row.protocol_error_message ?? undefined,
-          pendingFixError: row.pending_fix_error ?? undefined,
-          exitCode: row.exit_code ?? undefined,
-          completedAt: row.completed_at ?? undefined,
-          agentSessionId: row.agent_session_id ?? undefined,
-          agentName: row.agent_name ?? undefined,
-          reviewUrl: row.review_url ?? undefined,
-          inputPrompt: row.input_prompt ?? undefined,
-          isFixingWithAI: row.is_fixing_with_ai === 1,
-        },
-      });
-      tasksByWorkflow.set(workflowId, tasks);
-    }
-
-    for (const workflowId of workflowIds) {
-      const tasks = tasksByWorkflow.get(workflowId) ?? [];
-      rollups.set(workflowId, computeWorkflowRollupFromSummaries(tasks));
-    }
-
-    return rollups;
-  }
-
-  private rowToWorkflow(row: any, rollup?: WorkflowRollup): Workflow {
-    return mapRowToWorkflow(row, rollup);
-  }
-
-  private rowToTask(row: any): TaskState {
-    return mapRowToTask(row);
-  }
-
-  private reconcileTaskFromSelectedAttempt(task: TaskState): TaskState {
-    return this.taskAttemptRepo.reconcileTaskFromSelectedAttempt(task);
-  }
 
   private mapTerminalSessionRow(row: TerminalSessionRow): TerminalSessionRecord | undefined {
     if (row.status !== 'running' && row.status !== 'exited') return undefined;
@@ -2491,6 +2652,17 @@ export class SQLiteAdapter implements PersistenceAdapter {
       if (!id || !title || !presetKey || !createdAt || !updatedAt || !isInAppPlanningSessionStatus(row.status)) {
         return undefined;
       }
+      const terminalMode = row.terminal_mode === undefined || row.terminal_mode === null
+        ? 'chat'
+        : isPlanningTerminalMode(row.terminal_mode)
+          ? row.terminal_mode
+          : undefined;
+      if (!terminalMode) {
+        return undefined;
+      }
+      if (!isPlanningTerminalStatus(row.terminal_status)) {
+        return undefined;
+      }
       if (
         row.status === 'submitted'
         && (
@@ -2533,8 +2705,15 @@ export class SQLiteAdapter implements PersistenceAdapter {
         status: row.status,
         messages,
         ...(draftPlanSummary ? { draftPlanSummary } : {}),
+        ...(typeof row.draft_plan_text === 'string' ? { draftPlanText: row.draft_plan_text } : {}),
         ...(typeof row.submitted_workflow_id === 'string' ? { submittedWorkflowId: row.submitted_workflow_id } : {}),
         ...(typeof row.submitted_plan_name === 'string' ? { submittedPlanName: row.submitted_plan_name } : {}),
+        terminalMode,
+        ...(typeof row.terminal_session_id === 'string' ? { terminalSessionId: row.terminal_session_id } : {}),
+        ...(row.terminal_status ? { terminalStatus: row.terminal_status } : {}),
+        ...(typeof row.terminal_exit_code === 'number' ? { terminalExitCode: row.terminal_exit_code } : {}),
+        terminalOutputSnapshot: typeof row.terminal_output_snapshot === 'string' ? row.terminal_output_snapshot : '',
+        ...(typeof row.terminal_updated_at === 'string' ? { terminalUpdatedAt: row.terminal_updated_at } : {}),
         pendingResponse: row.pending_response === 1,
         createdAt,
         updatedAt,
@@ -2823,24 +3002,37 @@ export class SQLiteAdapter implements PersistenceAdapter {
     poolMemberId?: string;
     metadata?: unknown;
     leaseMs?: number;
+    /** Max live holders for this resource key. Default 1 preserves exclusive semantics. */
+    maxHolders?: number;
   }): boolean {
     const now = new Date();
     const nowIso = now.toISOString();
     const leaseExpiresAt = new Date(now.getTime() + (options.leaseMs ?? EXECUTION_RESOURCE_LEASE_MS)).toISOString();
+    const maxHolders = Math.max(1, Math.floor(options.maxHolders ?? 1));
     return this.runTransaction(() => {
       this.execRun(
         'DELETE FROM execution_resource_leases WHERE resource_key = ? AND lease_expires_at <= ?',
         [options.resourceKey, nowIso],
       );
-      const active = this.queryOne(
+      const existingForHolder = this.queryOne(
         `SELECT holder_id FROM execution_resource_leases
          WHERE resource_key = ?
-           AND holder_id != ?
+           AND holder_id = ?
            AND lease_expires_at > ?
          LIMIT 1`,
         [options.resourceKey, options.holderId, nowIso],
       );
-      if (active) return false;
+      if (!existingForHolder) {
+        const otherHolders = this.queryOne(
+          `SELECT COUNT(*) AS cnt FROM execution_resource_leases
+           WHERE resource_key = ?
+             AND holder_id != ?
+             AND lease_expires_at > ?`,
+          [options.resourceKey, options.holderId, nowIso],
+        );
+        const otherCount = Number(otherHolders?.cnt ?? 0);
+        if (otherCount >= maxHolders) return false;
+      }
 
       this.execRun(
         `INSERT OR REPLACE INTO execution_resource_leases (
@@ -2862,6 +3054,39 @@ export class SQLiteAdapter implements PersistenceAdapter {
       );
       return true;
     });
+  }
+
+  countExecutionResourceLeases(resourceKey: string, nowIso?: string): number {
+    const cutoff = nowIso ?? new Date().toISOString();
+    const row = this.queryOne(
+      `SELECT COUNT(*) AS cnt FROM execution_resource_leases
+       WHERE resource_key = ?
+         AND lease_expires_at > ?`,
+      [resourceKey, cutoff],
+    );
+    return Number(row?.cnt ?? 0);
+  }
+
+  listExecutionResourceLeasesByKey(resourceKey: string, nowIso?: string): ExecutionResourceLease[] {
+    const cutoff = nowIso ?? new Date().toISOString();
+    return this.queryAll(
+      `SELECT * FROM execution_resource_leases
+       WHERE resource_key = ?
+         AND lease_expires_at > ?
+       ORDER BY acquired_at ASC`,
+      [resourceKey, cutoff],
+    ).map((row) => ({
+      resourceKey: String(row.resource_key),
+      resourceType: String(row.resource_type),
+      holderId: String(row.holder_id),
+      taskId: row.task_id ? String(row.task_id) : undefined,
+      poolId: row.pool_id ? String(row.pool_id) : undefined,
+      poolMemberId: row.pool_member_id ? String(row.pool_member_id) : undefined,
+      acquiredAt: String(row.acquired_at),
+      lastHeartbeatAt: String(row.last_heartbeat_at),
+      leaseExpiresAt: String(row.lease_expires_at),
+      metadata: row.metadata_json ? JSON.parse(String(row.metadata_json)) : undefined,
+    }));
   }
 
   renewExecutionResourceLease(
@@ -2892,6 +3117,20 @@ export class SQLiteAdapter implements PersistenceAdapter {
       'DELETE FROM execution_resource_leases WHERE resource_key = ? AND holder_id = ?',
       [resourceKey, holderId],
     );
+  }
+
+  /**
+   * Globally delete expired execution-resource leases. Claim-time reclaim only
+   * clears the same `resource_key`; after owner restart, orphaned keys would
+   * otherwise sit until something tries that key again.
+   */
+  releaseExpiredExecutionResourceLeases(nowIso?: string): number {
+    const cutoff = nowIso ?? new Date().toISOString();
+    this.execRun(
+      'DELETE FROM execution_resource_leases WHERE lease_expires_at <= ?',
+      [cutoff],
+    );
+    return (this.db.getRowsModified?.() ?? 0) as number;
   }
 
   listExecutionResourceLeases(): ExecutionResourceLease[] {
@@ -3090,12 +3329,14 @@ export class SQLiteAdapter implements PersistenceAdapter {
         const candidateId = Number(candidate.id);
 
         let staleReason: string | undefined;
+        const taskStatus = String(candidate.current_task_status ?? '');
+        const launchClaimable = taskStatus === 'pending' || taskStatus === 'queued';
         if (!candidate.current_task_id) {
           staleReason = `Launch dispatch ${candidateId} is stale: task ${String(candidate.task_id)} no longer exists`;
-        } else if (String(candidate.current_task_status) !== 'pending') {
+        } else if (!launchClaimable) {
           staleReason =
             `Launch dispatch ${candidateId} is stale: task ${String(candidate.task_id)} ` +
-            `status is ${String(candidate.current_task_status)}`;
+            `status is ${taskStatus}`;
         } else if (String(candidate.current_selected_attempt_id ?? '') !== String(candidate.attempt_id)) {
           staleReason =
             `Launch dispatch ${candidateId} is stale: attempt ${String(candidate.attempt_id)} ` +
@@ -3187,16 +3428,24 @@ export class SQLiteAdapter implements PersistenceAdapter {
   listAbandonableLaunchDispatchLeases(options: {
     nowIso?: string;
     maxAttempts: number;
+    maxLaunchAgeMs?: number;
   }): TaskLaunchDispatch[] {
     const now = options.nowIso ?? new Date().toISOString();
+    const maxLaunchAgeMs = options.maxLaunchAgeMs;
+    const ageCutoff = maxLaunchAgeMs === undefined
+      ? null
+      : new Date(new Date(now).getTime() - maxLaunchAgeMs).toISOString();
     const rows = this.queryAll(
       `SELECT * FROM task_launch_dispatch
          WHERE state = 'leased'
            AND fenced_until IS NOT NULL
            AND fenced_until < ?
-           AND attempts_count >= ?
+           AND (
+             attempts_count >= ?
+             OR (? IS NOT NULL AND enqueued_at <= ?)
+           )
          ORDER BY id ASC`,
-      [now, options.maxAttempts],
+      [now, options.maxAttempts, ageCutoff, ageCutoff],
     );
     return rows.map((row) => this.rowToTaskLaunchDispatch(row));
   }
@@ -3355,6 +3604,14 @@ export class SQLiteAdapter implements PersistenceAdapter {
 
   private rowToWorkerAction(row: Record<string, unknown>): WorkerActionRecord {
     return mapRowToWorkerAction(row);
+  }
+
+  private rowToWorkerDesiredState(row: Record<string, unknown>): WorkerDesiredStateRecord {
+    return {
+      workerKind: String(row.worker_kind),
+      desiredEnabled: Number(row.desired_enabled) !== 0,
+      updatedAt: String(row.updated_at),
+    };
   }
 
   private requeueWorkflowMutationLease(workflowId: string): void {

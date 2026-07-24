@@ -22,7 +22,7 @@ import {
   parseMergeConflictError,
 } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import { DEFAULT_EXECUTION_AGENT, type TaskRunner, type ReviewGateCiFailureTrigger } from '@invoker/execution-engine';
+import { DEFAULT_EXECUTION_AGENT, type TaskRunner, type ReviewGateCiFailureTrigger, formatAgentFailureForTask } from '@invoker/execution-engine';
 import { normalizeMergeModeForPersistence } from './merge-mode.js';
 import {
   isReviewGateCiContextStale,
@@ -32,6 +32,7 @@ import {
 import { createDeleteAllSnapshot } from './delete-all-snapshot.js';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
 import { isDispatchableLaunch } from './global-topup.js';
+import { loadConfig, resolveConflictResolutionSettings, resolveDefaultExecutionAgent } from './config.js';
 
 type LoadedWorkflow = NonNullable<ReturnType<SQLiteAdapter['loadWorkflow']>>;
 type FreshBaseState = { branch: string; commit: string };
@@ -832,6 +833,7 @@ export async function resolveConflictAction(
   deps: Pick<ActionDeps, 'orchestrator' | 'persistence' | 'autoApproveAIFixes'> & { taskExecutor: TaskRunner },
   agentName?: string,
   signal?: AbortSignal,
+  options?: { pathDefaultAgent?: string },
 ): Promise<{ autoApproved: boolean; started: TaskState[] }> {
   const { orchestrator, persistence, taskExecutor } = deps;
   const entryLineage = captureTaskLineage(taskId, orchestrator);
@@ -840,12 +842,17 @@ export async function resolveConflictAction(
   const lineage = captureTaskLineage(taskId, orchestrator);
   try {
     assertLineageCurrent(lineage, orchestrator, signal);
-    await taskExecutor.resolveConflict(taskId, savedError, agentName);
+    const config = loadConfig();
+    const settings = resolveConflictResolutionSettings(config, {
+      explicitAgent: agentName,
+      pathDefaultAgent: options?.pathDefaultAgent ?? resolveDefaultExecutionAgent(config),
+    });
+    await taskExecutor.resolveConflict(taskId, savedError, settings.agent, settings.model);
     assertLineageCurrent(lineage, orchestrator, signal);
     return await finalizeAppliedFix(taskId, savedError, deps, signal, lineage);
   } catch (err) {
     if (err instanceof StaleLineageError) throw err;
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatAgentFailureForTask(err);
     assertLineageCurrent(lineage, orchestrator, signal);
     persistence.appendTaskOutput(taskId, `\n[Resolve Conflict] Failed: ${msg}`);
     assertLineageCurrent(lineage, orchestrator, signal);
@@ -894,8 +901,10 @@ export async function fixWithAgentAction(
   const effectiveAgentName = options.agentName ?? resolveTaskRunnerDefaultExecutionAgent(taskExecutor);
   const savedError = task.execution.error ?? '';
   const recoveryRoute = await selectFailureRecoveryRouteForAction(task, savedError, taskExecutor, options.recoveryRoute);
-  if (recoveryRoute.kind === 'invalidMergeWorkspace') {
-    const msg = invalidMergeWorkspaceMessage(recoveryRoute);
+  if (recoveryRoute.kind === 'invalidMergeWorkspace' || recoveryRoute.kind === 'invalidTaskWorkspace') {
+    const msg = recoveryRoute.kind === 'invalidMergeWorkspace'
+      ? invalidMergeWorkspaceMessage(recoveryRoute)
+      : invalidTaskWorkspaceMessage();
     const errorLabel = options.failureOutputLabel ?? `Fix with ${effectiveAgentName}`;
     persistence.appendTaskOutput(taskId, `\n[${errorLabel}] ${msg}`);
     // No session has begun; on a task with no fix-session evidence this is a
@@ -931,7 +940,16 @@ export async function fixWithAgentAction(
   try {
     assertLineageCurrent(lineage, orchestrator, options.signal);
     if (recoveryRoute.kind === 'resolveConflict') {
-      await taskExecutor.resolveConflict(taskId, persistedSavedError, effectiveAgentName);
+      const conflictSettings = resolveConflictResolutionSettings(loadConfig(), {
+        explicitAgent: options.agentName,
+        pathDefaultAgent: resolveTaskRunnerDefaultExecutionAgent(taskExecutor),
+      });
+      await taskExecutor.resolveConflict(
+        taskId,
+        persistedSavedError,
+        conflictSettings.agent,
+        conflictSettings.model,
+      );
     } else {
       const output = persistence.getTaskOutput(taskId);
       const fixContext = options.reviewGateContext?.fixContext;
@@ -950,7 +968,7 @@ export async function fixWithAgentAction(
     };
   } catch (err) {
     if (err instanceof StaleLineageError) throw err;
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatAgentFailureForTask(err);
     const errorLabel = options.failureOutputLabel
       ?? (recoveryRoute.kind === 'resolveConflict' ? 'Resolve Conflict' : `Fix with ${effectiveAgentName}`);
     assertLineageCurrent(lineage, orchestrator, options.signal);
@@ -990,7 +1008,8 @@ export type FailureRecoveryRoute =
   | { kind: 'fixWithAgent' }
   | { kind: 'resolveConflict' }
   | { kind: 'recreateWorkflowFromFreshBase'; workflowId: string }
-  | { kind: 'invalidMergeWorkspace'; workspacePath?: string };
+  | { kind: 'invalidMergeWorkspace'; workspacePath?: string }
+  | { kind: 'invalidTaskWorkspace' };
 
 export function selectFailureRecoveryRoute(
   task: TaskState,
@@ -1020,13 +1039,18 @@ async function selectFailureRecoveryRouteForAction(
   initialRoute?: FailureRecoveryRoute,
 ): Promise<FailureRecoveryRoute> {
   const route = initialRoute ?? selectFailureRecoveryRoute(task, savedError);
-  if (route.kind !== 'fixWithAgent' || !task.config.isMergeNode) {
+  if (route.kind !== 'fixWithAgent') {
     return route;
   }
 
   const workspacePath = task.execution.workspacePath?.trim();
   if (!workspacePath) {
-    return { kind: 'invalidMergeWorkspace' };
+    return task.config.isMergeNode
+      ? { kind: 'invalidMergeWorkspace' }
+      : { kind: 'invalidTaskWorkspace' };
+  }
+  if (!task.config.isMergeNode) {
+    return route;
   }
 
   try {
@@ -1044,6 +1068,10 @@ function freshBaseRecoveryMessage(_route: Extract<FailureRecoveryRoute, { kind: 
 function invalidMergeWorkspaceMessage(route: Extract<FailureRecoveryRoute, { kind: 'invalidMergeWorkspace' }>): string {
   const suffix = route.workspacePath ? `: ${route.workspacePath}` : '';
   return `Cannot apply a fix because this merge gate's saved workspace is missing or is not a git repository${suffix}. This task state is stale or corrupted. Recreate this merge-gate task from a fresh base, then rerun the gate.`;
+}
+
+function invalidTaskWorkspaceMessage(): string {
+  return 'Cannot apply a fix because this task has no saved workspace. This task state is stale or corrupted. Recreate the task or recreate the workflow, then rerun it.';
 }
 
 function isInvalidGitWorkspaceError(err: unknown): boolean {
@@ -1276,7 +1304,15 @@ export async function autoFixOnFailure(
       savedErrorLength: persistedSavedError.length,
     });
     if (recoveryRoute.kind === 'resolveConflict') {
-      await taskExecutor.resolveConflict(taskId, persistedSavedError, agentSelection.selectedAgent);
+      const conflictSettings = resolveConflictResolutionSettings(loadConfig(), {
+        pathDefaultAgent: agentSelection.selectedAgent,
+      });
+      await taskExecutor.resolveConflict(
+        taskId,
+        persistedSavedError,
+        conflictSettings.agent,
+        conflictSettings.model,
+      );
     } else {
       const output = persistence.getTaskOutput(taskId);
       await taskExecutor.fixWithAgent(taskId, output, agentSelection.selectedAgent, persistedSavedError);
@@ -1343,7 +1379,7 @@ export async function autoFixOnFailure(
     if (runnable.length > 0) await taskExecutor.executeTasks(runnable);
   } catch (err) {
     if (err instanceof StaleLineageError) throw err;
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = formatAgentFailureForTask(err);
     const diagnostics = formatAutoFixDiagnostics(err);
     if (lineage) assertLineageCurrent(lineage, orchestrator, deps.signal);
     persistence.logEvent?.(taskId, 'debug.auto-fix', {

@@ -94,6 +94,7 @@ function normalizeJsonValue(value: unknown, seen = new WeakSet<object>()): JsonS
 
 const STATUS_COLORS: Record<TaskStatus, string> = {
   pending: DIM,
+  queued: CYAN,
   running: YELLOW,
   fixing_with_ai: MAGENTA,
   completed: GREEN,
@@ -108,6 +109,7 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
 
 const STATUS_ICONS: Record<TaskStatus, string> = {
   pending: '○',
+  queued: '◔',
   running: '●',
   fixing_with_ai: '🔧',
   completed: '✓',
@@ -135,7 +137,7 @@ export function formatTaskStatus(task: TaskState): string {
   const color = isFixing ? MAGENTA : isFixApproval ? YELLOW : (STATUS_COLORS[task.status] ?? RESET);
   const icon = isFixing ? '🔧' : isFixApproval ? '🔧' : (STATUS_ICONS[task.status] ?? '?');
   const label = isFixing ? 'fixing_with_ai' : isFixApproval ? 'fix_approval' : task.status;
-  const phaseSuffix = task.status === 'running' && task.execution.phase
+  const phaseSuffix = (task.status === 'running' || task.status === 'queued') && task.execution.phase
     ? ` (phase=${task.execution.phase})`
     : '';
   const conflictSuffix = task.execution.mergeConflict
@@ -206,11 +208,52 @@ export function formatEventLog(events: TaskEvent[]): string {
 
   const lines = events.map((event) => {
     const timestamp = event.createdAt;
-    const payload = event.payload ? ` ${event.payload}` : '';
-    return `${DIM}[${timestamp}]${RESET} ${BOLD}${event.taskId}${RESET}: ${event.eventType}${payload}`;
+    const rendered = renderTaskEvent(event);
+    const payload = rendered.payload ? ` ${rendered.payload}` : '';
+    return `${DIM}[${timestamp}]${RESET} ${BOLD}${event.taskId}${RESET}: ${rendered.eventType}${payload}`;
   });
 
   return lines.join('\n');
+}
+
+function parseTaskEventPayload(payload: string | undefined): Record<string, unknown> | undefined {
+  if (!payload) return undefined;
+  try {
+    const parsed = JSON.parse(payload);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stringPayloadValue(payload: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = payload?.[key];
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function renderTaskEvent(event: TaskEvent): { eventType: string; payload?: string } {
+  if (event.eventType !== 'task.worker_action') {
+    return { eventType: event.eventType, ...(event.payload ? { payload: event.payload } : {}) };
+  }
+
+  const payload = parseTaskEventPayload(event.payload);
+  const workerKind = stringPayloadValue(payload, 'workerKind') ?? 'worker';
+  const actionType = stringPayloadValue(payload, 'actionType') ?? 'action';
+  const status = stringPayloadValue(payload, 'status') ?? 'recorded';
+  const summary = stringPayloadValue(payload, 'summary');
+  const reason = stringPayloadValue(payload, 'reason');
+  const renderedPayload = [
+    `${workerKind}/${actionType}`,
+    `[${status}]`,
+    ...(summary ? [summary] : []),
+    ...(reason ? [`reason=${reason}`] : []),
+  ].join(' ');
+  return {
+    eventType: 'task.worker_action',
+    payload: escapeTerminalText(renderedPayload),
+  };
 }
 
 export function formatWorkerActions(actions: WorkerActionRecord[]): string {
@@ -283,6 +326,8 @@ export function formatWorkerDecisions(actions: WorkerActionSummary[]): string {
 export function formatQueueStatus(status: {
   maxConcurrency: number;
   runningCount: number;
+  activeExecutionCount: number;
+  launchingCount: number;
   running: Array<{ taskId: string; description: string }>;
   queued: Array<{ taskId: string; priority: number; description: string }>;
 }): string {
@@ -290,12 +335,11 @@ export function formatQueueStatus(status: {
 
   // Concurrency header
   lines.push(
-    `${BOLD}Concurrency:${RESET} ${status.runningCount} / ${status.maxConcurrency} running`,
+    `${BOLD}Concurrency:${RESET} running=${status.activeExecutionCount} launching=${status.launchingCount} slots=${status.runningCount}/${status.maxConcurrency} queued=${status.queued.length}`,
   );
   lines.push('');
 
-  // Running section
-  lines.push(`${BOLD}${YELLOW}Running (${status.running.length}):${RESET}`);
+  lines.push(`${BOLD}${YELLOW}Active slots (${status.running.length}):${RESET}`);
   if (status.running.length === 0) {
     lines.push(`${DIM}  (none)${RESET}`);
   } else {

@@ -96,6 +96,17 @@ export const SCHEMA_DDL = `
 
         FOREIGN KEY (workflow_id) REFERENCES workflows(id)
       );
+      CREATE TABLE IF NOT EXISTS task_crash_preservation (
+        task_id TEXT PRIMARY KEY,
+        preserved_at TEXT NOT NULL,
+        owner_pid INTEGER,
+        diagnostic_report_path TEXT,
+        diagnostic_summary TEXT,
+        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_task_crash_preservation_preserved_at
+        ON task_crash_preservation(preserved_at);
 
       CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +119,38 @@ export const SCHEMA_DDL = `
 
       CREATE INDEX IF NOT EXISTS idx_events_task_id_id
         ON events(task_id, id);
+
+      CREATE INDEX IF NOT EXISTS idx_events_event_type_id
+        ON events(event_type, id);
+
+      CREATE INDEX IF NOT EXISTS idx_events_type_created
+        ON events(event_type, created_at);
+
+      -- O(1) lifetime counts per event_type. COUNT(*) GROUP BY over the events
+      -- table is linear in row count (~140ms at 2M rows) and runs on the main
+      -- thread on every recovery-worker status read; the counter makes it a
+      -- single indexed lookup. Triggers keep it exact across all INSERT/DELETE
+      -- paths (their presence also disables the DELETE truncate optimization,
+      -- so a bare DELETE FROM events still decrements row-by-row).
+      CREATE TABLE IF NOT EXISTS event_type_counters (
+        event_type TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TRIGGER IF NOT EXISTS trg_events_counter_insert
+      AFTER INSERT ON events
+      BEGIN
+        INSERT INTO event_type_counters (event_type, count)
+        VALUES (NEW.event_type, 1)
+        ON CONFLICT(event_type) DO UPDATE SET count = count + 1;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS trg_events_counter_delete
+      AFTER DELETE ON events
+      BEGIN
+        UPDATE event_type_counters SET count = count - 1
+        WHERE event_type = OLD.event_type;
+      END;
 
       CREATE TABLE IF NOT EXISTS activity_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,14 +184,44 @@ export const SCHEMA_DDL = `
       CREATE INDEX IF NOT EXISTS idx_conv_messages_thread
         ON conversation_messages(thread_ts, seq);
 
+      CREATE TABLE IF NOT EXISTS slack_launch_contexts (
+        thread_ts TEXT PRIMARY KEY,
+        repo_url TEXT NOT NULL,
+        harness_preset TEXT NOT NULL,
+        working_dir TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        lobby_channel_id TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS slack_pending_confirmations (
+        confirm_key TEXT PRIMARY KEY,
+        thread_ts TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_slack_pending_confirmations_expiry
+        ON slack_pending_confirmations(expires_at);
+
       CREATE TABLE IF NOT EXISTS in_app_planning_sessions (
         session_id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         preset_key TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('still_discussing', 'waiting_for_answer', 'draft_ready', 'submitted')),
         draft_plan_summary_json TEXT CHECK (draft_plan_summary_json IS NULL OR json_valid(draft_plan_summary_json)),
+        draft_plan_text TEXT,
         submitted_workflow_id TEXT,
         submitted_plan_name TEXT,
+        terminal_mode TEXT NOT NULL DEFAULT 'chat' CHECK (terminal_mode IN ('chat', 'tmux')),
+        terminal_session_id TEXT,
+        terminal_status TEXT CHECK (terminal_status IS NULL OR terminal_status IN ('running', 'exited')),
+        terminal_exit_code INTEGER,
+        terminal_output_snapshot TEXT NOT NULL DEFAULT '',
+        terminal_updated_at TEXT,
         pending_response INTEGER NOT NULL DEFAULT 0 CHECK (pending_response IN (0, 1)),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -179,6 +252,7 @@ export const SCHEMA_DDL = `
         lobby_thread_ts TEXT,
         harness_preset TEXT,
         repo_url TEXT,
+        progress_card_ts TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -342,6 +416,15 @@ export const SCHEMA_DDL = `
       CREATE INDEX IF NOT EXISTS idx_worker_actions_workflow_status
         ON worker_actions(workflow_id, worker_kind, status);
 
+      CREATE INDEX IF NOT EXISTS idx_worker_actions_kind_updated
+        ON worker_actions(worker_kind, updated_at DESC, id);
+
+      CREATE TABLE IF NOT EXISTS worker_desired_states (
+        worker_kind TEXT PRIMARY KEY,
+        desired_enabled INTEGER NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+
       CREATE TABLE IF NOT EXISTS execution_resource_leases (
         resource_key TEXT NOT NULL,
         resource_type TEXT NOT NULL,
@@ -402,6 +485,7 @@ export const SCHEMA_DDL = `
 
 /** Idempotent `ALTER TABLE ... ADD COLUMN` migrations for older databases. */
 export const COLUMN_MIGRATIONS = [
+  'ALTER TABLE workflow_channels ADD COLUMN progress_card_ts TEXT',
   "ALTER TABLE conversations ADD COLUMN mode TEXT DEFAULT 'plan'",
   'ALTER TABLE tasks ADD COLUMN claude_session_id TEXT',
   'ALTER TABLE tasks ADD COLUMN workspace_path TEXT',
@@ -465,11 +549,17 @@ export const COLUMN_MIGRATIONS = [
   'ALTER TABLE tasks ADD COLUMN fixed_integration_source TEXT',
   'ALTER TABLE tasks ADD COLUMN fix_prompt TEXT',
   'ALTER TABLE tasks ADD COLUMN fix_context TEXT',
-  'ALTER TABLE tasks ADD COLUMN execution_model TEXT',
   'ALTER TABLE attempts ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0',
   'ALTER TABLE attempts ADD COLUMN claimed_at TEXT',
   'ALTER TABLE attempts ADD COLUMN lease_expires_at TEXT',
   'ALTER TABLE tasks ADD COLUMN task_state_version INTEGER NOT NULL DEFAULT 1',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN draft_plan_text TEXT',
+  "ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_mode TEXT NOT NULL DEFAULT 'chat' CHECK (terminal_mode IN ('chat', 'tmux'))",
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_session_id TEXT',
+  "ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_status TEXT CHECK (terminal_status IS NULL OR terminal_status IN ('running', 'exited'))",
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_exit_code INTEGER',
+  "ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_output_snapshot TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_updated_at TEXT',
 ];
 
 /**
@@ -481,9 +571,17 @@ export const POST_MIGRATION_STATEMENTS = [
   'DROP INDEX IF EXISTS idx_attempts_node',
   'CREATE INDEX IF NOT EXISTS idx_attempts_node_created ON attempts(node_id, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_events_task_id_id ON events(task_id, id)',
+  'CREATE INDEX IF NOT EXISTS idx_events_event_type_id ON events(event_type, id)',
+  'CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(event_type, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_tasks_workflow_id ON tasks(workflow_id)',
   'CREATE INDEX IF NOT EXISTS idx_worker_actions_task_updated ON worker_actions(task_id, updated_at)',
   'CREATE INDEX IF NOT EXISTS idx_worker_actions_workflow_status ON worker_actions(workflow_id, worker_kind, status)',
+  'CREATE INDEX IF NOT EXISTS idx_worker_actions_kind_updated ON worker_actions(worker_kind, updated_at DESC, id)',
+  `CREATE TABLE IF NOT EXISTS worker_desired_states (
+    worker_kind TEXT PRIMARY KEY,
+    desired_enabled INTEGER NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  )`,
   'DROP INDEX IF EXISTS idx_task_launch_dispatch_active_attempt',
   `
       CREATE UNIQUE INDEX IF NOT EXISTS idx_task_launch_dispatch_active_attempt
@@ -491,6 +589,8 @@ export const POST_MIGRATION_STATEMENTS = [
         WHERE state IN ('enqueued', 'leased')
     `,
   `UPDATE worker_actions SET status = 'cancelled' WHERE status = 'canceled'`,
+  'CREATE TABLE IF NOT EXISTS task_crash_preservation (task_id TEXT PRIMARY KEY, preserved_at TEXT NOT NULL, owner_pid INTEGER, diagnostic_report_path TEXT, diagnostic_summary TEXT, FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE)',
+  'CREATE INDEX IF NOT EXISTS idx_task_crash_preservation_preserved_at ON task_crash_preservation(preserved_at)',
 ];
 
 /** Rebuilt `workflows` table used to drop a legacy `status` column. */

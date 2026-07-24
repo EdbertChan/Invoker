@@ -125,4 +125,27 @@ if (evaluatePush({ branch: gen, mergifyRefusesAsGenerated: false }).allowed) pro
 if (!evaluatePush({ branch: work, mergifyRefusesAsGenerated: false }).allowed) process.exit(1);
 if (evaluatePush({ branch: work, mergifyRefusesAsGenerated: true }).allowed) process.exit(1);
 " || fail "safe-stack-push guard must refuse generated branches and allow working branches"
+
+# One-refactor-at-a-time decomposition: one PR moves exactly one top-level symbol.
+must_contain "$SKILL_MD" "do one refactor at a time: one PR moves exactly ONE top-level symbol" "make-pr skill must require one top-level symbol move per PR"
+must_contain "$SKILL_MD" "A function move is its own PR; a class moves as one PR with its methods (one top-level symbol, not method-by-method)" "make-pr skill must make a function move its own PR and move a class whole"
+must_contain "$SKILL_MD" "move that minimal helper cluster with it only when splitting them would break the build or force a throwaway shim" "make-pr skill must allow the minimal dependency-cluster exception"
+must_contain "$REVIEW_COMPRESSION_MD" "refactor at a time: one PR moves exactly ONE top-level symbol." "review-compression must require one top-level symbol move per PR"
+must_contain "$REVIEW_COMPRESSION_MD" "is its own PR. A class moves as one PR with its methods riding along" "review-compression must make a function move its own PR and move a class whole"
+must_contain "$REVIEW_COMPRESSION_MD" "top-level symbol per PR, not method-by-method." "review-compression must forbid method-by-method class extraction"
+must_contain "$REVIEW_COMPRESSION_MD" "re-point its references in the same PR" "review-compression must keep the move and its re-point in the same PR"
+must_contain "$REVIEW_COMPRESSION_MD" "Dependency-cluster exception:" "review-compression must document the minimal dependency-cluster exception"
+must_contain "$REVIEW_COMPRESSION_MD" "multiple distinct extractions from one file (one top-level symbol move per slice)" "review-compression must split multiple extractions one symbol per slice"
+# The new grain must NOT split the identical mechanical migration grouping.
+must_contain "$REVIEW_COMPRESSION_MD" "exact same mechanical migration across" "review-compression must keep grouping the same mechanical migration across files"
+
+# Stale GitHub PR metadata after a branch update is a common landing failure.
+# The skill must both trigger on it and tell the author what to re-check.
+must_contain "$SKILL_MD" "whenever a branch/PR change means the GitHub PR" "make-pr skill must trigger when a branch change could stale GitHub PR metadata"
+must_contain "$SKILL_MD" "could leave GitHub title/body/proof text out of date" "make-pr skill must apply to any branch/stack/PR change that can stale title/body/proof text"
+must_contain "$SKILL_MD" "Mandatory refresh after branch/PR changes that can stale GitHub metadata" "make-pr skill must list the metadata-refresh requirement in what it covers"
+must_contain "$SKILL_MD" "After any branch update, rebase, force-push, or stacked-branch reshuffle, refresh the PR title and body" "make-pr skill must require refreshing PR title/body after any branch update, rebase, or force-push"
+must_contain "$SKILL_MD" "ensure the PR title still matches the current slice after any branch update or force-push" "make-pr skill validation checklist must include the PR-title staleness check"
+must_contain "$SKILL_MD" 'ensure the `## Summary` section still describes the current diff, not the earlier version' "make-pr skill validation checklist must include the Summary staleness check"
+
 echo "OK: make-pr skill contract checks passed"

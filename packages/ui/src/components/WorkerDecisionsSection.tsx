@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { WorkerActionSummary } from '../types.js';
 import { useWorkerDecisions } from '../hooks/useWorkerDecisions.js';
 import { displayWorkerTaskId, formatWorkerValue } from '../lib/worker-display.js';
@@ -11,25 +11,48 @@ function decisionClass(action: WorkerActionSummary): 'act' | 'skip' {
   return action.decision ?? (action.status === 'skipped' ? 'skip' : 'act');
 }
 
+function decisionTimestamp(action: WorkerActionSummary): string {
+  const value = action.completedAt ?? action.updatedAt ?? action.createdAt;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return '';
+  return new Date(parsed).toLocaleTimeString();
+}
+function decisionLabelClass(decision: 'act' | 'skip'): string {
+  return decision === 'skip' ? 'text-amber-300' : 'text-emerald-300';
+}
+
+
+interface WorkerDecisionsSectionProps {
+  workerKind?: string;
+  workflowId?: string;
+  taskId?: string;
+  title?: string;
+  emptyText?: string;
+}
+
 export function WorkerDecisionsSection({
   workerKind,
   workflowId,
-}: {
-  workerKind: string;
-  workflowId?: string;
-}) {
+  taskId,
+  title = 'Decision timeline',
+  emptyText,
+}: WorkerDecisionsSectionProps) {
   const [filter, setFilter] = useState<DecisionFilter>('all');
   const [decisions] = useWorkerDecisions({
-    workerKind,
+    ...(workerKind ? { workerKind } : {}),
     ...(workflowId ? { workflowId } : {}),
     ...(filter === 'all' ? {} : { decision: filter }),
     limit: 25,
   });
+  const visibleDecisions = useMemo(
+    () => (taskId ? decisions.filter((decision) => decision.taskId === taskId || decision.subjectId === taskId) : decisions),
+    [decisions, taskId],
+  );
 
   return (
-    <section className="rounded border border-gray-800 bg-gray-850/60 p-3" data-testid="worker-decisions-section">
+    <section className="pt-3" data-testid="worker-decisions-section">
       <div className="flex items-center justify-between">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Decisions</h3>
+        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
         <div className="flex gap-1">
           {FILTERS.map((value) => (
             <button
@@ -39,7 +62,7 @@ export function WorkerDecisionsSection({
               aria-pressed={filter === value}
               onClick={() => setFilter(value)}
               className={`rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${
-                filter === value ? 'bg-gray-700 text-gray-100' : 'text-gray-400 hover:bg-gray-800'
+                filter === value ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-secondary'
               }`}
             >
               {value}
@@ -47,37 +70,35 @@ export function WorkerDecisionsSection({
           ))}
         </div>
       </div>
-      {decisions.length === 0 ? (
-        <div className="mt-2 text-xs text-gray-500">
-          No {filter === 'all' ? '' : `${filter} `}decisions recorded yet.
+      {visibleDecisions.length === 0 ? (
+        <div className="mt-2 text-xs text-muted-foreground">
+          {emptyText ?? `No ${filter === 'all' ? '' : `${filter} `}decisions recorded yet.`}
         </div>
       ) : (
-        <ul className="mt-2 space-y-1">
-          {decisions.map((decision) => {
+        <ul className="mt-2">
+          {visibleDecisions.map((decision, index) => {
             const cls = decisionClass(decision);
+            const timestamp = decisionTimestamp(decision);
             return (
               <li
                 key={decision.id}
                 data-testid="worker-decision-row"
-                className="rounded border border-gray-800/80 bg-gray-900/40 px-2 py-1 text-xs"
+                className={`${index === 0 ? '' : 'border-t border-border/40'} py-2 text-xs`}
               >
                 <div className="flex items-center gap-2">
-                  <span
-                    className={`rounded px-1 py-0.5 text-[10px] font-semibold uppercase ${
-                      cls === 'skip' ? 'bg-amber-900/50 text-amber-200' : 'bg-emerald-900/50 text-emerald-200'
-                    }`}
-                  >
+                  <span className={`shrink-0 text-[10px] font-medium uppercase ${decisionLabelClass(cls)}`}>
                     {cls}
                   </span>
-                  <span className="text-gray-300">{formatWorkerValue(decision.status)}</span>
+                  <span className="text-muted-foreground">{formatWorkerValue(decision.status)}</span>
                   {decision.taskId ? (
-                    <span className="truncate text-gray-400">{displayWorkerTaskId(decision.taskId)}</span>
+                    <span className="truncate text-muted-foreground">{displayWorkerTaskId(decision.taskId)}</span>
                   ) : (
-                    <span className="truncate text-gray-400">{decision.subjectId}</span>
+                    <span className="truncate text-muted-foreground">{decision.subjectId}</span>
                   )}
+                  {timestamp ? <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{timestamp}</span> : null}
                 </div>
-                {decision.reason ? <div className="mt-0.5 text-gray-400">reason: {decision.reason}</div> : null}
-                {decision.summary ? <div className="mt-0.5 text-gray-500">{decision.summary}</div> : null}
+                {decision.reason ? <div className="mt-1 text-muted-foreground">reason: {decision.reason}</div> : null}
+                {decision.summary ? <div className="mt-1 text-foreground/85">{decision.summary}</div> : null}
               </li>
             );
           })}

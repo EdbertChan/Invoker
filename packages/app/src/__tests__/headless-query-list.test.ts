@@ -36,6 +36,7 @@ function makeQueryDeps(): HeadlessQueryDeps {
         if (filters && (filters as { workflowId?: string }).workflowId === 'missing') return [];
         return workerActions;
       },
+      listTaskEvents: () => [],
       listWorkflows: () => [],
     } as unknown as HeadlessQueryDeps['persistence'],
     orchestrator: {} as unknown as HeadlessQueryDeps['orchestrator'],
@@ -45,6 +46,35 @@ function makeQueryDeps(): HeadlessQueryDeps {
     resetUiPerfStats: () => {},
   };
 }
+
+describe('headless query workers', () => {
+  it('returns the local worker fleet snapshot as JSON', async () => {
+    const output = await runReadOnlyHeadlessQueryToString(
+      ['query', 'workers', '--output', 'json'],
+      makeQueryDeps(),
+    );
+
+    const parsed = JSON.parse(output) as {
+      generatedAt?: unknown;
+      workers?: Array<Record<string, unknown>>;
+    };
+    expect(typeof parsed.generatedAt).toBe('string');
+    expect(Array.isArray(parsed.workers)).toBe(true);
+    const autoFixWorker = parsed.workers?.find((worker) => worker.kind === 'autofix');
+    expect(autoFixWorker).toMatchObject({
+      kind: 'autofix',
+      lifecycle: 'stopped',
+      policy: 'unknown',
+      startable: false,
+      stoppable: false,
+      controlDisabledReason: 'Controls unavailable',
+      source: 'built-in',
+      availability: 'available',
+    });
+    expect(autoFixWorker).not.toHaveProperty('running');
+    expect(autoFixWorker?.recentActions).toEqual(workerActions.map((action) => expect.objectContaining({ id: action.id })));
+  });
+});
 
 describe('headless query worker-actions', () => {
   it('renders worker actions as JSON', async () => {
@@ -145,5 +175,113 @@ describe('headless query worker-decisions', () => {
         makeDecisionDeps(),
       ),
     ).rejects.toThrow('Invalid --decision');
+  });
+});
+
+function makeTaskQueryDeps(overrides: {
+  taskOutput?: string;
+  containerId?: string | null;
+}): HeadlessQueryDeps {
+  return {
+    persistence: {
+      listWorkflows: () => [{ id: 'wf-1' }],
+      loadTasks: (workflowId: string) =>
+        workflowId === 'wf-1' ? [{ id: 'wf-1/task-1' }] : [],
+      getTaskOutput: () => overrides.taskOutput ?? '',
+      getContainerId: () => overrides.containerId ?? null,
+    } as unknown as HeadlessQueryDeps['persistence'],
+    orchestrator: {
+      syncFromDb: () => {},
+    } as unknown as HeadlessQueryDeps['orchestrator'],
+    executionAgentRegistry: undefined,
+    invokerConfig: {} as unknown as HeadlessQueryDeps['invokerConfig'],
+    getUiPerfStats: () => ({}),
+    resetUiPerfStats: () => {},
+  };
+}
+
+describe('headless query task-output', () => {
+  it('prints the task output for a short task id', async () => {
+    const output = await runReadOnlyHeadlessQueryToString(
+      ['query', 'task-output', 'task-1'],
+      makeTaskQueryDeps({ taskOutput: 'build ok\n' }),
+    );
+    expect(output).toBe('build ok\n');
+  });
+
+  it('emits the resolved id and output as JSON', async () => {
+    const output = await runReadOnlyHeadlessQueryToString(
+      ['query', 'task-output', 'task-1', '--output', 'json'],
+      makeTaskQueryDeps({ taskOutput: 'log line' }),
+    );
+    expect(JSON.parse(output)).toEqual({ id: 'wf-1/task-1', output: 'log line' });
+  });
+});
+
+describe('headless query container-id', () => {
+  it('prints the container id for a short task id', async () => {
+    const output = await runReadOnlyHeadlessQueryToString(
+      ['query', 'container-id', 'task-1'],
+      makeTaskQueryDeps({ containerId: 'container-abc' }),
+    );
+    expect(output).toBe('container-abc\n');
+  });
+
+  it('prints an empty line when there is no container', async () => {
+    const output = await runReadOnlyHeadlessQueryToString(
+      ['query', 'container-id', 'task-1'],
+      makeTaskQueryDeps({ containerId: null }),
+    );
+    expect(output).toBe('\n');
+  });
+});
+
+describe('headless query execution-leases', () => {
+  it('lists live leases as JSON and hides expired rows', async () => {
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const output = await runReadOnlyHeadlessQueryToString(
+      ['query', 'execution-leases', '--output', 'json'],
+      {
+        ...makeQueryDeps(),
+        persistence: {
+          listExecutionResourceLeases: () => [
+            {
+              resourceKey: 'ssh:invoker@shared.example.com:22',
+              resourceType: 'ssh',
+              holderId: 'runner:1:wf-1/t1:attempt',
+              taskId: 'wf-1/t1',
+              poolId: 'pnpm-ssh',
+              poolMemberId: 'remote-shared',
+              acquiredAt: future,
+              lastHeartbeatAt: future,
+              leaseExpiresAt: future,
+            },
+            {
+              resourceKey: 'ssh:invoker@expired.example.com:22',
+              resourceType: 'ssh',
+              holderId: 'dead',
+              acquiredAt: past,
+              lastHeartbeatAt: past,
+              leaseExpiresAt: past,
+            },
+          ],
+        } as unknown as HeadlessQueryDeps['persistence'],
+      },
+    );
+
+    expect(JSON.parse(output)).toEqual([
+      {
+        resourceKey: 'ssh:invoker@shared.example.com:22',
+        resourceType: 'ssh',
+        poolId: 'pnpm-ssh',
+        poolMemberId: 'remote-shared',
+        taskId: 'wf-1/t1',
+        holderId: 'runner:1:wf-1/t1:attempt',
+        acquiredAt: future,
+        lastHeartbeatAt: future,
+        leaseExpiresAt: future,
+      },
+    ]);
   });
 });

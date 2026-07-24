@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import * as child_process from 'node:child_process';
-import { SlackSurface, parsePlanningRequest, parseLobbyClassification, parseLocalRequest, parseThreadRequest, parseWorkflowStatusQuery, BUILTIN_HARNESS_PRESETS, buildLobbyQuestionPrompt } from '../slack/slack-surface.js';
-import { SQLiteAdapter, ConversationRepository, WorkflowChannelRepository } from '@invoker/data-store';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SlackSurface, extractRepoUrlFromMessage, parsePlanningRequest, parseLobbyClassification, parseLocalRequest, parseThreadRequest, parseWorkflowStatusQuery, BUILTIN_HARNESS_PRESETS, buildLobbyQuestionPrompt } from '../slack/slack-surface.js';
+import { SQLiteAdapter, ConversationRepository, SlackSessionRepository, WorkflowChannelRepository } from '@invoker/data-store';
+import * as executionEngine from '@invoker/execution-engine';
 import type { SurfaceCommand } from '../surface.js';
 import type { WorkflowContext } from '../slack/workflow-assistant.js';
 
@@ -31,6 +35,8 @@ vi.mock('@slack/bolt', () => {
       },
       auth: { test: vi.fn().mockResolvedValue({ user_id: 'U_BOT' }) },
       reactions: { add: vi.fn().mockResolvedValue({}), remove: vi.fn().mockResolvedValue({}) },
+      pins: { add: vi.fn().mockResolvedValue({}) },
+      files: { uploadV2: vi.fn().mockResolvedValue({}) },
       conversations: {
         create: vi.fn().mockResolvedValue({ channel: { id: 'C_NEW' } }),
         invite: vi.fn().mockResolvedValue({}),
@@ -88,10 +94,6 @@ function baseConfig() {
   };
 }
 
-function wordCount(text: string): number {
-  return text.replace(/[`*_"]/g, '').trim().split(/\s+/).filter(Boolean).length;
-}
-
 function mentionHandler(surface: SlackSurface): Function {
   const app = surface.getApp() as any;
   return app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')!.handler;
@@ -113,6 +115,7 @@ describe('parsePlanningRequest', () => {
     expect(parsePlanningRequest('<@BOT> [omp+claude] [repo:web] do X', keys, 'cursor+claude')).toEqual({
       presetKey: 'omp+claude',
       repo: 'web',
+      hasExplicitPreset: true,
       text: 'do X',
     });
   });
@@ -130,6 +133,7 @@ describe('parsePlanningRequest', () => {
     expect(parsePlanningRequest('[plain codex] go', keys, 'cursor+claude')).toEqual({
       presetKey: 'codex',
       repo: undefined,
+      hasExplicitPreset: true,
       text: 'go',
     });
     expect(parsePlanningRequest('[unknown] go', keys, 'cursor+claude')).toEqual({
@@ -143,6 +147,7 @@ describe('parsePlanningRequest', () => {
     expect(parsePlanningRequest('[omp] add a /health endpoint', keys, 'cursor+claude')).toEqual({
       presetKey: 'omp',
       repo: undefined,
+      hasExplicitPreset: true,
       text: 'add a /health endpoint',
     });
   });
@@ -160,6 +165,63 @@ describe('parsePlanningRequest', () => {
       text: 'go',
       unknownPreset: 'omp+gpt5',
     });
+  });
+
+  it('extracts one direct repository URL from Slack markup or prose', () => {
+    expect(parsePlanningRequest(
+      '<@BOT> plan this in <https://github.com/EdbertChan/notarepo/|notarepo>',
+      keys,
+      'cursor+claude',
+    )).toMatchObject({
+      presetKey: 'cursor+claude',
+      repositoryUrls: ['https://github.com/EdbertChan/notarepo/'],
+    });
+    expect(parsePlanningRequest(
+      'plan this in git@github.com:EdbertChan/notarepo.git',
+      keys,
+      'cursor+claude',
+    )).toMatchObject({
+      repositoryUrls: ['git@github.com:EdbertChan/notarepo.git'],
+    });
+  });
+});
+
+describe('extractRepoUrlFromMessage', () => {
+  it('extracts wrapped and labeled Slack links', () => {
+    expect(extractRepoUrlFromMessage('use <https://github.com/openai/invoker> please')).toBe('https://github.com/openai/invoker');
+    expect(extractRepoUrlFromMessage('use <https://github.com/openai/invoker|repo> please')).toBe('https://github.com/openai/invoker');
+  });
+
+  it('extracts a plain repo URL', () => {
+    expect(extractRepoUrlFromMessage('repo is https://github.com/openai/invoker')).toBe('https://github.com/openai/invoker');
+  });
+
+  it('normalizes a trailing slash', () => {
+    expect(extractRepoUrlFromMessage('repo is https://github.com/EdbertChan/notarepo/')).toBe('https://github.com/EdbertChan/notarepo');
+  });
+
+  it('keeps a .git suffix', () => {
+    expect(extractRepoUrlFromMessage('repo is https://github.com/EdbertChan/notarepo.git')).toBe('https://github.com/EdbertChan/notarepo.git');
+  });
+
+  it('rejects credential-bearing URLs', () => {
+    expect(extractRepoUrlFromMessage('https://token@github.com/openai/invoker')).toBeUndefined();
+    expect(extractRepoUrlFromMessage('https://token:secret@github.com/openai/invoker.git')).toBeUndefined();
+  });
+
+  it('rejects deep links', () => {
+    expect(extractRepoUrlFromMessage('https://github.com/openai/invoker/issues/12')).toBeUndefined();
+    expect(extractRepoUrlFromMessage('https://github.com/openai/invoker/pull/5')).toBeUndefined();
+    expect(extractRepoUrlFromMessage('https://github.com/openai/invoker/tree/main')).toBeUndefined();
+    expect(extractRepoUrlFromMessage('https://github.com/openai/invoker/blob/main/README.md')).toBeUndefined();
+  });
+
+  it('returns the first repo-root URL when multiple are present', () => {
+    expect(extractRepoUrlFromMessage('try https://gitlab.com/first/repo then https://github.com/second/repo')).toBe('https://gitlab.com/first/repo');
+  });
+
+  it('returns undefined when no repo URL is present', () => {
+    expect(extractRepoUrlFromMessage('please plan this without a repo link')).toBeUndefined();
   });
 });
 
@@ -183,12 +245,44 @@ describe('parseWorkflowStatusQuery', () => {
   });
 });
 describe('parseThreadRequest', () => {
-  it('defaults to a normal agent thread and requires an explicit plan prefix for Invoker YAML', () => {
+  it('defaults to a normal agent thread unless the request clearly asks for an Invoker plan', () => {
     expect(parseThreadRequest('fix the Slack routing bug')).toEqual({ mode: 'agent', text: 'fix the Slack routing bug' });
     expect(parseThreadRequest('local: fix the Slack routing bug')).toEqual({ mode: 'agent', text: 'fix the Slack routing bug' });
     expect(parseThreadRequest('run local: report back how many workflows are running')).toEqual({ mode: 'agent', text: 'report back how many workflows are running' });
     expect(parseThreadRequest('plan: fix the Slack routing bug')).toEqual({ mode: 'plan', text: 'fix the Slack routing bug' });
     expect(parseThreadRequest('draft an Invoker plan: fix the Slack routing bug')).toEqual({ mode: 'plan', text: 'fix the Slack routing bug' });
+    expect(parseThreadRequest('plan fix the Slack routing bug')).toEqual({ mode: 'plan', text: 'fix the Slack routing bug' });
+    expect(parseThreadRequest('make that fix via Invoker')).toEqual({ mode: 'plan', text: 'make that fix' });
+    expect(parseThreadRequest('draft an Invoker plan for the Slack routing bug')).toEqual({ mode: 'plan', text: 'the Slack routing bug' });
+    expect(parseThreadRequest('please draft a plan for this')).toEqual({
+      mode: 'plan',
+      text: 'please draft a plan for this',
+    });
+    expect(parseThreadRequest('turn the discussion above into a plan')).toEqual({
+      mode: 'plan',
+      text: 'turn the discussion above into a plan',
+    });
+    expect(parseThreadRequest('Can you create a plan for this to submit to Invoker for all these features?')).toEqual({
+      mode: 'plan',
+      text: 'Can you create a plan for this to submit to Invoker for all these features?',
+    });
+    expect(parseThreadRequest('why are you dumping the chain of thought')).toEqual({
+      mode: 'agent',
+      text: 'why are you dumping the chain of thought',
+    });
+  });
+
+  it('treats a sole fenced plan: block as plan mode', () => {
+    const fenced = '```text\nplan: Prove and fix the adverse UI test issues\n```';
+    expect(parseThreadRequest(fenced)).toEqual({
+      mode: 'plan',
+      text: 'Prove and fix the adverse UI test issues',
+    });
+  });
+
+  it('does not treat a fence nested after prose as a plan opt-in', () => {
+    const mixed = 'please help\n\n```text\nplan: do not treat this as plan mode\n```';
+    expect(parseThreadRequest(mixed)).toEqual({ mode: 'agent', text: mixed });
   });
 });
 
@@ -204,6 +298,7 @@ describe('BUILTIN_HARNESS_PRESETS', () => {
     expect(parsePlanningRequest('<@BOT> [omp+codex] add a /health endpoint', keys, 'cursor+claude')).toEqual({
       presetKey: 'omp+codex',
       repo: undefined,
+      hasExplicitPreset: true,
       text: 'add a /health endpoint',
     });
   });
@@ -216,7 +311,11 @@ describe('harness routing', () => {
 
   it('constructs the planning conversation with the preset tool/model and injected builder', async () => {
     const builder = vi.fn(() => ({ command: 'cursor', args: [] }));
-    const surface = new SlackSurface({ ...baseConfig(), planningCommandBuilder: builder });
+    const surface = new SlackSurface({
+      ...baseConfig(),
+      defaultRepoUrl: 'git@github.com:default/repo.git',
+      planningCommandBuilder: builder,
+    });
     await surface.start(async () => {});
 
     await mentionHandler(surface)({
@@ -259,6 +358,62 @@ describe('workflow channel creation', () => {
     expect(postChannels).toContain('CLOBBY');
   });
 
+  it('pins a workflow plan summary and uploads its YAML file', async () => {
+    const planDir = mkdtempSync(join(tmpdir(), 'workflow-plan-'));
+    const planFile = join(planDir, 'submitted.yaml');
+    writeFileSync(planFile, [
+      'name: Workflow plan',
+      'tasks:',
+      '  - id: task-1',
+      '    description: Deliver the workflow plan',
+      '    dependencies: []',
+      '',
+    ].join('\n'));
+    const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
+    const client = (surface.getApp() as any).client;
+
+    await surface.handleEvent({ type: 'workflow_created', workflowId: 'wf-1-2', planFile });
+
+    const planCard = client.chat.postMessage.mock.calls
+      .map((call: any[]) => call[0])
+      .find((message: { text?: string }) => message.text?.includes('Plan for workflow'));
+    expect(planCard).toEqual(expect.objectContaining({ channel: 'C_NEW', text: expect.stringContaining('Workflow plan') }));
+    expect(client.pins.add).toHaveBeenCalledWith({ channel: 'C_NEW', timestamp: '1.1' });
+    expect(client.files.uploadV2).toHaveBeenCalledWith({
+      channel_id: 'C_NEW',
+      file_uploads: [{ file: planFile, filename: 'workflow-wf-1-2-plan.yaml' }],
+    });
+    rmSync(planDir, { recursive: true, force: true });
+  });
+
+  it('continues publishing the workflow plan when Slack cannot pin it', async () => {
+    const planDir = mkdtempSync(join(tmpdir(), 'workflow-plan-'));
+    const planFile = join(planDir, 'submitted.yaml');
+    writeFileSync(planFile, [
+      'name: Workflow plan',
+      'tasks:',
+      '  - id: task-1',
+      '    description: Deliver the workflow plan',
+      '    dependencies: []',
+      '',
+    ].join('\n'));
+    const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
+    const client = (surface.getApp() as any).client;
+    client.pins.add.mockRejectedValueOnce(new Error('missing_scope'));
+
+    await surface.handleEvent({ type: 'workflow_created', workflowId: 'wf-1-2', planFile });
+
+    expect(client.files.uploadV2).toHaveBeenCalledWith(expect.objectContaining({
+      channel_id: 'C_NEW',
+      file_uploads: [{ file: planFile, filename: 'workflow-wf-1-2-plan.yaml' }],
+    }));
+    expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'C_NEW',
+      text: expect.stringContaining('pins:write'),
+    }));
+    rmSync(planDir, { recursive: true, force: true });
+  });
+
   it('reuses an existing channel id on name_taken', async () => {
     const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
     const client = (surface.getApp() as any).client;
@@ -268,6 +423,23 @@ describe('workflow channel creation', () => {
     await surface.handleEvent({ type: 'workflow_created', workflowId: 'wf-1-2', requestedBy: 'U1' });
 
     expect(repo.getByWorkflowId('wf-1-2')?.channelId).toBe('C_EXIST');
+  });
+
+  it('tells the lobby when the requester invite fails', async () => {
+    const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
+    const client = (surface.getApp() as any).client;
+    client.conversations.invite.mockRejectedValueOnce({ data: { error: 'missing_scope' } });
+
+    await surface.handleEvent({
+      type: 'workflow_created', workflowId: 'wf-1-2', requestedBy: 'U1',
+      lobbyChannel: 'CLOBBY', lobbyThreadTs: 't1',
+    });
+
+    expect(repo.getByWorkflowId('wf-1-2')?.channelId).toBe('C_NEW');
+    const lobbyPost = client.chat.postMessage.mock.calls.find((c: any[]) => c[0].channel === 'CLOBBY')?.[0];
+    expect(lobbyPost?.text).toContain('could not invite you');
+    expect(lobbyPost?.text).toContain('missing_scope');
+    expect(lobbyPost?.text).not.toBe('Created <#C_NEW> for workflow `wf-1-2`.');
   });
 });
 
@@ -293,15 +465,71 @@ describe('outbound routing', () => {
     expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C123' }));
   });
 
-  it('falls back to the lobby channel for an unmapped workflow', async () => {
+  it('suppresses unmapped workflow updates instead of posting to the lobby', async () => {
     const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
     const client = (surface.getApp() as any).client;
     await surface.handleEvent({
       type: 'task_delta',
       delta: { type: 'updated', taskId: 'wf-9/api', changes: { status: 'running' }, taskStateVersion: 1, previousTaskStateVersion: 0 },
     });
-    expect(client.chat.postMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'CLOBBY' }));
+    await surface.handleEvent({
+      type: 'workflow_progress',
+      progress: {
+        workflowId: 'wf-9',
+        name: 'Unmapped',
+        percentComplete: 0,
+        counts: { total: 1, completed: 0, failed: 0, closed: 0, running: 0, pending: 1 },
+        tasks: [],
+      },
+    });
+    expect(client.chat.postMessage).not.toHaveBeenCalled();
   });
+  it('posts a replacement progress card when chat.update rejects invalid_blocks', async () => {
+    const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
+    const client = (surface.getApp() as any).client;
+    client.chat.postMessage
+      .mockResolvedValueOnce({ ts: 'progress-1' })
+      .mockResolvedValueOnce({ ts: 'progress-2' });
+
+    const progress = {
+      workflowId: 'wf-1-2',
+      name: 'Workflow',
+      percentComplete: 25,
+      counts: { total: 4, completed: 1, failed: 0, closed: 0, running: 1, pending: 2 },
+      tasks: [{ id: 'wf-1-2/api', name: 'API', status: 'running', phase: 'executing' }],
+    };
+
+    await surface.handleEvent({ type: 'workflow_progress', progress });
+    client.chat.update.mockRejectedValueOnce({ data: { error: 'invalid_blocks' } });
+    await surface.handleEvent({ type: 'workflow_progress', progress });
+
+    expect(client.chat.update).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C123', ts: 'progress-1' }));
+    expect(client.chat.postMessage).toHaveBeenCalledTimes(2);
+    expect(((surface as any).progressCardTs as Map<string, string>).get('wf-1-2')).toBe('progress-2');
+  });
+
+  it('posts a replacement task card when chat.update rejects invalid_blocks', async () => {
+    const surface = new SlackSurface({ ...baseConfig(), workflowChannelRepo: repo });
+    const client = (surface.getApp() as any).client;
+    client.chat.postMessage
+      .mockResolvedValueOnce({ ts: 'task-1' })
+      .mockResolvedValueOnce({ ts: 'task-2' });
+
+    await surface.handleEvent({
+      type: 'task_delta',
+      delta: { type: 'updated', taskId: 'wf-1-2/api', changes: { status: 'running' }, taskStateVersion: 1, previousTaskStateVersion: 0 },
+    });
+    client.chat.update.mockRejectedValueOnce({ data: { error: 'invalid_blocks' } });
+    await surface.handleEvent({
+      type: 'task_delta',
+      delta: { type: 'updated', taskId: 'wf-1-2/api', changes: { status: 'completed', summary: 'done' }, taskStateVersion: 2, previousTaskStateVersion: 1 },
+    });
+
+    expect(client.chat.update).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C123', ts: 'task-1' }));
+    expect(client.chat.postMessage).toHaveBeenCalledTimes(2);
+    expect(surface.getTaskMessages().get('wf-1-2/api')).toBe('task-2');
+  });
+
 });
 
 // ── In-channel assistant ─────────────────────────────────────
@@ -369,6 +597,79 @@ describe('in-channel workflow assistant', () => {
     expect(gather).toHaveBeenCalledWith('wf-1-2');
     expect(say).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('/health') }));
     expect(received).toHaveLength(0);
+  });
+
+  it('uses a temporary prompt file for oversized workflow assistant context', async () => {
+    const hugeOutput = 'running task details\n'.repeat(10_000);
+    const gather = vi.fn(async (): Promise<WorkflowContext> => ({
+      workflowId: 'wf-1-2',
+      planning: [{ role: 'user', content: 'track progress' }],
+      tasks: [{ id: 'wf-1-2/api', status: 'running', agentName: 'omp', transcript: [], output: hugeOutput }],
+    }));
+    let promptFile = '';
+    const planningCommandBuilder = vi.fn(({ prompt }: { prompt: string }) => {
+      const match = prompt.match(/file: (.+)\n/);
+      promptFile = match?.[1] ?? '';
+      const promptContents = readFileSync(promptFile, 'utf8');
+      expect(prompt).toContain('The full task instructions are in this file:');
+      expect(promptContents).toContain('Task wf-1-2/api (status=running');
+      expect(promptContents).toContain(hugeOutput);
+      return { command: 'cursor', args: ['--print', prompt] };
+    });
+    mockSpawn.mockImplementationOnce(() => mockProcess('The running task is wf-1-2/api.') as any);
+    const surface = new SlackSurface({
+      ...baseConfig(),
+      conversationRepo: convoRepo,
+      workflowChannelRepo: repo,
+      planningCommandBuilder,
+      gatherWorkflowContext: gather,
+    });
+    await surface.start(async (cmd) => { received.push(cmd); });
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+
+    await mentionHandler(surface)({
+      event: { text: '<@BOT> how are we doing', ts: 't1', user: 'U1', channel: 'C123' },
+      say,
+    });
+
+    expect(planningCommandBuilder).toHaveBeenCalledOnce();
+    expect(promptFile).toContain('invoker-slack-prompt-');
+    expect(existsSync(promptFile)).toBe(false);
+    expect(say).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('wf-1-2/api') }));
+  });
+
+  it('logs prompt cleanup failures after workflow assistant planning', async () => {
+    const cleanupError = new Error('device busy');
+    const logSpy = vi.fn();
+    const materializeSpy = vi.spyOn(executionEngine, 'materializeLocalAgentPrompt').mockReturnValue({
+      effectivePrompt: 'materialized prompt',
+      cleanup: () => ({ directory: '/tmp/invoker-slack-prompt-test-1234', error: cleanupError }),
+    });
+    mockSpawn.mockImplementationOnce(() => mockProcess('The running task is wf-1-2/api.'));
+    const surface = new SlackSurface({
+      ...baseConfig(),
+      log: logSpy,
+      conversationRepo: convoRepo,
+      workflowChannelRepo: repo,
+      planningCommandBuilder: () => ({ command: 'cursor', args: ['--print', 'materialized prompt'] }),
+    });
+    const runOneShotPlanner = Reflect.get(surface, 'runOneShotPlanner') as (
+      harness: { tool: string; model: string },
+      prompt: string,
+    ) => Promise<string>;
+
+    try {
+      await expect(runOneShotPlanner.call(surface, { tool: 'omp', model: 'claude-sonnet-4-5' }, 'ignored prompt')).resolves.toBe(
+        'The running task is wf-1-2/api.',
+      );
+      expect(logSpy).toHaveBeenCalledWith(
+        'slack-surface',
+        'warn',
+        '[PROMPT_CLEANUP] failed to remove materialized planner prompt at /tmp/invoker-slack-prompt-test-1234: device busy',
+      );
+    } finally {
+      materializeSpy.mockRestore();
+    }
   });
 });
 
@@ -449,12 +750,89 @@ describe('lobby verb routing', () => {
     });
   }
 
+  async function persistentLobbySurface(extra: Partial<ConstructorParameters<typeof SlackSurface>[0]> = {}) {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    const conversationRepo = new ConversationRepository(adapter, { info: silentLog, warn: silentLog, error: silentLog });
+    const slackSessionRepo = new SlackSessionRepository(adapter);
+    const surface = lobbySurface(true, { conversationRepo, slackSessionRepo, ...extra });
+    return { adapter, conversationRepo, slackSessionRepo, surface };
+  }
+
   it('asks lobby question answers to be short ELI5 Slack prose except for clearly technical questions', () => {
     const prompt = buildLobbyQuestionPrompt('how many workflows are running?');
     expect(prompt).toContain('ELI5 Slack prose');
     expect(prompt).toContain('40 words or fewer');
     expect(prompt).toContain('clearly technical');
     expect(prompt).toContain('Do NOT generate a YAML plan');
+  });
+
+  it('lets a lobby question repro locally but hands off anything that mutates shared state', () => {
+    const prompt = buildLobbyQuestionPrompt('can you land the top of the stack for me?');
+    expect(prompt).toContain('Reproducing a bug locally is always allowed');
+    expect(prompt).toContain('mergify stack push');
+    expect(prompt).toContain('scripts/land-stack.mjs --execute');
+    expect(prompt).toContain('draft a plan in this same thread');
+    expect(prompt).toContain('same thread');
+    expect(prompt).toContain('only the final user-facing answer');
+    expect(prompt).not.toContain('start a plan thread');
+  });
+
+  it('returns only the final Codex message from one-shot Slack replies', async () => {
+    const raw = [
+      JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'reasoning', text: 'Inspecting the repository.' },
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'Progress update.' },
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: 'Final user-facing answer.' },
+      }),
+    ].join('\n');
+    mockSpawn.mockImplementationOnce(() => mockProcess(raw));
+    const surface = lobbySurface();
+
+    await expect((surface as any).runOneShotPlanner({ tool: 'codex' }, 'answer this')).resolves.toBe(
+      'Final user-facing answer.',
+    );
+  });
+
+  // Repro: the Slack thread that prompted this asked the bot to investigate a
+  // landing failure. It routed as `question` — the one lobby path whose prompt
+  // never told it to keep its hands off shared state.
+  it('carries the execution boundary into the planner command a lobby question actually spawns', async () => {
+    const prompts: string[] = [];
+    mockSpawn
+      .mockImplementationOnce(() => mockProcess('{"intent":"question","operation":"none","target":"none"}'))
+      .mockImplementationOnce(() => mockProcess('Here is what went wrong.'));
+    const surface = lobbySurface(true, {
+      planningCommandBuilder: ({ prompt }: { prompt: string }) => {
+        prompts.push(prompt);
+        return { command: 'cursor', args: ['--print', prompt] };
+      },
+    });
+    await surface.start(async (cmd) => { received.push(cmd); });
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+
+    await mentionHandler(surface)({
+      event: {
+        text: '<@BOT> why do we get extra merge stacks when we babysit landing these workflows?',
+        ts: 't1', user: 'U1', channel: 'CLOBBY',
+      },
+      say,
+    });
+
+    expect(prompts).toHaveLength(2);
+    const answerPrompt = prompts[1];
+    expect(answerPrompt).toContain('Never run anything that changes state outside your worktree');
+    expect(answerPrompt).toContain('mergify stack push');
+    expect(answerPrompt).toContain('scripts/land-stack.mjs --execute');
+    expect(answerPrompt).toContain('Reproducing a bug locally is always allowed');
+    expect(received).toHaveLength(0);
   });
 
   it('stages a bulk verb for confirmation, then runs it on a plain `yes`', async () => {
@@ -489,6 +867,37 @@ describe('lobby verb routing', () => {
     expect(runWorkflowOp).not.toHaveBeenCalled();
     expect(say2).toHaveBeenCalledWith(expect.objectContaining({ text: 'Cancelled.' }));
   });
+
+  it('notifies when a near-yes reply drops a pending approval', async () => {
+    const surface = lobbySurface();
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+    await mentionHandler(surface)({ event: { text: '<@BOT> recreate all', ts: 't1', user: 'U1' }, say });
+
+    const say2 = vi.fn().mockResolvedValue({ ts: 'b' });
+    await messageHandler(surface)({
+      event: { thread_ts: 't1', ts: 't2', user: 'U1', text: 'yes please add more tests' },
+      say: say2,
+    });
+    expect(runWorkflowOp).not.toHaveBeenCalled();
+    expect(say2).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('Dropped the pending approval'),
+    }));
+  });
+
+  it('accepts ok as confirmation for a staged bulk verb', async () => {
+    runWorkflowOp.mockResolvedValue({ ok: true, summary: 'recreate: 3 ok' });
+    const surface = lobbySurface();
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+    await mentionHandler(surface)({ event: { text: '<@BOT> recreate all', ts: 't1', user: 'U1' }, say });
+
+    const say2 = vi.fn().mockResolvedValue({ ts: 'b' });
+    await messageHandler(surface)({ event: { thread_ts: 't1', ts: 't2', user: 'U1', text: 'ok' }, say: say2 });
+    expect(runWorkflowOp).toHaveBeenCalledTimes(1);
+    expect(say2).toHaveBeenCalledWith(expect.objectContaining({ text: 'recreate: 3 ok' }));
+  });
+
   it('confirms a bulk verb via the Approve button: acks instantly and posts the result in-thread', async () => {
     runWorkflowOp.mockResolvedValue({ ok: true, summary: 'recreate: 3 ok' });
     const surface = lobbySurface();
@@ -600,6 +1009,45 @@ describe('lobby verb routing', () => {
     expect(say2).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('Invoker is back') }));
   });
 
+  it('refuses lobby controls from non-lobby channels while still accepting planning mentions', async () => {
+    const onRestartInvoker = vi.fn().mockResolvedValue(undefined);
+    const surface = lobbySurface(true, { onRestartInvoker });
+    await surface.start(async () => {});
+    const handlePlanningMention = vi.spyOn(surface as any, 'handlePlanningMention');
+
+    const sayRestart = vi.fn().mockResolvedValue({ ts: 'a' });
+    await mentionHandler(surface)({
+      event: { text: '<@BOT> restart', ts: 't-restart', user: 'U1', channel: 'COTHER' },
+      say: sayRestart,
+    });
+    expect(onRestartInvoker).not.toHaveBeenCalled();
+    expect(sayRestart).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('restart/submit/workflow controls only work in the lobby channel or DMs'),
+    }));
+
+    const sayOp = vi.fn().mockResolvedValue({ ts: 'b' });
+    await mentionHandler(surface)({
+      event: { text: '<@BOT> recreate all', ts: 't-op', user: 'U1', channel: 'COTHER' },
+      say: sayOp,
+    });
+    expect(runWorkflowOp).not.toHaveBeenCalled();
+    expect(sayOp).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('restart/submit/workflow controls only work in the lobby channel or DMs'),
+    }));
+
+    handlePlanningMention.mockClear();
+    const sayPlan = vi.fn().mockResolvedValue({ ts: 'c' });
+    await mentionHandler(surface)({
+      event: { text: '<@BOT> draft a plan for a health endpoint', ts: 't-plan', user: 'U1', channel: 'COTHER' },
+      say: sayPlan,
+    });
+    expect(handlePlanningMention).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'COTHER', ts: 't-plan' }),
+      sayPlan,
+      'COTHER',
+    );
+  });
+
   it('reports a restart failure when the relaunch throws', async () => {
     const onRestartInvoker = vi.fn().mockRejectedValue(new Error('no display'));
     const surface = lobbySurface(true, { onRestartInvoker });
@@ -684,25 +1132,414 @@ describe('lobby verb routing', () => {
     expect(received).toHaveLength(0);
   });
 
-  it('routes a build request to a normal agent thread without classifying', async () => {
-    const surface = lobbySurface();
+  it('routes a build request to an inferred Invoker plan thread', async () => {
+    const surface = lobbySurface(true, { defaultRepoUrl: 'git@github.com:default/repo.git' });
     await surface.start(async () => {});
     const say = vi.fn().mockResolvedValue({ ts: 'a' });
     await mentionHandler(surface)({ event: { text: '<@BOT> add a /health endpoint', ts: 't1', user: 'U1' }, say });
     expect(planConversationConfigs).toHaveLength(1);
-    expect(planConversationConfigs[0].mode).toBe('agent');
-    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(planConversationConfigs[0].mode).toBe('plan');
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
     expect(runWorkflowOp).not.toHaveBeenCalled();
   });
 
   it('routes an explicit plan request to an Invoker plan thread', async () => {
-    const surface = lobbySurface();
+    const surface = lobbySurface(true, { defaultRepoUrl: 'git@github.com:default/repo.git' });
     await surface.start(async () => {});
     const say = vi.fn().mockResolvedValue({ ts: 'a' });
     await mentionHandler(surface)({ event: { text: '<@BOT> plan: add a /health endpoint', ts: 't1', user: 'U1' }, say });
     expect(planConversationConfigs).toHaveLength(1);
     expect(planConversationConfigs[0].mode).toBe('plan');
     expect(runWorkflowOp).not.toHaveBeenCalled();
+  });
+
+  it('uses a direct repository URL for a clone-backed planning session', async () => {
+    const prepareRepoCheckout = vi.fn().mockResolvedValue('/planning-clones/notarepo');
+    const surface = lobbySurface(true, {
+      defaultRepoUrl: 'https://github.com/Neko-Catpital-Labs/Invoker.git',
+      workingDir: '/manager/Invoker',
+      prepareRepoCheckout,
+    });
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+    await mentionHandler(surface)({
+      event: {
+        text: '<@BOT> plan this in <https://github.com/EdbertChan/notarepo/|notarepo>',
+        ts: 'direct-repo',
+        user: 'U1',
+      },
+      say,
+    });
+
+    expect(prepareRepoCheckout).toHaveBeenCalledWith('https://github.com/EdbertChan/notarepo');
+    expect(planConversationConfigs.at(-1)).toEqual(expect.objectContaining({
+      repoUrl: 'https://github.com/EdbertChan/notarepo',
+      workingDir: '/planning-clones/notarepo',
+    }));
+  });
+
+  it('uses a repo-root URL in the first plan message instead of defaultRepoUrl and announces it', async () => {
+    mockSpawn.mockImplementationOnce(() => mockProcess('{"intent":"plan","operation":"none","target":"none"}'));
+    const surface = lobbySurface(true, {
+      defaultRepoUrl: 'git@github.com:default/repo.git',
+      enableImmediateAck: true,
+    });
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+
+    await mentionHandler(surface)({
+      event: {
+        text: '<@BOT> add a /health endpoint to https://github.com/openai/invoker',
+        ts: 't1',
+        user: 'U1',
+        channel: 'CLOBBY',
+      },
+      say,
+    });
+
+    expect(planConversationConfigs).toHaveLength(1);
+    expect(planConversationConfigs[0].repoUrl).toBe('https://github.com/openai/invoker');
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(say).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      text: expect.stringContaining('I picked repo `https://github.com/openai/invoker`'),
+      thread_ts: 't1',
+    }));
+  });
+
+  it('rejects multiple repository selectors before creating a session', async () => {
+    const surface = lobbySurface(true, {
+      repoAliases: { proof: 'https://github.com/example/proof.git' },
+    });
+    await surface.start(async () => {});
+    const multipleSay = vi.fn().mockResolvedValue({ ts: 'a' });
+    await mentionHandler(surface)({
+      event: {
+        text: '<@BOT> plan https://github.com/example/one and https://github.com/example/two',
+        ts: 'repo-multiple',
+        user: 'U1',
+      },
+      say: multipleSay,
+    });
+    expect(multipleSay).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('multiple repository URLs') }));
+    expect(planConversationConfigs).toHaveLength(0);
+  });
+
+  it('lets a [repo:] tag win over a repo URL in the same first plan message', async () => {
+    const surface = lobbySurface(true, {
+      defaultRepoUrl: 'git@github.com:default/repo.git',
+      repoAliases: { foo: 'git@github.com:me/foo.git' },
+    });
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+
+    await mentionHandler(surface)({
+      event: {
+        text: '<@BOT> [repo:foo] plan: add a /health endpoint to https://github.com/openai/invoker',
+        ts: 't1',
+        user: 'U1',
+        channel: 'CLOBBY',
+      },
+      say,
+    });
+
+    expect(planConversationConfigs).toHaveLength(1);
+    expect(planConversationConfigs[0].repoUrl).toBe('git@github.com:me/foo.git');
+    expect(say.mock.calls.map((call) => call[0].text).join('\n')).not.toContain('from the URL in your message');
+  });
+
+  it('ignores a deep link in the first plan message and falls through to defaultRepoUrl', async () => {
+    const surface = lobbySurface(true, { defaultRepoUrl: 'git@github.com:default/repo.git' });
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+
+    await mentionHandler(surface)({
+      event: {
+        text: '<@BOT> plan: fix the issue at https://github.com/openai/invoker/pull/123',
+        ts: 't1',
+        user: 'U1',
+        channel: 'CLOBBY',
+      },
+      say,
+    });
+
+    expect(planConversationConfigs).toHaveLength(1);
+    expect(planConversationConfigs[0].repoUrl).toBe('git@github.com:default/repo.git');
+    expect(say.mock.calls.map((call) => call[0].text).join('\n')).not.toContain('from the URL in your message');
+  });
+
+  it('rebinds a follow-up repo-root URL, clears workingDir, and checks out the new repo on the next turn', async () => {
+    const oldRepo = 'https://github.com/openai/old-repo';
+    const newRepo = 'https://github.com/openai/new-repo';
+    const prepareRepoCheckout = vi.fn().mockResolvedValue('/checkouts/new-repo');
+    const { adapter, slackSessionRepo, surface } = await persistentLobbySurface({
+      defaultRepoUrl: oldRepo,
+      workingDir: '/checkouts/old-repo',
+      prepareRepoCheckout,
+    });
+
+    try {
+      await surface.start(async () => {});
+      await mentionHandler(surface)({
+        event: { text: '<@BOT> local: start in the current repo', ts: 't1', user: 'U1', channel: 'CLOBBY' },
+        say: vi.fn().mockResolvedValue({ ts: 'a' }),
+      });
+      expect(slackSessionRepo.getLaunchContext('t1')).toEqual(expect.objectContaining({
+        repoUrl: oldRepo,
+        workingDir: '/checkouts/old-repo',
+      }));
+
+      const rebindSay = vi.fn().mockResolvedValue({ ts: 'b' });
+      await messageHandler(surface)({
+        event: { thread_ts: 't1', ts: 't2', user: 'U1', text: `Please use ${newRepo} instead`, channel: 'CLOBBY' },
+        say: rebindSay,
+      });
+
+      expect(prepareRepoCheckout).not.toHaveBeenCalled();
+      expect(slackSessionRepo.getLaunchContext('t1')).toEqual(expect.objectContaining({
+        repoUrl: newRepo,
+        workingDir: '',
+      }));
+      expect(rebindSay).toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining('openai/new-repo'),
+        thread_ts: 't1',
+      }));
+      expect(rebindSay.mock.calls[0][0].text).toContain('previous working state for this thread was discarded');
+      expect(planConversationConfigs).toHaveLength(1);
+
+      await messageHandler(surface)({
+        event: { thread_ts: 't1', ts: 't3', user: 'U1', text: 'run local: make the update now', channel: 'CLOBBY' },
+        say: vi.fn().mockResolvedValue({ ts: 'c' }),
+      });
+
+      expect(prepareRepoCheckout).toHaveBeenCalledWith(newRepo);
+      expect(slackSessionRepo.getLaunchContext('t1')).toEqual(expect.objectContaining({
+        repoUrl: newRepo,
+        workingDir: '/checkouts/new-repo',
+      }));
+      expect(planConversationConfigs.at(-1)).toEqual(expect.objectContaining({
+        mode: 'agent',
+        repoUrl: newRepo,
+        workingDir: '/checkouts/new-repo',
+      }));
+    } finally {
+      await surface.stop();
+      adapter.close();
+    }
+  });
+  it('refuses a repo rebind from a different non-admin participant', async () => {
+    const oldRepo = 'https://github.com/openai/old-repo';
+    const newRepo = 'https://github.com/openai/new-repo';
+    const prepareRepoCheckout = vi.fn().mockResolvedValue('/checkouts/new-repo');
+    const { adapter, slackSessionRepo, surface } = await persistentLobbySurface({
+      defaultRepoUrl: oldRepo,
+      workingDir: '/checkouts/old-repo',
+      adminUserIds: ['U_ADMIN'],
+      prepareRepoCheckout,
+    });
+
+    try {
+      await surface.start(async () => {});
+      await mentionHandler(surface)({
+        event: { text: '<@BOT> local: start in the current repo', ts: 't1', user: 'U1', channel: 'CLOBBY' },
+        say: vi.fn().mockResolvedValue({ ts: 'a' }),
+      });
+
+      const deniedSay = vi.fn().mockResolvedValue({ ts: 'b' });
+      await messageHandler(surface)({
+        event: { thread_ts: 't1', ts: 't2', user: 'U2', text: `Please use ${newRepo} instead`, channel: 'CLOBBY' },
+        say: deniedSay,
+      });
+
+      expect(prepareRepoCheckout).not.toHaveBeenCalled();
+      expect(slackSessionRepo.getLaunchContext('t1')).toEqual(expect.objectContaining({
+        repoUrl: oldRepo,
+        workingDir: '/checkouts/old-repo',
+      }));
+      expect(deniedSay).toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining('Permission denied'),
+        thread_ts: 't1',
+      }));
+      expect(deniedSay.mock.calls.map((call) => call[0].text).join('\n')).not.toContain('switched this thread');
+      expect(planConversationConfigs).toHaveLength(1);
+    } finally {
+      await surface.stop();
+      adapter.close();
+    }
+  });
+
+  it('treats a follow-up URL for the already-bound repo as a no-op', async () => {
+    const boundRepo = 'git@github.com:openai/invoker.git';
+    const prepareRepoCheckout = vi.fn().mockResolvedValue('/checkouts/unused');
+    const { adapter, slackSessionRepo, surface } = await persistentLobbySurface({
+      defaultRepoUrl: boundRepo,
+      workingDir: '/checkouts/invoker',
+      prepareRepoCheckout,
+    });
+
+    try {
+      await surface.start(async () => {});
+      await mentionHandler(surface)({
+        event: { text: '<@BOT> local: start in invoker', ts: 't1', user: 'U1', channel: 'CLOBBY' },
+        say: vi.fn().mockResolvedValue({ ts: 'a' }),
+      });
+
+      const sameRepoSay = vi.fn().mockResolvedValue({ ts: 'b' });
+      await messageHandler(surface)({
+        event: { thread_ts: 't1', ts: 't2', user: 'U1', text: 'run local: continue in https://github.com/openai/invoker', channel: 'CLOBBY' },
+        say: sameRepoSay,
+      });
+
+      expect(prepareRepoCheckout).not.toHaveBeenCalled();
+      expect(slackSessionRepo.getLaunchContext('t1')).toEqual(expect.objectContaining({
+        repoUrl: boundRepo,
+        workingDir: '/checkouts/invoker',
+      }));
+      expect(planConversationConfigs).toHaveLength(1);
+      const texts = sameRepoSay.mock.calls.map((call) => call[0].text).join('\n');
+      expect(texts).not.toContain('switched this thread');
+      expect(texts).not.toContain('previous working state');
+    } finally {
+      await surface.stop();
+      adapter.close();
+    }
+  });
+
+  it('accepts an equivalent non-GitHub repo URL in a thread mention', async () => {
+    const boundRepo = 'git@gitlab.com:openai/invoker.git';
+    const prepareRepoCheckout = vi.fn().mockResolvedValue('/checkouts/unused');
+    const { adapter, surface } = await persistentLobbySurface({
+      defaultRepoUrl: boundRepo,
+      workingDir: '/checkouts/invoker',
+      prepareRepoCheckout,
+    });
+
+    try {
+      await surface.start(async () => {});
+      await mentionHandler(surface)({
+        event: { text: '<@BOT> local: start in invoker', ts: 't1', user: 'U1', channel: 'CLOBBY' },
+        say: vi.fn().mockResolvedValue({ ts: 'a' }),
+      });
+
+      const sameRepoSay = vi.fn().mockResolvedValue({ ts: 'b' });
+      await mentionHandler(surface)({
+        event: {
+          text: '<@BOT> local: continue in https://gitlab.com/openai/invoker',
+          thread_ts: 't1',
+          ts: 't2',
+          user: 'U1',
+          channel: 'CLOBBY',
+        },
+        say: sameRepoSay,
+      });
+
+      expect(prepareRepoCheckout).not.toHaveBeenCalled();
+      expect(planConversationConfigs).toHaveLength(1);
+      expect(sameRepoSay.mock.calls.map((call) => call[0].text).join('\n')).not.toContain('already pinned to a different repository');
+    } finally {
+      await surface.stop();
+      adapter.close();
+    }
+  });
+
+  it('clears persisted conversation state when rebinding a thread repo', async () => {
+    const oldRepo = 'https://github.com/openai/old-repo';
+    const newRepo = 'https://github.com/openai/new-repo';
+    const { adapter, conversationRepo, surface } = await persistentLobbySurface({
+      defaultRepoUrl: oldRepo,
+      workingDir: '/checkouts/old-repo',
+    });
+
+    try {
+      await surface.start(async () => {});
+      await mentionHandler(surface)({
+        event: { text: '<@BOT> local: start in the current repo', ts: 't1', user: 'U1', channel: 'CLOBBY' },
+        say: vi.fn().mockResolvedValue({ ts: 'a' }),
+      });
+      conversationRepo.saveConversation(
+        't1',
+        [
+          { role: 'user', content: 'old repo question' },
+          { role: 'assistant', content: 'old repo answer' },
+        ],
+        null,
+        false,
+        'CLOBBY',
+        'U1',
+        'agent',
+      );
+      expect(conversationRepo.loadConversation('t1')).not.toBeNull();
+
+      const rebindSay = vi.fn().mockResolvedValue({ ts: 'b' });
+      await messageHandler(surface)({
+        event: { thread_ts: 't1', ts: 't2', user: 'U1', text: `Please use ${newRepo} instead`, channel: 'CLOBBY' },
+        say: rebindSay,
+      });
+
+      expect(rebindSay).toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining('openai/new-repo'),
+        thread_ts: 't1',
+      }));
+      expect(conversationRepo.loadConversation('t1')).toBeNull();
+    } finally {
+      await surface.stop();
+      adapter.close();
+    }
+  });
+
+  it('does not rebind a follow-up deep link', async () => {
+    const boundRepo = 'https://github.com/openai/invoker';
+    const prepareRepoCheckout = vi.fn().mockResolvedValue('/checkouts/unused');
+    const { adapter, slackSessionRepo, surface } = await persistentLobbySurface({
+      defaultRepoUrl: boundRepo,
+      workingDir: '/checkouts/invoker',
+      prepareRepoCheckout,
+    });
+
+    try {
+      await surface.start(async () => {});
+      await mentionHandler(surface)({
+        event: { text: '<@BOT> local: start in invoker', ts: 't1', user: 'U1', channel: 'CLOBBY' },
+        say: vi.fn().mockResolvedValue({ ts: 'a' }),
+      });
+
+      const deepLinkSay = vi.fn().mockResolvedValue({ ts: 'b' });
+      await messageHandler(surface)({
+        event: { thread_ts: 't1', ts: 't2', user: 'U1', text: 'run local: inspect https://github.com/openai/new-repo/pull/123', channel: 'CLOBBY' },
+        say: deepLinkSay,
+      });
+
+      expect(prepareRepoCheckout).not.toHaveBeenCalled();
+      expect(slackSessionRepo.getLaunchContext('t1')).toEqual(expect.objectContaining({
+        repoUrl: boundRepo,
+        workingDir: '/checkouts/invoker',
+      }));
+      expect(planConversationConfigs).toHaveLength(1);
+      const texts = deepLinkSay.mock.calls.map((call) => call[0].text).join('\n');
+      expect(texts).not.toContain('switched this thread');
+      expect(texts).not.toContain('previous working state');
+    } finally {
+      await surface.stop();
+      adapter.close();
+    }
+  });
+
+  it('asks for a repo instead of planning when a plan mention has no tag, repo URL, or default', async () => {
+    const surface = lobbySurface();
+    await surface.start(async () => {});
+    const say = vi.fn().mockResolvedValue({ ts: 'a' });
+
+    await mentionHandler(surface)({
+      event: { text: '<@BOT> plan: add a /health endpoint', ts: 't1', user: 'U1', channel: 'CLOBBY' },
+      say,
+    });
+
+    expect(planConversationConfigs).toHaveLength(0);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(say).toHaveBeenCalledWith(expect.objectContaining({
+      text: expect.stringContaining('[repo:<alias>]'),
+      thread_ts: 't1',
+    }));
+    expect(say.mock.calls[0][0].text).toContain('git URL');
   });
 
 
@@ -756,11 +1593,12 @@ describe('lobby verb routing', () => {
     const say = vi.fn().mockResolvedValue({ ts: 'a' });
     await mentionHandler(surface)({ event: { text: '<@BOT> submit', ts: 't1', user: 'U1' }, say });
     expect(received).toHaveLength(0);
-    expect(say).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('No Invoker plan draft') }));
+    expect(say).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('No complete Invoker draft') }));
+    expect(say.mock.calls[0][0].text).not.toContain('plan:');
   });
 
-  it('submit shows a short plain-English plan summary and emits start_plan on confirmation', async () => {
-    const surface = lobbySurface();
+  it('submit shows every task in the plan summary and emits start_plan on confirmation', async () => {
+    const surface = lobbySurface(true, { defaultRepoUrl: 'git@github.com:default/repo.git' });
     await surface.start(async (cmd) => { received.push(cmd); });
     const say = vi.fn().mockResolvedValue({ ts: 'a' });
     // Open a planning conversation in the thread, then arm its drafted plan.
@@ -784,14 +1622,11 @@ tasks:
 
     const say2 = vi.fn().mockResolvedValue({ ts: 'b' });
     await mentionHandler(surface)({ event: { text: '<@BOT> submit', thread_ts: 't1', ts: 't2', user: 'U1' }, say: say2 });
-    // Shows the ELI5 step summary, does not submit yet.
     const confirmationText = say2.mock.calls[0][0].text as string;
-    expect(confirmationText).toContain('steps in order');
-    expect(confirmationText).toContain('First: Add a simple /health endpoint for ...');
-    expect(confirmationText).toContain('Then: Wire the new /health route through ...');
-    expect(confirmationText).toContain('Then 2 more.');
-    expect(confirmationText).not.toContain('without changing unrelated endpoints');
-    expect(wordCount(confirmationText)).toBeLessThanOrEqual(40);
+    expect(confirmationText).toContain('Drafted *Health API rollout with several detailed implementation tasks* (4 tasks).');
+    expect(confirmationText).toContain('1) Add a simple /health endpoint for uptime');
+    expect(confirmationText).toContain('2) Wire the new /health route through the');
+    expect(confirmationText.split(/\s+/).length).toBeLessThan(100);
     expect(received.some((c) => c.type === 'start_plan')).toBe(false);
 
     const say3 = vi.fn().mockResolvedValue({ ts: 'c' });

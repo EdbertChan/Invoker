@@ -37,6 +37,7 @@ describe('Task interaction (component)', () => {
 
   it('selecting a workflow shows mini DAG and inspector content', async () => {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([alpha, beta], workflows));
 
     await waitFor(() => {
@@ -51,8 +52,39 @@ describe('Task interaction (component)', () => {
     });
   });
 
+  it('scopes mini DAG layering to the workflow graph surface', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+    act(() => mock.setTasks([alpha, beta], workflows));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workflow-node-wf-a')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('rf__node-wf-a'));
+
+    const surface = screen.getByTestId('workflow-graph-surface');
+    const graphContent = screen.getByTestId('workflow-graph-content');
+    const panel = await screen.findByTestId('selected-workflow-mini-dag');
+
+    expect(surface).toHaveClass('relative', 'isolate', 'z-0');
+    expect(graphContent).toHaveClass('relative', 'z-0');
+    expect(panel).toHaveClass('absolute', 'z-10');
+    expect(panel).not.toHaveClass('z-[1000]');
+    expect(panel.style.zIndex).toBe('');
+    expect(surface).toContainElement(graphContent);
+    expect(surface).toContainElement(panel);
+
+    fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-a'));
+    const globalMenu = await screen.findByRole('menu');
+
+    expect(globalMenu).toHaveClass('fixed', 'z-50');
+    expect(surface).not.toContainElement(globalMenu);
+  });
+
   it('clicking a mini DAG task updates prompt details', async () => {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([alpha, beta], workflows));
 
     await waitFor(() => {
@@ -81,6 +113,7 @@ describe('Task interaction (component)', () => {
     });
 
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([failedTask], failedWorkflows));
 
     await waitFor(() => {
@@ -94,8 +127,114 @@ describe('Task interaction (component)', () => {
     });
   });
 
+  it('renders task.worker_action events in the task timeline', async () => {
+    const task = makeUITask({
+      id: 'task-worker-action',
+      description: 'Worker action target',
+      status: 'completed',
+      workflowId: 'wf-a',
+      command: 'pnpm test',
+    });
+    mock.setEvents(task.id, [{
+      id: 1,
+      taskId: task.id,
+      eventType: 'task.worker_action',
+      payload: JSON.stringify({
+        workerKind: 'pr-summary-refresh',
+        actionType: 'refresh-pr-summary',
+        status: 'completed',
+        summary: 'Updated PR body with Invoker pipeline summary',
+        reviewId: '123',
+      }),
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }]);
+
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+    act(() => mock.setTasks([task], workflows));
+
+    fireEvent.click(await screen.findByTestId('rf__node-task-worker-action'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('task-logs-section')).toHaveTextContent(
+        'pr-summary-refresh/refresh-pr-summary completed: Updated PR body with Invoker pipeline summary',
+      );
+      expect(screen.getByTestId('task-logs-section')).toHaveTextContent('"workerKind":"pr-summary-refresh"');
+    });
+  });
+
+  it('lets prompt tasks change harness and model from the inspector', async () => {
+    const promptTask = makeUITask({
+      id: 'task-ai',
+      description: 'AI task',
+      status: 'pending',
+      workflowId: 'wf-a',
+      prompt: 'Write a test',
+      config: {
+        workflowId: 'wf-a',
+        prompt: 'Write a test',
+        executionAgent: 'omp',
+      },
+    });
+    vi.mocked(mock.api.getExecutionDefaults).mockResolvedValue({
+      executionAgent: 'omp',
+      executionModel: 'chatgpt-5.4',
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+    act(() => mock.setTasks([promptTask], workflows));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workflow-node-wf-a')).toBeInTheDocument();
+    });
+
+    fireEvent.click(await screen.findByTestId('rf__node-task-ai'));
+    await waitFor(() => {
+      expect(screen.getByTestId('execution-agent-select')).toBeInTheDocument();
+      expect(screen.getByTestId('execution-model-select')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByTestId('execution-agent-select'), { target: { value: 'codex' } });
+    await waitFor(() => {
+      expect(mock.api.editTaskAgent).toHaveBeenCalledWith('task-ai', 'codex');
+    });
+
+    fireEvent.change(screen.getByTestId('execution-model-select'), { target: { value: 'openai/gpt-5-codex' } });
+    await waitFor(() => {
+      expect(mock.api.editTaskModel).toHaveBeenCalledWith('task-ai', 'openai/gpt-5-codex');
+    });
+  });
+
+  it('clicking a task expands a minimized inspector', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+    act(() => mock.setTasks([alpha, beta], workflows));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workflow-node-wf-a')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('rf__node-wf-a'));
+    await waitFor(() => {
+      expect(screen.getByTestId('rf__node-task-alpha')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText('Minimize inspector'));
+    expect(await screen.findByLabelText('Maximize inspector')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('rf__node-task-alpha'));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Minimize inspector')).toBeInTheDocument();
+      expect(screen.getByText('echo hello-alpha')).toBeInTheDocument();
+    });
+    expect(screen.queryByLabelText('Maximize inspector')).not.toBeInTheDocument();
+  });
+
   it('clicking workflow graph background dismisses the selected mini DAG', async () => {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([alpha, beta], workflows));
 
     await waitFor(() => {
@@ -116,6 +255,7 @@ describe('Task interaction (component)', () => {
 
   it('clicking inside the mini DAG panel keeps the workflow selected', async () => {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([alpha, beta], workflows));
 
     await waitFor(() => {
@@ -132,6 +272,7 @@ describe('Task interaction (component)', () => {
 
   it('drags the selected workflow mini DAG by its header', async () => {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([alpha, beta], workflows));
 
     await waitFor(() => {
@@ -179,6 +320,7 @@ describe('Task interaction (component)', () => {
 
   it('clamps the selected workflow mini DAG inside the graph surface while dragging', async () => {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([alpha, beta], workflows));
 
     await waitFor(() => {
@@ -226,6 +368,7 @@ describe('Task interaction (component)', () => {
 
   it('opens and closes the maximized graph without clearing selection', async () => {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([alpha, beta], workflows));
 
     await waitFor(() => {

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { QueueView } from '../components/QueueView.js';
 import { makeUITask } from './helpers/mock-invoker.js';
-import type { TaskState, WorkerActionSummary, WorkerStatusEntry, WorkerStatusSnapshot } from '../types.js';
+import type { TaskState, WorkerActionSummary, WorkerStatusEntry, WorkerStatusSnapshot, WorkflowMeta } from '../types.js';
 
 describe('QueueView', () => {
   const onTaskClick = vi.fn();
@@ -14,6 +14,10 @@ describe('QueueView', () => {
     generatedAt: '2026-01-01T00:00:00.000Z',
     workers: [],
   };
+
+  const DEFAULT_WORKFLOWS = new Map<string, WorkflowMeta>([
+    ['wf-1', { id: 'wf-1', name: 'My Workflow', status: 'running' }],
+  ]);
 
   function makeWorkerAction(overrides: Partial<WorkerActionSummary> = {}): WorkerActionSummary {
     return {
@@ -38,12 +42,16 @@ describe('QueueView', () => {
     return {
       kind: 'autofix',
       note: 'Auto-fixes failed tasks.',
+      source: 'built-in',
+      availability: 'available',
+      running: true,
       lifecycle: 'running',
       policy: 'enabled',
       autoStarts: true,
       startable: false,
       stoppable: true,
       recentActions: [],
+      recentLogs: [],
       ...overrides,
     };
   }
@@ -61,10 +69,12 @@ describe('QueueView', () => {
     selectedTaskId: string | null = null,
     readOnly = false,
     selectedWorkerKind: string | null = null,
+    workflows: Map<string, WorkflowMeta> = DEFAULT_WORKFLOWS,
   ) {
     render(
       <QueueView
         tasks={tasks}
+        workflows={workflows}
         workerStatus={workerStatus}
         readOnly={readOnly}
         onStartWorker={onStartWorker}
@@ -125,7 +135,8 @@ describe('QueueView', () => {
 
     expect(screen.getByText('Worker Actions (1)')).toBeInTheDocument();
     expect(screen.getByText('Only work started by a worker process appears here.')).toBeInTheDocument();
-    expect(screen.getByText('Fix With Agent · needs fix')).toBeInTheDocument();
+    expect(screen.getByText('needs fix')).toBeInTheDocument();
+    expect(screen.getByText('Autofix · Fix With Agent · My Workflow')).toBeInTheDocument();
     expect(screen.queryByText('normal scheduler work')).not.toBeInTheDocument();
     expect(screen.queryByText('Workflow gate for queued merge')).not.toBeInTheDocument();
     expect(screen.queryByText(/Backlog/)).not.toBeInTheDocument();
@@ -141,9 +152,42 @@ describe('QueueView', () => {
       ]),
     );
 
-    fireEvent.click(screen.getByText('Fix With Agent · needs fix'));
+    fireEvent.click(screen.getByText('needs fix'));
 
     expect(onTaskClick).toHaveBeenCalledWith(expect.objectContaining({ id: task.id }));
+  });
+
+  it('distinguishes CI failure repair rows by target task title', () => {
+    const taskA = makeUITask({ id: 'wf-1/gate-a', status: 'failed', description: 'Review gate A' });
+    const taskB = makeUITask({ id: 'wf-1/gate-b', status: 'failed', description: 'Review gate B' });
+    renderQueueView(
+      new Map([[taskA.id, taskA], [taskB.id, taskB]]),
+      makeWorkerStatus([
+        makeWorker({
+          kind: 'ci-failure',
+          recentActions: [
+            makeWorkerAction({
+              id: 'ci-a',
+              workerKind: 'ci-failure',
+              actionType: 'fix-ci-failure',
+              taskId: taskA.id,
+              subjectId: taskA.id,
+            }),
+            makeWorkerAction({
+              id: 'ci-b',
+              workerKind: 'ci-failure',
+              actionType: 'fix-ci-failure',
+              taskId: taskB.id,
+              subjectId: taskB.id,
+            }),
+          ],
+        }),
+      ]),
+    );
+
+    expect(screen.getByText('Review gate A')).toBeInTheDocument();
+    expect(screen.getByText('Review gate B')).toBeInTheDocument();
+    expect(screen.getAllByText('CI failure repair · Fix Ci Failure · My Workflow')).toHaveLength(2);
   });
 
   it('keeps worker actions and worker processes in independent scroll panes', () => {
@@ -161,15 +205,48 @@ describe('QueueView', () => {
     const actionSection = screen.getByTestId('action-queue-section');
     const actionList = screen.getByTestId('worker-action-list');
     const workersSection = screen.getByTestId('worker-processes-section');
+    const workersScroll = screen.getByTestId('worker-process-scroll');
 
+    expect(actionSection.parentElement).toHaveClass('grid-rows-[minmax(0,1fr)]');
     expect(actionSection.compareDocumentPosition(workersSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(actionSection.className).toContain('overflow-hidden');
     expect(actionList.className).toContain('overflow-y-auto');
     expect(workersSection.className).toContain('overflow-hidden');
+    expect(workersScroll).toHaveClass('min-h-0', 'flex-1', 'overflow-y-auto');
     expect(within(actionSection).getByText('Worker Actions (1)')).toBeInTheDocument();
-    expect(within(workersSection).getByText('Worker processes (1)')).toBeInTheDocument();
+    expect(within(workersSection).queryByText('Worker processes (1)')).not.toBeInTheDocument();
     expect(within(workersSection).getByTestId('worker-row-autofix')).toBeInTheDocument();
     expect(within(actionSection).queryByTestId('worker-row-autofix')).not.toBeInTheDocument();
+  });
+
+  it('keeps tall worker-process rows inside the middle pane scroll owner', () => {
+    const workers = Array.from({ length: 24 }, (_, index) =>
+      makeWorker({
+        kind: `worker-${index}`,
+        note: `Worker ${index}`,
+        lifecycle: index % 2 === 0 ? 'running' : 'stopped',
+        autoStarts: false,
+        startable: true,
+        stoppable: false,
+      }),
+    );
+
+    renderQueueView(new Map(), makeWorkerStatus(workers));
+
+    const workersScroll = screen.getByTestId('worker-process-scroll');
+    const workerCard = screen.getByTestId('worker-activity-card');
+    const processList = screen.getByTestId('worker-process-list');
+    const firstRow = screen.getByTestId('worker-row-worker-0');
+    const lastRow = screen.getByTestId('worker-row-worker-23');
+
+    expect(workersScroll).toHaveClass('min-h-0', 'flex-1', 'overflow-y-auto');
+    expect(workerCard).toHaveClass('flex', 'min-h-0', 'flex-col');
+    expect(processList).toHaveClass('min-h-0');
+    expect(processList.closest('.overflow-y-auto')).toBe(workersScroll);
+    expect(firstRow.closest('[data-testid="worker-process-scroll"]')).toBe(workersScroll);
+    expect(lastRow.closest('[data-testid="worker-process-scroll"]')).toBe(workersScroll);
+    expect(lastRow.closest('[data-testid="worker-action-list"]')).toBeNull();
+    expect(screen.getAllByTestId(/^worker-row-/)).toHaveLength(24);
   });
 
   it('shows an empty worker-action state without showing unrelated tasks', () => {
@@ -197,9 +274,10 @@ describe('QueueView', () => {
       ]),
     );
 
-    expect(screen.getByText('Fix With Agent · missing-target')).toBeInTheDocument();
+    expect(screen.getByText('missing-target')).toBeInTheDocument();
+    expect(screen.getByText('Autofix · Fix With Agent · My Workflow')).toBeInTheDocument();
     expect(screen.getByText('Target task is not loaded.')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Fix With Agent · missing-target'));
+    fireEvent.click(screen.getByText('missing-target'));
     expect(onTaskClick).not.toHaveBeenCalled();
   });
 
@@ -247,6 +325,14 @@ describe('QueueView', () => {
           startable: false,
           stoppable: true,
         }),
+        makeWorker({
+          kind: 'pr-ci-failure-scan',
+          note: 'Scans mapped PRs for failing CI.',
+          lifecycle: 'running',
+          autoStarts: true,
+          startable: false,
+          stoppable: true,
+        }),
       ]),
     );
 
@@ -257,13 +343,15 @@ describe('QueueView', () => {
       'worker-row-ci-failure',
       'worker-row-coderabbit-address',
       'worker-row-pr-conflict-rebase',
+      'worker-row-pr-ci-failure-scan',
     ]);
-    expect(screen.getByText('Worker processes (5)')).toBeInTheDocument();
+    expect(screen.queryByText('Worker processes (6)')).not.toBeInTheDocument();
     expect(screen.getByText('Autofix')).toBeInTheDocument();
     expect(screen.getByText('PR status')).toBeInTheDocument();
     expect(screen.getByText('CI failure repair')).toBeInTheDocument();
     expect(screen.getByText('Coderabbit Address')).toBeInTheDocument();
     expect(screen.getByText('Pr Conflict Rebase')).toBeInTheDocument();
+    expect(screen.getByText('PR CI scan')).toBeInTheDocument();
   });
 
   it('shows disabled Autofix and CI rows when policy is disabled', () => {
@@ -295,7 +383,7 @@ describe('QueueView', () => {
 
     expect(within(screen.getByTestId('worker-row-autofix')).getByText('Disabled · autoFixRetries=0')).toBeInTheDocument();
     expect(within(screen.getByTestId('worker-row-ci-failure')).getByText('Disabled · autoFixRetries=0')).toBeInTheDocument();
-    expect(within(screen.getByTestId('worker-row-ci-failure')).getByText('Auto-starts')).toBeInTheDocument();
+    expect(within(screen.getByTestId('worker-row-ci-failure')).getByText('Starts on launch')).toBeInTheDocument();
   });
 
   it('calls start worker for a stopped row', () => {
@@ -311,7 +399,7 @@ describe('QueueView', () => {
       ]),
     );
 
-    fireEvent.click(within(screen.getByTestId('worker-row-autofix')).getByRole('button', { name: 'Start process' }));
+    fireEvent.click(within(screen.getByTestId('worker-row-autofix')).getByRole('button', { name: 'Enable worker' }));
     expect(onStartWorker).toHaveBeenCalledWith('autofix');
   });
 
@@ -328,7 +416,7 @@ describe('QueueView', () => {
       ]),
     );
 
-    fireEvent.click(within(screen.getByTestId('worker-row-ci-failure')).getByRole('button', { name: 'Stop process' }));
+    fireEvent.click(within(screen.getByTestId('worker-row-ci-failure')).getByRole('button', { name: 'Disable worker' }));
     expect(onStopWorker).toHaveBeenCalledWith('ci-failure');
   });
 
@@ -347,7 +435,7 @@ describe('QueueView', () => {
       true,
     );
 
-    const start = within(screen.getByTestId('worker-row-autofix')).getByRole('button', { name: 'Start process' });
+    const start = within(screen.getByTestId('worker-row-autofix')).getByRole('button', { name: 'Enable worker' });
     expect(start).toBeDisabled();
     expect(start).toHaveAttribute('title', 'Read-only window');
   });
@@ -414,7 +502,7 @@ describe('QueueView', () => {
 
     const relsSection = screen.getByTestId('rels-wf-1/build');
     expect(relsSection.textContent).toContain('downstream:');
-    expect(relsSection.textContent).toContain('deploy');
+    expect(relsSection.textContent).toContain('Deploy after build');
 
     const deployChip = relsSection.querySelector('button');
     expect(deployChip).not.toBeNull();
@@ -448,7 +536,7 @@ describe('QueueView', () => {
       buildTask.id,
     );
 
-    const selectedRow = screen.getByText('Fix With Agent · Build the project').closest('[data-row-id]');
+    const selectedRow = screen.getByText('Build the project').closest('[data-row-id]');
     expect(selectedRow?.className).toContain('bg-cyan-950/30');
 
     fireEvent.click(screen.getByLabelText('Expand relationships'));

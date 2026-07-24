@@ -8,7 +8,7 @@
  * command-family modules — keeping the import graph acyclic.
  */
 
-import { makeEnvelope } from '@invoker/contracts';
+import { makeEnvelope, type StartReadyRequest } from '@invoker/contracts';
 import type { TaskState } from '@invoker/workflow-core';
 import {
   remoteFetchForPool,
@@ -26,7 +26,7 @@ import {
   forkWorkflow as sharedForkWorkflow,
 } from './workflow-actions.js';
 import { parseHeadlessFixArgs } from './auto-fix-intents.js';
-import { resolveDefaultExecutionAgent } from './config.js';
+import { resolveDefaultExecutionAgent, resolveConflictResolutionSettings } from './config.js';
 import {
   dispatchStartedTasksWithGlobalTopup,
   executeGlobalTopup,
@@ -48,6 +48,27 @@ import {
   preemptTaskSubgraph,
   preemptWorkflowExecution,
 } from './headless-shared.js';
+import { runStartReady } from './start-ready.js';
+type StartReadyRequestExt = StartReadyRequest & {
+  recreateFailedAndPending?: boolean;
+  recreateFailedPendingAndRunning?: boolean;
+};
+
+type StartReadyPreviewExt = {
+  readyTaskIds: string[];
+  recoverableTaskIds: string[];
+  failedWorkflowIds: string[];
+  pendingWorkflowIds: string[];
+  runningWorkflowIds: string[];
+  skipped: {
+    awaitingApproval: number;
+    reviewReady: number;
+    blocked: number;
+    failedTasks: number;
+    pendingTasks: number;
+    runningTasks: number;
+  };
+};
 
 export async function headlessWatch(workflowId: string | undefined, deps: HeadlessDeps): Promise<void> {
   const workflows = deps.persistence.listWorkflows();
@@ -212,6 +233,103 @@ export async function headlessResume(
   await webSurface?.close().catch(() => {});
 }
 
+function parseStartReadyArgs(args: string[], inheritedNoTrack: boolean | undefined): {
+  request: StartReadyRequestExt;
+  noTrack: boolean;
+} {
+  const request: StartReadyRequestExt = {};
+  let noTrack = inheritedNoTrack ?? false;
+  for (const arg of args) {
+    switch (arg) {
+      case '--dry-run':
+        request.dryRun = true;
+        break;
+      case '--recreate-failed':
+        request.recreateFailed = true;
+        break;
+      case '--recreate-failed-and-pending':
+        request.recreateFailedAndPending = true;
+        break;
+      case '--recreate-failed-pending-and-running':
+        request.recreateFailedPendingAndRunning = true;
+        break;
+      case '--recreate-all':
+        request.recreateAll = true;
+        break;
+      case '--no-track':
+        noTrack = true;
+        break;
+      default:
+        throw new Error(`Unknown start-ready option "${arg}". Usage: --headless start-ready [--dry-run] [--recreate-failed] [--recreate-failed-and-pending] [--recreate-failed-pending-and-running] [--recreate-all] [--no-track]`);
+    }
+  }
+  return { request, noTrack };
+}
+
+export async function headlessStartReady(args: string[], deps: HeadlessDeps): Promise<void> {
+  const { request, noTrack } = parseStartReadyArgs(args, deps.noTrack);
+  const result = runStartReady(deps.orchestrator, request) as ReturnType<typeof runStartReady> & {
+    preview: StartReadyPreviewExt;
+  };
+  const runnable = result.started.filter(isDispatchableLaunch);
+  const preview = result.preview;
+
+  const modeLabel = request.recreateAll
+    ? 'Start and recreate all (including finished)'
+    : request.recreateFailedPendingAndRunning
+      ? 'Start and recreate failed, pending, and running'
+      : request.recreateFailedAndPending
+        ? 'Start and recreate failed and pending'
+        : request.recreateFailed
+          ? 'Start and recreate failed'
+          : 'Start ready work';
+  process.stdout.write(`${modeLabel}: ${result.dryRun ? 'preview' : 'submitted'}\n`);
+  process.stdout.write(`  ready: ${preview.readyTaskIds.length}\n`);
+  process.stdout.write(`  recoverable: ${preview.recoverableTaskIds.length}\n`);
+  process.stdout.write(`  failed workflows: ${preview.failedWorkflowIds.length}\n`);
+  if (
+    request.recreateAll
+    || request.recreateFailedAndPending
+    || request.recreateFailedPendingAndRunning
+  ) {
+    process.stdout.write(`  pending workflows: ${preview.pendingWorkflowIds.length}\n`);
+  }
+  if (request.recreateAll || request.recreateFailedPendingAndRunning) {
+    process.stdout.write(`  running workflows: ${preview.runningWorkflowIds.length}\n`);
+  }
+  if (request.recreateAll) {
+    process.stdout.write(`  completed workflows: ${preview.completedWorkflowIds?.length ?? 0}\n`);
+  }
+  process.stdout.write(`  recreated workflows: ${result.recreatedWorkflowIds.length}\n`);
+  process.stdout.write(`  started: ${runnable.length}\n`);
+
+  if (result.dryRun || runnable.length === 0) {
+    return;
+  }
+
+  if (noTrack) {
+    if (deps.deferRunnableTasks) {
+      deps.deferRunnableTasks(runnable);
+    } else {
+      const taskExecutor = createHeadlessExecutor(deps);
+      void Promise.resolve()
+        .then(() => taskExecutor.executeTasks(runnable))
+        .catch((err) => {
+          deps.logger.error(
+            `background no-track start-ready failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+            { module: 'headless' },
+          );
+        });
+    }
+    process.stdout.write('[headless] --no-track enabled: start-ready accepted; exiting without tracking.\n');
+    return;
+  }
+
+  const taskExecutor = createHeadlessExecutor(deps);
+  wireHeadlessApproveHook(deps, taskExecutor);
+  await taskExecutor.executeTasks(runnable);
+}
+
 export async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Promise<void> {
   if (!taskId) throw new Error('Missing arguments. Usage: --headless retry-task <taskId>');
   await withRestoredTaskUnlessDeleteAllWon(taskId, deps, 'retry-task', async (restored) => {
@@ -254,15 +372,14 @@ export async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Pro
           deps.deferRunnableTasks(dispatchable, restored.workflowId);
         } else {
           const taskExecutor = createHeadlessExecutor(deps);
-          const launch = setTimeout(() => {
-            void taskExecutor.executeTasks(dispatchable).catch((err) => {
+          void Promise.resolve()
+            .then(() => taskExecutor.executeTasks(dispatchable))
+            .catch((err) => {
               deps.logger.error(
                 `background no-track task retry failed for ${taskId}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
                 { module: 'headless' },
               );
             });
-          }, 25);
-          launch.unref?.();
         }
       }
       process.stdout.write('[headless] --no-track enabled: retry-task accepted; exiting without tracking.\n');
@@ -288,6 +405,15 @@ export async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Pro
       setExitCodeOnFailure: false,
     });
   });
+}
+
+export async function headlessRepairReviewGateCi(prArg: string | undefined, deps: HeadlessDeps): Promise<void> {
+  if (!prArg) throw new Error('Missing PR argument. Usage: --headless repair-review-gate-ci <prNumber|prUrl>');
+  if (!deps.repairReviewGateCi) {
+    throw new Error('Review-gate CI repair is unavailable in this process.');
+  }
+  const result = await deps.repairReviewGateCi(prArg);
+  process.stdout.write(`${result.message}\n`);
 }
 
 export async function headlessFix(rawArgs: string[], deps: HeadlessDeps): Promise<void> {
@@ -359,13 +485,19 @@ export async function headlessResolveConflict(taskId: string, deps: HeadlessDeps
   taskId = restored.resolvedTaskId;
 
   const te = createHeadlessExecutor(deps);
-  const agent = (agentArg ?? resolveDefaultExecutionAgent(deps.invokerConfig)).toLowerCase();
+  const settings = resolveConflictResolutionSettings(deps.invokerConfig, {
+    explicitAgent: agentArg?.toLowerCase(),
+    pathDefaultAgent: resolveDefaultExecutionAgent(deps.invokerConfig),
+  });
+  const agent = settings.agent ?? resolveDefaultExecutionAgent(deps.invokerConfig);
   try {
     const result = await resolveConflictAction(taskId, {
       ...deps,
       taskExecutor: te,
       autoApproveAIFixes: deps.invokerConfig.autoApproveAIFixes,
-    }, agent, deps.signal);
+    }, agentArg?.toLowerCase(), deps.signal, {
+      pathDefaultAgent: resolveDefaultExecutionAgent(deps.invokerConfig),
+    });
     await finalizeMutationWithGlobalTopup({
       orchestrator: deps.orchestrator,
       taskExecutor: te,
@@ -768,15 +900,14 @@ export async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDe
       deps.deferRunnableTasks(dispatchable, workflowId);
     } else {
       const te = createHeadlessExecutor(deps);
-      const launch = setTimeout(() => {
-        void te.executeTasks(dispatchable).catch((err) => {
+      void Promise.resolve()
+        .then(() => te.executeTasks(dispatchable))
+        .catch((err) => {
           deps.logger.error(
             `background no-track workflow retry failed for ${workflowId}: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
             { module: 'headless' },
           );
         });
-      }, 25);
-      launch.unref?.();
     }
     process.stdout.write('[headless] --no-track enabled: retry accepted; exiting without tracking.\n');
     return;

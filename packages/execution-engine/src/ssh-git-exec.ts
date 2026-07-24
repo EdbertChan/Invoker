@@ -142,6 +142,11 @@ elif [[ "\${INVOKER_HOME:0:2}" == '~/' ]]; then
 fi
 CLONE="$INVOKER_HOME/repos/$H"
 mkdir -p "$(dirname "$CLONE")"
+# The remote ssh session has its own HOME/git config, so a local file:// $REPO
+# owned by another uid is rejected with "detected dubious ownership". Only the
+# safe.directory "*" wildcard covers the check on $REPO/.git (the -c form and a
+# specific path do not), so set it in the remote global config before cloning.
+git config --global --add safe.directory '*' >/dev/null 2>&1 || true
 if [ ! -d "$CLONE/.git" ]; then git clone "$REPO" "$CLONE"; fi
 if ! git -C "$CLONE" fetch --all --prune; then
   echo "[WARNING] Git fetch failed for $CLONE" >&2
@@ -294,13 +299,9 @@ export interface GitWorktreeSandboxResetOpts {
  *                                   files (e.g. node_modules/, build caches).
  *
  * Why -fd and not -fdx:
- *   The managed-workspace execution path always runs provisionCommand
- *   (pnpm install --frozen-lockfile) inside buildRuntimeBootstrapScript, so
- *   there is no warm-reuse savings to protect by keeping node_modules/ out of the
- *   clean.  However, -x would unconditionally evict the package cache on every
- *   reuse_exact hit, forcing a full network re-install.  Keeping gitignored caches
- *   alive with -fd lets the package manager do its own lockfile-gated cache check,
- *   which is faster and no less correct.
+ *   Managed SSH may hydrate package caches such as node_modules/ before task
+ *   execution. Keeping gitignored caches alive with -fd makes repeated
+ *   task-level hydration faster without changing tracked files.
  */
 export function buildWorktreeSandboxResetScript(opts: GitWorktreeSandboxResetOpts): string {
   const wtB64 = base64Encode(opts.worktreePath);

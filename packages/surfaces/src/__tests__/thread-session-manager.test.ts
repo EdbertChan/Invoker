@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SessionManager, SessionIdentifier, SessionHandle } from '../slack/thread-session-manager.js';
+import * as child_process from 'node:child_process';
 
 // ── Mock child_process.spawn ────────────────────────────────
 
@@ -21,6 +22,8 @@ vi.mock('node:child_process', async (importOriginal) => {
     }),
   };
 });
+
+const mockSpawn = vi.mocked(child_process.spawn);
 
 // ── Mock ConversationRepository ─────────────────────────────
 
@@ -212,6 +215,62 @@ describe('SessionManager', () => {
       'U001',
       'agent',
     );
+  });
+
+  it('a per-session repoUrl override wins over the manager-level default (multi-repo threads)', async () => {
+    mockSpawn.mockClear();
+    const multiRepoManager = new SessionManager({
+      cursorCommand: 'cursor',
+      workingDir: '/fake',
+      conversationRepo: mockRepo as any,
+      evictionIntervalMs: 60_000,
+      // Simulates `defaultRepoUrl` in ~/.invoker/config.json pointed at Invoker.
+      repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+      mode: 'plan',
+    });
+    multiRepoManager.start();
+
+    // Simulates a Slack thread that resolved a `[repo:notarepo]` tag to a
+    // different repo than the manager-level default.
+    const id = new SessionIdentifier('C123', '1234.5678');
+    const handle = await multiRepoManager.getOrCreateSession(id, 'U001', {
+      workingDir: '/checkouts/notarepo',
+      repoUrl: 'git@github.com:EdbertChan/notarepo.git',
+    });
+    expect(handle).not.toBeNull();
+
+    await handle!.sendMessage('Add a health endpoint');
+    const prompt = mockSpawn.mock.calls[0][1]![1] as string;
+
+    // The thread's own resolved repo, not the manager-level default, must
+    // reach the planning LLM's system prompt.
+    expect(prompt).toContain('repoUrl: "git@github.com:EdbertChan/notarepo.git"');
+    expect(prompt).not.toContain('Neko-Catpital-Labs/Invoker.git');
+
+    multiRepoManager.stop();
+  });
+
+  it('falls back to the manager-level default repoUrl when a session omits its own', async () => {
+    mockSpawn.mockClear();
+    const singleRepoManager = new SessionManager({
+      cursorCommand: 'cursor',
+      workingDir: '/fake',
+      conversationRepo: mockRepo as any,
+      evictionIntervalMs: 60_000,
+      repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+      mode: 'plan',
+    });
+    singleRepoManager.start();
+
+    const id = new SessionIdentifier('C123', '9999.0000');
+    const handle = await singleRepoManager.getOrCreateSession(id, 'U001');
+    expect(handle).not.toBeNull();
+
+    await handle!.sendMessage('Add a health endpoint');
+    const prompt = mockSpawn.mock.calls[0][1]![1] as string;
+    expect(prompt).toContain('repoUrl: "git@github.com:Neko-Catpital-Labs/Invoker.git"');
+
+    singleRepoManager.stop();
   });
 
   it('getMetrics returns correct counts', async () => {

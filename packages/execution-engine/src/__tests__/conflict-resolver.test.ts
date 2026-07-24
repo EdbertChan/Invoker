@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildFixPrompt, resolveConflictImpl, fixWithAgentImpl, spawnRemoteAgentFixImpl } from '../conflict-resolver.js';
+import { buildFixPrompt, resolveConflictImpl, fixWithAgentImpl, spawnRemoteAgentFixImpl, remoteAgentShellInvocation } from '../conflict-resolver.js';
 import type { ConflictResolverHost } from '../conflict-resolver.js';
 import type { Orchestrator } from '@invoker/workflow-core';
 import { registerBuiltinAgents } from '../agents/index.js';
@@ -781,5 +781,11 @@ describe('conflict-resolver fail-fast workspace invariant', () => {
       ).rejects.not.toThrow(/has no valid workspace/);
       expect(getRemoteTargetConfig).toHaveBeenCalledWith('remote-from-audit');
     });
+  });
+});
+
+describe('remoteAgentShellInvocation', () => {
+  it('uses a remote login shell so ~/.profile PATH (flutter, agents) applies', () => {
+    expect(remoteAgentShellInvocation()).toEqual(['bash', '-l', '-s']);
   });
 });

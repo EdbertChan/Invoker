@@ -18,9 +18,9 @@ import {
   acquireWorkerLock,
   createAutoFixAttemptLedger,
   createWorkerRegistry,
-  registerAutoFixWorker,
-  registerPrMaintenanceWorkers,
+  registerBuiltinWorkers,
   resolveInvokerHomeRoot,
+  GitHubMergeGateProvider,
   WorkerLockHeldError,
   type WorkerRuntimeDependencies,
 } from '@invoker/execution-engine';
@@ -40,10 +40,6 @@ import {
 } from './global-topup.js';
 import { LaunchDispatcher } from './launch-dispatcher.js';
 import { formatHeadlessSetSubcommands } from './headless-command-registry.js';
-import {
-  collectRecoveryWorkerStatus,
-  type RecoveryWorkerStatus,
-} from './recovery-worker-observability.js';
 import { registerExternalWorkersFromConfig } from './external-worker-loader.js';
 
 export {
@@ -76,10 +72,11 @@ import {
 
 export { createHeadlessExecutor, wireHeadlessApproveHook, parseQueryFlags };
 export type { HeadlessDeps, QueryFlags };
-import { headlessQuery, headlessQuerySelect } from './headless-query-list.js';
+import { headlessQuery, headlessQuerySelect, renderWorkerStatus } from './headless-query-list.js';
 export { resolveAgentSession } from './headless-query-list.js';
 import {
   headlessRun,
+  headlessStartReady,
   headlessResume,
   headlessWatch,
   headlessRetryWorkflow,
@@ -90,6 +87,7 @@ import {
   headlessForkWorkflow,
   headlessRebaseRetry,
   headlessRebaseRecreate,
+  headlessRepairReviewGateCi,
   headlessFix,
   headlessResolveConflict,
 } from './headless-run-resume.js';
@@ -272,6 +270,9 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
     case 'run':
       await headlessRun(args[1], deps, deps.waitForApproval, deps.noTrack);
       break;
+    case 'start-ready':
+      await headlessStartReady(args.slice(1), deps);
+      break;
     case 'resume':
       await headlessResume(args[1], deps, deps.waitForApproval, deps.noTrack);
       break;
@@ -306,6 +307,9 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
       break;
     case 'rebase-recreate':
       await headlessRebaseRecreate(args[1], deps);
+      break;
+    case 'repair-review-gate-ci':
+      await headlessRepairReviewGateCi(args[1], deps);
       break;
     case 'fix':
       await headlessFix(args, deps);
@@ -422,13 +426,29 @@ export async function runHeadless(args: string[], deps: HeadlessDeps): Promise<v
   }
 }
 
+export function resolveHeadlessDiskHeadroomConfig(
+  invokerConfig: HeadlessDeps['invokerConfig'],
+): NonNullable<WorkerRuntimeDependencies['diskHeadroom']> {
+  return {
+    localPath: resolveInvokerHomeRoot(),
+    remoteTargets: Object.entries(invokerConfig.remoteTargets ?? {}).map(([name, target]) => ({
+      name,
+      connection: {
+        host: target.host,
+        user: target.user,
+        sshKeyPath: target.sshKeyPath,
+        port: target.port,
+      },
+      remotePath: '~/.invoker',
+    })),
+  };
+}
+
 async function headlessWorker(args: string[], deps: HeadlessDeps): Promise<void> {
   const subCommand = args[0] ?? 'list';
   const registry = registerExternalWorkersFromConfig(
     deps.invokerConfig?.externalWorkers,
-    registerPrMaintenanceWorkers(
-      registerAutoFixWorker(createWorkerRegistry<WorkerRuntimeDependencies>()),
-    ),
+    registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>()),
   );
 
   if (subCommand === 'list') {
@@ -440,23 +460,7 @@ async function headlessWorker(args: string[], deps: HeadlessDeps): Promise<void>
   }
 
   if (subCommand === 'status') {
-    const flags = parseQueryFlags(args.slice(1));
-    const status = collectRecoveryWorkerStatus(deps.persistence);
-    const { formatAsJson, formatAsJsonl } = await import('./formatter.js');
-    switch (flags.output) {
-      case 'label':
-        process.stdout.write(`${status.workerId}\n`);
-        break;
-      case 'json':
-        process.stdout.write(formatAsJson(status) + '\n');
-        break;
-      case 'jsonl':
-        process.stdout.write(formatAsJsonl([status]) + '\n');
-        break;
-      default:
-        process.stdout.write(formatRecoveryWorkerStatus(status) + '\n');
-        break;
-    }
+    await renderWorkerStatus(args.slice(1), deps);
     return;
   }
 
@@ -477,6 +481,7 @@ async function headlessWorker(args: string[], deps: HeadlessDeps): Promise<void>
     throw err;
   }
   const autoFixAttemptLedger = createAutoFixAttemptLedger();
+  const reviewGateExecutor = createHeadlessExecutor(deps);
   try {
     const worker = definition.factory({
       store: deps.persistence,
@@ -486,12 +491,17 @@ async function headlessWorker(args: string[], deps: HeadlessDeps): Promise<void>
         ),
       },
       logger: deps.logger,
+      reviewGate: {
+        checkMergeGateStatuses: () => reviewGateExecutor.checkMergeGateStatuses(),
+      },
       autoFix: {
         defaultAutoFixRetries: deps.invokerConfig.autoFixRetries,
         attemptLedger: autoFixAttemptLedger,
         getAutoFixAgent: () => deps.invokerConfig.autoFixAgent,
       },
       prMaintenance: resolvePrMaintenanceWorkerConfig(deps.invokerConfig),
+      diskHeadroom: resolveHeadlessDiskHeadroomConfig(deps.invokerConfig),
+      mergeGateProvider: new GitHubMergeGateProvider(),
     });
     await worker.tick('manual');
     await worker.stop();
@@ -502,30 +512,6 @@ async function headlessWorker(args: string[], deps: HeadlessDeps): Promise<void>
   }
   const label = definition.kind === AUTO_FIX_WORKER_KIND ? 'Auto-fix' : definition.kind;
   process.stdout.write(`${label} worker scan completed.\n`);
-}
-
-function formatRecoveryWorkerStatus(status: RecoveryWorkerStatus): string {
-  const lines = [
-    `${BOLD}Recovery worker${RESET}`,
-    `  kind: ${status.kind}`,
-    `  workerId: ${status.workerId}`,
-    `  owner: ${status.owner}`,
-    `  lastWakeupAt: ${status.lastWakeupAt ?? 'never'}`,
-    `  lastScanAt: ${status.lastScanAt ?? 'never'}`,
-    `  lastSubmitAt: ${status.lastSubmitAt ?? 'never'}`,
-    `  lastSkip: ${status.lastSkipAt ?? 'never'}${status.lastSkipReason ? ` (${status.lastSkipReason} task=${status.lastSkipTaskId})` : ''}`,
-    `  counts: wakeups=${status.wakeups} scans=${status.scans} submissions=${status.submissions} skips=${status.skips}`,
-  ];
-  if (status.recent.length > 0) {
-    lines.push('');
-    lines.push(`${BOLD}Recent recovery decisions${RESET}`);
-    for (const event of status.recent) {
-      const reason = event.reason ? ` reason=${event.reason}` : '';
-      const phase = event.phase ? ` phase=${event.phase}` : '';
-      lines.push(`  ${event.at} ${event.taskId} ${event.action}${phase}${reason}`);
-    }
-  }
-  return lines.join('\n');
 }
 
 async function headlessOwnerServe(deps: Pick<HeadlessDeps, 'isStandaloneOwnerIdle'>): Promise<void> {
@@ -570,10 +556,13 @@ ${BOLD}Query${RESET} (read-only, all support --output text|label|json|jsonl):
                                                       Show what each worker decided: submitted vs skipped, and why
   query ui-perf [--output F] [--reset]               Print live UI perf stats
   query stats [--output F]                           Aggregate stats across all workflows
+  query execution-leases [--output F]               List live SSH/host execution resource leases
 
 ${BOLD}Execute:${RESET}
   watch [<workflowId>]                                Watch workflow status until settled or Ctrl-C
   run <plan.yaml>                                     Load and execute plan
+  start-ready [--dry-run] [--recreate-failed] [--recreate-failed-and-pending] [--recreate-failed-pending-and-running] [--recreate-all] [--no-track]
+                                                      Start pending work that is ready to execute
   resume <id>                                         Resume incomplete workflow
   retry <workflowId>                                  Retry workflow: rerun failed, keep completed
   retry-task <taskId>                                 Retry a single failed/stuck task
@@ -584,8 +573,8 @@ ${BOLD}Execute:${RESET}
   detach-workflow <workflowId> <upstreamWorkflowId>  Detach one upstream workflow and void downstream to pending
   rebase-retry <workflowId|mergeTaskId|taskId>        Refresh pool base, then retry incomplete work
   rebase-recreate <workflowId|mergeTaskId|taskId>     Refresh pool base, then recreate workflow
+  repair-review-gate-ci <prNumber|prUrl>              Queue CI repair for one mapped review-gate PR
   fix <taskId> [claude|codex]                         Fix a failed task (default: claude)
-  resolve-conflict <taskId> [claude|codex]            Resolve merge conflict + restart
 
 ${BOLD}Respond:${RESET}
   approve <taskId>                                    Approve a task
@@ -973,4 +962,3 @@ async function headlessSetTaskMetadata(
   );
   process.stdout.write(`Updated task "${result.id}" ${result.fieldPath} → ${JSON.stringify(result.value)}\n`);
 }
-

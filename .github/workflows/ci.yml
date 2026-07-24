@@ -10,7 +10,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && startsWith(github.head_ref, 'mergify/merge-queue/') && format('merge-queue-{0}', github.head_ref) || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' && github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -29,6 +29,9 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Reclaim workspace
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$HOME/.invoker" "$HOME/.claude" 2>/dev/null || true
+        shell: bash
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -65,7 +68,7 @@ jobs:
   quality-required:
     runs-on:
       labels: ${{ matrix.runner_label }}
-    timeout-minutes: 30
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +83,9 @@ jobs:
     name: quality / ${{ matrix.name }}
 
     steps:
+      - name: Reclaim workspace
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$HOME/.invoker" "$HOME/.claude" 2>/dev/null || true
+        shell: bash
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -111,10 +117,13 @@ jobs:
   ui-vitest:
     name: UI Vitest
     runs-on:
-      labels: Runner_2_4_core
-    timeout-minutes: 20
+      labels: Runner_Vitest
+    timeout-minutes: 5
 
     steps:
+      - name: Reclaim workspace
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$HOME/.invoker" "$HOME/.claude" 2>/dev/null || true
+        shell: bash
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -142,7 +151,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'mergify/merge-queue/') }}
     runs-on:
       labels: ${{ matrix.runner_label }}
-    timeout-minutes: 30
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
@@ -186,7 +195,7 @@ jobs:
   e2e-proof:
     if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') }}
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, Runner_Heavy_Ubuntu, Runner_Heavy_Docker]
     container:
       image: mcr.microsoft.com/playwright:v1.58.2-noble
     timeout-minutes: 60
@@ -231,6 +240,8 @@ jobs:
 
       - name: Configure git identity and HTTPS auth
         run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -261,7 +272,7 @@ jobs:
   e2e-proof-aggregate:
     if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') }}
     needs: e2e-proof
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, Runner_Heavy_Ubuntu, Runner_Heavy_Docker]
     container:
       image: mcr.microsoft.com/playwright:v1.58.2-noble
     timeout-minutes: 15
@@ -294,7 +305,8 @@ jobs:
   required-fast:
     if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') }}
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on:
+      labels: Runner_2_4_core
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -314,6 +326,9 @@ jobs:
     name: required-fast / ${{ matrix.name }}
 
     steps:
+      - name: Reclaim workspace
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" "$HOME/.invoker" "$HOME/.claude" 2>/dev/null || true
+        shell: bash
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -345,6 +360,8 @@ jobs:
 
       - name: Configure git identity and HTTPS auth
         run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -354,6 +371,7 @@ jobs:
           git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
 
       - name: Install Playwright system dependencies
+        continue-on-error: true
         run: pnpm --filter @invoker/app exec playwright install-deps chromium
 
       - name: Run suite group
@@ -378,15 +396,9 @@ jobs:
           - name: Start Running MECE Repros
             command: bash scripts/test-suites/required/18-start-running-mece-repros.sh
             runner_label: Runner_2_4_core
-          - name: Task New Attempt Reset Repro
-            command: bash scripts/test-suites/required/19-task-new-attempt-reset-repro.sh
-            runner_label: Github_Runner
           - name: Launch Dispatch Queue Repro
             command: bash scripts/test-suites/required/25-launch-dispatch-queue-handoff-repro.sh
             runner_label: Runner_2_4_core
-          - name: Reset Rulebook Repro
-            command: bash scripts/test-suites/required/26-reset-rulebook-proof.sh
-            runner_label: Runner_1
 
     name: required-fast / ${{ matrix.name }}
 
@@ -422,6 +434,8 @@ jobs:
 
       - name: Configure git identity and HTTPS auth
         run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -429,9 +443,6 @@ jobs:
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git update-ref refs/heads/main refs/remotes/origin/master || true
           git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
-
-      - name: Install Playwright system dependencies
-        run: pnpm --filter @invoker/app exec playwright install-deps chromium
 
       - name: Run suite group with Mergify Insights
         if: matrix.name == 'Vitest Workspace'
@@ -442,6 +453,68 @@ jobs:
       - name: Run suite group
         if: matrix.name != 'Vitest Workspace'
         run: ${{ matrix.command }}
+
+  reset-rulebook-repro:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'mergify/merge-queue/') }}
+    needs: build-artifacts
+    runs-on: [self-hosted, Linux, X64, Runner_Heavy_Ubuntu, Runner_Heavy_Docker]
+    container:
+      image: mcr.microsoft.com/playwright:v1.58.2-noble
+    timeout-minutes: 45
+    name: required-fast / Reset Rulebook Repro
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .node-version
+
+      - name: Install test system packages
+        run: apt-get update && apt-get install -y unzip xvfb jq make g++ python3
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: app-build-dist
+          path: /tmp/invoker-build-artifacts
+
+      - name: Extract build artifacts
+        run: tar -xzf /tmp/invoker-build-artifacts/app-build-dist.tgz -C .
+
+      - name: Configure git identity and HTTPS auth
+        run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "git@github.com:"
+          git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
+          git update-ref refs/heads/main refs/remotes/origin/master || true
+          git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
+
+      - name: Run Reset Rulebook proof
+        env:
+          TMPDIR: /tmp/invoker-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          chmod 1777 "$TMPDIR"
+          bash scripts/test-suites/required/26-reset-rulebook-proof.sh
 
   scheduled-repros:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -483,6 +556,8 @@ jobs:
 
       - name: Configure git identity and HTTPS auth
         run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -496,20 +571,22 @@ jobs:
 
       - name: Run fix-intent repro bundle
         run: bash scripts/test-suites/required/23-fix-intent-repros.sh
+      - name: Run dispatch invariants
+        run: pnpm --filter @invoker/app test --run src/__tests__/dispatch-capacity-invariants.test.ts
 
 
   playwright:
     if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') }}
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, Runner_Heavy_Ubuntu, Runner_Heavy_Docker]
     container:
       image: mcr.microsoft.com/playwright:v1.58.2-noble
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: 1-of-3
+          - name: 1-of-7
             files: >-
               e2e/visual-proof.spec.ts
               e2e/edit-task-command.spec.ts
@@ -517,31 +594,53 @@ jobs:
               e2e/launching-stall-watchdog.spec.ts
               e2e/embedded-terminal-pty.spec.ts
               e2e/keyboard-navigation.spec.ts
+          - name: 2-of-7
+            files: >-
               e2e/action-graph-visual-proof.spec.ts
               e2e/invalid-merge-workspace-visual.spec.ts
-          - name: 2-of-3
-            files: >-
+              e2e/invalid-task-workspace-visual.spec.ts
               e2e/persistence-lifecycle.spec.ts
               e2e/task-death-logs.spec.ts
               e2e/restart-failed-task.spec.ts
-              e2e/task-new-attempt-reset.spec.ts
+          - name: 3-of-7
+            files: >-
               e2e/ui-graph-drag-performance.spec.ts
               e2e/pending-review-gate-target-repo.proof.spec.ts
               e2e/workflow-status-composition.spec.ts
+              e2e/queue-running-vs-queued.spec.ts
               e2e/startup-window-liveness.spec.ts
-          - name: 3-of-3
-            files: >-
               e2e/workflow-lifecycle.spec.ts
-              e2e/persistence-recovery.spec.ts
+          - name: 4-of-7
+            files: >-
               e2e/edit-task-prompt.spec.ts
               e2e/fix-with-claude.spec.ts
               e2e/fix-with-agent-transition.spec.ts
               e2e/autofix-worker-ui.spec.ts
               e2e/orphan-relaunch.spec.ts
               e2e/gap-recovery-bench.spec.ts
+          - name: 5-of-7
+            files: >-
               e2e/system-setup-visual-proof.spec.ts
               e2e/startup-nonempty-responsiveness.spec.ts
               e2e/embedded-terminal-spawn-failure.spec.ts
+              e2e/embedded-terminal-restart-persistence.spec.ts
+              e2e/planning-terminal-restart-persistence.spec.ts
+              e2e/worker-tab-scroll.spec.ts
+          - name: 6-of-7
+            files: >-
+              e2e/workflow-delete-latency.spec.ts
+              e2e/main-process-hitch-responsiveness.spec.ts
+              e2e/dag-click-hitch-responsiveness.spec.ts
+              e2e/terminal-upsert-hitch-responsiveness.spec.ts
+              e2e/attention-click-hitch-responsiveness.spec.ts
+              e2e/focus-switch-hitch-responsiveness.spec.ts
+          - name: 7-of-7
+            files: >-
+              e2e/command-palette-open.spec.ts
+              e2e/task-new-attempt-reset.spec.ts
+              e2e/persistence-recovery.spec.ts
+              e2e/start-ready-production-click.spec.ts
+              e2e/workers-surface.spec.ts
 
     name: playwright / ${{ matrix.name }}
 
@@ -576,7 +675,11 @@ jobs:
           const YAML = require('yaml');
 
           const workflow = YAML.parse(fs.readFileSync('.github/workflows/ci.yml', 'utf8'));
-          const shards = workflow.jobs.playwright.strategy.matrix.include;
+          const perfJob = workflow.jobs['playwright-nightly-perf'];
+          const shards = [
+            ...workflow.jobs.playwright.strategy.matrix.include,
+            ...(perfJob ? perfJob.strategy.matrix.include : []),
+          ];
           const listed = shards.flatMap((shard) => String(shard.files).trim().split(/\s+/).filter(Boolean));
           const discovered = fs.readdirSync('packages/app/e2e')
             .filter((file) => file.endsWith('.spec.ts'))
@@ -611,6 +714,8 @@ jobs:
 
       - name: Configure git identity for E2E repos
         run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -633,10 +738,88 @@ jobs:
             packages/app/test-results
           if-no-files-found: ignore
 
+  # Heavy UI responsiveness battery (200ms nav/click acks + refocus herd) under a
+  # fat DB. Nightly/dispatch only — too slow for the 5-min merge-queue playwright
+  # job. Its spec is unioned into the shard-inventory guard above.
+  playwright-nightly-perf:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    needs: build-artifacts
+    runs-on: [self-hosted, Linux, X64, Runner_Heavy_Ubuntu, Runner_Heavy_Docker]
+    container:
+      image: mcr.microsoft.com/playwright:v1.58.2-noble
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: responsiveness-battery
+            files: >-
+              e2e/ui-action-responsiveness-battery.spec.ts
+              e2e/storm-scale-responsiveness.spec.ts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Use Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .node-version
+
+      - name: Install native build tools
+        run: apt-get update && apt-get install -y unzip make g++ python3
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: app-build-dist
+          path: /tmp/invoker-build-artifacts
+
+      - name: Extract build artifacts
+        run: tar -xzf /tmp/invoker-build-artifacts/app-build-dist.tgz -C .
+
+      - name: Configure git identity for E2E repos
+        run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@invoker.dev"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Run responsiveness battery
+        env:
+          INVOKER_PLAYWRIGHT_RUN_LABEL: ci-playwright-nightly-perf-${{ matrix.name }}
+          INVOKER_PLAYWRIGHT_WORKERS: '1'
+          INVOKER_PLAYWRIGHT_FILES: ${{ matrix.files }}
+          INVOKER_PLAYWRIGHT_ARGS: --reporter=line
+        run: bash scripts/test-suites/optional/40-playwright-app.sh
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts-nightly-perf-${{ matrix.name }}
+          path: |
+            .git/playwright-artifacts
+            packages/app/test-results
+          if-no-files-found: ignore
+
   ssh:
     if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') }}
     needs: build-artifacts
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, Runner_Heavy_Ubuntu, Runner_Heavy_Docker]
     container:
       image: mcr.microsoft.com/playwright:v1.58.2-noble
     timeout-minutes: 60
@@ -685,6 +868,8 @@ jobs:
 
       - name: Configure git identity and HTTPS auth
         run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -803,6 +988,8 @@ jobs:
 
       - name: Configure git identity and HTTPS auth
         run: |
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/gitconfig" >> "$GITHUB_ENV"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
           git config --global user.name "CI Bot"
           git config --global user.email "ci@invoker.dev"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -810,9 +997,6 @@ jobs:
           git config --global --add url."https://x-access-token:${{ github.token }}@github.com/".insteadOf "https://github.com/"
           git update-ref refs/heads/main refs/remotes/origin/master || true
           git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
-
-      - name: Install sqlite3
-        run: sudo apt-get install -y sqlite3
 
       - name: Build invoker agent base image
         run: bash scripts/build-agent-base-image.sh

@@ -8,6 +8,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { buildCancelInFlight, buildWorkflowInvalidationDeps, type Orchestrator } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { TaskRunner } from '@invoker/execution-engine';
+
+const loadConfigMock = vi.hoisted(() => vi.fn(() => ({})));
+
+vi.mock('../config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../config.js')>();
+  return {
+    ...actual,
+    loadConfig: () => loadConfigMock(),
+  };
+});
+
 import {
   cancelWorkflow,
   recreateWorkflowFromFreshBase,
@@ -34,6 +45,10 @@ import {
 vi.mock('../delete-all-snapshot.js', () => ({
   createDeleteAllSnapshot: () => '/tmp/fake-snapshot',
 }));
+
+beforeEach(() => {
+  loadConfigMock.mockReturnValue({});
+});
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -757,10 +772,62 @@ describe('autoFixOnFailure', () => {
     });
 
     expect(orchestrator.beginFixSession).toHaveBeenCalledWith('task-a');
-    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex');
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex', undefined);
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
     expect(orchestrator.retryTask).toHaveBeenCalledWith('task-a');
     expect(taskExecutor.executeTasks).toHaveBeenCalledWith(started);
+  });
+
+  it('prefers conflictResolutionAgent over autoFixAgent for merge conflicts', async () => {
+    loadConfigMock.mockReturnValue({
+      conflictResolutionAgent: 'omp',
+      conflictResolutionModel: 'gpt-5-mini',
+    });
+    const started = [makeRunningTask({ id: 'task-a', status: 'running' })];
+    const mergeError = JSON.stringify({
+      type: 'merge_conflict',
+      failedBranch: 'experiment/foo',
+      conflictFiles: ['src/foo.ts'],
+    });
+    const orchestrator = {
+      shouldAutoFix: vi.fn(() => true),
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        execution: { error: mergeError, workspacePath: '/tmp/task-a' },
+      })),
+      getAutoFixRetryBudget: vi.fn(() => 3),
+      beginFixSession: vi.fn(() => ({ savedError: mergeError })),
+      retryTask: vi.fn(() => started),
+      cancelTask: vi.fn(() => ({ cancelled: [], runningCancelled: [] })),
+      cascadeInvalidationToDownstream: vi.fn(() => []),
+      revertFixSession: vi.fn(),
+    };
+    const persistence = {
+      updateTask: vi.fn(),
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      fixWithAgent: vi.fn().mockResolvedValue(undefined),
+      resolveConflict: vi.fn().mockResolvedValue(undefined),
+      executeTasks: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await autoFixOnFailure('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+      commandService: makeCommandService(),
+      getAutoFixAgent: () => 'claude',
+    });
+
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith(
+      'task-a',
+      mergeError,
+      'omp',
+      'gpt-5-mini',
+    );
+    expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
   });
 
   it('uses resolveConflict for prefixed post-fix merge conflict errors', async () => {
@@ -799,7 +866,7 @@ describe('autoFixOnFailure', () => {
       commandService: makeCommandService(),
     });
 
-    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex');
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex', undefined);
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
   });
 
@@ -1090,7 +1157,7 @@ describe('autoFixOnFailure', () => {
       getAutoFixAgent: () => undefined,
     });
 
-    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex');
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex', undefined);
     expect(logEvent).toHaveBeenCalledWith(
       'task-a',
       'debug.auto-fix',
@@ -1191,7 +1258,7 @@ describe('fixWithAgentAction', () => {
       getTask: vi.fn(() => makeTask({
         status: 'failed',
         config: { workflowId: 'wf-1' },
-        execution: { error: 'boom' },
+        execution: { error: 'boom', workspacePath: '/tmp/task-a' },
       })),
       beginFixSession: vi.fn(() => ({ savedError: 'boom' })),
       setFixAwaitingApproval: vi.fn(),
@@ -1219,6 +1286,49 @@ describe('fixWithAgentAction', () => {
     expect(taskExecutor.resolveConflict).not.toHaveBeenCalled();
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', 'boom');
     expect(result).toEqual({ kind: 'fixWithAgent', autoApproved: false, started: [] });
+  });
+  it('rejects plain fixes without a saved workspace before fix execution', async () => {
+    const orchestrator = {
+      getTask: vi.fn(() => makeTask({
+        status: 'failed',
+        config: { workflowId: 'wf-1' },
+        execution: { error: 'boom' },
+      })),
+      beginFixSession: vi.fn(),
+      setFixAwaitingApproval: vi.fn(),
+      revertFixSession: vi.fn(),
+    };
+    const persistence = {
+      getTaskOutput: vi.fn(() => 'test output'),
+      appendTaskOutput: vi.fn(),
+    };
+    const taskExecutor = {
+      getDefaultExecutionAgent: vi.fn(() => 'codex'),
+      execGitIn: vi.fn(),
+      fixWithAgent: vi.fn(),
+      resolveConflict: vi.fn(),
+    };
+
+    await expect(fixWithAgentAction('task-a', {
+      orchestrator: orchestrator as unknown as Orchestrator,
+      persistence: persistence as unknown as SQLiteAdapter,
+      taskExecutor: taskExecutor as unknown as TaskRunner,
+      commandService: makeCommandService(),
+    })).rejects.toThrow('Cannot apply a fix because this task has no saved workspace');
+
+    expect(taskExecutor.execGitIn).not.toHaveBeenCalled();
+    expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
+    expect(taskExecutor.resolveConflict).not.toHaveBeenCalled();
+    expect(orchestrator.beginFixSession).not.toHaveBeenCalled();
+    expect(orchestrator.setFixAwaitingApproval).not.toHaveBeenCalled();
+    expect(persistence.appendTaskOutput).toHaveBeenCalledWith(
+      'task-a',
+      '\n[Fix with codex] Cannot apply a fix because this task has no saved workspace. This task state is stale or corrupted. Recreate the task or recreate the workflow, then rerun it.',
+    );
+    expect(orchestrator.revertFixSession).toHaveBeenCalledWith('task-a', {
+      savedError: 'boom',
+      fixError: 'Cannot apply a fix because this task has no saved workspace. This task state is stale or corrupted. Recreate the task or recreate the workflow, then rerun it.',
+    });
   });
 
   it('uses the task runner default agent when manual fix omits agentName', async () => {
@@ -1291,7 +1401,7 @@ describe('fixWithAgentAction', () => {
       agentName: 'claude',
     });
 
-    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'claude');
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'claude', undefined);
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError);
     expect(result).toEqual({ kind: 'resolveConflict', autoApproved: false, started: [] });
@@ -1327,7 +1437,7 @@ describe('fixWithAgentAction', () => {
       agentName: 'codex',
     });
 
-    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex');
+    expect(taskExecutor.resolveConflict).toHaveBeenCalledWith('task-a', mergeError, 'codex', undefined);
     expect(taskExecutor.fixWithAgent).not.toHaveBeenCalled();
     expect(orchestrator.setFixAwaitingApproval).toHaveBeenCalledWith('task-a', mergeError);
     expect(result).toEqual({ kind: 'resolveConflict', autoApproved: false, started: [] });
@@ -2004,7 +2114,7 @@ describe('fixWithAgentAction lineage guard', () => {
           return makeTask({
             status: 'failed',
             config: { workflowId: 'wf-1' },
-            execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+            execution: { error: 'boom', workspacePath: '/tmp/task-a', selectedAttemptId: 'att-1', generation: 5 },
           });
         }
         // After fix returns, lineage has advanced
@@ -2046,7 +2156,7 @@ describe('fixWithAgentAction lineage guard', () => {
       getTask: vi.fn(() => makeTask({
         status: 'failed',
         config: { workflowId: 'wf-1' },
-        execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+        execution: { error: 'boom', workspacePath: '/tmp/task-a', selectedAttemptId: 'att-1', generation: 5 },
       })),
       beginFixSession: vi.fn(() => ({ savedError: 'boom' })),
       setFixAwaitingApproval: vi.fn(),
@@ -2086,7 +2196,7 @@ describe('fixWithAgentAction lineage guard', () => {
           return makeTask({
             status: 'failed',
             config: { workflowId: 'wf-1' },
-            execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+            execution: { error: 'boom', workspacePath: '/tmp/task-a', selectedAttemptId: 'att-1', generation: 5 },
           });
         }
         // Lineage changed during fix
@@ -2126,7 +2236,7 @@ describe('fixWithAgentAction lineage guard', () => {
       getTask: vi.fn(() => makeTask({
         status: 'failed',
         config: { workflowId: 'wf-1' },
-        execution: { error: 'boom', selectedAttemptId: 'att-1', generation: 5 },
+        execution: { error: 'boom', workspacePath: '/tmp/task-a', selectedAttemptId: 'att-1', generation: 5 },
       })),
       beginFixSession: vi.fn(() => ({ savedError: 'boom' })),
       setFixAwaitingApproval: vi.fn(),
@@ -2169,7 +2279,7 @@ describe('resolveConflictAction lineage guard', () => {
           return makeTask({
             status: 'fixing_with_ai',
             config: { workflowId: 'wf-1' },
-            execution: { error: mergeError, selectedAttemptId: 'att-1', generation: 5 },
+            execution: { error: mergeError, workspacePath: '/tmp/task-a', selectedAttemptId: 'att-1', generation: 5 },
           });
         }
         // Lineage changed
@@ -2439,7 +2549,7 @@ describe('fixWithAgentAction review-gate CI context', () => {
       getTask: vi.fn(() => makeTask({
         status: 'failed',
         config: { workflowId: 'wf-1' },
-        execution: { error: 'ci failed', ...execution },
+        execution: { error: 'ci failed', workspacePath: '/tmp/task-a', ...execution },
       })),
       beginFixSession: vi.fn(() => ({ savedError: 'ci failed' })),
       setFixAwaitingApproval: vi.fn(),

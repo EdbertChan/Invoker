@@ -10,6 +10,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
+import { pidWasRecycledSince, readProcessStartTimeMs } from './process-start-time.js';
+
 const ENV_BYPASS = 'INVOKER_UNSAFE_DISABLE_DB_WRITER_LOCK';
 const ENV_DIAGNOSTIC_REPORT_DIRS = 'INVOKER_DIAGNOSTIC_REPORT_DIRS';
 const DIAGNOSTIC_REPORT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -29,11 +31,18 @@ export interface PreviousOwnerCrashDiagnostic {
   ktriageInfo?: string;
 }
 
+export interface ReclaimedDeadOwnerInfo {
+  pid: number;
+  diagnostic: PreviousOwnerCrashDiagnostic | null;
+}
+
 export interface DbWriterLockResult {
   /** True when the lock was acquired (or bypassed). */
   acquired: true;
   /** True when the lock was bypassed via env var. */
   bypassed: boolean;
+  /** Previous dead owner details when this acquisition reclaimed a stale lock. */
+  reclaimedDeadOwner: ReclaimedDeadOwnerInfo | null;
   /** Release the lock. No-op if bypassed. */
   release: () => void;
 }
@@ -156,14 +165,18 @@ export function formatPreviousOwnerCrashDiagnostic(diagnostic: PreviousOwnerCras
  * @returns lock handle with a `release()` method.
  * @throws if another process already holds the lock.
  */
-export function acquireDbWriterLock(dbPath: string, callerContext?: string): DbWriterLockResult {
+export function acquireDbWriterLock(
+  dbPath: string,
+  callerContext?: string,
+  reclaimedDeadOwner: ReclaimedDeadOwnerInfo | null = null,
+  readStartTimeMs: (pid: number) => number | null = readProcessStartTimeMs,
+): DbWriterLockResult {
   const bypassed = process.env[ENV_BYPASS] === '1';
   const lockDir = `${dbPath}.lock`;
   const callerTag = callerContext ? ` caller=${callerContext}` : '';
 
   if (bypassed) {
-    console.log(`[db-writer-lock] BYPASSED (${ENV_BYPASS}=1) — no exclusive lock acquired${callerTag}`);
-    return { acquired: true, bypassed: true, release: () => {} };
+    return { acquired: true, bypassed: true, reclaimedDeadOwner: null, release: () => {} };
   }
 
   try {
@@ -178,17 +191,38 @@ export function acquireDbWriterLock(dbPath: string, callerContext?: string): DbW
           holder = readFileSync(pidFile, 'utf-8').trim();
           const holderPid = parseInt(holder, 10);
           if (!isNaN(holderPid)) {
+            let staleReason: string | null = null;
             try {
               process.kill(holderPid, 0); // signal 0 = check if alive
             } catch {
               // Holding process is dead — stale lock from a crash.
+              staleReason = `Stale lock from dead PID ${holderPid}`;
+            }
+            if (staleReason === null) {
+              // Pid is alive, but it may not be the writer that took the
+              // lock: after a hard kill the OS can recycle the pid for an
+              // unrelated process. A process that started after the lock
+              // was written cannot be its owner.
+              let lockCreatedAtMs: number | null = null;
+              try {
+                lockCreatedAtMs = statSync(pidFile).mtimeMs;
+              } catch (statErr) {
+                // Rare race (owner may be releasing right now): stay
+                // conservative for this attempt. Logged for debuggability.
+                console.warn(`[db-writer-lock] could not stat ${pidFile}:`, statErr);
+              }
+              if (pidWasRecycledSince(holderPid, lockCreatedAtMs, readStartTimeMs)) {
+                staleReason = `Lock PID ${holderPid} was recycled by an unrelated newer process`;
+              }
+            }
+            if (staleReason !== null) {
               const diagnostic = findPreviousOwnerCrashDiagnostic(holderPid);
               const diagnosticSuffix = diagnostic
                 ? `; ${formatPreviousOwnerCrashDiagnostic(diagnostic)}`
                 : '; no matching owner crash report found';
-              console.warn(`[db-writer-lock] Stale lock from dead PID ${holderPid}, reclaiming${callerTag}${diagnosticSuffix}`);
+              console.warn(`[db-writer-lock] ${staleReason}, reclaiming${callerTag}${diagnosticSuffix}`);
               rmSync(lockDir, { recursive: true, force: true });
-              return acquireDbWriterLock(dbPath, callerContext);
+              return acquireDbWriterLock(dbPath, callerContext, { pid: holderPid, diagnostic }, readStartTimeMs);
             }
           }
         } catch { /* best effort */ }
@@ -219,5 +253,5 @@ export function acquireDbWriterLock(dbPath: string, callerContext?: string): DbW
     } catch { /* best effort on shutdown */ }
   };
 
-  return { acquired: true, bypassed: false, release };
+  return { acquired: true, bypassed: false, reclaimedDeadOwner, release };
 }

@@ -6,7 +6,8 @@
  */
 
 import type { TaskState, TaskStateChanges, PlanDefinition, Attempt, WorkflowDerivedStatus, WorkflowRollup, ExternalDependency, ExternalDependencyChange, DetachedExternalDependency } from '@invoker/workflow-core';
-import type { InAppPlanningChatLine, InAppPlanningPlanSummary, InAppPlanningSessionStatus, SearchResultItem, SearchOptions } from '@invoker/contracts';
+import type { InAppPlanningChatLine, InAppPlanningPlanSummary, InAppPlanningSessionStatus, PlanningTerminalMode, SearchResultItem, SearchOptions } from '@invoker/contracts';
+import type { CostAttributionAttempt } from './attempt-read-models.js';
 
 
 export type ConversationMode = 'agent' | 'plan';
@@ -32,6 +33,26 @@ export interface ConversationMessage {
   createdAt: string;
 }
 
+export interface SlackLaunchContext {
+  threadTs: string;
+  repoUrl: string;
+  harnessPreset: string;
+  workingDir: string;
+  requestedBy: string;
+  lobbyChannelId: string;
+}
+
+export interface SlackPendingConfirmation {
+  confirmKey: string;
+  threadTs: string;
+  channelId: string;
+  userId: string;
+  kind: string;
+  payloadJson: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
 // ── Workflow Channel Types (Slack workflow↔channel mapping) ─
 
 export interface WorkflowChannel {
@@ -42,6 +63,7 @@ export interface WorkflowChannel {
   lobbyThreadTs?: string;
   harnessPreset?: string;
   repoUrl?: string;
+  progressCardTs?: string;
   createdAt: string;
 }
 
@@ -142,6 +164,13 @@ export type WorkerActionStatus =
   | 'abandoned'
   | 'cancelled';
 
+export interface TaskEventListFilters {
+  taskId?: string;
+  eventTypes?: readonly string[];
+  sortBy?: 'asc' | 'desc';
+  limit?: number;
+}
+
 export interface WorkerActionRecord {
   id: string;
   workerKind: string;
@@ -162,6 +191,12 @@ export interface WorkerActionRecord {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+}
+
+export interface WorkerDesiredStateRecord {
+  workerKind: string;
+  desiredEnabled: boolean;
+  updatedAt: string;
 }
 
 export interface WorkerActionWrite {
@@ -225,8 +260,15 @@ export interface InAppPlanningSessionRecord {
   status: InAppPlanningSessionStatus;
   messages: InAppPlanningChatLine[];
   draftPlanSummary?: InAppPlanningPlanSummary;
+  draftPlanText?: string;
   submittedWorkflowId?: string;
   submittedPlanName?: string;
+  terminalMode?: PlanningTerminalMode;
+  terminalSessionId?: string;
+  terminalStatus?: 'running' | 'exited';
+  terminalExitCode?: number;
+  terminalOutputSnapshot?: string;
+  terminalUpdatedAt?: string;
   pendingResponse: boolean;
   createdAt: string;
   updatedAt: string;
@@ -238,8 +280,15 @@ export type InAppPlanningSessionPatch = Partial<Pick<
   | 'status'
   | 'messages'
   | 'draftPlanSummary'
+  | 'draftPlanText'
   | 'submittedWorkflowId'
   | 'submittedPlanName'
+  | 'terminalMode'
+  | 'terminalSessionId'
+  | 'terminalStatus'
+  | 'terminalExitCode'
+  | 'terminalOutputSnapshot'
+  | 'terminalUpdatedAt'
   | 'pendingResponse'
   | 'updatedAt'
 >>;
@@ -268,16 +317,31 @@ export interface PersistenceAdapter {
   deleteAllTasks(workflowId: string): void;
   deleteAllWorkflows(): void;
   deleteWorkflow(workflowId: string): void;
+  /** All non-pending tasks (or pending with events), with workflow name and event aggregates. */
+  loadAllHistoryTasks(): Array<TaskState & { workflowName: string; lastEventAt: string | null; eventCount: number }>;
+  /** Legacy completed-only history list. Prefer loadAllHistoryTasks for the History view. */
+  loadAllCompletedTasks(): Array<TaskState & { workflowName: string }>;
 
   // Events (audit trail)
   logEvent(taskId: string, eventType: string, payload?: unknown): void;
+  /** Unbounded history — internal/tests only. Public IPC must use the limited overload. */
   getEvents(taskId: string): TaskEvent[];
-  getEvents(taskId: string, sortBy: 'asc' | 'desc', limit: number): TaskEvent[];
+  getEvents(taskId: string, sortBy: 'asc' | 'desc', limit: number, beforeId?: number): TaskEvent[];
+  getEventsByTypes?(eventTypes: readonly string[], sortBy: 'asc' | 'desc', limit: number): TaskEvent[];
+  countEventsByTypes?(eventTypes: readonly string[]): Array<{
+    eventType: string;
+    count: number;
+    lastCreatedAt: string | null;
+  }>;
+  listTaskEvents?(filters?: TaskEventListFilters): TaskEvent[];
 
   // Worker actions (durable worker-owned action state/history)
   getWorkerAction(workerKind: string, externalKey: string): WorkerActionRecord | undefined;
   upsertWorkerAction(action: WorkerActionWrite): WorkerActionRecord;
   listWorkerActions(filters?: WorkerActionListFilters): WorkerActionRecord[];
+  getWorkerDesiredState(workerKind: string): WorkerDesiredStateRecord | undefined;
+  setWorkerDesiredState(workerKind: string, desiredEnabled: boolean): WorkerDesiredStateRecord;
+  listWorkerDesiredStates(): WorkerDesiredStateRecord[];
 
   // Conversations (Slack thread-based)
   saveConversation(conversation: Conversation): void;
@@ -287,11 +351,22 @@ export interface PersistenceAdapter {
 
   // Conversation queries
   listActiveConversations(): Conversation[];
+  listActivePlanConversations(channelId: string, userId: string): Conversation[];
   deleteConversationsOlderThan(cutoffIso: string): number;
 
   // Conversation messages
   appendMessage(threadTs: string, role: 'user' | 'assistant', content: string): void;
+  countMessages(threadTs: string): number;
   loadMessages(threadTs: string): ConversationMessage[];
+
+  // Slack plan submission session state
+  saveSlackLaunchContext(context: SlackLaunchContext): void;
+  loadSlackLaunchContext(threadTs: string): SlackLaunchContext | undefined;
+  deleteSlackLaunchContext(threadTs: string): void;
+  saveSlackPendingConfirmation(confirmation: SlackPendingConfirmation): void;
+  loadSlackPendingConfirmation(confirmKey: string): SlackPendingConfirmation | undefined;
+  deleteSlackPendingConfirmation(confirmKey: string): void;
+  purgeExpiredSlackPendingConfirmations(nowIso: string): number;
 
   // Workflow channels (Slack workflow↔channel mapping)
   saveWorkflowChannel(rec: WorkflowChannel): void;
@@ -307,6 +382,7 @@ export interface PersistenceAdapter {
   // Attempts
   saveAttempt(attempt: Attempt): void;
   loadAttempts(nodeId: string): Attempt[];
+  loadCostAttributionAttempts(nodeId: string): CostAttributionAttempt[];
   loadAttempt(attemptId: string): Attempt | undefined;
   updateAttempt(attemptId: string, changes: Partial<Pick<Attempt, 'status' | 'claimedAt' | 'startedAt' | 'completedAt' | 'exitCode' | 'error' | 'lastHeartbeatAt' | 'leaseExpiresAt' | 'branch' | 'commit' | 'summary' | 'queuePriority' | 'workspacePath' | 'agentSessionId' | 'containerId' | 'mergeConflict'>>): void;
 

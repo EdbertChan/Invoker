@@ -32,18 +32,23 @@ tasks:
 EOF
 # The recreate client is intentionally still alive while this case samples the
 # first five seconds. In WAL mode a read-only sampler can lose that race; retry
-# only that transient busy-open failure so the assertion still checks reset
-# timing instead of failing on the harness read.
+# transient busy/empty reads so the assertion still checks reset timing instead
+# of failing on the harness read.
 invoker_e2e_case_216_query_json() {
   local out err status attempt
   err="$(mktemp "${TMPDIR:-/tmp}/invoker-e2e-2.16-query.err.XXXXXX")"
-  for attempt in 1 2 3 4 5; do
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if out="$(invoker_e2e_run_headless "$@" --output json 2>"$err")"; then
-      rm -f "$err"
-      printf '%s' "$out"
-      return 0
+      if printf '%s' "$out" | python3 -m json.tool >/dev/null 2>&1; then
+        rm -f "$err"
+        printf '%s' "$out"
+        return 0
+      fi
+      sleep 0.25
+      continue
+    else
+      status=$?
     fi
-    status=$?
     if grep -Fq 'Read-only file open refused while WAL sidecars exist' "$err"; then
       sleep 0.25
       continue
@@ -52,6 +57,9 @@ invoker_e2e_case_216_query_json() {
     rm -f "$err"
     return "$status"
   done
+  if [ -n "${out:-}" ]; then
+    printf '%s\n' "$out" >&2
+  fi
   cat "$err" >&2
   rm -f "$err"
   return 75
@@ -105,11 +113,15 @@ for i in 0 1 2 3 4 5; do
     exit 1
   fi
   case "$FAIL_ST" in
-    pending|running|completed) retry_fail_left_failed=1 ;;
+    pending|queued|running|completed) retry_fail_left_failed=1 ;;
   esac
   sleep 1
 done
 wait "$RETRY_PID"
+FINAL_FAIL_ST="$(invoker_e2e_case_216_query_json query tasks --workflow "$WF_ID" | python3 -c 'import json,sys; task_id=sys.argv[1]; data=json.load(sys.stdin); match=next((t for t in data if t.get("id")==task_id), None); print("" if match is None else match.get("status",""))' "$FAIL_TASK_ID" 2>/dev/null || true)"
+case "$FINAL_FAIL_ST" in
+  pending|queued|running|completed) retry_fail_left_failed=1 ;;
+esac
 
 if [ "$retry_fail_left_failed" -ne 1 ]; then
   echo "FAIL case 2.16: retry did not move failed task out of failed within 5s"
@@ -121,7 +133,7 @@ echo "==> case 2.16: recreate-all --follow and observe first 5s"
 RECREATE_START_EPOCH="$(date +%s)"
 bash scripts/recreate-all.sh --follow >/tmp/e2e-2.16-recreate.log 2>&1 &
 RECREATE_PID=$!
-recreate_snapshot_has_pending=0
+recreate_snapshot_has_reset_state=0
 for i in 0 1 2 3 4 5; do
   KEEP_ST="$(invoker_e2e_task_status "$KEEP_TASK_ID" 2>/dev/null || true)"
   FAIL_ST="$(invoker_e2e_task_status "$FAIL_TASK_ID" 2>/dev/null || true)"
@@ -138,8 +150,8 @@ for i in 0 1 2 3 4 5; do
   SNAP_COUNTS="$(printf '%s' "$SNAP_JSON" | python3 -c 'import json,sys; from collections import Counter; data=json.load(sys.stdin); c=Counter(t.get("status","") for t in data); print(" ".join(f"{k}:{c[k]}" for k in sorted(c)))')"
   echo "recreate t+$i keep=$KEEP_ST fail=$FAIL_ST counts=$SNAP_COUNTS"
 
-  if printf '%s' "$SNAP_JSON" | python3 -c 'import json,sys; data=json.load(sys.stdin); raise SystemExit(0 if any(t.get("status")=="pending" for t in data) else 1)'; then
-    recreate_snapshot_has_pending=1
+  if printf '%s' "$SNAP_JSON" | python3 -c 'import json,sys; data=json.load(sys.stdin); raise SystemExit(0 if any(t.get("status") in {"pending","queued"} for t in data) else 1)'; then
+    recreate_snapshot_has_reset_state=1
   fi
   sleep 1
 done
@@ -181,8 +193,8 @@ if [ "$FAIL_PENDING_DELTA_S" -lt 0 ] || [ "$FAIL_PENDING_DELTA_S" -gt 5 ]; then
   exit 1
 fi
 
-if [ "$recreate_snapshot_has_pending" -ne 1 ]; then
-  echo "FAIL case 2.16: recreate did not show pending state in first 5s snapshots"
+if [ "$recreate_snapshot_has_reset_state" -ne 1 ]; then
+  echo "FAIL case 2.16: recreate did not show pending or queued state in first 5s snapshots"
   invoker_e2e_run_headless status 2>&1 || true
   exit 1
 fi

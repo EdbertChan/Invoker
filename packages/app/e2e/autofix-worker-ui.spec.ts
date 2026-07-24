@@ -8,7 +8,7 @@ import {
   E2E_REPO_URL,
 } from './fixtures/electron-app.js';
 
-test.use({ repoConfig: { autoFixRetries: 1, autoFixAgent: 'claude', autoApproveAIFixes: false } });
+test.use({ repoConfig: { autoFixRetries: 2, autoFixAgent: 'claude', autoApproveAIFixes: false } });
 
 const PLAN = {
   name: 'E2E Autofix Worker UI Plan',
@@ -21,10 +21,15 @@ const PLAN = {
 };
 
 test('worker-triggered autofix reaches approval UI with mocked Claude', async ({ page }) => {
+  // Bare-restart then escalate can exceed the default 120s Playwright budget on CI.
+  test.setTimeout(240_000);
+  await page.evaluate(async () => {
+    await window.invoker.startWorker('autofix');
+  });
   await loadPlan(page, PLAN);
   await startPlan(page);
   await waitForTaskStatus(page, 'task-pass', 'completed');
-  await waitForTaskStatus(page, 'task-fail', 'awaiting_approval', 30000);
+  await waitForTaskStatus(page, 'task-fail', 'awaiting_approval', 120_000);
 
   const scopedTaskId = await resolveTaskId(page, 'task-fail');
   await page.waitForFunction(
@@ -40,7 +45,7 @@ test('worker-triggered autofix reaches approval UI with mocked Claude', async ({
         return payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
       };
 
-      const events = await window.invoker.getEvents(taskId);
+      const events = await window.invoker.getEvents(taskId, { limit: 100, sortBy: 'desc' });
       return events.some((event: { eventType: string }) => event.eventType === 'task.failed')
         && events.some((event: { eventType: string; payload?: unknown }) => {
           const payload = parsePayload(event.payload);
@@ -55,8 +60,10 @@ test('worker-triggered autofix reaches approval UI with mocked Claude', async ({
     { timeout: 10000 },
   );
 
+  await page.evaluate(() => window.invoker.refreshTaskGraph());
+  await page.waitForTimeout(1000);
   const node = page.locator('.react-flow__node[data-testid$="/task-fail"]');
-  await expect(node.locator('text=/APPROVE/')).toBeVisible({ timeout: 5000 });
+  await expect(node.locator('text=/Approve/i')).toBeVisible({ timeout: 5000 });
   await expect(node.locator('text=FIXING WITH AI')).not.toBeVisible();
 
   await node.click();

@@ -66,7 +66,10 @@ import { buildWorkRequest } from './task-runner-prepare.js';
 import { dispatchExecutor } from './task-runner-dispatch.js';
 import { wireCompletion } from './task-runner-finalize.js';
 import * as reviewGate from './task-runner-review-gate.js';
-import type { ReviewGateCiFailureLifecyclePublisher } from './task-runner-review-gate.js';
+import type {
+  ReviewGateCiFailureLifecyclePublisher,
+  ReviewGateMergeConflictLifecyclePublisher,
+} from './task-runner-review-gate.js';
 import {
   poolMemberKey,
   selectPoolMember,
@@ -85,11 +88,11 @@ import {
 import type {
   ExecutionPoolMember,
   ExecutionPoolConfig,
+  PoolMemberHealth,
   PoolSelection,
   RemoteTargetDisplay,
   ResolvedExecutionSelection,
   SelectedExecutor,
-  PoolMemberHealth,
 } from './task-runner-pool.js';
 
 export type { TaskHeartbeatEvent, TaskRunnerCallbacks } from './task-runner-callbacks.js';
@@ -163,6 +166,7 @@ export interface TaskRunnerConfig {
   mergeGateProvider?: MergeGateProvider;
   reviewProviderRegistry?: ReviewProviderRegistry;
   reviewGateCiFailurePublisher?: ReviewGateCiFailureLifecyclePublisher;
+  reviewGateMergeConflictPublisher?: ReviewGateMergeConflictLifecyclePublisher;
   /**
    * Provider that returns remote SSH targets keyed by target ID.
    * Called at task-execution time so config file changes take effect on retry.
@@ -217,6 +221,9 @@ export class TaskRunner {
   /** @internal */ reviewProviderRegistry?: ReviewProviderRegistry;
   /** @internal */ reviewGateCiFailurePublisher?: ReviewGateCiFailureLifecyclePublisher;
   /** @internal */ reviewGateCiFailureInFlight = new Set<string>();
+  /** @internal */ reviewGateMergeConflictPublisher?: ReviewGateMergeConflictLifecyclePublisher;
+  /** @internal */ reviewGateMergeConflictInFlight = new Set<string>();
+
   /** @internal */ getRemoteTargets: () => Record<string, RemoteTargetDisplay>;
   /** @internal */ getExecutionPools: () => Record<string, ExecutionPoolConfig>;
   private getExecutionDefaults: () => { executionAgent?: string; executionModel?: string };
@@ -332,6 +339,7 @@ export class TaskRunner {
     this.mergeGateProvider = config.mergeGateProvider;
     this.reviewProviderRegistry = config.reviewProviderRegistry;
     this.reviewGateCiFailurePublisher = config.reviewGateCiFailurePublisher;
+    this.reviewGateMergeConflictPublisher = config.reviewGateMergeConflictPublisher;
     this.getRemoteTargets = config.remoteTargetsProvider ?? (() => ({}));
     this.getExecutionPools = config.executionPoolsProvider ?? (() => ({}));
     this.getExecutionDefaults = config.executionDefaultsProvider ?? (() => ({}));
@@ -873,37 +881,68 @@ export class TaskRunner {
       }
     }
 
-    const selectedExecutor = this.selectExecutor(task);
-    const executor = selectedExecutor.executor;
-    let result: { commitHash?: string; error?: string };
-    if (executor instanceof SshExecutor) {
-      result = await executor.publishApprovedFix(publishWorkspacePath, request, branch);
-    } else if (executor instanceof BaseExecutor) {
-      result = await executor.publishApprovedFix(publishWorkspacePath, request, branch);
-    } else {
-      throw new Error(
-        `Executor ${executor.type} does not support approved-fix publish for task ${task.id}`,
-      );
+    let selectedExecutor: SelectedExecutor;
+    let capacityWaitAttempts = 0;
+    for (;;) {
+      try {
+        selectedExecutor = this.selectExecutor(task);
+        break;
+      } catch (err) {
+        const cause = err instanceof Error ? err.cause : undefined;
+        if (!(err instanceof ResourceLimitError) && !(cause instanceof ResourceLimitError)) {
+          throw err;
+        }
+        capacityWaitAttempts += 1;
+        const retryMs = Math.min(15_000 * 2 ** Math.max(0, capacityWaitAttempts - 1), 5 * 60_000);
+        const message = err instanceof Error ? err.message : String(err);
+        this.persistence.logEvent?.(task.id, 'task.approved_fix_waiting', {
+          attempts: capacityWaitAttempts,
+          message,
+          nextRetryAt: new Date(Date.now() + retryMs),
+        });
+        this.logger.info(
+          `[TaskRunner] approved-fix publish waiting for capacity task=${task.id} retryInMs=${retryMs}: ${message}`,
+          { taskId: task.id, attempts: capacityWaitAttempts, retryMs },
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, retryMs));
+      }
     }
+    const poolSelection = this.pendingPoolSelections.get(task.id);
+    try {
+      const executor = selectedExecutor.executor;
+      let result: { commitHash?: string; error?: string };
+      if (executor instanceof SshExecutor) {
+        result = await executor.publishApprovedFix(publishWorkspacePath, request, branch);
+      } else if (executor instanceof BaseExecutor) {
+        result = await executor.publishApprovedFix(publishWorkspacePath, request, branch);
+      } else {
+        throw new Error(
+          `Executor ${executor.type} does not support approved-fix publish for task ${task.id}`,
+        );
+      }
 
-    if (result.error) {
-      throw new Error(result.error);
-    }
-    if (!result.commitHash) {
-      throw new Error(`Approved-fix publish produced no commit hash for task ${task.id}`);
-    }
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      if (!result.commitHash) {
+        throw new Error(`Approved-fix publish produced no commit hash for task ${task.id}`);
+      }
 
-    this.persistence.updateTask(task.id, {
-      execution: {
-        commit: result.commitHash,
-      },
-    });
-    const attemptId = task.execution.selectedAttemptId;
-    if (attemptId) {
-      this.persistence.updateAttempt(attemptId, {
-        branch,
-        commit: result.commitHash,
+      this.persistence.updateTask(task.id, {
+        execution: {
+          commit: result.commitHash,
+        },
       });
+      const attemptId = task.execution.selectedAttemptId;
+      if (attemptId) {
+        this.persistence.updateAttempt(attemptId, {
+          branch,
+          commit: result.commitHash,
+        });
+      }
+    } finally {
+      this.releasePoolSelectionLease(poolSelection);
+      this.pendingPoolSelections.delete(task.id);
     }
   }
 
@@ -1193,10 +1232,18 @@ export class TaskRunner {
    * Resolve a merge conflict by re-creating the merge state and spawning an agent to fix it.
    * After resolution, the task is restarted so it can proceed normally.
    */
-  async resolveConflict(taskId: string, savedError?: string, agentName?: string): Promise<void> {
+  async resolveConflict(
+    taskId: string,
+    savedError?: string,
+    agentName?: string,
+    executionModel?: string,
+  ): Promise<void> {
     const task = this.orchestrator.getTask(taskId);
-    const executionModel = task ? this.resolveExecutionModel(task) : undefined;
-    return this.withAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName, executionModel));
+    const explicitModel = executionModel?.trim();
+    const resolvedModel = explicitModel && explicitModel.length > 0
+      ? explicitModel
+      : (task ? this.resolveExecutionModel(task) : undefined);
+    return this.withAttemptHeartbeat(taskId, () => resolveConflictImpl(this, taskId, savedError, agentName, resolvedModel));
   }
 
   /**
@@ -1443,6 +1490,7 @@ export class TaskRunner {
     featureBranch: string;
     workflowSummary: string;
     cwd: string;
+    expectedGeneration: number;
     reviewGate?: ReviewGateState;
   }): Promise<{ artifacts: ReviewGateArtifact[]; sessionId: string; agentName: string }> {
     if (!this.executionAgentRegistry) {
@@ -1558,7 +1606,7 @@ export class TaskRunner {
         }
 
         const nowIso = new Date().toISOString();
-        const generation = args.reviewGate?.activeGeneration ?? 0;
+        const generation = args.expectedGeneration;
         const artifacts: ReviewGateArtifact[] = parsedArtifacts.map(({ body: _body, ...artifact }) => ({
           ...artifact,
           provider: 'github',

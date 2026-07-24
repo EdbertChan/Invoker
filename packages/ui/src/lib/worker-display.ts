@@ -1,9 +1,22 @@
-import type { WorkerActionStatus, WorkerActionSummary, WorkerStatusEntry } from '../types.js';
+import type {
+  TaskState,
+  WorkerActionStatus,
+  WorkerActionSummary,
+  WorkerStatusEntry,
+  WorkflowMeta,
+} from '../types.js';
 
 export interface WorkerDisplayCopy {
   readonly name: string;
   readonly idleText: string;
   readonly noActionText: string;
+}
+
+export interface WorkerActionTargetContext {
+  readonly task: TaskState | null;
+  readonly taskTitle: string;
+  readonly workflowId: string | undefined;
+  readonly workflowName: string | undefined;
 }
 
 export const ACTIVE_WORKER_ACTION_STATUSES: ReadonlySet<WorkerActionStatus> = new Set<WorkerActionStatus>([
@@ -14,7 +27,8 @@ export const ACTIVE_WORKER_ACTION_STATUSES: ReadonlySet<WorkerActionStatus> = ne
   'review_ready',
 ]);
 
-export function formatWorkerValue(value: string): string {
+export function formatWorkerValue(value: string | undefined): string {
+  if (!value) return 'Unknown';
   return value
     .split(/[-_]/g)
     .filter(Boolean)
@@ -26,6 +40,34 @@ export function displayWorkerTaskId(taskId: string): string {
   if (taskId.startsWith('__merge__')) return 'merge gate';
   const slash = taskId.lastIndexOf('/');
   return slash >= 0 ? taskId.slice(slash + 1) : taskId;
+}
+
+export function resolveWorkerActionTarget(
+  action: WorkerActionSummary,
+  tasks: Map<string, TaskState>,
+  workflows?: Map<string, WorkflowMeta>,
+): WorkerActionTargetContext {
+  const task = action.taskId ? tasks.get(action.taskId) ?? null : null;
+  const workflowId = action.workflowId ?? task?.config.workflowId;
+  const workflowName = workflowId
+    ? workflows?.get(workflowId)?.name ?? workflowId
+    : undefined;
+
+  let taskTitle: string;
+  if (task?.description) {
+    taskTitle = task.description;
+  } else if (action.taskId) {
+    taskTitle = displayWorkerTaskId(action.taskId);
+  } else {
+    taskTitle = `${formatWorkerValue(action.subjectType)} ${action.subjectId}`;
+  }
+
+  return {
+    task,
+    taskTitle,
+    workflowId,
+    workflowName,
+  };
 }
 
 export function getWorkerDisplayCopy(kind: string): WorkerDisplayCopy {
@@ -43,11 +85,25 @@ export function getWorkerDisplayCopy(kind: string): WorkerDisplayCopy {
       noActionText: 'No persisted PR status actions. This worker updates review gates directly.',
     };
   }
+  if (kind === 'pr-summary-refresh') {
+    return {
+      name: 'PR summary refresh',
+      idleText: 'Idle. Refreshes published PR bodies when Invoker pipeline actions change.',
+      noActionText: 'No PR summary refresh actions recorded yet.',
+    };
+  }
   if (kind === 'ci-failure') {
     return {
       name: 'CI failure repair',
       idleText: 'Idle. Waiting for review-gate CI failure events.',
       noActionText: 'No CI repair actions recorded yet.',
+    };
+  }
+  if (kind === 'pr-ci-failure-scan') {
+    return {
+      name: 'PR CI scan',
+      idleText: 'Idle. Scans mapped PRs for failing CI and queues repairs.',
+      noActionText: 'No PR CI scan runs recorded yet.',
     };
   }
   if (kind === 'e2e-autofix') {

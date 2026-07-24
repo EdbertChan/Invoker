@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { WorkflowGraph } from '../components/WorkflowGraph.js';
@@ -14,7 +14,9 @@ vi.mock('@xyflow/react', async () => {
 
 const fitViewMock = (ReactFlowModule as unknown as { __fitViewMock: Mock }).__fitViewMock;
 const setCenterMock = (ReactFlowModule as unknown as { __setCenterMock: Mock }).__setCenterMock;
+const setViewportMock = (ReactFlowModule as unknown as { __setViewportMock: Mock }).__setViewportMock;
 const getZoomMock = (ReactFlowModule as unknown as { __getZoomMock: Mock }).__getZoomMock;
+const getViewportMock = (ReactFlowModule as unknown as { __getViewportMock: Mock }).__getViewportMock;
 
 const source = readFileSync(
   resolve(__dirname, '..', 'components', 'WorkflowGraph.tsx'),
@@ -65,10 +67,17 @@ async function renderAndSettleInitialFit(props: Parameters<typeof WorkflowGraph>
 
 describe('WorkflowGraph', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     fitViewMock.mockClear();
     setCenterMock.mockClear();
+    setViewportMock.mockClear();
     getZoomMock.mockReset();
     getZoomMock.mockReturnValue(1);
+    getViewportMock.mockReset();
+    getViewportMock.mockReturnValue({ x: 0, y: 0, zoom: 1 });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('calls selection and context menu handlers', () => {
@@ -317,6 +326,26 @@ describe('WorkflowGraph', () => {
     expect(setCenterMock).not.toHaveBeenCalled();
   });
 
+  it('restores a supplied viewport on remount without running the first-fit', async () => {
+    const workflows = new Map([['wf-a', wf('wf-a', 'running')]]);
+    const savedViewport = { x: -240, y: 96, zoom: 0.72 };
+
+    render(
+      <WorkflowGraph
+        workflows={workflows}
+        selectedWorkflowId={null}
+        initialViewport={savedViewport}
+        statusFilters={new Set()}
+        onSelectWorkflow={() => {}}
+        onWorkflowContextMenu={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(setViewportMock).toHaveBeenCalledWith(savedViewport, { duration: 0 }));
+    expect(fitViewMock).not.toHaveBeenCalled();
+    expect(setCenterMock).not.toHaveBeenCalled();
+  });
+
   it('preserves the camera across a non-empty workflow snapshot replacement', async () => {
     const workflows = new Map([
       ['wf-a', wf('wf-a', 'running')],
@@ -352,6 +381,134 @@ describe('WorkflowGraph', () => {
     expect(setCenterMock).not.toHaveBeenCalled();
   });
 
+  it('does not refit when graph data briefly empties after a manual viewport move', async () => {
+    const onManualViewport = vi.fn();
+
+    const { rerender } = await renderAndSettleInitialFit({
+      workflows: new Map([
+        ['wf-a', wf('wf-a', 'running')],
+        ['wf-b', wf('wf-b', 'pending')],
+      ]),
+      selectedWorkflowId: null,
+      statusFilters: new Set(),
+      onSelectWorkflow: () => {},
+      onWorkflowContextMenu: () => {},
+      onManualViewport,
+    });
+
+    fireEvent.pointerDown(screen.getByTestId('rf__pane'));
+    expect(onManualViewport).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <WorkflowGraph
+        workflows={new Map()}
+        selectedWorkflowId={null}
+        statusFilters={new Set()}
+        onSelectWorkflow={() => {}}
+        onWorkflowContextMenu={() => {}}
+        onManualViewport={onManualViewport}
+      />,
+    );
+    expect(screen.getByTestId('workflow-node-wf-a')).toBeInTheDocument();
+    expect(screen.getByTestId('workflow-node-wf-b')).toBeInTheDocument();
+    expect(screen.queryByText('No plan yet — draft one from Home.')).not.toBeInTheDocument();
+    expect(fitViewMock).not.toHaveBeenCalled();
+    expect(setCenterMock).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(screen.getByTestId('rf__pane'));
+    await waitFor(() => expect(screen.getByText('No plan yet — draft one from Home.')).toBeInTheDocument());
+
+    rerender(
+      <WorkflowGraph
+        workflows={new Map([
+          ['wf-a', wf('wf-a', 'running')],
+          ['wf-c', wf('wf-c', 'pending')],
+        ])}
+        selectedWorkflowId={null}
+        statusFilters={new Set()}
+        onSelectWorkflow={() => {}}
+        onWorkflowContextMenu={() => {}}
+        onManualViewport={onManualViewport}
+      />,
+    );
+
+    expect(await screen.findByTestId('workflow-node-wf-c')).toBeInTheDocument();
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+
+    // No App-issued camera command is supplied, no selection fallback target is
+    // selected, mock nodes are visible, and the watchdog timer is not advanced.
+    // A failure here isolates the source to WorkflowGraph's React Flow remount.
+    expect(fitViewMock).not.toHaveBeenCalled();
+    expect(setCenterMock).not.toHaveBeenCalled();
+  });
+
+  it('does not let pre-recovery watchdog misses refit after a manual pan and graph data change', async () => {
+    const onManualViewport = vi.fn();
+
+    const { rerender } = await renderAndSettleInitialFit({
+      workflows: new Map([
+        ['wf-a', wf('wf-a', 'running')],
+        ['wf-b', wf('wf-b', 'pending')],
+      ]),
+      selectedWorkflowId: 'wf-a',
+      statusFilters: new Set(),
+      onSelectWorkflow: () => {},
+      onWorkflowContextMenu: () => {},
+      onManualViewport,
+    });
+
+    const pane = screen.getByTestId('rf__pane');
+    fireEvent.pointerDown(pane);
+    fireEvent.pointerUp(pane);
+    expect(onManualViewport).toHaveBeenCalled();
+    fitViewMock.mockClear();
+    setCenterMock.mockClear();
+    setViewportMock.mockClear();
+
+    vi.useFakeTimers();
+    rerender(
+      <WorkflowGraph
+        workflows={new Map([
+          ['wf-a', wf('wf-a', 'completed')],
+          ['wf-b', wf('wf-b', 'pending')],
+          ['wf-c', wf('wf-c', 'running')],
+        ])}
+        selectedWorkflowId="wf-a"
+        statusFilters={new Set()}
+        onSelectWorkflow={() => {}}
+        onWorkflowContextMenu={() => {}}
+        onManualViewport={onManualViewport}
+      />,
+    );
+
+    expect(screen.getByTestId('workflow-node-wf-c')).toBeInTheDocument();
+    for (const element of document.querySelectorAll<HTMLElement>('.react-flow__node')) {
+      element.style.visibility = 'hidden';
+    }
+
+    // No App is mounted and no cameraCommand is supplied, so App command
+    // reissue, WorkflowGraph command consumption, and selection fallback are
+    // ruled out. Advancing the watchdog isolates the source to blank-render
+    // recovery; only the bounded recovery threshold may move the camera.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(fitViewMock).not.toHaveBeenCalled();
+    expect(setCenterMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(fitViewMock).not.toHaveBeenCalled();
+    expect(setCenterMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(fitViewMock).toHaveBeenCalledTimes(1);
+    expect(setCenterMock).not.toHaveBeenCalled();
+  });
+
   it('does not move the camera on a status-only update', async () => {
 
     const { rerender } = await renderAndSettleInitialFit({
@@ -377,6 +534,205 @@ describe('WorkflowGraph', () => {
     await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
     expect(fitViewMock).not.toHaveBeenCalled();
     expect(setCenterMock).not.toHaveBeenCalled();
+  });
+
+  it('defers graph object updates while a manual viewport pan is active', async () => {
+    const onManualViewport = vi.fn();
+
+    const { rerender } = await renderAndSettleInitialFit({
+      workflows: new Map([['wf-a', wf('wf-a', 'running')]]),
+      selectedWorkflowId: 'wf-a',
+      statusFilters: new Set(),
+      onSelectWorkflow: () => {},
+      onWorkflowContextMenu: () => {},
+      onManualViewport,
+    });
+
+    const pane = screen.getByTestId('rf__pane');
+    fireEvent.pointerDown(pane);
+    expect(onManualViewport).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <WorkflowGraph
+        workflows={new Map([['wf-a', wf('wf-a', 'completed')]])}
+        selectedWorkflowId="wf-a"
+        statusFilters={new Set()}
+        onSelectWorkflow={() => {}}
+        onWorkflowContextMenu={() => {}}
+        onManualViewport={onManualViewport}
+      />,
+    );
+
+    expect(screen.getByTestId('workflow-node-wf-a')).toHaveTextContent('running');
+    expect(screen.getByTestId('workflow-node-wf-a')).not.toHaveTextContent('completed');
+
+    fireEvent.pointerUp(pane);
+    await waitFor(() => expect(screen.getByTestId('workflow-node-wf-a')).toHaveTextContent('completed'));
+  });
+
+  it('pans the workflow viewport from native pane mouse drags', async () => {
+    getViewportMock.mockReturnValue({ x: 10, y: 20, zoom: 0.75 });
+
+    await renderAndSettleInitialFit({
+      workflows: new Map([['wf-a', wf('wf-a', 'running')]]),
+      selectedWorkflowId: 'wf-a',
+      statusFilters: new Set(),
+      onSelectWorkflow: () => {},
+      onWorkflowContextMenu: () => {},
+    });
+
+    const pane = screen.getByTestId('rf__pane');
+    fireEvent.mouseDown(pane, { clientX: 100, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { clientX: 130, clientY: 88, buttons: 1 });
+    fireEvent.mouseUp(window, { clientX: 130, clientY: 88, button: 0 });
+
+    expect(setViewportMock).toHaveBeenCalledWith({ x: 40, y: 8, zoom: 0.75 }, { duration: 0 });
+  });
+
+  it('starts pane drags from React Flow overlay layers inside the pane bounds', async () => {
+    getViewportMock.mockReturnValue({ x: 10, y: 20, zoom: 0.75 });
+
+    await renderAndSettleInitialFit({
+      workflows: new Map([['wf-a', wf('wf-a', 'running')]]),
+      selectedWorkflowId: 'wf-a',
+      statusFilters: new Set(),
+      onSelectWorkflow: () => {},
+      onWorkflowContextMenu: () => {},
+    });
+
+    const root = screen.getByTestId('workflow-graph-react-flow');
+    const pane = screen.getByTestId('rf__pane');
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 200,
+      bottom: 200,
+      width: 200,
+      height: 200,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const overlay = document.createElement('div');
+    overlay.className = 'react-flow__renderer';
+    root.appendChild(overlay);
+
+    fireEvent.mouseDown(overlay, { clientX: 100, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { clientX: 130, clientY: 88, buttons: 1 });
+    fireEvent.mouseUp(window, { clientX: 130, clientY: 88, button: 0 });
+
+    expect(setViewportMock).toHaveBeenCalledWith({ x: 40, y: 8, zoom: 0.75 }, { duration: 0 });
+  });
+
+  it('selects a workflow when clicking its node inside the pane', async () => {
+    const onSelectWorkflow = vi.fn();
+
+    await renderAndSettleInitialFit({
+      workflows: new Map([['wf-a', wf('wf-a', 'running')]]),
+      selectedWorkflowId: null,
+      statusFilters: new Set(),
+      onSelectWorkflow,
+      onWorkflowContextMenu: () => {},
+    });
+
+    fireEvent.click(screen.getByTestId('workflow-node-wf-a'));
+
+    expect(onSelectWorkflow).toHaveBeenCalledWith('wf-a');
+  });
+
+  it('keeps workflow node clicks selectable without starting a pane drag', async () => {
+    const onSelectWorkflow = vi.fn();
+    getViewportMock.mockReturnValue({ x: 10, y: 20, zoom: 0.75 });
+
+    await renderAndSettleInitialFit({
+      workflows: new Map([['wf-a', wf('wf-a', 'running')]]),
+      selectedWorkflowId: 'wf-a',
+      statusFilters: new Set(),
+      onSelectWorkflow,
+      onWorkflowContextMenu: () => {},
+    });
+
+    const pane = screen.getByTestId('rf__pane');
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 200,
+      bottom: 200,
+      width: 200,
+      height: 200,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    const node = screen.getByTestId('workflow-node-wf-a');
+    fireEvent.mouseDown(node, { clientX: 100, clientY: 100, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 100, clientY: 100, button: 0 });
+    fireEvent.click(node);
+
+    expect(onSelectWorkflow).toHaveBeenCalledWith('wf-a');
+    expect(setViewportMock).not.toHaveBeenCalled();
+  });
+
+  it('starts pane drags from workflow node surfaces after pointer movement', async () => {
+    getViewportMock.mockReturnValue({ x: 10, y: 20, zoom: 0.75 });
+
+    await renderAndSettleInitialFit({
+      workflows: new Map([['wf-a', wf('wf-a', 'running')]]),
+      selectedWorkflowId: 'wf-a',
+      statusFilters: new Set(),
+      onSelectWorkflow: () => {},
+      onWorkflowContextMenu: () => {},
+    });
+
+    const pane = screen.getByTestId('rf__pane');
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 200,
+      bottom: 200,
+      width: 200,
+      height: 200,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    fireEvent.mouseDown(screen.getByTestId('workflow-node-wf-a'), { clientX: 100, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { clientX: 102, clientY: 101, buttons: 1 });
+    expect(setViewportMock).not.toHaveBeenCalled();
+    fireEvent.mouseMove(window, { clientX: 130, clientY: 88, buttons: 1 });
+    fireEvent.mouseUp(window, { clientX: 130, clientY: 88, button: 0 });
+
+    expect(setViewportMock).toHaveBeenCalledWith({ x: 40, y: 8, zoom: 0.75 }, { duration: 0 });
+  });
+
+  it('clears pane-pan inline transforms after drag and restores fit from controls', async () => {
+    getViewportMock.mockReturnValue({ x: 10, y: 20, zoom: 0.75 });
+
+    await renderAndSettleInitialFit({
+      workflows: new Map([['wf-a', wf('wf-a', 'running')]]),
+      selectedWorkflowId: 'wf-a',
+      statusFilters: new Set(),
+      onSelectWorkflow: () => {},
+      onWorkflowContextMenu: () => {},
+    });
+
+    const viewport = screen.getByTestId('workflow-graph-react-flow').querySelector('.react-flow__viewport');
+    expect(viewport).not.toBeNull();
+
+    const pane = screen.getByTestId('rf__pane');
+    fireEvent.mouseDown(pane, { clientX: 100, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { clientX: 130, clientY: 88, buttons: 1 });
+    await waitFor(() => expect((viewport as HTMLElement).style.transform).not.toBe(''));
+    fireEvent.mouseUp(window, { clientX: 130, clientY: 88, button: 0 });
+    await waitFor(() => expect((viewport as HTMLElement).style.transform).toBe(''));
+
+    fitViewMock.mockClear();
+    fireEvent.click(screen.getByTestId('rf__fit-view'));
+    expect(fitViewMock).toHaveBeenCalledTimes(1);
+    expect(fitViewMock).toHaveBeenCalledWith({ padding: 0.2 });
+    expect((viewport as HTMLElement).style.transform).toBe('');
   });
 
   it('centers the selected workflow on a centerSelection command, preserving the current zoom', async () => {

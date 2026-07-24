@@ -27,10 +27,15 @@ import {
 import { loadConfig, resolveSecretsFilePath, type InvokerConfig } from './config.js';
 import { WorkflowMutationFacade } from './workflow-mutation-facade.js';
 import { trackWorkflow } from './headless-watch.js';
-import { publishReviewGateCiFailedLifecycleEvent } from './lifecycle-event-bridge.js';
+import {
+  publishReviewGateCiFailedLifecycleEvent,
+  publishReviewGateMergeConflictLifecycleEvent,
+} from './lifecycle-event-bridge.js';
 import type { WorkflowCancelResult } from './workflow-preemption.js';
 import type { WorkflowMutationTiming } from './workflow-mutation-timing.js';
 import type { RuntimeServices } from '@invoker/runtime-service';
+import type { ReviewGateCiRepairCommandResult } from './review-gate-ci-repair-command.js';
+
 
 export interface HeadlessDeps {
   logger: Logger;
@@ -55,6 +60,7 @@ export interface HeadlessDeps {
   isStandaloneOwnerIdle?: () => boolean;
   getBundledSkillsStatus?: () => BundledSkillsStatus;
   installBundledSkills?: (mode?: BundledSkillsInstallMode) => BundledSkillsStatus;
+  repairReviewGateCi?: (prArg: string) => Promise<ReviewGateCiRepairCommandResult>;
   /** Abort signal from the workflow mutation coordinator, if running inside a coordinated mutation. */
   signal?: AbortSignal;
   mutationTiming?: WorkflowMutationTiming;
@@ -158,6 +164,14 @@ export function createHeadlessExecutor(
     reviewGateCiFailurePublisher: {
       publish: (trigger) => {
         publishReviewGateCiFailedLifecycleEvent(trigger, {
+          messageBus: deps.messageBus,
+          getTask: (taskId) => deps.orchestrator.getTask(taskId),
+        });
+      },
+    },
+    reviewGateMergeConflictPublisher: {
+      publish: (trigger) => {
+        publishReviewGateMergeConflictLifecycleEvent(trigger, {
           messageBus: deps.messageBus,
           getTask: (taskId) => deps.orchestrator.getTask(taskId),
         });
@@ -378,8 +392,11 @@ export async function waitForCompletion(
     if (allSettled && !hasBackgroundWork?.()) return;
     // Also settle if nothing is running and at least one task awaits human action.
     // Pending merge gates can't progress until their upstream is approved.
-    const noneRunning = !tasks.some(
-      (t) => t.status === 'running' || t.status === 'fixing_with_ai',
+    const noneRunning = !tasks.some((t) =>
+      t.status === 'running'
+      || t.status === 'fixing_with_ai'
+      || (t.status as string) === 'queued'
+      || (t.status === 'pending' && t.execution.phase === 'launching')
     );
     const hasReadyPending = readyTasks.some((t) => t.status === 'pending');
     const hasHumanBlocked = tasks.some((t) => settledStatuses.includes(t.status) && t.status !== 'completed');

@@ -7,21 +7,24 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 
 import type { Orchestrator } from '@invoker/workflow-core';
 import { OrchestratorError, OrchestratorErrorCode, parseMergeConflictError } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import { buildAgentExitFailureDetail, cleanElectronEnv, resolveExecutableOnCurrentPath } from './process-utils.js';
-import { DEFAULT_EXECUTION_AGENT, type ExecutionAgent } from './agent.js';
+import { assertExecutionModelSupported, DEFAULT_EXECUTION_AGENT, type ExecutionAgent } from './agent.js';
 import type { SessionDriver } from './session-driver.js';
 import type { AgentRegistry } from './agent-registry.js';
 import { buildWorktreeListScript, createSshRemoteScriptError } from './ssh-git-exec.js';
 import { buildSshConnectionArgs } from './ssh-transport-options.js';
 import { findManagedWorktreeForBranch } from './worktree-discovery.js';
 import { buildRemoteAgentEnvExports } from './remote-agent-env.js';
+import {
+  buildAgentPromptFileBootstrap,
+  materializeLocalAgentPrompt,
+  shouldInlineAgentPrompt,
+} from './agent-prompt-transport.js';
 
 // ── Host interface ───────────────────────────────────────
 
@@ -54,13 +57,6 @@ export interface ConflictResolverHost {
   getRemoteTargetConfig?(targetId: string): RemoteTargetConfig | undefined;
 }
 
-const DEFAULT_MAX_INLINE_PROMPT_BYTES = 64 * 1024;
-const MAX_INLINE_PROMPT_BYTES = (() => {
-  const raw = process.env.INVOKER_MAX_INLINE_AGENT_PROMPT_BYTES;
-  if (!raw) return DEFAULT_MAX_INLINE_PROMPT_BYTES;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_INLINE_PROMPT_BYTES;
-})();
 const DEBUG_IO_TAIL_CHARS = 2000;
 
 function tailText(value: unknown, maxChars: number = DEBUG_IO_TAIL_CHARS): string | undefined {
@@ -69,44 +65,13 @@ function tailText(value: unknown, maxChars: number = DEBUG_IO_TAIL_CHARS): strin
   return value.slice(-maxChars);
 }
 
-function promptByteLength(prompt: string): number {
-  return Buffer.byteLength(prompt, 'utf8');
-}
-
-function buildPromptFileBootstrap(promptPath: string): string {
-  return [
-    `The full task instructions are in this file: ${promptPath}`,
-    `Read the file completely, then execute those instructions in this workspace.`,
-    `Do not ask for the file contents.`,
-  ].join('\n');
-}
-
-function materializeLocalPrompt(prompt: string): { effectivePrompt: string; cleanup: () => void } {
-  if (promptByteLength(prompt) <= MAX_INLINE_PROMPT_BYTES) {
-    return { effectivePrompt: prompt, cleanup: () => {} };
-  }
-  const dir = mkdtempSync(join(tmpdir(), 'invoker-agent-prompt-'));
-  const promptPath = join(dir, 'prompt.md');
-  writeFileSync(promptPath, prompt, 'utf8');
-  return {
-    effectivePrompt: buildPromptFileBootstrap(promptPath),
-    cleanup: () => {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* best effort */
-      }
-    },
-  };
-}
-
 function materializeRemotePrompt(prompt: string): { effectivePrompt: string; remotePromptFilePath?: string; promptB64?: string } {
-  if (promptByteLength(prompt) <= MAX_INLINE_PROMPT_BYTES) {
+  if (shouldInlineAgentPrompt(prompt)) {
     return { effectivePrompt: prompt };
   }
   const remotePromptFilePath = `/tmp/invoker-agent-prompt-${randomUUID()}.md`;
   return {
-    effectivePrompt: buildPromptFileBootstrap(remotePromptFilePath),
+    effectivePrompt: buildAgentPromptFileBootstrap(remotePromptFilePath),
     remotePromptFilePath,
     promptB64: Buffer.from(prompt, 'utf8').toString('base64'),
   };
@@ -148,15 +113,19 @@ export async function resolveRemoteBranchOwnerPath(
   if (!branch) return undefined;
   const info = deriveRemoteManagedWorkspaceInfo(workspacePath, target);
   if (!info) return undefined;
-  const porcelain = await execRemoteSsh(
-    target,
-    buildWorktreeListScript({
-      repoHash: info.repoHash,
-      invokerHome: info.invokerHome,
-    }),
-    'list_worktrees',
-  );
-  return findManagedWorktreeForBranch(porcelain, branch, [info.managedPrefix]);
+  try {
+    const porcelain = await execRemoteSsh(
+      target,
+      buildWorktreeListScript({
+        repoHash: info.repoHash,
+        invokerHome: info.invokerHome,
+      }),
+      'list_worktrees',
+    );
+    return findManagedWorktreeForBranch(porcelain, branch, [info.managedPrefix]);
+  } catch {
+    return undefined;
+  }
 }
 
 // ── Extracted functions ──────────────────────────────────
@@ -304,6 +273,15 @@ function shellQuote(s: string): string {
 }
 
 /**
+ * Remote shell for agent fix/resolve commands. Use a login shell so the remote
+ * user's ~/.profile PATH is applied (same as SshExecutor task payloads). Do not
+ * forward the local host PATH — that clobbers Linux remotes with macOS paths.
+ */
+export function remoteAgentShellInvocation(): string[] {
+  return ['bash', '-l', '-s'];
+}
+
+/**
  * Build the shell command to run an agent on a remote host.
  * Uses the agent registry when available; falls back to claude CLI.
  */
@@ -424,7 +402,7 @@ fi
       user: target.user,
       host: target.host,
     }, { batchMode: true }),
-    'bash', '-s',
+    ...remoteAgentShellInvocation(),
   ];
   await new Promise<void>((resolve, reject) => {
     const child = spawn('ssh', sshArgs, { stdio: ['pipe', 'inherit', 'inherit'], env: cleanElectronEnv() });
@@ -713,7 +691,7 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
       user: target.user,
       host: target.host,
     }, { batchMode: true }),
-    'bash', '-s',
+    ...remoteAgentShellInvocation(),
   ];
 
   console.log(`[spawnAgentFix] remote agent command: ${agentCmd}`);
@@ -756,7 +734,8 @@ export function spawnAgentFixViaRegistry(
   driver?: SessionDriver,
   executionModel?: string,
 ): Promise<{ stdout: string; sessionId: string }> {
-  const promptTransport = materializeLocalPrompt(prompt);
+  assertExecutionModelSupported(agent, executionModel);
+  const promptTransport = materializeLocalAgentPrompt(prompt);
   const spec = agent.buildFixCommand?.(promptTransport.effectivePrompt, { executionModel });
   if (!spec) {
     promptTransport.cleanup();
@@ -820,7 +799,7 @@ function execRemoteSsh(target: RemoteTargetConfig, script: string, phase?: strin
       user: target.user,
       host: target.host,
     }, { batchMode: true }),
-    'bash', '-s',
+    ...remoteAgentShellInvocation(),
   ];
 
   return new Promise((resolve, reject) => {

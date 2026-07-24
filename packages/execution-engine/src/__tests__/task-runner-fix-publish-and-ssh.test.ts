@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TaskRunner } from '../task-runner.js';
 import { collectDirectNonMergeTaskIds } from '../merge-runner.js';
+import { getCurrentRequiredReviewArtifacts } from '../task-runner-review-gate.js';
+import { ResourceLimitError } from '../repo-pool.js';
 import { SshExecutor } from '../ssh-executor.js';
 import type { TaskState } from '@invoker/workflow-core';
 import type { WorkResponse, Logger } from '@invoker/contracts';
@@ -104,8 +106,8 @@ function createTempWorkspace(): string {
   tempWorkspaces.push(dir);
   return dir;
 }
-
 afterEach(() => {
+  vi.useRealTimers();
   if (originalGithubTargetRepo === undefined) {
     delete process.env.INVOKER_GITHUB_TARGET_REPO;
   } else {
@@ -325,6 +327,58 @@ describe('TaskRunner', () => {
 
       // All git calls should use the task's workspacePath
       expect(gitCwds.every(c => c === workspacePath)).toBe(true);
+    });
+
+    it('passes explicit executionModel to spawnAgentFix over task model', async () => {
+      const workspacePath = createTempWorkspace();
+      const conflictError = JSON.stringify({
+        type: 'merge_conflict',
+        failedBranch: 'invoker/dep-task',
+        conflictFiles: ['shared.ts'],
+      });
+
+      const tasks = new Map<string, TaskState>();
+      tasks.set('conflict-task', makeTask({
+        id: 'conflict-task',
+        status: 'failed',
+        config: { executionAgent: 'codex', executionModel: 'gpt-5.2' },
+        execution: {
+          error: conflictError,
+          branch: 'invoker/conflict-task',
+          workspacePath,
+        },
+      }));
+
+      const orchestrator = {
+        getTask: (id: string) => tasks.get(id),
+        getAllTasks: () => Array.from(tasks.values()),
+      };
+      const executor = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: { logEvent: vi.fn() } as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+        cwd: '/tmp',
+      });
+
+      (executor as any).execGitIn = async (args: string[]) => {
+        if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
+        if (args[0] === 'checkout') return '';
+        if (args[0] === 'merge') throw new Error('conflict');
+        return '';
+      };
+      let capturedModel: string | undefined;
+      (executor as any).spawnAgentFix = async (
+        _prompt: string,
+        _cwd: string,
+        _agent?: string,
+        executionModel?: string,
+      ) => {
+        capturedModel = executionModel;
+        return { stdout: '', sessionId: 'sess-conflict-model' };
+      };
+
+      await executor.resolveConflict('conflict-task', undefined, 'codex', 'gpt-5-mini');
+      expect(capturedModel).toBe('gpt-5-mini');
     });
   });
 
@@ -746,6 +800,80 @@ describe('TaskRunner', () => {
         branch: 'experiment/ssh-fix-gap',
         commit: 'abc1234',
       });
+    });
+    it('waits for wrapped SSH capacity errors instead of failing approved-fix publish', async () => {
+      vi.useFakeTimers();
+      const publishSpy = vi.spyOn(SshExecutor.prototype, 'publishApprovedFix').mockResolvedValue({
+        commitHash: 'queued123',
+      });
+      const updateTask = vi.fn();
+      const updateAttempt = vi.fn();
+      const logEvent = vi.fn();
+      const task = makeTask({
+        id: 'ssh-fix-task-capacity',
+        description: 'Apply approved fix after SSH capacity frees up',
+        config: {
+          runnerKind: 'ssh',
+          poolMemberId: 'remote-1',
+          command: 'bash -lc false',
+        },
+        execution: {
+          workspacePath: '/remote/worktree',
+          branch: 'experiment/ssh-fix-gap',
+          selectedAttemptId: 'attempt-ssh-capacity-1',
+        },
+      });
+      const tasks = new Map<string, TaskState>([[task.id, task]]);
+      const executorRegistry = {
+        getDefault: () => ({ type: 'worktree' }),
+        get: () => null,
+        register: () => {},
+        getAll: () => [],
+      };
+      const runner = new TaskRunner({
+        orchestrator: { getTask: (id: string) => tasks.get(id) } as any,
+        persistence: { updateTask, updateAttempt, logEvent } as any,
+        executorRegistry: executorRegistry as any,
+        cwd: '/tmp',
+        remoteTargetsProvider: () => ({
+          'remote-1': {
+            host: 'example.com',
+            user: 'invoker',
+            sshKeyPath: '/tmp/test-key',
+          },
+        }),
+      });
+      const selectExecutorSpy = vi.spyOn(runner, 'selectExecutor');
+      const originalSelectExecutor = TaskRunner.prototype.selectExecutor.bind(runner);
+      selectExecutorSpy.mockImplementationOnce(() => {
+        const message = 'Execution pool "pnpm-ssh" has no member capacity available';
+        throw new Error(message, { cause: new ResourceLimitError(message) });
+      });
+      selectExecutorSpy.mockImplementation((selectedTask, excludedPoolMemberKeys = new Set()) =>
+        originalSelectExecutor(selectedTask, excludedPoolMemberKeys)
+      );
+
+      const publishPromise = runner.publishApprovedFix(task);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await publishPromise;
+
+      expect(logEvent).toHaveBeenCalledWith(task.id, 'task.approved_fix_waiting', expect.objectContaining({
+        attempts: 1,
+        message: 'Execution pool "pnpm-ssh" has no member capacity available',
+      }));
+      expect(publishSpy).toHaveBeenCalledWith(
+        '/remote/worktree',
+        expect.objectContaining({ actionId: task.id }),
+        'experiment/ssh-fix-gap',
+      );
+      expect(updateTask).toHaveBeenCalledWith(task.id, {
+        execution: { commit: 'queued123' },
+      });
+      expect(updateAttempt).toHaveBeenCalledWith('attempt-ssh-capacity-1', {
+        branch: 'experiment/ssh-fix-gap',
+        commit: 'queued123',
+      });
+      vi.useRealTimers();
     });
 
     it('pins SSH approved-fix publish to the recorded pool member in mixed pools', async () => {
@@ -1268,11 +1396,13 @@ describe('TaskRunner', () => {
           workflowSummary: 'summary',
           cwd: '/tmp',
           mergeNodeTaskId: '__merge__wf-1',
+          expectedGeneration: 26,
         });
 
         expect(attempts).toEqual(['claude', 'codex']);
         expect(result.agentName).toBe('codex');
         expect(result.artifacts[1].dependsOn).toEqual(['contracts']);
+        expect(result.artifacts.map((a: any) => a.generation)).toEqual([26, 26]);
         expect(logEvent).toHaveBeenCalledWith(
           '__merge__wf-1',
           'task.log',
@@ -2626,6 +2756,56 @@ describe('TaskRunner', () => {
         }),
       }), expect.objectContaining({ generation: 0 }));
     });
+    it('stamps published stack artifacts with the merge task generation so the poller keeps them live', async () => {
+      const contractsTask = makeTask({
+        id: 'contracts',
+        status: 'completed',
+        config: { workflowId: 'wf-pub' },
+        execution: { branch: 'invoker/contracts' },
+        description: 'Contracts',
+      });
+
+      const { executor, mergeTask, orchestrator } = setupPublishAfterFix({
+        mergeMode: 'external_review',
+        featureBranch: 'plan/feature',
+        gateWorkspacePath: '/tmp/gate-clone',
+        taskBranches: [contractsTask],
+        repoUrl: 'https://github.com/Neko-Catpital-Labs/Invoker.git',
+      });
+
+      mergeTask.execution.generation = 26;
+
+      (executor as any).publishReviewStackWithMakePrSkill = vi.fn().mockResolvedValue({
+        artifacts: [
+          {
+            id: 'contracts',
+            title: 'Define contracts',
+            url: 'https://github.com/Neko-Catpital-Labs/Invoker/pull/1',
+            providerId: '1',
+            branch: 'stack/contracts',
+            baseBranch: 'master',
+            required: true,
+            status: 'open',
+            generation: 0,
+          },
+        ],
+        sessionId: 'sess-stack',
+        agentName: 'codex',
+      });
+
+      await executor.publishAfterFix(mergeTask);
+
+      expect(orchestrator.setTaskReviewReady).toHaveBeenCalledTimes(1);
+      const [, changes] = (orchestrator.setTaskReviewReady as any).mock.calls[0];
+      const gate = changes.execution.reviewGate;
+      expect(gate.activeGeneration).toBe(26);
+      for (const artifact of gate.artifacts) {
+        expect(artifact.generation).toBe(gate.activeGeneration);
+      }
+
+      const publishedTask = { execution: changes.execution } as TaskState;
+      expect(getCurrentRequiredReviewArtifacts(publishedTask)).toHaveLength(1);
+    });
     it('external_review mode: detaches HEAD, fetches, consolidates, creates PR', async () => {
       const completedTask = makeTask({
         id: 't1',
@@ -2703,7 +2883,7 @@ describe('TaskRunner', () => {
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
     });
 
-    it('pull_request mode: calls execPr and persists reviewUrl', async () => {
+    it('pull_request mode: republishes through createReview and returns to review_ready', async () => {
       const completedTask = makeTask({
         id: 't1',
         status: 'completed',
@@ -2711,7 +2891,7 @@ describe('TaskRunner', () => {
         execution: { branch: 'invoker/t1' },
       });
 
-      const { executor, mergeTask, orchestrator, persistence } = setupPublishAfterFix({
+      const { executor, mergeTask, orchestrator, persistence, mergeGateProvider } = setupPublishAfterFix({
         mergeMode: 'manual',
         onFinish: 'pull_request',
         featureBranch: 'plan/feature',
@@ -2726,11 +2906,33 @@ describe('TaskRunner', () => {
         workflowSummary: '## Summary',
         cwd: '/tmp/gate-clone',
       }));
-      expect((executor as any).execPr).toHaveBeenCalledWith('master', 'plan/feature', 'Test Workflow', '## Summary\n\nPublished body', '/tmp/gate-clone');
-      expect(persistence.updateTask).toHaveBeenCalledWith('__merge__wf-pub', expect.objectContaining({
-        execution: expect.objectContaining({ reviewUrl: 'https://github.com/owner/repo/pull/100' }),
+      expect(mergeGateProvider.createReview).toHaveBeenCalledWith(expect.objectContaining({
+        baseBranch: 'master',
+        featureBranch: 'plan/feature',
+        title: 'Test Workflow',
+        cwd: '/tmp/gate-clone',
+        body: '## Summary\n\nPublished body',
       }));
-      expect(orchestrator.setTaskReviewReady).toHaveBeenCalled();
+      expect((executor as any).execPr).not.toHaveBeenCalled();
+      expect(persistence.updateTask).not.toHaveBeenCalledWith('__merge__wf-pub', expect.objectContaining({
+        execution: expect.objectContaining({ reviewUrl: expect.any(String) }),
+      }));
+      expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith('__merge__wf-pub', expect.objectContaining({
+        execution: expect.objectContaining({
+          branch: 'plan/feature',
+          reviewUrl: 'https://github.com/owner/repo/pull/99',
+          reviewId: 'owner/repo#99',
+          reviewStatus: 'Awaiting review',
+          reviewGate: expect.objectContaining({
+            activeGeneration: 0,
+            artifacts: [expect.objectContaining({
+              providerId: 'owner/repo#99',
+              status: 'open',
+              generation: 0,
+            })],
+          }),
+        }),
+      }), expect.objectContaining({ generation: 0 }));
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
     });
 
@@ -3910,19 +4112,15 @@ describe('TaskRunner', () => {
       for (let i = 0; i < 10; i++) await Promise.resolve();
     }
 
-    it('does not run merge-node work from the completion handler', async () => {
-      const log: string[] = [];
-      const deferred1 = createDeferred();
-      const deferred2 = createDeferred();
+    it('does not run legacy executeMergeNode from the completion handler', async () => {
       let mergeCallCount = 0;
-
       const completeCallbacks = new Map<string, (response: WorkResponse) => void>();
-      const manualExecutor = {
-        type: 'worktree',
+      const mergeExecutor = {
+        type: 'merge',
         start: vi.fn(async (request: any) => ({
           executionId: `exec-${request.actionId}`,
           taskId: request.actionId,
-          workspacePath: '/tmp/mock-worktree',
+          workspacePath: '/tmp/mock-merge',
           branch: `invoker/${request.actionId}`,
         })),
         onComplete: vi.fn((handle: any, cb: any) => {
@@ -3941,30 +4139,28 @@ describe('TaskRunner', () => {
         } as any,
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: {
-          getDefault: () => manualExecutor,
-          get: () => manualExecutor,
-          getAll: () => [manualExecutor],
+          getDefault: () => mergeExecutor,
+          get: (type: string) => (type === 'merge' ? mergeExecutor : null),
+          getAll: () => [mergeExecutor],
+          register: vi.fn(),
         } as any,
         cwd: '/tmp',
       });
 
       vi.spyOn(runner as any, 'executeMergeNode').mockImplementation(async () => {
-        const n = ++mergeCallCount;
-        log.push(`enter-${n}`);
-        if (n === 1) await deferred1.promise;
-        else await deferred2.promise;
-        log.push(`exit-${n}`);
+        mergeCallCount += 1;
       });
 
+      // Persisted runnerKind=worktree must still route to the merge executor.
       const task1 = makeTask({ id: 'merge-1', status: 'running', config: { isMergeNode: true, runnerKind: 'worktree' } });
       const task2 = makeTask({ id: 'merge-2', status: 'running', config: { isMergeNode: true, runnerKind: 'worktree' } });
 
       const done1 = runner.executeTask(task1);
       const done2 = runner.executeTask(task2);
       await flush();
+      expect(mergeExecutor.start).toHaveBeenCalledTimes(2);
       expect(completeCallbacks.size).toBe(2);
 
-      // Fire both onComplete callbacks simultaneously
       completeCallbacks.get('merge-1')!({
         requestId: 'r1', actionId: 'merge-1', status: 'completed', outputs: { exitCode: 0 },
       });
@@ -3974,26 +4170,23 @@ describe('TaskRunner', () => {
 
       await flush();
       await Promise.all([done1, done2]);
-      expect(log).toEqual([]);
       expect(mergeCallCount).toBe(0);
     });
 
-    it('a completed no-command merge worktree does not enter merge execution from onComplete', async () => {
+    it('routes isMergeNode + runnerKind worktree through merge executor completion', async () => {
       vi.useFakeTimers();
       try {
-        const log: string[] = [];
-        const deferred1 = createDeferred();
         const completeCallbacks = new Map<string, (response: WorkResponse) => void>();
         const updateAttempt = vi.fn();
-        const receivedHeartbeats: string[] = [];
         const onCompleteCb = vi.fn();
+        let legacyMergeCallCount = 0;
 
-        const manualExecutor = {
-          type: 'worktree',
+        const mergeExecutor = {
+          type: 'merge',
           start: vi.fn(async (request: any) => ({
             executionId: `exec-${request.actionId}`,
             taskId: request.actionId,
-            workspacePath: '/tmp/mock-worktree',
+            workspacePath: '/tmp/mock-merge',
             branch: `invoker/${request.actionId}`,
           })),
           onComplete: vi.fn((handle: any, cb: any) => {
@@ -4030,23 +4223,19 @@ describe('TaskRunner', () => {
           } as any,
           persistence: { updateTask: vi.fn(), updateAttempt } as any,
           executorRegistry: {
-            getDefault: () => manualExecutor,
-            get: () => manualExecutor,
-            getAll: () => [manualExecutor],
+            getDefault: () => mergeExecutor,
+            get: (type: string) => (type === 'merge' ? mergeExecutor : null),
+            getAll: () => [mergeExecutor],
+            register: vi.fn(),
           } as any,
           cwd: '/tmp',
           callbacks: {
-            onHeartbeat: (taskId: string) => { receivedHeartbeats.push(taskId); },
             onComplete: onCompleteCb,
           },
         });
 
-        vi.spyOn(runner as any, 'executeMergeNode').mockImplementation(async (task: TaskState) => {
-          log.push(`enter-${task.id}`);
-          if (task.id === 'merge-1') {
-            await deferred1.promise;
-          }
-          log.push(`exit-${task.id}`);
+        vi.spyOn(runner as any, 'executeMergeNode').mockImplementation(async () => {
+          legacyMergeCallCount += 1;
         });
 
         const task1 = makeTask({
@@ -4065,6 +4254,7 @@ describe('TaskRunner', () => {
         const done1 = runner.executeTask(task1);
         const done2 = runner.executeTask(task2);
         await flush();
+        expect(mergeExecutor.start).toHaveBeenCalledTimes(2);
         expect(completeCallbacks.size).toBe(2);
 
         completeCallbacks.get('merge-1')!({
@@ -4081,18 +4271,12 @@ describe('TaskRunner', () => {
         });
 
         await flush();
-        await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
-
-        expect(log).toEqual([]);
-        expect(receivedHeartbeats).not.toContain('merge-2');
+        await Promise.all([done1, done2]);
+        expect(legacyMergeCallCount).toBe(0);
         expect(onCompleteCb).toHaveBeenCalledWith(
           'merge-2',
           expect.objectContaining({ status: 'completed' }),
         );
-
-        deferred1.resolve(undefined as any);
-        await Promise.all([done1, done2]);
-        expect(log).toEqual([]);
       } finally {
         vi.useRealTimers();
       }

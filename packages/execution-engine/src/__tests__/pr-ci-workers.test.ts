@@ -14,10 +14,12 @@ import {
   ciFailureActionKey,
   createCiFailureTick,
 } from '../workers/ci-failure-worker.js';
+import { maybePublishReviewGateCiFailure } from '../task-runner-review-gate.js';
 import {
   DEFAULT_PR_STATUS_WORKER_INTERVAL_MS,
   createPrStatusWorker,
 } from '../workers/pr-status-worker.js';
+
 
 const logger = {
   info: vi.fn(),
@@ -180,7 +182,7 @@ describe('PR status and CI failure workers', () => {
       drainEvents: () => [event],
     });
 
-    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1 });
+    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1, signal: new AbortController().signal });
 
     expect(ciFailureActionKey(sameChecksDifferentOrder)).toBe(ciFailureActionKey(event));
     expect(harness.submit).toHaveBeenCalledTimes(1);
@@ -221,7 +223,7 @@ describe('PR status and CI failure workers', () => {
       drainEvents: () => [event],
     });
 
-    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1 });
+    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1, signal: new AbortController().signal });
 
     expect(harness.submit).toHaveBeenCalledTimes(1);
   });
@@ -239,7 +241,7 @@ describe('PR status and CI failure workers', () => {
       drainEvents: () => [event],
     });
 
-    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1 });
+    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1, signal: new AbortController().signal });
 
     expect(harness.submit).not.toHaveBeenCalled();
     expect(harness.actions.get(`${CI_FAILURE_WORKER_KIND}:${ciFailureActionKey(event)}`)).toMatchObject({
@@ -279,12 +281,37 @@ describe('PR status and CI failure workers', () => {
       drainEvents: () => [event],
     });
 
-    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1 });
+    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1, signal: new AbortController().signal });
 
     expect(harness.submit).not.toHaveBeenCalled();
     // Stale events are routine scan noise: logged, but NOT recorded as a durable
     // decision row. Only meaningful skips (e.g. retry-budget-exhausted) persist.
     expect(harness.actions.get(`${CI_FAILURE_WORKER_KIND}:${ciFailureActionKey(event)}`)).toBeUndefined();
     expect(harness.store.upsertWorkerAction).not.toHaveBeenCalled();
+  });
+  it('does not publish a CI repair intent for pending checks or merge-conflict-only polls', async () => {
+    const publish = vi.fn();
+    const host = {
+      reviewGateCiFailurePublisher: { publish },
+      reviewGateCiFailureInFlight: new Set<string>(),
+    } as any;
+    const task = makeTask();
+
+    await maybePublishReviewGateCiFailure(host, task, {
+      lifecycle: 'open',
+      rejected: false,
+      statusText: 'Checks pending',
+      url: 'https://github.com/owner/repo/pull/123',
+      checks: { state: 'pending', failed: [] },
+    }, '123');
+    await maybePublishReviewGateCiFailure(host, task, {
+      lifecycle: 'open',
+      rejected: false,
+      statusText: 'Merge conflict',
+      url: 'https://github.com/owner/repo/pull/123',
+      mergeState: 'dirty',
+    }, '123');
+
+    expect(publish).not.toHaveBeenCalled();
   });
 });

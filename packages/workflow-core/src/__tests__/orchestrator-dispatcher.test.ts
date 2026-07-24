@@ -323,7 +323,7 @@ describe('Orchestrator launch claims', () => {
     expect(started.map((task) => task.id)).toEqual([taskId]);
   });
 
-  it('keeps recreated tasks pending until executor launch is confirmed', () => {
+  it('keeps recreated tasks queued until executor launch is confirmed', () => {
     const { orchestrator, persistence } = makeOrchestrator({ deferRunningUntilLaunch: true });
     orchestrator.loadPlan({
       name: 'truthful-recreate',
@@ -335,7 +335,7 @@ describe('Orchestrator launch claims', () => {
     const workflowId = orchestrator.getWorkflowIds()[0]!;
 
     let [claim] = orchestrator.startExecution();
-    expect(claim!.status).toBe('pending');
+    expect(claim!.status).toBe('queued');
     expect(persistence.loadAttempt(claim!.execution.selectedAttemptId!)?.status).toBe('claimed');
     expect(orchestrator.markTaskRunningAfterLaunch(taskId, claim!.execution.selectedAttemptId!)).toBe(true);
     respondForTask(orchestrator, taskId, 'completed');
@@ -343,8 +343,8 @@ describe('Orchestrator launch claims', () => {
     [claim] = orchestrator.recreateWorkflow(workflowId);
     const replacementAttemptId = claim!.execution.selectedAttemptId!;
 
-    expect(claim!.status).toBe('pending');
-    expect(orchestrator.getTask(taskId)?.status).toBe('pending');
+    expect(claim!.status).toBe('queued');
+    expect(orchestrator.getTask(taskId)?.status).toBe('queued');
     expect(persistence.loadAttempt(replacementAttemptId)?.status).toBe('claimed');
     expect(orchestrator.getLastInvalidationPlan()).toMatchObject({
       action: 'recreateWorkflow',
@@ -381,7 +381,7 @@ describe('Orchestrator launch claims', () => {
 
     expect(staleResult).toEqual([]);
     expect(orchestrator.getTask(taskId)?.execution.selectedAttemptId).toBe(replacementAttemptId);
-    expect(orchestrator.getTask(taskId)?.status).toBe('pending');
+    expect(orchestrator.getTask(taskId)?.status).toBe('queued');
   });
 
   it('clears stale launch metadata from dependency-blocked tasks during recreateWorkflow reset', () => {
@@ -598,6 +598,45 @@ describe('Orchestrator launch claims', () => {
     expect(orchestrator.getTask(downstreamId)?.status).toBe('pending');
     expect(persistence.launchDispatchRows.some((row) => row.taskId === downstreamId)).toBe(false);
   });
+  it('rebuilds the pending queue so runnable tasks stay ahead of dependency-blocked stale jobs', () => {
+    const { orchestrator, persistence } = makeOrchestrator({
+      deferRunningUntilLaunch: true,
+      enqueueLaunchDispatchEnabled: true,
+      maxConcurrency: 1,
+    });
+    orchestrator.loadPlan({
+      name: 'pending-queue-rebuild',
+      onFinish: 'none',
+      tasks: [
+        { id: 'ready-root', description: 'ready root', command: 'echo ready' },
+        { id: 'stale-upstream', description: 'stale upstream', command: 'echo stale' },
+        { id: 'stale-blocked', description: 'stale blocked', command: 'echo blocked', dependencies: ['stale-upstream'] },
+      ],
+    });
+    const readyRootId = taskIdBySuffix(orchestrator, 'ready-root');
+    const staleUpstreamId = taskIdBySuffix(orchestrator, 'stale-upstream');
+    const staleBlockedId = taskIdBySuffix(orchestrator, 'stale-blocked');
+    persistence.updateTask(staleUpstreamId, {
+      status: 'failed',
+      execution: {
+        exitCode: 1,
+        error: 'boom',
+        completedAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    });
+    orchestrator.syncAllFromDb();
+    (orchestrator as any).scheduler.enqueue({ taskId: staleBlockedId, priority: 0 });
+    (orchestrator as any).enqueueIfNotScheduled(readyRootId);
+    expect((orchestrator as any).scheduler.getQueuedJobs().map((job: { taskId: string }) => job.taskId)).toEqual([
+      readyRootId,
+      staleBlockedId,
+    ]);
+    const started = (orchestrator as any).drainScheduler() as TaskState[];
+    expect(started).toHaveLength(1);
+    expect(started[0]?.id).toBe(readyRootId);
+    expect(orchestrator.getTask(staleBlockedId)?.status).toBe('pending');
+    expect(persistence.launchDispatchRows.map((row) => row.taskId)).toEqual([readyRootId]);
+  });
 
   it('ignores responses for a selected attempt row that has been superseded', () => {
     const { orchestrator, persistence } = makeOrchestrator();
@@ -636,7 +675,7 @@ describe('Orchestrator launch claims', () => {
     persistence.updateAttempt(attemptId, { status: 'superseded' });
 
     expect(orchestrator.markTaskRunningAfterLaunch(taskId, attemptId)).toBe(false);
-    expect(orchestrator.getTask(taskId)?.status).toBe('pending');
+    expect(orchestrator.getTask(taskId)?.status).toBe('queued');
     expect(persistence.loadAttempt(attemptId)?.status).toBe('superseded');
   });
 

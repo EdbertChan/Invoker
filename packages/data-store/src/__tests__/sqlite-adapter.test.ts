@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, statSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -98,9 +98,13 @@ describe('SQLiteAdapter', () => {
         taskCount: 1,
         workflowCount: 1,
         steps: ['Update README'],
+        taskGroups: [{ workflow: 'Docs', tasks: ['Update README'] }],
       },
+      draftPlanText: 'name: README plan\ntasks:\n  - id: update-readme\n    description: Update README\n',
       submittedWorkflowId: 'wf-planning',
       submittedPlanName: 'README plan',
+      terminalMode: 'chat',
+      terminalOutputSnapshot: '',
       pendingResponse: true,
       createdAt: '2026-07-07T00:00:00.000Z',
       updatedAt: '2026-07-07T00:00:03.000Z',
@@ -217,6 +221,48 @@ describe('SQLiteAdapter', () => {
       // Update path: set it back on.
       adapter.updateTask('t1', { execution: { failureClass: 'liveness_stall' } } as TaskStateChanges);
       expect(adapter.loadTasks('wf-1')[0].execution.failureClass).toBe('liveness_stall');
+    });
+  });
+  describe('task crash preservation metadata', () => {
+    it('round-trips crash preservation through the side table and clears it on reset', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1', { status: 'running' }));
+
+      adapter.updateTask('t1', {
+        execution: {
+          crashPreservedAt: new Date('2026-07-13T01:02:03.000Z'),
+          crashPreservedOwnerPid: 46301,
+          crashPreservedReportPath: '/tmp/Electron-46301.ips',
+          crashPreservedDiagnosticSummary: 'previous owner pid=46301; no matching crash report found',
+        },
+      });
+
+      expect(adapter.loadTasks('wf-1')[0]?.execution).toMatchObject({
+        crashPreservedOwnerPid: 46301,
+        crashPreservedReportPath: '/tmp/Electron-46301.ips',
+        crashPreservedDiagnosticSummary: 'previous owner pid=46301; no matching crash report found',
+      });
+      expect(adapter.loadTasks('wf-1')[0]?.execution.crashPreservedAt?.toISOString()).toBe('2026-07-13T01:02:03.000Z');
+      expect(tableColumns(adapter, 'tasks')).not.toContain('crash_preserved_at');
+      expect(tableColumns(adapter, 'task_crash_preservation')).toEqual([
+        'task_id',
+        'preserved_at',
+        'owner_pid',
+        'diagnostic_report_path',
+        'diagnostic_summary',
+      ]);
+
+      adapter.updateTask('t1', {
+        execution: {
+          crashPreservedAt: undefined,
+          crashPreservedOwnerPid: undefined,
+          crashPreservedReportPath: undefined,
+          crashPreservedDiagnosticSummary: undefined,
+        },
+      });
+
+      expect(adapter.loadTasks('wf-1')[0]?.execution.crashPreservedAt).toBeUndefined();
+      expect(sqliteScalar(adapter, 'SELECT COUNT(*) FROM task_crash_preservation')).toBe(0);
     });
   });
 
@@ -417,8 +463,15 @@ describe('SQLiteAdapter', () => {
         'preset_key',
         'status',
         'draft_plan_summary_json',
+        'draft_plan_text',
         'submitted_workflow_id',
         'submitted_plan_name',
+        'terminal_mode',
+        'terminal_session_id',
+        'terminal_status',
+        'terminal_exit_code',
+        'terminal_output_snapshot',
+        'terminal_updated_at',
         'pending_response',
         'created_at',
         'updated_at',
@@ -452,10 +505,44 @@ describe('SQLiteAdapter', () => {
       }
     });
 
+    it('round-trips planning tmux ownership across adapter reopen', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-planning-tmux-sessions-'));
+      const dbPath = join(dir, 'invoker.db');
+      try {
+        const first = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        first.upsertInAppPlanningSession(makePlanningSession('planning-tmux', {
+          terminalMode: 'tmux',
+          terminalSessionId: 'term-planning-tmux',
+          terminalStatus: 'running',
+          terminalExitCode: undefined,
+          terminalOutputSnapshot: 'tmux transcript\n',
+          terminalUpdatedAt: '2026-07-07T00:00:04.000Z',
+        }));
+        first.close();
+
+        const reopened = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        expect(reopened.loadInAppPlanningSession('planning-tmux')).toMatchObject({
+          terminalMode: 'tmux',
+          terminalSessionId: 'term-planning-tmux',
+          terminalStatus: 'running',
+          terminalOutputSnapshot: 'tmux transcript\n',
+          terminalUpdatedAt: '2026-07-07T00:00:04.000Z',
+        });
+        reopened.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('updates planning sessions and replaces visible messages', () => {
       adapter.upsertInAppPlanningSession(makePlanningSession('planning-1'));
       adapter.updateInAppPlanningSession('planning-1', {
         status: 'still_discussing',
+        terminalMode: 'tmux',
+        terminalSessionId: 'planning-terminal-1',
+        terminalStatus: 'running',
+        terminalOutputSnapshot: 'tmux output\n',
+        terminalUpdatedAt: '2026-07-07T00:00:04.500Z',
         messages: [{
           id: 7,
           role: 'system',
@@ -464,6 +551,7 @@ describe('SQLiteAdapter', () => {
           createdAt: '2026-07-07T00:00:04.000Z',
         }],
         draftPlanSummary: undefined,
+        draftPlanText: undefined,
         pendingResponse: false,
         updatedAt: '2026-07-07T00:00:05.000Z',
       });
@@ -471,6 +559,11 @@ describe('SQLiteAdapter', () => {
       const loaded = adapter.loadInAppPlanningSession('planning-1');
       expect(loaded).toMatchObject({
         status: 'still_discussing',
+        terminalMode: 'tmux',
+        terminalSessionId: 'planning-terminal-1',
+        terminalStatus: 'running',
+        terminalOutputSnapshot: 'tmux output\n',
+        terminalUpdatedAt: '2026-07-07T00:00:04.500Z',
         messages: [{
           id: 7,
           role: 'system',
@@ -482,6 +575,7 @@ describe('SQLiteAdapter', () => {
         updatedAt: '2026-07-07T00:00:05.000Z',
       });
       expect(loaded?.draftPlanSummary).toBeUndefined();
+      expect(loaded?.draftPlanText).toBeUndefined();
     });
 
     it('deletes planning sessions and their visible messages', () => {
@@ -558,19 +652,17 @@ describe('SQLiteAdapter', () => {
       expect(adapter.loadTerminalSession('term-t2')).toBeDefined();
     });
 
-    it('persists executionModel through saveTask, updateTask, and loadTask', () => {
+    it('persists optional executionModel through saveTask and loadTask', () => {
       adapter.saveWorkflow(testWorkflow);
       adapter.saveTask('wf-1', makeTask('model-task', {
-        config: { executionAgent: 'omp', executionModel: 'openai/gpt-5.2' },
+        config: { executionAgent: 'omp', executionModel: 'claude' },
+      }));
+      adapter.saveTask('wf-1', makeTask('no-model-task', {
+        config: { executionAgent: 'omp' },
       }));
 
-      expect(adapter.loadTask('model-task')?.config.executionModel).toBe('openai/gpt-5.2');
-
-      adapter.updateTask('model-task', {
-        config: { executionModel: 'anthropic/claude-sonnet-4.5' },
-      });
-
-      expect(adapter.loadTasks('wf-1')[0]?.config.executionModel).toBe('anthropic/claude-sonnet-4.5');
+      expect(adapter.loadTask('model-task')?.config.executionModel).toBe('claude');
+      expect(adapter.loadTask('no-model-task')?.config.executionModel).toBeUndefined();
     });
 
     it('loads all workflows and tasks in one startup snapshot', () => {
@@ -644,10 +736,16 @@ describe('SQLiteAdapter', () => {
       expect(tableIndexes(adapter, 'worker_actions')).toEqual(expect.arrayContaining([
         'idx_worker_actions_task_updated',
         'idx_worker_actions_workflow_status',
+        'idx_worker_actions_kind_updated',
       ]));
       expect(tableForeignKeys(adapter, 'worker_actions')).toEqual(expect.arrayContaining([
         'workflows.id:CASCADE',
         'tasks.id:CASCADE',
+      ]));
+      expect(tableColumns(adapter, 'worker_desired_states')).toEqual(expect.arrayContaining([
+        'worker_kind',
+        'desired_enabled',
+        'updated_at',
       ]));
     });
 
@@ -812,6 +910,26 @@ describe('SQLiteAdapter', () => {
       expect(adapter.listWorkerActions({ decision: 'skip' }).map((action) => action.id)).toEqual(['wa-skip']);
       expect(adapter.listWorkerActions({ decision: 'act' }).map((action) => action.id)).toEqual(['wa-done', 'wa-act']);
     });
+
+    it('persists worker desired states', () => {
+      expect(adapter.getWorkerDesiredState('workflow-resume')).toBeUndefined();
+
+      expect(adapter.setWorkerDesiredState('workflow-resume', true)).toMatchObject({
+        workerKind: 'workflow-resume',
+        desiredEnabled: true,
+      });
+      expect(adapter.getWorkerDesiredState('workflow-resume')).toMatchObject({
+        workerKind: 'workflow-resume',
+        desiredEnabled: true,
+      });
+
+      adapter.setWorkerDesiredState('workflow-resume', false);
+      adapter.setWorkerDesiredState('pr-status', true);
+      expect(adapter.listWorkerDesiredStates()).toEqual([
+        expect.objectContaining({ workerKind: 'pr-status', desiredEnabled: true }),
+        expect.objectContaining({ workerKind: 'workflow-resume', desiredEnabled: false }),
+      ]);
+    });
   });
 
   describe('execution resource leases', () => {
@@ -855,6 +973,9 @@ describe('SQLiteAdapter', () => {
       const leases = adapter.listExecutionResourceLeases();
       expect(leases).toHaveLength(1);
       expect(leases[0].holderId).toBe('holder-2');
+      expect(adapter.listExecutionResourceLeasesByKey('ssh:invoker@example.com:22')).toEqual([
+        expect.objectContaining({ holderId: 'holder-2' }),
+      ]);
     });
 
     it('renews and releases resource leases by holder', () => {
@@ -868,6 +989,70 @@ describe('SQLiteAdapter', () => {
       adapter.releaseExecutionResourceLease('ssh:invoker@example.com:22', 'holder-1');
 
       expect(adapter.listExecutionResourceLeases()).toHaveLength(0);
+    });
+
+    it('globally sweeps expired execution resource leases across keys', () => {
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:expired-a',
+        resourceType: 'ssh',
+        holderId: 'holder-a',
+        leaseMs: -1,
+      })).toBe(true);
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:live-b',
+        resourceType: 'ssh',
+        holderId: 'holder-b',
+        leaseMs: 60_000,
+      })).toBe(true);
+
+      expect(adapter.releaseExpiredExecutionResourceLeases()).toBe(1);
+      const leases = adapter.listExecutionResourceLeases();
+      expect(leases).toHaveLength(1);
+      expect(leases[0]?.resourceKey).toBe('ssh:live-b');
+    });
+
+    it('allows up to maxHolders live holders on one resource key', () => {
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@counted.example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-1',
+        maxHolders: 2,
+      })).toBe(true);
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@counted.example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-2',
+        maxHolders: 2,
+      })).toBe(true);
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@counted.example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-3',
+        maxHolders: 2,
+      })).toBe(false);
+
+      expect(adapter.countExecutionResourceLeases('ssh:invoker@counted.example.com:22')).toBe(2);
+      expect(adapter.listExecutionResourceLeasesByKey('ssh:invoker@counted.example.com:22')).toHaveLength(2);
+    });
+
+    it('renews an existing holder without consuming an extra maxHolders slot', () => {
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@renew.example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-1',
+        maxHolders: 1,
+      })).toBe(true);
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:invoker@renew.example.com:22',
+        resourceType: 'ssh',
+        holderId: 'holder-1',
+        maxHolders: 1,
+        taskId: 'task-renewed',
+      })).toBe(true);
+
+      const leases = adapter.listExecutionResourceLeasesByKey('ssh:invoker@renew.example.com:22');
+      expect(leases).toHaveLength(1);
+      expect(leases[0]?.taskId).toBe('task-renewed');
     });
   });
 
@@ -1383,6 +1568,28 @@ describe('SQLiteAdapter', () => {
         expect(after?.lastError).toMatch(/status is failed/);
       });
 
+      it('claims queued launch-wait tasks written by deferRunningUntilLaunch', () => {
+        setupWorkflowAndTask('wf-launch', 'wf-launch/t1', {
+          selectedAttemptId: 'attempt-queued-task',
+          status: 'queued',
+        });
+        const row = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t1',
+          attemptId: 'attempt-queued-task',
+          workflowId: 'wf-launch',
+          generation: 0,
+        });
+
+        const claimed = adapter.claimLaunchDispatchAtomic({
+          ownerId: 'runner-queued',
+          nowIso: '2026-06-03T00:02:30.000Z',
+        });
+
+        expect(claimed?.id).toBe(row.id);
+        expect(claimed?.state).toBe('leased');
+        expect(adapter.loadLaunchDispatchById(row.id)?.state).toBe('leased');
+      });
+
       it('abandons missing-task candidates', () => {
         adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
         (adapter as any).db.run('PRAGMA foreign_keys = OFF');
@@ -1798,6 +2005,137 @@ describe('SQLiteAdapter', () => {
       const [task] = adapter.loadTasks('wf-1');
       expect(task.status).toBe('fixing_with_ai');
     });
+
+    it('projects from the newest active attempt when selected_attempt_id lags behind a failed attempt with a newer pending replacement', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const olderCreatedAt = new Date('2026-07-09T05:38:02.000Z');
+      const newerCreatedAt = new Date('2026-07-09T05:51:12.808Z');
+      const failed: Attempt = {
+        ...createAttempt('t1', { status: 'failed' }),
+        id: 't1-aOLD',
+        createdAt: olderCreatedAt,
+        error: 'Cancelled by user (workflow)',
+        completedAt: new Date('2026-07-09T05:51:12.761Z'),
+      };
+      const newerPending: Attempt = {
+        ...createAttempt('t1', { status: 'pending' }),
+        id: 't1-aNEW',
+        createdAt: newerCreatedAt,
+        supersedesAttemptId: failed.id,
+      };
+      adapter.saveTask('wf-1', makeTask('t1', {
+        status: 'running',
+        execution: { startedAt: new Date('2026-07-09T05:43:54.107Z') },
+      }));
+      adapter.saveAttempt(failed);
+      adapter.saveAttempt(newerPending);
+      // Production shape: selected_attempt_id lags on the FAILED attempt even
+      // though a newer pending replacement exists.
+      adapter.updateTask('t1', { execution: { selectedAttemptId: failed.id } });
+
+      const [task] = adapter.loadTasks('wf-1');
+      expect(task.status).toBe('running');
+      expect(task.execution.error).toBeUndefined();
+      expect(task.execution.completedAt).toBeUndefined();
+      // Pointer stays as-persisted; the projection does not rewrite the row.
+      expect(task.execution.selectedAttemptId).toBe(failed.id);
+    });
+
+    it('projects from the newest active attempt when selected_attempt_id lags behind a superseded attempt', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const olderCreatedAt = new Date('2026-07-09T05:38:02.000Z');
+      const newerCreatedAt = new Date('2026-07-09T05:51:12.808Z');
+      const superseded: Attempt = {
+        ...createAttempt('t1', { status: 'superseded' }),
+        id: 't1-aOLD',
+        createdAt: olderCreatedAt,
+      };
+      const newerRunning: Attempt = {
+        ...createAttempt('t1', { status: 'running' }),
+        id: 't1-aNEW',
+        createdAt: newerCreatedAt,
+        supersedesAttemptId: superseded.id,
+      };
+      adapter.saveTask('wf-1', makeTask('t1', {
+        status: 'running',
+        execution: { startedAt: newerCreatedAt },
+      }));
+      adapter.saveAttempt(superseded);
+      adapter.saveAttempt(newerRunning);
+      adapter.updateTask('t1', { execution: { selectedAttemptId: superseded.id } });
+
+      const [task] = adapter.loadTasks('wf-1');
+      // Without the fix this would project `stale`; the newer active attempt
+      // wins and keeps the task as running.
+      expect(task.status).toBe('running');
+    });
+
+    it('keeps projecting `stale` when selected_attempt_id targets a superseded attempt with no newer active replacement', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const attempt: Attempt = {
+        ...createAttempt('t1', { status: 'superseded' }),
+        id: 't1-aOLD',
+      };
+      adapter.saveTask('wf-1', makeTask('t1', { status: 'running' }));
+      adapter.saveAttempt(attempt);
+      adapter.updateTask('t1', { execution: { selectedAttemptId: attempt.id } });
+
+      const [task] = adapter.loadTasks('wf-1');
+      expect(task.status).toBe('stale');
+    });
+
+    it('projects the newest active attempt without scanning every attempt for the node (perf regression #3746)', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1', { status: 'running' }));
+
+      const selectedFailed: Attempt = {
+        ...createAttempt('t1', { status: 'failed' }),
+        id: 't1-aOLD',
+        createdAt: new Date('2026-07-09T05:00:00.000Z'),
+        error: 'boom',
+      };
+      const newerPending: Attempt = {
+        ...createAttempt('t1', { status: 'pending' }),
+        id: 't1-aNEW',
+        createdAt: new Date('2026-07-09T06:00:00.000Z'),
+        supersedesAttemptId: selectedFailed.id,
+      };
+      adapter.saveAttempt(selectedFailed);
+      adapter.saveAttempt(newerPending);
+
+      const bigError = 'x'.repeat(200_000);
+      for (let i = 0; i < 50; i += 1) {
+        adapter.saveAttempt({
+          ...createAttempt('t1', { status: i % 2 === 0 ? 'failed' : 'superseded' }),
+          id: `t1-old-${i}`,
+          createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)),
+          error: bigError,
+        });
+      }
+
+      adapter.updateTask('t1', { execution: { selectedAttemptId: selectedFailed.id } });
+
+      const spy = vi.spyOn(
+        adapter as unknown as { queryAll: (sql: string, params?: unknown[]) => unknown },
+        'queryAll',
+      );
+      try {
+        const [task] = adapter.loadTasks('wf-1');
+        expect(task.status).toBe('running');
+        expect(task.execution.error).toBeUndefined();
+        expect(task.execution.selectedAttemptId).toBe(selectedFailed.id);
+      } finally {
+        spy.mockRestore();
+      }
+
+      const ranUnboundedScan = spy.mock.calls.some(
+        ([sql]) =>
+          typeof sql === 'string' &&
+          /FROM attempts\s+WHERE node_id = \?\s+ORDER BY created_at ASC/.test(sql),
+      );
+      expect(ranUnboundedScan).toBe(false);
+    });
+
   });
 
   describe('loadActionGraphAttempts', () => {
@@ -2248,6 +2586,42 @@ describe('SQLiteAdapter', () => {
         Array.from({ length: 20 }, (_value, index) => `event-${29 - index}`),
       );
       expect(adapter.getEvents('t1', 'desc', 0)).toEqual([]);
+    });
+
+    it('supports beforeId cursor for older pages', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+      for (let index = 0; index < 30; index += 1) {
+        adapter.logEvent('t1', `event-${index}`, { index });
+      }
+
+      const first = adapter.getEvents('t1', 'desc', 10);
+      const oldest = first[first.length - 1]!;
+      const second = adapter.getEvents('t1', 'desc', 10, oldest.id);
+
+      expect(second).toHaveLength(10);
+      expect(second.every((event) => event.id < oldest.id)).toBe(true);
+      expect(second[0]!.eventType).toBe(`event-${29 - 10}`);
+    });
+
+    it('lists recent task events across tasks by event type', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+      adapter.saveTask('wf-1', makeTask('t2'));
+
+      adapter.logEvent('t1', 'debug.auto-fix', { phase: 'worker-autofix-skip' });
+      adapter.logEvent('t2', 'other.event');
+      adapter.logEvent('t2', 'recovery.worker.submit', { phase: 'worker-autofix-submitted' });
+
+      const events = adapter.listTaskEvents({
+        eventTypes: ['debug.auto-fix', 'recovery.worker.submit'],
+        sortBy: 'desc',
+        limit: 2,
+      });
+
+      expect(events.map((event) => event.eventType)).toEqual(['recovery.worker.submit', 'debug.auto-fix']);
+      expect(events.map((event) => event.taskId)).toEqual(['t2', 't1']);
+      expect(adapter.listTaskEvents({ eventTypes: [], limit: 2 })).toEqual([]);
     });
   });
 
@@ -3243,6 +3617,26 @@ describe('SQLiteAdapter', () => {
       ...overrides,
     };
   }
+  function saveSlackConversationState(threadTs: string, confirmKey: string): void {
+    adapter.saveSlackLaunchContext({
+      threadTs,
+      repoUrl: 'https://github.com/acme/repo.git',
+      harnessPreset: 'claude',
+      workingDir: '/tmp/repo',
+      requestedBy: 'U456',
+      lobbyChannelId: 'C123',
+    });
+    adapter.saveSlackPendingConfirmation({
+      confirmKey,
+      threadTs,
+      channelId: 'C123',
+      userId: 'U456',
+      kind: 'plan_submission',
+      payloadJson: JSON.stringify({ workflowId: 'wf-1' }),
+      createdAt: '2026-07-19T12:00:00.000Z',
+      expiresAt: '2099-07-20T12:00:00.000Z',
+    });
+  }
 
   describe('saveConversation + loadConversation', () => {
     it('round-trips a conversation through save and load', () => {
@@ -3316,6 +3710,40 @@ describe('SQLiteAdapter', () => {
       expect(adapter.loadConversation('ts-1')).toBeUndefined();
       expect(adapter.loadMessages('ts-1')).toEqual([]);
     });
+    it('rolls back linked Slack cleanup when deleteConversation fails mid-flight', () => {
+      const threadTs = 'ts-rollback';
+      const confirmKey = 'confirm-rollback';
+      adapter.saveConversation(makeConversation(threadTs));
+      adapter.appendMessage(threadTs, 'user', '"hello"');
+      saveSlackConversationState(threadTs, confirmKey);
+
+      const db = (adapter as unknown as { db: { run: (sql: string, params?: unknown[]) => void } }).db;
+      const originalRun = db.run.bind(db) as (sql: string, params?: unknown[]) => void;
+      let injected = false;
+      const spy = vi.spyOn(db, 'run').mockImplementation((sql: string, params?: unknown[]) => {
+        if (
+          !injected &&
+          sql.includes('DELETE FROM conversation_messages WHERE thread_ts = ?')
+        ) {
+          injected = true;
+          throw new Error('injected delete failure');
+        }
+        return originalRun(sql, params);
+      });
+      try {
+        expect(() => adapter.deleteConversation(threadTs)).toThrow('injected delete failure');
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(injected).toBe(true);
+      expect(adapter.loadConversation(threadTs)?.threadTs).toBe(threadTs);
+      expect(adapter.loadMessages(threadTs)).toHaveLength(1);
+      expect(adapter.loadSlackLaunchContext(threadTs)).toEqual(expect.objectContaining({ threadTs }));
+      expect(adapter.loadSlackPendingConfirmation(confirmKey)).toEqual(
+        expect.objectContaining({ confirmKey, threadTs }),
+      );
+    });
   });
 
   // ── Conversation Messages ──────────────────────────────
@@ -3342,6 +3770,21 @@ describe('SQLiteAdapter', () => {
     it('returns empty array for thread with no messages', () => {
       adapter.saveConversation(makeConversation('ts-1'));
       expect(adapter.loadMessages('ts-1')).toEqual([]);
+    });
+
+    it('counts messages for a thread', () => {
+      adapter.saveConversation(makeConversation('ts-1'));
+      adapter.saveConversation(makeConversation('ts-2'));
+
+      expect(adapter.countMessages('ts-1')).toBe(0);
+
+      adapter.appendMessage('ts-1', 'user', '"thread 1 msg"');
+      adapter.appendMessage('ts-2', 'user', '"thread 2 msg"');
+      adapter.appendMessage('ts-1', 'assistant', '"reply to thread 1"');
+
+      expect(adapter.countMessages('ts-1')).toBe(2);
+      expect(adapter.countMessages('ts-2')).toBe(1);
+      expect(adapter.countMessages('missing')).toBe(0);
     });
 
     it('isolates messages by thread_ts', () => {
@@ -3409,6 +3852,139 @@ describe('SQLiteAdapter', () => {
     it('returns empty array on empty database', () => {
       const results = adapter.loadAllCompletedTasks();
       expect(results).toHaveLength(0);
+    });
+  });
+
+  describe('loadAllHistoryTasks', () => {
+    it('returns tasks across all non-pending statuses with workflowName and lastEventAt', () => {
+      adapter.saveWorkflow({ id: 'wf-1', name: 'Alpha Plan', createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:00:00Z' });
+      adapter.saveWorkflow({ id: 'wf-2', name: 'Beta Plan', createdAt: '2024-01-02T00:00:00Z', updatedAt: '2024-01-02T00:00:00Z' });
+
+      adapter.saveTask('wf-1', makeTask('completed-task', { status: 'completed', execution: { completedAt: new Date('2024-01-05T00:00:00Z') } }));
+      adapter.saveTask('wf-1', makeTask('failed-task', { status: 'failed', execution: { completedAt: new Date('2024-01-04T00:00:00Z') } }));
+      adapter.saveTask('wf-2', makeTask('running-task', { status: 'running' }));
+      adapter.saveTask('wf-2', makeTask('pending-task', { status: 'pending' }));
+
+      adapter.logEvent('running-task', 'task.started');
+      adapter.logEvent('failed-task', 'task.failed');
+
+      const results = adapter.loadAllHistoryTasks();
+      const ids = results.map((r) => r.id);
+      expect(ids).toContain('completed-task');
+      expect(ids).toContain('failed-task');
+      expect(ids).toContain('running-task');
+      expect(ids).not.toContain('pending-task');
+
+      const running = results.find((r) => r.id === 'running-task');
+      expect(running?.workflowName).toBe('Beta Plan');
+      expect(running?.lastEventAt).toBeTruthy();
+      expect(running?.eventCount).toBe(1);
+
+      const completed = results.find((r) => r.id === 'completed-task');
+      expect(completed?.eventCount).toBe(0);
+      expect(completed?.lastEventAt).toBeNull();
+    });
+
+    it('includes a pending task once it has any recorded event', () => {
+      adapter.saveWorkflow({ id: 'wf-1', name: 'Test', createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:00:00Z' });
+      adapter.saveTask('wf-1', makeTask('pending-task', { status: 'pending' }));
+
+      expect(adapter.loadAllHistoryTasks()).toHaveLength(0);
+
+      adapter.logEvent('pending-task', 'task.pending');
+
+      const results = adapter.loadAllHistoryTasks();
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe('pending-task');
+      expect(results[0].eventCount).toBe(1);
+      expect(results[0].lastEventAt).toBeTruthy();
+    });
+
+    it('orders results by most recent event descending', () => {
+      adapter.saveWorkflow({ id: 'wf-1', name: 'Test', createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:00:00Z' });
+      adapter.saveTask('wf-1', makeTask('t-old', { status: 'completed', execution: { completedAt: new Date('2024-01-02T00:00:00Z') } }));
+      adapter.saveTask('wf-1', makeTask('t-new', { status: 'completed', execution: { completedAt: new Date('2024-01-05T00:00:00Z') } }));
+
+      // Pin created_at so ordering is deterministic across fast test runs.
+      const db = (adapter as unknown as { db: { run: (sql: string, params?: unknown[]) => void } }).db;
+      db.run(`INSERT INTO events (task_id, event_type, created_at) VALUES ('t-old', 'task.completed', '2024-01-02T12:00:00Z')`);
+      db.run(`INSERT INTO events (task_id, event_type, created_at) VALUES ('t-new', 'task.completed', '2024-01-05T12:00:00Z')`);
+
+      const results = adapter.loadAllHistoryTasks();
+      expect(results.map((r) => r.id)).toEqual(['t-new', 't-old']);
+    });
+
+    it('falls back to completed_at / started_at / created_at when there are no events', () => {
+      adapter.saveWorkflow({ id: 'wf-1', name: 'Test', createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:00:00Z' });
+      adapter.saveTask('wf-1', makeTask('t-old', {
+        status: 'completed',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        execution: { completedAt: new Date('2024-01-02T00:00:00Z') },
+      }));
+      adapter.saveTask('wf-1', makeTask('t-new', {
+        status: 'completed',
+        createdAt: new Date('2024-01-01T00:00:00Z'),
+        execution: { completedAt: new Date('2024-01-05T00:00:00Z') },
+      }));
+
+      const results = adapter.loadAllHistoryTasks();
+      expect(results.map((r) => r.id)).toEqual(['t-new', 't-old']);
+      expect(results.every((r) => r.eventCount === 0)).toBe(true);
+      expect(results.every((r) => r.lastEventAt === null)).toBe(true);
+    });
+
+    it('reconciles selected-attempt status like loadTasks', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const attempt = createAttempt('t1', {
+        status: 'failed',
+        exitCode: 1,
+        error: 'boom',
+        completedAt: new Date(),
+      });
+      adapter.saveTask('wf-1', makeTask('t1', {
+        status: 'running',
+        execution: {
+          startedAt: new Date(),
+        },
+      }));
+      adapter.saveAttempt(attempt);
+      adapter.updateTask('t1', {
+        execution: { selectedAttemptId: attempt.id },
+      });
+
+      const [fromLoadTasks] = adapter.loadTasks('wf-1');
+      const [fromHistory] = adapter.loadAllHistoryTasks();
+      expect(fromLoadTasks.status).toBe('failed');
+      expect(fromHistory.status).toBe('failed');
+      expect(fromHistory.execution.exitCode).toBe(1);
+      expect(fromHistory.execution.error).toBe('boom');
+    });
+
+    it('does not override fixing_with_ai with a failed selected attempt', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const attempt = createAttempt('t1', {
+        status: 'failed',
+        exitCode: 1,
+        error: 'boom',
+        completedAt: new Date(),
+      });
+      adapter.saveTask('wf-1', makeTask('t1', {
+        status: 'fixing_with_ai',
+        execution: {
+          startedAt: new Date(),
+        },
+      }));
+      adapter.saveAttempt(attempt);
+      adapter.updateTask('t1', {
+        execution: { selectedAttemptId: attempt.id },
+      });
+
+      const [fromHistory] = adapter.loadAllHistoryTasks();
+      expect(fromHistory.status).toBe('fixing_with_ai');
+    });
+
+    it('returns empty array on empty database', () => {
+      expect(adapter.loadAllHistoryTasks()).toHaveLength(0);
     });
   });
 
@@ -4927,6 +5503,52 @@ describe('SQLiteAdapter', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+    it('rolls back linked Slack cleanup when deleteConversationsOlderThan fails mid-flight', () => {
+      const threadTs = 'ts-old-rollback';
+      const confirmKey = 'confirm-old-rollback';
+      const old = new Date();
+      old.setDate(old.getDate() - 10);
+      const oldIso = old.toISOString();
+
+      adapter.saveConversation(makeConversation(threadTs, {
+        createdAt: oldIso,
+        updatedAt: oldIso,
+      }));
+      adapter.appendMessage(threadTs, 'user', '"old message"');
+      saveSlackConversationState(threadTs, confirmKey);
+
+      const db = (adapter as unknown as { db: { run: (sql: string, params?: unknown[]) => void } }).db;
+      const originalRun = db.run.bind(db) as (sql: string, params?: unknown[]) => void;
+      let injected = false;
+      const spy = vi.spyOn(db, 'run').mockImplementation((sql: string, params?: unknown[]) => {
+        if (
+          !injected &&
+          sql.includes('DELETE FROM conversation_messages WHERE thread_ts IN')
+        ) {
+          injected = true;
+          throw new Error('injected delete failure');
+        }
+        return originalRun(sql, params);
+      });
+
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - 7);
+      try {
+        expect(() => adapter.deleteConversationsOlderThan(cutoff.toISOString())).toThrow(
+          'injected delete failure',
+        );
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(injected).toBe(true);
+      expect(adapter.loadConversation(threadTs)?.threadTs).toBe(threadTs);
+      expect(adapter.loadMessages(threadTs)).toHaveLength(1);
+      expect(adapter.loadSlackLaunchContext(threadTs)).toEqual(expect.objectContaining({ threadTs }));
+      expect(adapter.loadSlackPendingConfirmation(confirmKey)).toEqual(
+        expect.objectContaining({ confirmKey, threadTs }),
+      );
+    });
 
     it('marks deletion mutations as dirty for diagnostics', async () => {
       // Use in-memory adapter to verify the dirty flag is set
@@ -5105,6 +5727,42 @@ describe('SQLiteAdapter', () => {
         expect(handle.freeCallsFor(captured)).toBe(1);
       } finally {
         handle.restore();
+      }
+    });
+
+    it('reports queries slower than the configured threshold', async () => {
+      const onSlowQuery = vi.fn();
+      const timed = await SQLiteAdapter.create(':memory:', {
+        slowQueryThresholdMs: 0.0001,
+        onSlowQuery,
+      });
+      try {
+        onSlowQuery.mockClear();
+        timed.listWorkflows();
+        expect(onSlowQuery).toHaveBeenCalled();
+        expect(onSlowQuery.mock.calls.some(([info]) => /SELECT/i.test(String(info.sql)))).toBe(true);
+        expect(onSlowQuery.mock.calls[0]?.[0]).toEqual(
+          expect.objectContaining({
+            durationMs: expect.any(Number),
+            sql: expect.any(String),
+          }),
+        );
+      } finally {
+        timed.close();
+      }
+    });
+
+    it('does not report slow queries when the threshold is disabled', async () => {
+      const onSlowQuery = vi.fn();
+      const timed = await SQLiteAdapter.create(':memory:', {
+        slowQueryThresholdMs: 0,
+        onSlowQuery,
+      });
+      try {
+        timed.listWorkflows();
+        expect(onSlowQuery).not.toHaveBeenCalled();
+      } finally {
+        timed.close();
       }
     });
 

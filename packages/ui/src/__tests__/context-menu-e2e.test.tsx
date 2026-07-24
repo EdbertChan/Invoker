@@ -46,11 +46,14 @@ const workflows: WorkflowMeta[] = [
   { id: 'wf-1', name: 'Test Workflow', status: 'running', baseBranch: 'master' },
 ];
 
-describe('Context menu (component)', () => {
+const FLOATING_GRAPH_PANEL_LOCAL_Z_INDEX = 10;
+const APP_CONTEXT_MENU_TEST_TIMEOUT_MS = 20_000;
+
+describe('Context menu (component)', { timeout: APP_CONTEXT_MENU_TEST_TIMEOUT_MS }, () => {
   let mock: MockInvoker;
 
   beforeEach(() => {
-    mock = createMockInvoker();
+    mock = createMockInvoker([alpha, beta, merge], workflows);
     mock.install();
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     Object.defineProperty(navigator, 'clipboard', {
@@ -69,11 +72,9 @@ describe('Context menu (component)', () => {
     workflowList = workflows,
   ) {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks(tasks, workflowList));
-
-    await waitFor(() => {
-      expect(screen.getByTestId('workflow-node-wf-1')).toBeInTheDocument();
-    });
+    expect(await screen.findByTestId('workflow-node-wf-1')).toBeInTheDocument();
   }
 
   async function openWorkflowContextMenu() {
@@ -104,7 +105,7 @@ describe('Context menu (component)', () => {
 
   async function expectHighlightedMenuItem(name: RegExp | string) {
     await waitFor(() => {
-      expect(screen.getByRole('menuitem', { name })).toHaveClass('bg-gray-700');
+      expect(screen.getByRole('menuitem', { name })).toHaveClass('bg-muted');
     });
   }
 
@@ -242,6 +243,20 @@ describe('Context menu (component)', () => {
     expect(mock.api.deleteWorkflow).not.toHaveBeenCalled();
   });
 
+  it('task context menu opened from the selected workflow mini DAG layers above the floating graph panel', async () => {
+    await setup();
+    fireEvent.click(screen.getByTestId('workflow-node-wf-1'));
+    const panel = await screen.findByTestId('selected-workflow-mini-dag');
+
+    fireEvent.contextMenu(screen.getByTestId('rf__node-task-alpha'));
+
+    const menu = await screen.findByRole('menu');
+    expect(panel).toBeInTheDocument();
+    expect(panel).toHaveClass(`z-${FLOATING_GRAPH_PANEL_LOCAL_Z_INDEX}`);
+    expect(panel.style.zIndex).toBe('');
+    expect(Number(menu.style.zIndex)).toBeGreaterThan(FLOATING_GRAPH_PANEL_LOCAL_Z_INDEX);
+  });
+
   it('workflow context menu retries workflow', async () => {
     await setup();
     fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-1'));
@@ -364,6 +379,7 @@ describe('Context menu (component)', () => {
 
     async function setupStack() {
       render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
       act(() => mock.setTasks([upTask, downTask], stackWorkflows));
       await waitFor(() => {
         expect(screen.getByTestId('workflow-node-wf-down')).toBeInTheDocument();

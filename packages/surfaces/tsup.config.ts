@@ -12,6 +12,8 @@ export default defineConfig({
     '@invoker/workflow-core',
     '@invoker/contracts',
     '@invoker/data-store',
+    '@invoker/execution-engine',
+    '@invoker/planning-core',
     '@invoker/transport',
     'yaml',
   ],

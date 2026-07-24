@@ -10,7 +10,7 @@
 import type { SQLiteAdapter, TaskLaunchDispatch } from '@invoker/data-store';
 import type { LaunchOutboxAck } from '@invoker/execution-engine';
 import type { TaskLaunchReadiness, TaskState } from '@invoker/workflow-core';
-import { DISPATCH_MAX_ATTEMPTS, type Logger } from '@invoker/contracts';
+import { DISPATCH_MAX_ATTEMPTS, LAUNCH_STUCK_ABANDON_MS, type Logger } from '@invoker/contracts';
 
 
 export type LaunchDispatcherPersistence = Pick<
@@ -25,7 +25,9 @@ export type LaunchDispatcherPersistence = Pick<
   | 'listExecutionResourceLeasesByTask'
   | 'releaseExecutionResourceLease'
   | 'logEvent'
->;
+> & {
+  releaseExpiredExecutionResourceLeases?(nowIso?: string): number;
+};
 
 /**
  * Narrow interface for the orchestrator surface the dispatcher needs.
@@ -39,6 +41,13 @@ export interface LaunchDispatcherOrchestrator {
   syncFromDb?(workflowId: string): void;
   getTask?(taskId: string): TaskState | undefined;
   getTaskLaunchReadiness?(taskId: string): TaskLaunchReadiness;
+  /**
+   * Optional: when startExecution leaves free slots idle with ready work that
+   * has no launching phase (lost outbox after cancel/recreate), mint attempts.
+   */
+  getExecutableReadyTasks?(): TaskState[];
+  getQueueStatus?(): { runningCount: number; maxConcurrency: number };
+  isLaunchParked?(taskId: string, now?: number): boolean;
   startExecution?(): TaskState[];
 }
 
@@ -102,21 +111,81 @@ export class LaunchDispatcher {
   /**
    * Single dispatcher tick:
    *
-   *   1. Reap any leased rows whose dispatch lease expired.
-   *   2. Abandon expired rows that exhausted their retry budget.
-   *   3. Top up ready tasks into the durable launch outbox.
-   *   4. Lease and dispatch enqueued rows.
+   *   1. Sweep expired SSH/worktree execution-resource leases globally.
+   *   2. Abandon leased rows that are out of retries or have sat in
+   *      launch long enough to be treated as stuck.
+   *   3. Reap any remaining leased rows whose dispatch lease expired.
+   *   4. Top up ready tasks into the durable launch outbox.
+   *   5. Lease and dispatch enqueued rows.
    */
   poll(): void {
-    this.reapExpiredLeases();
+    this.sweepExpiredResourceLeases();
     this.abandonStuckLeases();
+    this.reapExpiredLeases();
     this.topUpReadyLaunches();
     this.dispatchActive();
   }
 
+  private sweepExpiredResourceLeases(): void {
+    const sweep = this.persistence.releaseExpiredExecutionResourceLeases;
+    if (typeof sweep !== 'function') return;
+    try {
+      const released = sweep.call(this.persistence);
+      if (released > 0) {
+        this.logger?.info?.('[launch-dispatcher] swept expired execution resource leases', {
+          ownerId: this.ownerId,
+          released,
+          module: 'launch-dispatcher',
+        });
+      }
+    } catch (err) {
+      this.logger?.warn?.('[launch-dispatcher] expired execution resource lease sweep failed', {
+        ownerId: this.ownerId,
+        error: err instanceof Error ? err.message : String(err),
+        module: 'launch-dispatcher',
+      });
+    }
+  }
+
   private topUpReadyLaunches(): void {
     try {
-      const started = this.orchestrator?.startExecution?.() ?? [];
+      let started = this.orchestrator?.startExecution?.() ?? [];
+      // Ready pending roots can lose their outbox row after cancel/recreate while
+      // free scheduler slots remain. Mint a fresh attempt only for non-parked
+      // ready work, then drain again.
+      if (
+        started.length === 0
+        && typeof this.orchestrator?.getExecutableReadyTasks === 'function'
+        && typeof this.orchestrator.prepareTaskForNewAttempt === 'function'
+      ) {
+        const queue = this.orchestrator.getQueueStatus?.();
+        const freeSlots = queue
+          ? Math.max(0, queue.maxConcurrency - queue.runningCount)
+          : 0;
+        if (freeSlots > 0) {
+          const now = Date.now();
+          const stranded = this.orchestrator.getExecutableReadyTasks().filter((task) => {
+            if (task.status !== 'pending' || task.execution.phase === 'launching') return false;
+            if (this.orchestrator?.isLaunchParked?.(task.id, now)) return false;
+            return true;
+          });
+          const toRecover = stranded.slice(0, freeSlots);
+          for (const task of toRecover) {
+            this.orchestrator.prepareTaskForNewAttempt(task.id, 'launch-dispatcher-ready-topup');
+          }
+          if (toRecover.length > 0) {
+            started = this.orchestrator.startExecution?.() ?? [];
+            this.logger?.info?.('[launch-dispatcher] re-topped ready launches after stranded pending', {
+              ownerId: this.ownerId,
+              stranded: toRecover.length,
+              freeSlots,
+              started: started.length,
+              taskIds: toRecover.map((task) => task.id),
+              module: 'launch-dispatcher',
+            });
+          }
+        }
+      }
       if (started.length > 0) {
         this.logger?.info?.('[launch-dispatcher] topped up ready launches', {
           ownerId: this.ownerId,
@@ -297,16 +366,18 @@ export class LaunchDispatcher {
   }
 
   /**
-   * For every `leased` row whose fence has expired AND whose
-   * attempts_count has reached `maxAttempts`, transition it to
-   * `abandoned`, ask the orchestrator to prepare a fresh attempt, and
-   * emit a real `task.failed` event with a concrete error message.
+   * For every `leased` row whose fence has expired AND that either
+   * exhausted its retry budget or sat in launching past
+   * `LAUNCH_STUCK_ABANDON_MS`, transition it to `abandoned`, ask the
+   * orchestrator to prepare a fresh attempt, and emit a real
+   * `task.failed` event with a concrete error message.
    * Returns the number of rows abandoned.
    */
   abandonStuckLeases(nowIso?: string): number {
     const candidates = this.persistence.listAbandonableLaunchDispatchLeases({
       nowIso,
       maxAttempts: this.maxAttempts,
+      maxLaunchAgeMs: LAUNCH_STUCK_ABANDON_MS,
     });
     if (candidates.length === 0) return 0;
     let abandoned = 0;

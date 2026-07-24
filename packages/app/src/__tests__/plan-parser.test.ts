@@ -106,6 +106,34 @@ tasks:
     expect(plan.tasks[0].command).toBe('echo "Hello, World!"');
   });
 
+  it('normalizes optional executionModel values', () => {
+    const yaml = `
+name: Model Selector Test
+repoUrl: git@github.com:test/repo.git
+tasks:
+  - id: explicit
+    description: Explicit model
+    command: echo explicit
+    executionModel: claude
+  - id: padded
+    description: Padded model
+    command: echo padded
+    executionModel: "  claude  "
+  - id: empty
+    description: Empty model
+    command: echo empty
+    executionModel: "  "
+  - id: absent
+    description: Absent model
+    command: echo absent
+`;
+    const plan = parsePlan(yaml);
+    expect(plan.tasks[0].executionModel).toBe('claude');
+    expect(plan.tasks[1].executionModel).toBe('claude');
+    expect(plan.tasks[2].executionModel).toBeUndefined();
+    expect(plan.tasks[3].executionModel).toBeUndefined();
+  });
+
   it('parses optional intermediateRepoUrl', () => {
     const yaml = `
 name: Intermediate Remote Plan
@@ -282,7 +310,7 @@ tasks:
 `;
     const plan = parsePlan(yaml);
     expect(plan.externalDependencies).toEqual([
-      { workflowId: 'wf-123', taskId: '__merge__', requiredStatus: 'completed', gatePolicy: 'completed' },
+      { workflowId: 'wf-123', taskId: '__merge__', requiredStatus: 'completed', gatePolicy: 'review_ready' },
     ]);
   });
 
@@ -326,7 +354,7 @@ tasks:
 `;
     const plan = parsePlan(yaml);
     expect(plan.externalDependencies).toEqual([
-      { workflowId: 'wf-123', taskId: '__merge__', requiredStatus: 'completed', gatePolicy: 'completed' },
+      { workflowId: 'wf-123', taskId: '__merge__', requiredStatus: 'completed', gatePolicy: 'review_ready' },
     ]);
     expect(plan.tasks[0].externalDependencies).toBeUndefined();
     expect(plan.tasks[1].externalDependencies).toBeUndefined();

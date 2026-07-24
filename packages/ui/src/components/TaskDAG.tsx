@@ -71,11 +71,31 @@ type LayoutState = {
   result: TaskGraphLayout;
 };
 
+function truncateEdgeEndpoint(label: string): string {
+  return label.length > 12 ? label.slice(0, 12) + '..' : label;
+}
+
+function unscopedTaskId(task: TaskState): string {
+  const workflowId = task.config.workflowId;
+  if (workflowId && task.id.startsWith(`${workflowId}/`)) {
+    return task.id.slice(workflowId.length + 1);
+  }
+  return task.id;
+}
+
 /** Short label for edge hover tooltip showing the dependency relationship. */
-function buildEdgeLabel(source: TaskState, target: TaskState): string {
-  const srcId = source.id.length > 12 ? source.id.slice(0, 12) + '..' : source.id;
-  const tgtId = target.id.length > 12 ? target.id.slice(0, 12) + '..' : target.id;
-  return `${srcId} → ${tgtId}`;
+function buildEdgeEndpointLabel(taskId: string, task?: TaskState): string {
+  if (task?.config.isMergeNode || isMergeGateId(taskId)) return 'Merge';
+  return truncateEdgeEndpoint(task ? unscopedTaskId(task) : taskId);
+}
+
+function buildEdgeLabel(
+  sourceId: string,
+  targetId: string,
+  sourceTask?: TaskState,
+  targetTask?: TaskState,
+): string {
+  return `${buildEdgeEndpointLabel(sourceId, sourceTask)} → ${buildEdgeEndpointLabel(targetId, targetTask)}`;
 }
 
 function resolveExternalDependencyTaskId(
@@ -164,7 +184,10 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
   const browserRemountDoneRef = useRef(false);
   const initFitFrameRef = useRef(0);
   const nodesRef = useRef<typeof nodes>([]);
+  const selectedTaskIdRef = useRef<string | null>(selectedTaskId ?? null);
+  selectedTaskIdRef.current = selectedTaskId ?? null;
   const [layoutState, setLayoutState] = useState<LayoutState | null>(null);
+  const lastLayoutRef = useRef<TaskGraphLayout | null>(null);
   const [flowInstanceKey, setFlowInstanceKey] = useState(0);
   const onInitHandler = useCallback(() => {
     initFitFrameRef.current = requestAnimationFrame(() => fitView({ padding: 0.2 }));
@@ -257,6 +280,7 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
 
     void layoutTaskGraph(layoutTasks, layoutEdges).then((result) => {
       if (!stale) {
+        lastLayoutRef.current = result;
         setLayoutState({ key: rawGraph.layoutKey, result });
       }
     });
@@ -270,7 +294,22 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
     if (layoutState && layoutHasAllTasks(layoutState.result, rawGraph.taskArray)) {
       return layoutState.result;
     }
-    return rawGraph.fallbackLayout;
+    const priorPositions = layoutState?.result.positions ?? lastLayoutRef.current?.positions;
+    if (!priorPositions) {
+      return rawGraph.fallbackLayout;
+    }
+    const positions = new Map<string, { x: number; y: number }>();
+    let usedFallback = false;
+    for (const task of rawGraph.taskArray) {
+      const prior = priorPositions.get(task.id);
+      if (prior) {
+        positions.set(task.id, prior);
+      } else {
+        positions.set(task.id, rawGraph.fallbackLayout.positions.get(task.id) ?? { x: 0, y: 0 });
+        usedFallback = true;
+      }
+    }
+    return { positions, edgePoints: new Map(), usedFallback };
   }, [layoutState, rawGraph.fallbackLayout, rawGraph.taskArray]);
 
   const emptyEdgePoints = useMemo(() => new Map<string, { x: number; y: number }[]>(), []);
@@ -367,13 +406,7 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
       const targetStatus = targetTask?.status ?? rawGraph.gateStatuses.get(e.target) ?? 'pending';
       const edgeStyle = getEdgeStyle(sourceStatus, targetStatus);
 
-      const srcIsMerge = tasks.get(e.source)?.config.isMergeNode || isMergeGateId(e.source);
-      const tgtIsMerge = tasks.get(e.target)?.config.isMergeNode || isMergeGateId(e.target);
-      const srcLabel = srcIsMerge ? 'Merge' : e.source;
-      const tgtLabel = tgtIsMerge ? 'Merge' : e.target;
-      const truncSrc = srcLabel.length > 12 ? srcLabel.slice(0, 12) + '..' : srcLabel;
-      const truncTgt = tgtLabel.length > 12 ? tgtLabel.slice(0, 12) + '..' : tgtLabel;
-      const label = `${truncSrc} → ${truncTgt}`;
+      const label = buildEdgeLabel(e.source, e.target, sourceTask, targetTask);
 
       const edgeDimmed = rawGraph.dimmedNodeIds.has(e.source) || rawGraph.dimmedNodeIds.has(e.target);
       const selectionActive = selectedTaskId === e.source || selectedTaskId === e.target;
@@ -492,6 +525,7 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
     const frame = requestAnimationFrame(() => {
       if (cancelled) return;
       fitView({ padding: 0.2 });
+      const selectedTaskId = selectedTaskIdRef.current;
       if (!selectedTaskId) return;
       const node = nodesRef.current.find((candidate) => candidate.id === selectedTaskId);
       if (!node) return;
@@ -506,7 +540,7 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
       cancelled = true;
       cancelAnimationFrame(frame);
     };
-  }, [fitView, getZoom, rawGraph.layoutKey, selectedTaskId, setCenter, surfaceMode]);
+  }, [fitView, getZoom, rawGraph.layoutKey, setCenter, surfaceMode]);
 
   useEffect(() => {
     if (surfaceMode !== 'browser' || nodesRef.current.length === 0 || browserRemountDoneRef.current) return;
@@ -579,9 +613,9 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
             recoveryTriggered: shouldRecover,
           },
         );
-        fitView({ padding: 0.2 });
         if (shouldRecover) {
           watchdogRecoveryAttemptedRef.current = true;
+          fitView({ padding: 0.2 });
           setFlowInstanceKey((key) => key + 1);
         }
       } else {
@@ -592,7 +626,8 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
   }, [nodes.length, fitView]);
 
   const onNodeClick = useCallback(
-    (_event: React.MouseEvent, node: Node) => {
+    (event: React.MouseEvent, node: Node) => {
+      if (event.detail > 1) return;
       const task = tasks.get(node.id);
       if (task && onTaskClick) {
         onTaskClick(task);
@@ -624,9 +659,9 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
 
   if (tasks.size === 0) {
     return (
-      <div className="h-full w-full flex items-center justify-center text-gray-500">
+      <div className="h-full w-full flex items-center justify-center text-muted-foreground">
         <div className="text-center">
-          <p>Your plan will appear here.</p>
+          <p>No plan yet — draft one from Home.</p>
         </div>
       </div>
     );
@@ -637,8 +672,8 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
   return (
     <div
       ref={graphRootRef}
-      className="flex w-full flex-1"
-      style={{ minHeight: '300px', height: browserHeight }}
+      className="flex min-h-0 w-full flex-1 overflow-hidden"
+      style={{ height: browserHeight }}
     >
       <ReactFlow
         key={flowInstanceKey}
@@ -654,6 +689,7 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
         onNodeContextMenu={onNodeContextMenu}
         onMoveStart={onMoveStart}
         onInit={onInitHandler}
+        fitViewOptions={{ padding: { top: '10%', right: '10%', bottom: '64px', left: '64px' } }}
         zoomOnDoubleClick={false}
         minZoom={0.3}
         maxZoom={2}
@@ -662,12 +698,12 @@ function TaskDAGInner({ tasks, workflows, selectedTaskId, cameraCommand, onTaskC
         elementsSelectable
         proOptions={{ hideAttribution: true }}
       >
-        <Background color="#374151" gap={20} />
+        <Background color="var(--graph-grid)" gap={20} />
         <Controls
           style={{
-            background: '#1f2937',
+            background: 'var(--graph-controls)',
             borderRadius: '8px',
-            border: '1px solid #374151',
+            border: '1px solid var(--graph-controls-border)',
           }}
         />
       </ReactFlow>

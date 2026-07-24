@@ -1,5 +1,5 @@
 import type { MouseEvent } from 'react';
-import type { WorkflowMeta, WorkflowStatus } from '../types.js';
+import type { QueueStatus, WorkflowMeta, WorkflowStatus } from '../types.js';
 import { workflowStatusVisual } from '../lib/workflow-status.js';
 
 interface WorkflowStatusChipsProps {
@@ -7,6 +7,8 @@ interface WorkflowStatusChipsProps {
   activeFilters: Set<WorkflowStatus>;
   onStatusClick: (status: WorkflowStatus, event: MouseEvent<HTMLButtonElement>) => void;
   keyboardActiveKey?: WorkflowStatus | null;
+  queueStatus?: QueueStatus | null;
+  onOpenRunningSurface?: () => void;
 }
 
 const DISPLAY_ORDER: WorkflowStatus[] = [
@@ -27,6 +29,8 @@ export function WorkflowStatusChips({
   activeFilters,
   onStatusClick,
   keyboardActiveKey = null,
+  queueStatus = null,
+  onOpenRunningSurface,
 }: WorkflowStatusChipsProps): JSX.Element {
   const counts = new Map<WorkflowStatus, number>();
   for (const status of DISPLAY_ORDER) counts.set(status, 0);
@@ -35,9 +39,53 @@ export function WorkflowStatusChips({
   }
 
   const hasFilters = activeFilters.size > 0;
+  const queueSlots = queueStatus?.runningCount ?? 0;
+  const queueExecuting = queueStatus?.activeExecutionCount ?? queueSlots;
+  const queueLaunching = queueStatus?.launchingCount
+    ?? Math.max(0, queueSlots - queueExecuting);
+  const queueMax = queueStatus?.maxConcurrency ?? 0;
+  const queueQueued = queueStatus?.queued.length ?? 0;
 
   return (
-    <div data-testid="workflow-status-chips" className="flex items-center gap-6 px-4 py-2 bg-gray-800 border-t border-gray-700 text-sm">
+    <div data-testid="workflow-status-chips" className="flex items-center gap-6 px-4 py-2 bg-secondary border-t border-border text-sm">
+      {queueStatus && (
+        <div data-testid="queue-capacity-chips" className="flex items-center gap-3 border-r border-border pr-6">
+          <button
+            type="button"
+            data-testid="queue-chip-running"
+            onClick={() => onOpenRunningSurface?.()}
+            className="px-2 py-0.5 text-xs rounded-full cursor-pointer select-none text-blue-300 hover:brightness-125"
+          >
+            Executing ({queueExecuting}/{queueMax})
+          </button>
+          <button
+            type="button"
+            data-testid="queue-chip-slots"
+            onClick={() => onOpenRunningSurface?.()}
+            className="px-2 py-0.5 text-xs rounded-full cursor-pointer select-none text-sky-200/90 hover:brightness-125"
+          >
+            Slots ({queueSlots}/{queueMax})
+          </button>
+          {queueLaunching > 0 && (
+            <button
+              type="button"
+              data-testid="queue-chip-launching"
+              onClick={() => onOpenRunningSurface?.()}
+              className="px-2 py-0.5 text-xs rounded-full cursor-pointer select-none text-cyan-300/90 hover:brightness-125"
+            >
+              Launching ({queueLaunching})
+            </button>
+          )}
+          <button
+            type="button"
+            data-testid="queue-chip-queued"
+            onClick={() => onOpenRunningSurface?.()}
+            className="px-2 py-0.5 text-xs rounded-full cursor-pointer select-none text-amber-300 hover:brightness-125"
+          >
+            Queued ({queueQueued})
+          </button>
+        </div>
+      )}
       {DISPLAY_ORDER.map((status) => {
         const visual = workflowStatusVisual(status);
         const active = activeFilters.has(status);
@@ -51,10 +99,10 @@ export function WorkflowStatusChips({
               'px-2 py-0.5 text-xs rounded-full cursor-pointer select-none transition-opacity duration-75',
               visual.textClass,
               active ? 'ring-1 ring-current' : hasFilters ? 'opacity-60' : 'hover:brightness-125',
-              keyboardActiveKey === status ? 'ring-2 ring-blue-300/90 ring-offset-1 ring-offset-gray-800' : '',
+              keyboardActiveKey === status ? 'ring-2 ring-ring/90 ring-offset-1 ring-offset-background' : '',
             ].join(' ')}
           >
-            {status.replaceAll('_', ' ')} ({count})
+            {status === 'running' ? 'workflows running' : status.replaceAll('_', ' ')} ({count})
           </button>
         );
       })}

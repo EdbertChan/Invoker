@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -60,6 +61,15 @@ function captureProcessOutput() {
       stderrSpy.mockRestore();
     },
   };
+}
+function makeSpawnProcessStub() {
+  return vi.fn(() => {
+    const child = new EventEmitter() as ReturnType<typeof spawn>;
+    process.nextTick(() => {
+      child.emit('exit', 0, null);
+    });
+    return child;
+  });
 }
 
 describe('invoker-cli', () => {
@@ -136,6 +146,33 @@ describe('invoker-cli', () => {
     expect(code).toBe(0);
     expect(runMcpServer).toHaveBeenCalledTimes(1);
   });
+  it('--help lists the headless owner command', async () => {
+    const result = await runCli(['--help']);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('invoker-cli owner serve');
+    expect(result.stdout).toContain('Start a headless Invoker owner process.');
+  });
+
+  it('owner serve launches the resolved headless owner command', async () => {
+    const spawnProcess = makeSpawnProcessStub();
+
+    const code = await main(['owner', 'serve'], {
+      resolveOwnerLaunchSpec: () => ({
+        command: '/usr/local/bin/invoker-ui',
+        args: ['--headless', 'owner-serve'],
+      }),
+      spawnProcess,
+    });
+
+    expect(code).toBe(0);
+    expect(spawnProcess).toHaveBeenCalledWith(
+      '/usr/local/bin/invoker-ui',
+      ['--headless', 'owner-serve'],
+      expect.objectContaining({
+        stdio: 'inherit',
+      }),
+    );
+  });
 
   it('runs the hello-world fixture with an isolated db dir', async () => {
     const dbDir = mkdtempSync(join(tmpdir(), 'invoker-cli-test-db-'));
@@ -163,7 +200,7 @@ describe('invoker-cli', () => {
     expect(result.stderr).toContain('Invalid YAML');
   });
 
-  it('--live delegates run to a reachable GUI owner', async () => {
+  it('--live delegates run to a reachable headless owner', async () => {
     const output = captureProcessOutput();
     const bus = new LocalBus();
     const runHandler = vi.fn(async (req: unknown) => {
@@ -173,7 +210,7 @@ describe('invoker-cli', () => {
       }));
       return { workflowId: 'wf-live-1', tasks: [] };
     });
-    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'gui-1', mode: 'gui' }));
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
     bus.onRequest('headless.run', runHandler);
 
     const code = await main(['run', fixturePlan, '--live'], { createMessageBus: () => bus });
@@ -184,14 +221,14 @@ describe('invoker-cli', () => {
     output.restore();
   });
 
-  it('--live exits non-zero when no GUI owner is reachable', async () => {
+  it('--live exits non-zero when no owner is reachable', async () => {
     const output = captureProcessOutput();
     const bus = new LocalBus();
 
     const code = await main(['run', fixturePlan, '--live'], { createMessageBus: () => bus });
 
     expect(code).toBe(1);
-    expect(output.stderr).toContain('No running Invoker UI owner is reachable');
+    expect(output.stderr).toContain('No running Invoker owner is reachable');
     output.restore();
   });
 
@@ -234,6 +271,20 @@ tasks:
     expect(code).toBe(0);
     expect(runHandler).toHaveBeenCalledTimes(1);
     expect(output.stdout).toContain('wf-auto-live');
+    output.restore();
+  });
+  it('auto mode delegates when a headless owner exists', async () => {
+    const output = captureProcessOutput();
+    const bus = new LocalBus();
+    const runHandler = vi.fn(async () => ({ workflowId: 'wf-auto-headless', tasks: [] }));
+    bus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-1', mode: 'standalone' }));
+    bus.onRequest('headless.run', runHandler);
+
+    const code = await main(['run', fixturePlan], { createMessageBus: () => bus });
+
+    expect(code).toBe(0);
+    expect(runHandler).toHaveBeenCalledTimes(1);
+    expect(output.stdout).toContain('wf-auto-headless');
     output.restore();
   });
 

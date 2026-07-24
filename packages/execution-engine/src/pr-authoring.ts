@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 
 import type { ExecutionAgent } from './agent.js';
 import type { SessionDriver } from './session-driver.js';
 import { buildAgentExitFailureDetail, cleanElectronEnv, killProcessGroup, resolveExecutableOnCurrentPath, SIGKILL_TIMEOUT_MS } from './process-utils.js';
+import { materializeLocalAgentPrompt } from './agent-prompt-transport.js';
 
 export interface MakePrStackArtifactOutput {
   readonly id: string;
@@ -33,6 +34,21 @@ export interface PrAuthoringTaskEntry {
   fileChangeSummary?: string;
 }
 
+/** Durable worker action evidence rendered into the PR pipeline summary. */
+export interface PrAuthoringWorkerActionEntry {
+  workerKind: string;
+  actionType: string;
+  status: string;
+  subjectType?: string;
+  subjectId?: string;
+  workflowId?: string;
+  taskId?: string;
+  summary?: string;
+  reason?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 /**
  * Structured context that supplements the free-form `workflowSummary` string
  * with machine-readable evidence for PR body authoring.
@@ -46,6 +62,8 @@ export interface PrAuthoringContext {
   workflowDescription?: string;
   /** Per-task entries with verification evidence. */
   tasks: PrAuthoringTaskEntry[];
+  /** Durable worker decisions/actions that explain Invoker pipeline activity. */
+  workerActions?: PrAuthoringWorkerActionEntry[];
   /** Visual-proof markdown block (screenshots / video walkthrough). */
   visualProofMarkdown?: string;
 }
@@ -65,14 +83,7 @@ const REVIEW_STACK_METADATA_SECTIONS = [
   '## Slice Rationale',
 ] as const;
 const DISCOURAGED_HEADINGS = ['## Testing', '## Notes'] as const;
-const DEFAULT_MAX_INLINE_PROMPT_BYTES = 64 * 1024;
 const DEFAULT_PR_AUTHORING_TIMEOUT_MS = 20 * 60 * 1000;
-const MAX_INLINE_PROMPT_BYTES = (() => {
-  const raw = process.env.INVOKER_MAX_INLINE_AGENT_PROMPT_BYTES;
-  if (!raw) return DEFAULT_MAX_INLINE_PROMPT_BYTES;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_INLINE_PROMPT_BYTES;
-})();
 
 function getPrAuthoringTimeoutMs(): number {
   const raw = process.env.INVOKER_PR_AUTHORING_TIMEOUT_MS?.trim();
@@ -242,37 +253,6 @@ export function validateReviewStackPrBody(body: string): string[] {
   return errors;
 }
 
-function promptByteLength(prompt: string): number {
-  return Buffer.byteLength(prompt, 'utf8');
-}
-
-function buildPromptFileBootstrap(promptPath: string): string {
-  return [
-    `The full task instructions are in this file: ${promptPath}`,
-    'Read the file completely, then execute those instructions in this workspace.',
-    'Do not ask for the file contents.',
-  ].join('\n');
-}
-
-function materializeLocalPrompt(prompt: string): { effectivePrompt: string; cleanup: () => void } {
-  if (promptByteLength(prompt) <= MAX_INLINE_PROMPT_BYTES) {
-    return { effectivePrompt: prompt, cleanup: () => {} };
-  }
-  const dir = mkdtempSync(join(tmpdir(), 'invoker-pr-author-prompt-'));
-  const promptPath = join(dir, 'prompt.md');
-  writeFileSync(promptPath, prompt, 'utf8');
-  return {
-    effectivePrompt: buildPromptFileBootstrap(promptPath),
-    cleanup: () => {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* best effort */
-      }
-    },
-  };
-}
-
 function extractAssistantBody(driver: SessionDriver | undefined, sessionId: string, fallback: string): string {
   const rawSession = driver?.loadSession(sessionId);
   if (rawSession && driver) {
@@ -374,6 +354,18 @@ export function buildMakePrStackPublishPrompt(args: {
   return lines.join('\n');
 }
 
+function parseGitHubPullRequestNumber(url: string): string | undefined {
+  const match = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+)(?:[/?#].*)?$/i.exec(url);
+  return match?.[1];
+}
+
+// GitHub-first for now: the public PR URL is the authoritative review-gate key.
+function normalizeReviewArtifactProviderId(url: string, providerId: string | undefined): string | undefined {
+  const githubPrNumber = parseGitHubPullRequestNumber(url);
+  if (githubPrNumber) return githubPrNumber;
+  return providerId;
+}
+
 export function parseMakePrStackPublishResult(raw: string): MakePrStackArtifactOutput[] {
   let parsed: unknown;
   try {
@@ -425,11 +417,14 @@ export function parseMakePrStackPublishResult(raw: string): MakePrStackArtifactO
         return dependency.trim();
       });
     ids.add(id);
+    const providerId = typeof record.providerId === 'string'
+      ? record.providerId.trim() || undefined
+      : undefined;
     records.push({
       id,
       title: typeof record.title === 'string' ? record.title : undefined,
       url,
-      providerId: typeof record.providerId === 'string' ? record.providerId : undefined,
+      providerId: normalizeReviewArtifactProviderId(url, providerId),
       branch: typeof record.branch === 'string' ? record.branch : undefined,
       baseBranch: typeof record.baseBranch === 'string' ? record.baseBranch : undefined,
       dependsOn: normalizedDependsOn,
@@ -463,6 +458,69 @@ export function parseMakePrStackPublishResult(raw: string): MakePrStackArtifactO
   return records;
 }
 
+function markdownTableCell(value: string | undefined): string {
+  const normalized = (value ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '-';
+  return normalized.replaceAll('\\', '\\\\').replaceAll('|', '\\|');
+}
+
+function workerActionTimestamp(action: PrAuthoringWorkerActionEntry): string {
+  return action.createdAt ?? action.updatedAt ?? '';
+}
+
+function workerActionTarget(action: PrAuthoringWorkerActionEntry): string {
+  if (action.taskId) return action.taskId;
+  if (action.workflowId && action.subjectId && action.subjectId !== action.workflowId) {
+    return `${action.workflowId}/${action.subjectId}`;
+  }
+  return action.subjectId ?? action.workflowId ?? '-';
+}
+
+function compareWorkerActionsByTime(
+  a: PrAuthoringWorkerActionEntry,
+  b: PrAuthoringWorkerActionEntry,
+): number {
+  const aTime = workerActionTimestamp(a);
+  const bTime = workerActionTimestamp(b);
+  const aMs = Date.parse(aTime);
+  const bMs = Date.parse(bTime);
+  if (Number.isFinite(aMs) && Number.isFinite(bMs) && aMs !== bMs) return aMs - bMs;
+  return aTime.localeCompare(bTime)
+    || a.workerKind.localeCompare(b.workerKind)
+    || a.actionType.localeCompare(b.actionType)
+    || workerActionTarget(a).localeCompare(workerActionTarget(b));
+}
+
+function renderPipelineSection(workerActions: readonly PrAuthoringWorkerActionEntry[]): string[] {
+  const lines: string[] = [];
+  lines.push('## Pipeline');
+  lines.push('');
+
+  if (workerActions.length === 0) {
+    lines.push('_No worker actions recorded._');
+    lines.push('');
+    return lines;
+  }
+
+  lines.push('| Time | Worker | Action | Status | Target | Summary |');
+  lines.push('| --- | --- | --- | --- | --- | --- |');
+  for (const action of [...workerActions].sort(compareWorkerActionsByTime)) {
+    const summary = action.reason
+      ? `${action.summary ?? ''}${action.summary ? ' ' : ''}(${action.reason})`
+      : action.summary;
+    lines.push([
+      markdownTableCell(workerActionTimestamp(action)),
+      markdownTableCell(action.workerKind),
+      markdownTableCell(action.actionType),
+      markdownTableCell(action.status),
+      markdownTableCell(workerActionTarget(action)),
+      markdownTableCell(summary),
+    ].join(' | ').replace(/^/, '| ').replace(/$/, ' |'));
+  }
+  lines.push('');
+  return lines;
+}
+
 /**
  * Build a deterministic canonical PR body from structured context.
  * Used as the no-AI escape hatch when all agent-authored attempts fail.
@@ -483,6 +541,10 @@ export function buildCanonicalPrBody(args: {
     lines.push(args.workflowSummary.trim());
   }
   lines.push('');
+
+  if (args.structuredContext?.workerActions !== undefined) {
+    lines.push(...renderPipelineSection(args.structuredContext.workerActions));
+  }
 
   // ## Test Plan — content collapsed per the canonical schema.
   lines.push('## Test Plan');
@@ -599,6 +661,24 @@ export function buildMakePrPrompt(args: {
       lines.push(ctx.visualProofMarkdown);
       lines.push('');
     }
+
+    if (ctx.workerActions !== undefined) {
+      lines.push('Pipeline worker actions (render as a ## Pipeline table in chronological order):');
+      if (ctx.workerActions.length === 0) {
+        lines.push('- No worker actions recorded.');
+      } else {
+        for (const action of [...ctx.workerActions].sort(compareWorkerActionsByTime)) {
+          const target = workerActionTarget(action);
+          const when = workerActionTimestamp(action) || 'unknown-time';
+          const summary = action.summary ? ` — ${action.summary}` : '';
+          const reason = action.reason ? ` (${action.reason})` : '';
+          lines.push(
+            `- ${when} ${action.workerKind}/${action.actionType} ${action.status} target=${target}${summary}${reason}`,
+          );
+        }
+      }
+      lines.push('');
+    }
   }
 
   return lines.join('\n');
@@ -610,7 +690,7 @@ export function spawnAgentPrAuthorViaRegistry(
   agent: ExecutionAgent,
   driver?: SessionDriver,
 ): Promise<{ body: string; stdout: string; sessionId: string }> {
-  const promptTransport = materializeLocalPrompt(prompt);
+  const promptTransport = materializeLocalAgentPrompt(prompt, 'invoker-pr-author-prompt-');
   const spec = agent.buildCommand(promptTransport.effectivePrompt);
   const sessionId = spec.sessionId ?? randomUUID();
   const cmd = resolveExecutableOnCurrentPath(spec.cmd) ?? spec.cmd;

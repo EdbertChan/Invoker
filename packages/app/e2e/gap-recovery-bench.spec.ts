@@ -44,6 +44,7 @@ async function launchElectronApp(testDir: string, extraEnv?: Record<string, stri
     env: {
       ...process.env,
       NODE_ENV: 'test',
+          INVOKER_TEST_WORKFLOW_IDS: '1',
       INVOKER_GUI_OWNER_MODE: process.env.INVOKER_E2E_GUI_OWNER_MODE ?? 'gui',
       INVOKER_DB_DIR: testDir,
       INVOKER_IPC_SOCKET: ipcSocketPath,
@@ -74,6 +75,8 @@ function buildPlan(index: number) {
 }
 
 async function waitForWorkflowGraphVisible(page: Page, timeoutMs: number): Promise<void> {
+  await page.getByTestId('sidebar-planning').click();
+  await page.getByRole('heading', { name: 'Plan graph' }).waitFor({ state: 'visible', timeout: Math.min(timeoutMs, 10_000) });
   await page.locator('[data-testid^="workflow-node-"]:visible').first().waitFor({
     state: 'visible',
     timeout: timeoutMs,

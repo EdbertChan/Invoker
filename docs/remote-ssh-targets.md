@@ -23,7 +23,6 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
       "sshKeyPath": "/home/user/.ssh/id_staging",
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
-      "provisionCommand": "pnpm install --frozen-lockfile",
       "remoteHeartbeatIntervalSeconds": 30
     },
     "staging-server-b": {
@@ -33,12 +32,27 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
       "port": 22,
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
-      "provisionCommand": "pnpm install --frozen-lockfile",
       "remoteHeartbeatIntervalSeconds": 30
     }
   }
 }
 ```
+Invoker does not run repo bootstrap automatically on managed SSH checkouts. If a repo needs setup such as `pnpm install` or `flutter pub get`, make the task command run that repo-owned step explicitly.
+
+## Owner-host workers
+
+Remote SSH targets execute workflow tasks only. Long-lived operator automation belongs on the Invoker owner host, where the process owns the workflow database and worker registry.
+
+For the supported PR-maintenance setup, enable `prMaintenance` in `~/.invoker/config.json` on the owner host and run the built-in worker kinds from the Workers tab or headless CLI:
+
+```bash
+./run.sh --headless worker status --output text
+./run.sh --headless worker coderabbit-address
+./run.sh --headless worker pr-conflict-rebase
+./run.sh --headless worker pr-ci-failure-scan
+```
+
+Do not install separate cron jobs on SSH targets for these maintenance paths. The workers share the owner process, owner database, and per-kind worker locks; SSH targets stay disposable execution capacity.
 
 ### Fields
 
@@ -50,12 +64,11 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
 | `port` | number | no | SSH port (default: 22) |
 | `managedWorkspaces` | boolean | no | When true, Invoker clones/fetches the repo and manages per-task worktrees on the remote host |
 | `remoteInvokerHome` | string | no | Base directory used by managed remote workspaces (default: `~/.invoker`) |
-| `provisionCommand` | string | no | Command run after worktree creation in managed mode |
 | `remoteHeartbeatIntervalSeconds` | number | no | Interval (seconds) for SSH remote workload heartbeat markers used by executing-stall detection (default: `30`) |
 
 ## Multiple SSH Targets
 
-You can configure as many remote targets as you want under `remoteTargets`. Each task picks one by `poolMemberId`.
+You can configure as many remote targets as you want under `remoteTargets`. Each task picks one with `poolId`.
 
 ```yaml
 name: "Run tasks on multiple remotes"
@@ -65,17 +78,15 @@ tasks:
   - id: check-a
     description: "Run tests on remote A"
     command: "pnpm test"
-    runnerKind: ssh
-    poolMemberId: staging-server
+    poolId: staging-server
 
   - id: check-b
     description: "Run tests on remote B"
     command: "pnpm test"
-    runnerKind: ssh
-    poolMemberId: staging-server-b
+    poolId: staging-server-b
 ```
 
-This is the supported way to run multiple SSH executors in one workflow: define multiple targets, then attach different tasks to different target IDs.
+This is the simplest way to target specific SSH machines: define multiple `remoteTargets`, then point each task at the target ID it should use. If you need queueing, load balancing, or mixed local/SSH routing, put those target IDs inside `executionPools` and use the pool name as `poolId` instead.
 
 ## Usage in Plans
 
@@ -89,31 +100,28 @@ tasks:
   - id: health-check
     description: "Verify staging server is reachable"
     command: "echo 'OK'; uptime; df -h"
-    runnerKind: ssh
-    poolMemberId: staging-server
+    poolId: staging-server
     dependencies: []
 
   - id: run-migrations
     description: "Run database migrations on staging"
     command: "cd /opt/app && ./migrate.sh"
-    runnerKind: ssh
-    poolMemberId: staging-server
+    poolId: staging-server
     dependencies:
       - health-check
 ```
 
 ### Task fields
 
-- `runnerKind: ssh` — selects the SSH executor
-- `poolMemberId: <id>` — references a key in `remoteTargets` config
+- `poolId: <id>` — references either a `remoteTargets` key directly or an `executionPools` key that contains SSH members
 
-Both fields are required for SSH tasks. The executor validates at runtime that the `poolMemberId` exists in config and throws a clear error if it's missing.
+The executor validates at runtime that the selected target or pool exists and resolves to an SSH-capable execution route.
 
 ## How It Works
 
-1. The plan parser reads `runnerKind` and `poolMemberId` from YAML and carries them through to `TaskConfig`.
-2. When `TaskRunner.selectExecutor()` sees `runnerKind: ssh`, it looks up the `poolMemberId` in the `remoteTargets` config map.
-3. An `SshExecutor` instance is created with the target's connection details.
+1. The plan parser reads `poolId` from YAML and stores it on the task config.
+2. At dispatch time, Invoker resolves that `poolId` either directly to a `remoteTargets` entry or to an `executionPools` member selection.
+3. An `SshExecutor` instance is created with the chosen target's connection details.
 4. The runner spawns: `ssh -i <keyPath> -p <port> -o StrictHostKeyChecking=accept-new -o BatchMode=yes user@host <command>`
 5. For `claude` action types, the Claude CLI command is shell-quoted and executed remotely.
 
@@ -123,6 +131,18 @@ The executor uses these SSH options by default:
 
 - `-o StrictHostKeyChecking=accept-new` — auto-accept new host keys (TOFU), reject changed keys
 - `-o BatchMode=yes` — fail immediately if interactive auth is needed (no password prompts)
+
+## SSH Pool Capacity (Lease-Backed)
+
+SSH member capacity is decided by durable host-keyed leases in `execution_resource_leases`, not by in-memory runner maps.
+
+- **Resource key:** `ssh:user@host:port`. The same droplet listed in multiple pools (for example `mixed-local-ssh` and `pnpm-ssh`) shares one capacity budget.
+- **Counted holders:** a key may hold up to `maxConcurrentTasksPerMember` (or the member override) live leases. Limit `1` is the exclusive case used in production today.
+- **Claim-at-select:** the runner acquires the lease while selecting a pool member, before start. Dispatch renews an already-held lease instead of claiming again.
+- **In-memory maps:** `activeExecutions` / `pendingPoolSelections` still drive kill, heartbeat, and start plumbing, but they do **not** contribute to SSH `poolMemberLoad`. Worktree pool members still use in-memory load.
+- **Reclaim:** orphan-executor reclaim remains useful cleanup; it is not the source of truth for “is this host full?”.
+- **Inspect:** with the GUI/owner up, `./run.sh --headless query execution-leases [--output json|text|label]` lists live holders (`resourceKey`, `poolId`, `poolMemberId`, `taskId`, `holderId`, expiry).
+- **Regression gate:** `bash scripts/repro/repro-ssh-lease-capacity-battery.sh --gate` (orphan ghosts, cross-pool exclusivity, churn refill, lease/occupancy parity).
 
 ## Member Health & Circuit Breaker
 

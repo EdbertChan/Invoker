@@ -17,12 +17,16 @@ import {
 } from './fixtures/electron-app.js';
 
 test.describe('Workflow lifecycle', () => {
-  test('starting a plan transitions tasks to running', async ({ page }) => {
+  test('starting a plan transitions tasks to a live launch state', async ({ page }) => {
     await loadPlan(page, TEST_PLAN);
     await startPlan(page);
 
-    const alphaStatus = await waitForTaskStarted(page, 'task-alpha');
-    expect(['running', 'completed']).toContain(alphaStatus);
+    await expect.poll(async () => {
+      const result = await page.evaluate(() => window.invoker.getTasks());
+      const tasks = Array.isArray(result) ? result : result.tasks;
+      const status = findTaskByIdSuffix(tasks, 'task-alpha')?.status;
+      return ['queued', 'running', 'completed'].includes(String(status));
+    }, { timeout: 30000 }).toBe(true);
   });
 
   test('tasks complete in dependency order', async ({ page }) => {
@@ -40,7 +44,7 @@ test.describe('Workflow lifecycle', () => {
     const workflowNode = tasks.find((t: any) => t.config?.isMergeNode);
     expect(alpha?.status).toBe('completed');
     expect(beta?.status).toBe('completed');
-    expect(['pending', 'running', 'completed']).toContain(gamma?.status);
+    expect(['pending', 'queued', 'running', 'completed']).toContain(gamma?.status);
     expect(workflowNode?.status).toBe('pending');
   });
 
