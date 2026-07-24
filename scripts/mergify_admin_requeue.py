@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from typing import Sequence
 
 try:
@@ -16,19 +15,22 @@ except ImportError:
     from mergify_admin_requeue_plan import classify_pr, plan_stack_actions
     from mergify_admin_requeue_snapshot import group_stack_prs, parse_mergify_queue_event, parse_stack_metadata
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 parse_args = exec_impl.parse_args
 run_once = exec_impl.run_once
+run_loop = exec_impl.run_loop
+REPO_ROOT = exec_impl.REPO_ROOT
 subprocess = exec_impl.subprocess
 execute_action = exec_impl.execute_action
-resolve_workflow = exec_impl.resolve_workflow
+_execute_action = exec_impl.execute_action
 repair_conflict = exec_impl.repair_conflict
+_repair_conflict = exec_impl.repair_conflict
 repair_check = exec_impl.repair_check
+_repair_check = exec_impl.repair_check
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    return run_once(args)
+    return run_loop(args) if args.loop else run_once(args)
 
 
 if __name__ == "__main__":

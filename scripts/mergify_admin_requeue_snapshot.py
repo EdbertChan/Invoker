@@ -50,14 +50,16 @@ class GhClient:
     def _run(self, args: Sequence[str]) -> str:
         return run_logged(args)
 
-    def list_candidate_prs(self, repo: str, author: str, pr_numbers: Sequence[int]) -> list[dict]:
+    def list_candidate_prs(self, repo: str, author: str | None, pr_numbers: Sequence[int]) -> list[dict]:
         if pr_numbers:
             return [self.pr_detail(repo, number) for number in pr_numbers]
         args = [
-            "gh", "pr", "list", "--repo", repo, "--author", author, "--state", "open",
+            "gh", "pr", "list", "--repo", repo, "--state", "open",
             "--label", "admin-bypass", "--limit", "200", "--json",
             "number,title,url,headRefName,headRefOid,baseRefName,state,isDraft,labels,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup",
         ]
+        if author:
+            args[5:5] = ["--author", author]
         value = self._run_json(args)
         seeds = value if isinstance(value, list) else []
         by_number: dict[int, dict] = {}
@@ -90,6 +92,21 @@ class GhClient:
             remember(number, self.pr_detail(repo, number))
 
         return [by_number[number] for number in ordered_numbers]
+
+    def list_open_prs(self, repo: str) -> list[dict]:
+        args = [
+            "gh", "pr", "list", "--repo", repo, "--state", "open", "--limit", "200", "--json",
+            "number,title,url,headRefName,headRefOid,baseRefName,state,isDraft,labels,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup",
+        ]
+        try:
+            completed = subprocess.run(args, check=True, text=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # Older repro stubs only seed labeled admin-bypass lists. Callers fall
+            # back to the candidate set when this returns empty.
+            return []
+        out = completed.stdout or ""
+        value = json.loads(out) if out.strip() else None
+        return value if isinstance(value, list) else []
 
     def pr_detail(self, repo: str, number: int) -> dict:
         owner, name = repo.split("/", 1)
