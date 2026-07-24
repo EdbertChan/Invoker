@@ -127,6 +127,17 @@ CI_PR="$(gh pr create --repo "$REPO" --head "$CI_BRANCH" --base "$DEFAULT_BRANCH
   --title "battle ci $RUN_TAG" --body "Invoker live babysit test; safe to close." \
   | grep -oE '[0-9]+$')"
 
+echo "[live] waiting for battle-fail-on-marker to fail on PR #$CI_PR"
+CI_FAILED=0
+for _ in $(seq 1 60); do
+  CONCLUSION="$(gh pr view "$CI_PR" --repo "$REPO" --json statusCheckRollup \
+    --jq '[.statusCheckRollup[]? | select(.workflowName == "battle-fail-on-marker") | .conclusion] | first' \
+    2>/dev/null || true)"
+  [ "$CONCLUSION" = "FAILURE" ] && { CI_FAILED=1; break; }
+  sleep 5
+done
+[ "$CI_FAILED" -eq 1 ] || fail "battle-fail-on-marker never reached FAILURE on PR #$CI_PR"
+
 # One-shot CI cron. The repair dispatch goes through headless-ipc; record it
 # with a node shim instead of booting an owner + real fix agent.
 mkdir -p "$TMP/bin"
