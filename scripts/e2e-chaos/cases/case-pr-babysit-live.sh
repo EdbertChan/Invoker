@@ -165,17 +165,22 @@ grep -q "repair-review-gate-ci $CONFLICT_PR" "$NODE_LOG" \
 # Landing leg (guard half only — no Mergify on the scratch repo)
 # ---------------------------------------------------------------------------
 echo "[live] landing leg: land-stack guard must reject a non-stack/ PR"
-if node scripts/land-stack.mjs "$CONFLICT_PR" >/dev/null 2>&1; then
+if GH_REPO="$REPO" node scripts/land-stack.mjs "$CONFLICT_PR" >/dev/null 2>&1; then
   fail "land-stack.mjs accepted non-stack/ PR #$CONFLICT_PR"
 fi
 
 echo "[live] landing leg: dry-run requeue plan for the labeled bottom PR"
-gh pr edit "$CI_PR" --repo "$REPO" --add-label admin-bypass >/dev/null 2>&1 || true
+gh label create admin-bypass --repo "$REPO" --force >/dev/null 2>&1 || true
+gh pr edit "$CI_PR" --repo "$REPO" --add-label admin-bypass \
+  || fail "could not add admin-bypass label to live PR #$CI_PR"
+gh pr view "$CI_PR" --repo "$REPO" --json labels --jq '.labels[].name' \
+  | grep -qx admin-bypass \
+  || fail "admin-bypass label missing on live PR #$CI_PR"
 OUT="$(python3 scripts/mergify_admin_requeue.py --once --dry-run \
   --repo "$REPO" --author "$(gh api user --jq .login)" \
   --state-file "$TMP/land-ledger.jsonl" --pr "$CI_PR" 2>&1 || true)"
 echo "$OUT"
-echo "$OUT" | grep -Eq "DRY-RUN|BLOCK" \
-  || fail "mergify dry-run produced no plan for live PR #$CI_PR"
+echo "$OUT" | grep -Eq "DRY-RUN (requeue|add-admin-bypass-label) PR #$CI_PR" \
+  || fail "mergify dry-run produced no requeue/label plan for live PR #$CI_PR"
 
 echo "[live] PASS pr-babysit-live"
