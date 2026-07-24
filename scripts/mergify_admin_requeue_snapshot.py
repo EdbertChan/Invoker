@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 from typing import Mapping, Sequence
+from urllib.parse import quote
 
 try:
     from .mergify_admin_requeue_model import (
@@ -58,7 +59,37 @@ class GhClient:
             "number,title,url,headRefName,headRefOid,baseRefName,state,isDraft,labels,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup",
         ]
         value = self._run_json(args)
-        return value if isinstance(value, list) else []
+        seeds = value if isinstance(value, list) else []
+        by_number: dict[int, dict] = {}
+        ordered_numbers: list[int] = []
+
+        def remember(number: int, detail: dict) -> None:
+            if number not in by_number:
+                ordered_numbers.append(number)
+            by_number[number] = detail
+
+        for item in seeds:
+            if not isinstance(item, dict):
+                continue
+            number = int(item.get("number") or 0)
+            if number:
+                remember(number, item)
+
+        queued_stack_numbers: list[int] = []
+        queued_stack_number_set: set[int] = set()
+        for number in list(ordered_numbers):
+            meta = parse_stack_metadata(self.issue_comments(repo, number))
+            if not meta:
+                continue
+            for stack_number in meta[1]:
+                if stack_number not in by_number and stack_number not in queued_stack_number_set:
+                    queued_stack_number_set.add(stack_number)
+                    queued_stack_numbers.append(stack_number)
+
+        for number in queued_stack_numbers:
+            remember(number, self.pr_detail(repo, number))
+
+        return [by_number[number] for number in ordered_numbers]
 
     def pr_detail(self, repo: str, number: int) -> dict:
         owner, name = repo.split("/", 1)
@@ -88,12 +119,20 @@ class GhClient:
         subprocess.run(["gh", "pr", "comment", str(number), "--repo", repo, "--body", body], check=True, text=True, capture_output=True)
 
     def edit_label(self, repo: str, number: int, add: str | None = None, remove: str | None = None) -> None:
-        args = ["gh", "pr", "edit", str(number), "--repo", repo]
         if add:
-            args.extend(["--add-label", add])
+            subprocess.run(
+                ["gh", "api", "--method", "POST", f"repos/{repo}/issues/{number}/labels", "-f", f"labels[]={add}"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
         if remove:
-            args.extend(["--remove-label", remove])
-        subprocess.run(args, check=True, text=True, capture_output=True)
+            subprocess.run(
+                ["gh", "api", "--method", "DELETE", f"repos/{repo}/issues/{number}/labels/{quote(remove, safe='')}"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
 
     def resolve_review_thread(self, thread_id: str) -> None:
         query = "mutation($threadId:ID!) { resolveReviewThread(input:{threadId:$threadId}) { thread { id isResolved } } }"

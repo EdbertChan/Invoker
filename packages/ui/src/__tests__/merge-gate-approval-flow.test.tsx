@@ -15,6 +15,11 @@ vi.mock('@xyflow/react', async () => {
   return createReactFlowMock();
 });
 
+// Rendering the full <App /> exceeds Vitest's default 5s on 1-2 vCPU CI
+// runners (observed 7-8s). packages/ui/vite.config.ts does not extend
+// vitest.shared.ts, so raise the timeout for this file only.
+vi.setConfig({ testTimeout: 20_000 });
+
 const { App } = await import('../App.js');
 
 const taskA = makeUITask({
@@ -57,6 +62,7 @@ describe('Merge gate approval flow (integration)', () => {
 
   it('workflow context menu retries workflow', async () => {
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([taskA, gateA], [wfA]));
 
     await waitFor(() => {
@@ -82,6 +88,7 @@ describe('Merge gate approval flow (integration)', () => {
     });
 
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([fixedTask], [wfA]));
 
     await waitFor(() => {
@@ -133,6 +140,7 @@ describe('Merge gate approval flow (integration)', () => {
     };
 
     render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
     act(() => mock.setTasks([completedTask, reviewGate], [reviewWorkflow]));
 
     await waitFor(() => {

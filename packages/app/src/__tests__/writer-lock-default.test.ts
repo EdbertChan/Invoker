@@ -23,6 +23,7 @@ describe('writer lock default-on', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (previousDiagnosticDirs === undefined) {
       delete process.env.INVOKER_DIAGNOSTIC_REPORT_DIRS;
     } else {
@@ -37,6 +38,7 @@ describe('writer lock default-on', () => {
     try {
       expect(result.acquired).toBe(true);
       expect(result.bypassed).toBe(false);
+      expect(result.reclaimedDeadOwner).toBeNull();
     } finally {
       result.release();
     }
@@ -69,6 +71,31 @@ describe('writer lock default-on', () => {
     } finally {
       first.release();
     }
+  });
+
+  it('reclaims the lock when the holder pid was recycled by a newer process', () => {
+    mkdirSync(`${dbPath}.lock`);
+    writeFileSync(`${dbPath}.lock/pid`, '999999');
+    // Pid is "alive" (recycled by an unrelated process)…
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    // …but that process started well after the lock was written.
+    const lock = acquireDbWriterLock(dbPath, 'test:recycled', null, () => Date.now() + 60_000);
+
+    expect(lock.acquired).toBe(true);
+    expect(lock.reclaimedDeadOwner?.pid).toBe(999999);
+    lock.release();
+  });
+
+  it('still refuses when the holder is alive and its start time is unknown', () => {
+    mkdirSync(`${dbPath}.lock`);
+    writeFileSync(`${dbPath}.lock/pid`, '999999');
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    expect(() => acquireDbWriterLock(dbPath, 'test:unknown-start', null, () => null))
+      .toThrow(/already held by PID 999999/);
+
+    rmSync(`${dbPath}.lock`, { recursive: true, force: true });
   });
 
   it('finds a crash diagnostic for a stale owner pid', () => {
@@ -135,6 +162,13 @@ describe('writer lock default-on', () => {
       expect(result.acquired).toBe(true);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('Stale lock from dead PID 2147483647'));
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('signal=SIGBUS'));
+      expect(result.reclaimedDeadOwner).toMatchObject({
+        pid: deadPid,
+        diagnostic: expect.objectContaining({
+          reportPath: join(reportDir, 'Electron-stale-owner.ips'),
+          exceptionSignal: 'SIGBUS',
+        }),
+      });
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('Bus error: 10'));
     } finally {
       result.release();

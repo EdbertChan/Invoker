@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { summarizePlanText } from '../slack/plan-summary.js';
+import { summarizePlanText, formatPlanSummaryLines, formatSlackPlanBrief } from '../slack/plan-summary.js';
 
 describe('summarizePlanText', () => {
   it('returns name, one step per task, and taskCount for a valid 2-task plan', () => {
@@ -59,6 +59,63 @@ workflows:
     expect(summary!.workflowCount).toBe(2);
     expect(summary!.taskCount).toBe(4);
     expect(summary!.steps).toEqual(['Workers Surface Contracts', 'Workers Surface UI']);
+    expect(summary!.taskGroups).toEqual([
+      { workflow: 'Workers Surface Contracts', tasks: ['Define contracts', 'Verify contracts'] },
+      { workflow: 'Workers Surface UI', tasks: ['Build UI', 'Verify UI'] },
+    ]);
+  });
+
+  it('groups a flat plan under a single null-workflow group in execution order', () => {
+    const summary = summarizePlanText(`
+name: Flat plan
+tasks:
+  - id: b
+    description: Second task
+    dependencies: [a]
+  - id: a
+    description: First task
+`);
+    expect(summary!.taskGroups).toEqual([
+      { workflow: null, tasks: ['First task', 'Second task'] },
+    ]);
+  });
+});
+
+describe('formatPlanSummaryLines', () => {
+  it('lists every task under its workflow name for a stacked plan', () => {
+    const summary = summarizePlanText(`
+name: Dark mode
+workflows:
+  - name: Add theme tokens
+    tasks:
+      - id: t1
+        description: Add CSS variables
+      - id: t2
+        description: Test the tokens
+  - name: Wire the toggle
+    tasks:
+      - id: t3
+        description: Add the toggle control
+`)!;
+    expect(formatPlanSummaryLines(summary)).toEqual([
+      'Add theme tokens',
+      '   • Add CSS variables',
+      '   • Test the tokens',
+      'Wire the toggle',
+      '   • Add the toggle control',
+    ]);
+  });
+
+  it('lists one bullet per task with no workflow heading for a flat plan', () => {
+    const summary = summarizePlanText(`
+name: Flat plan
+tasks:
+  - id: a
+    description: First task
+  - id: b
+    description: Second task
+`)!;
+    expect(formatPlanSummaryLines(summary)).toEqual(['• First task', '• Second task']);
   });
 
   it('keeps long descriptions intact after normalizing whitespace', () => {
@@ -181,5 +238,48 @@ tasks:
     expect(summary).not.toBeNull();
     expect(summary!.steps).toEqual(['Task A', 'Task B']);
     expect(summary!.taskCount).toBe(2);
+  });
+});
+
+describe('formatSlackPlanBrief', () => {
+  it('renders ordered delivery slices under 100 words and omits paired verification tasks', () => {
+    const summary = summarizePlanText(`
+name: Orca-inspired Invoker UX Control Plane
+tasks:
+  - id: attention
+    description: "Goal: Ship an attention inbox and workflow command center. Layer: ui_activation"
+  - id: attention-verify
+    description: "Goal: Run focused attention inbox tests. Layer: app_regression"
+  - id: gates
+    description: "Goal: Surface decision gates and resume affordances. Layer: ui_activation"
+  - id: gates-verify
+    description: "Goal: Verify gate and resume projections. Layer: app_regression"
+  - id: review-notes
+    description: "Goal: Batch review notes into a consolidated agent instruction. Layer: domain"
+  - id: review-notes-verify
+    description: "Goal: Run review-note batching tests. Layer: app_regression"
+  - id: presets
+    description: "Goal: Let Slack users choose repository and harness presets. Layer: contact_surface"
+  - id: presets-verify
+    description: "Goal: Verify Slack picker routing. Layer: app_regression"
+  - id: mobile
+    description: "Goal: Improve mobile Slack control cards and artifact presentation. Layer: contact_surface"
+  - id: mobile-verify
+    description: "Goal: Run mobile Slack formatting tests. Layer: app_regression"
+  - id: usage
+    description: "Goal: Expose provider-agnostic cost and rate-limit risk chips. Layer: ui_activation"
+  - id: usage-verify
+    description: "Goal: Verify usage chips. Layer: app_regression"
+  - id: final-verify
+    description: "Goal: Build all touched packages. Layer: app_regression"
+`)!;
+
+    const brief = formatSlackPlanBrief(summary);
+
+    expect(brief.split(/\s+/).length).toBeLessThan(100);
+    expect(brief).toContain('1) Ship an attention inbox and workflow command');
+    expect(brief).toContain('2) Surface decision gates and resume affordances');
+    expect(brief).toContain('6) Expose provider-agnostic cost and rate-limit risk');
+    expect(brief).not.toContain('Run focused attention inbox tests');
   });
 });

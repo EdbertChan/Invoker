@@ -11,18 +11,37 @@ import type {
   TaskState,
   TaskDelta,
   TaskGraphEvent,
+  TaskHistoryEntry,
+  TaskEvent,
   WorkflowMeta,
   TaskStatus,
   TaskConfig,
   TaskExecution,
+  WorkerDecisionsRequest,
+  WorkerDecisionsResponse,
 } from '../../types.js';
-import type { ActionGraphResponse, InAppPlanningSessionSummary, RuntimeStatus, TerminalOutputEvent, WorkerStatusEntry, WorkerStatusSnapshot, WorkflowMutationAcceptedResult, WorkflowMutationFailedEvent } from '@invoker/contracts';
+import type {
+  ActionGraphResponse,
+  InAppPlanningSessionSummary,
+  InAppPlanningStreamEvent,
+  RuntimeStatus,
+  StartReadyResult,
+  TerminalOutputEvent,
+  WorkerStatusEntry,
+  WorkerStatusSnapshot,
+  WorkflowMutationAcceptedResult,
+  WorkflowMutationFailedEvent,
+} from '@invoker/contracts';
 
 export interface MockInvoker {
   /** The mock InvokerAPI object installed on window.invoker. */
   api: InvokerAPI;
   /** Replace the task snapshot and fire matching 'created' graph events. */
   setTasks: (tasks: TaskState[], workflows?: WorkflowMeta[]) => void;
+  /** Replace the history list returned by getHistoryTasks. */
+  setHistoryTasks: (entries: TaskHistoryEntry[]) => void;
+  /** Replace the events returned by getEvents for a task id. */
+  setEvents: (taskId: string, events: TaskEvent[]) => void;
   /** Directly fire a task delta to subscribers. */
   fireDelta: (delta: TaskDelta) => void;
   /** Directly fire a task graph event to subscribers. */
@@ -31,14 +50,22 @@ export interface MockInvoker {
   fireWorkflowsChanged: (workflows: WorkflowMeta[]) => void;
   /** Fire an embedded terminal output event to subscribers. */
   fireTerminalOutput: (event: TerminalOutputEvent) => void;
+  /** Fire a planning chat raw stream event to subscribers. */
+  firePlanningChatStream: (event: InAppPlanningStreamEvent) => void;
   /** Fire a workflow-mutation-failed event to subscribers. */
   fireWorkflowMutationFailed: (event: WorkflowMutationFailedEvent) => void;
+  /** Fire a runtime-status event to subscribers. */
+  fireRuntimeStatus: (status: RuntimeStatus) => void;
   /** Replace the action graph snapshot returned by getActionGraph. */
   setActionGraph: (response: ActionGraphResponse) => void;
   /** Replace the runtime status returned by getRuntimeStatus. */
   setRuntimeStatus: (status: RuntimeStatus) => void;
   /** Replace the worker status snapshot returned by getWorkerStatus. */
   setWorkerStatus: (status: WorkerStatusSnapshot) => void;
+  /** Replace the worker decision responses returned by getWorkerDecisions. */
+  setWorkerDecisions: (
+    resolver: WorkerDecisionsResponse | ((request: WorkerDecisionsRequest) => WorkerDecisionsResponse | Promise<WorkerDecisionsResponse>),
+  ) => void;
   /** Install the mock on window.invoker. */
   install: () => void;
   /** Remove window.invoker. */
@@ -57,19 +84,12 @@ export function makePlanningSessionSummary(
     messages: [
       {
         id: 1,
-        role: 'system',
-        text: 'Ask Invoker what you want to build.',
-        tone: 'muted',
-        createdAt: '2026-07-07T00:00:00.000Z',
-      },
-      {
-        id: 2,
         role: 'user',
         text: 'Add README',
         createdAt: '2026-07-07T00:00:01.000Z',
       },
       {
-        id: 3,
+        id: 2,
         role: 'assistant',
         text: 'Draft plan ready.',
         createdAt: '2026-07-07T00:00:02.000Z',
@@ -88,10 +108,14 @@ export function createMockInvoker(
 ): MockInvoker {
   let taskSnapshot = initialTasks;
   let workflowSnapshot = initialWorkflows;
+  let historySnapshot: TaskHistoryEntry[] = [];
+  const eventsByTask = new Map<string, TaskEvent[]>();
   let graphEventCallback: ((event: TaskGraphEvent) => void) | undefined;
   let workflowsCallback: ((workflows: unknown[]) => void) | undefined;
+  const planningChatStreamCallbacks = new Set<(event: InAppPlanningStreamEvent) => void>();
   const terminalOutputCallbacks = new Set<(event: TerminalOutputEvent) => void>();
   const workflowMutationFailedCallbacks = new Set<(event: WorkflowMutationFailedEvent) => void>();
+  const runtimeStatusCallbacks = new Set<(status: RuntimeStatus) => void>();
   let actionGraphSnapshot: ActionGraphResponse = {
     generatedAt: '2026-01-01T00:00:00.000Z',
     stallThresholdMs: 60_000,
@@ -107,6 +131,14 @@ export function createMockInvoker(
     generatedAt: '2026-01-01T00:00:00.000Z',
     workers: [],
   };
+  let workerDecisionsResolver:
+    | WorkerDecisionsResponse
+    | ((request: WorkerDecisionsRequest) => WorkerDecisionsResponse | Promise<WorkerDecisionsResponse>) = {
+      actions: [],
+      limit: 25,
+      offset: 0,
+      hasMore: false,
+    };
 
   const accepted = (channel: string, workflowId = 'wf-1'): WorkflowMutationAcceptedResult => ({
     ok: true,
@@ -169,7 +201,7 @@ export function createMockInvoker(
         title: 'Untitled plan',
         status: 'still_discussing',
         presetKey: 'codex',
-        messages: [{ id: 1, role: 'system', text: 'Ask Invoker what you want to build.', tone: 'muted', createdAt: '2026-01-01T00:00:00.000Z' }],
+        messages: [],
         draftPlanAvailable: false,
         createdAt: '2026-01-01T00:00:00.000Z',
         updatedAt: '2026-01-01T00:00:00.000Z',
@@ -188,6 +220,28 @@ export function createMockInvoker(
       workflowId: 'wf-1',
     })),
     planningChatReset: vi.fn(async () => ({ ok: true })),
+    onPlanningChatStream: vi.fn((cb: (event: InAppPlanningStreamEvent) => void) => {
+      planningChatStreamCallbacks.add(cb);
+      return () => { planningChatStreamCallbacks.delete(cb); };
+    }),
+    planningChatSetTerminalMode: vi.fn(async () => ({ ok: true })),
+    planningTerminalOpen: vi.fn(async (planningSessionId: string) => ({
+      opened: true,
+      session: {
+        sessionId: `mock-planning-terminal-${planningSessionId}`,
+        taskId: `planning:${planningSessionId}`,
+        kind: 'planning',
+        planningSessionId,
+        status: 'running',
+        mode: 'spawn',
+        attached: false,
+        createdAt: new Date('2025-01-01T00:00:00Z').toISOString(),
+      },
+    })),
+    planningTerminalList: vi.fn(async () => []),
+    planningTerminalWrite: vi.fn(async () => ({ ok: true })),
+    planningTerminalResize: vi.fn(async () => ({ ok: true })),
+    planningTerminalClose: vi.fn(async () => ({ ok: true })),
     getPlanningPresets: vi.fn(async () => [
       { key: 'codex', label: 'Codex', tool: 'codex', isDefault: true },
       { key: 'omp+claude', label: 'Claude via OMP', tool: 'omp', model: 'claude', isDefault: false },
@@ -206,10 +260,28 @@ export function createMockInvoker(
     editTaskPrompt: vi.fn(async () => accepted('invoker:edit-task-prompt')),
     editTaskPool: vi.fn(async () => accepted('invoker:edit-task-pool')),
     editTaskAgent: vi.fn(async () => accepted('invoker:edit-task-agent')),
+    editTaskModel: vi.fn(async () => accepted('invoker:edit-task-model')),
     setTaskExternalGatePolicies: vi.fn(async () => accepted('invoker:set-task-external-gate-policies')),
     getRemoteTargets: vi.fn(async () => []),
     getExecutionPools: vi.fn(async () => ['mixed-local-ssh', 'pnpm-ssh']),
-    getExecutionAgents: vi.fn(async () => ['claude', 'codex']),
+    getExecutionHarnesses: vi.fn(async () => [
+      {
+        name: 'claude',
+        supportedModels: [{ id: 'sonnet', label: 'Claude Sonnet' }],
+      },
+      {
+        name: 'codex',
+        supportedModels: [{ id: 'gpt-5-codex', label: 'GPT-5 Codex' }],
+      },
+      {
+        name: 'omp',
+        supportedModels: [
+          { id: 'chatgpt-5.4', label: 'ChatGPT 5.4' },
+          { id: 'openai/gpt-5-codex', label: 'OpenAI GPT-5 Codex' },
+        ],
+      },
+    ]),
+    getExecutionDefaults: vi.fn(async () => ({ executionAgent: 'codex' })),
     getRuntimeStatus: vi.fn(async () => runtimeStatus),
     getSystemDiagnostics: vi.fn(async () => ({
       platform: 'linux',
@@ -260,7 +332,21 @@ export function createMockInvoker(
     runInvokerCliSetup: vi.fn(async () => ({ ok: true, steps: [{ id: 'tools', name: 'Run setup', ok: true, output: 'setup ok' }] })),
     replaceTask: vi.fn(async () => accepted('invoker:replace-task')),
     getActivityLogs: vi.fn(async () => []),
-    getEvents: vi.fn(async () => []),
+    reportUiPerf: vi.fn(async () => {}),
+    getUiPerfStats: vi.fn(async () => ({})),
+    getEvents: vi.fn(async (taskId: string, options?: { limit: number; sortBy?: 'asc' | 'desc'; beforeId?: number }) => {
+      const events = [...(eventsByTask.get(taskId) ?? [])];
+      const sorted = options?.sortBy === 'desc'
+        ? events.sort((a, b) => b.id - a.id)
+        : options?.sortBy === 'asc'
+          ? events.sort((a, b) => a.id - b.id)
+          : events;
+      const filtered = options?.beforeId === undefined
+        ? sorted
+        : sorted.filter((event) => event.id < options.beforeId!);
+      return filtered.slice(0, options?.limit ?? filtered.length);
+    }),
+    getHistoryTasks: vi.fn(async () => historySnapshot),
     openTerminal: vi.fn(async (taskId: string) => ({
       opened: true,
       session: {
@@ -285,6 +371,32 @@ export function createMockInvoker(
       workflowMutationFailedCallbacks.add(cb);
       return () => { workflowMutationFailedCallbacks.delete(cb); };
     }),
+    onRuntimeStatus: vi.fn((cb: (status: RuntimeStatus) => void) => {
+      runtimeStatusCallbacks.add(cb);
+      return () => { runtimeStatusCallbacks.delete(cb); };
+    }),
+    startReady: vi.fn(async () => ({
+      preview: {
+        readyTaskIds: [],
+        recoverableTaskIds: [],
+        failedWorkflowIds: [],
+        pendingWorkflowIds: [],
+        runningWorkflowIds: [],
+        completedWorkflowIds: [],
+        skipped: {
+          awaitingApproval: 0,
+          reviewReady: 0,
+          blocked: 0,
+          failedTasks: 0,
+          pendingTasks: 0,
+          runningTasks: 0,
+          completedTasks: 0,
+        },
+      },
+      started: [],
+      recreatedWorkflowIds: [],
+      dryRun: false,
+    } as StartReadyResult)),
     resumeWorkflow: vi.fn(async () => null),
     listWorkflows: vi.fn(async () => workflowSnapshot),
     loadWorkflow: vi.fn(async () => ({ workflow: {}, tasks: [] })),
@@ -316,7 +428,13 @@ export function createMockInvoker(
       queued: [],
     })),
     getWorkerStatus: vi.fn(async () => workerStatus),
-    getWorkerDecisions: vi.fn(async () => ({ actions: [], limit: 25, offset: 0, hasMore: false })),
+    getWorkerDecisions: vi.fn(async (request: WorkerDecisionsRequest) => {
+      if (typeof workerDecisionsResolver === 'function') {
+        return await workerDecisionsResolver(request);
+      }
+      return workerDecisionsResolver;
+    }),
+    getWorkers: vi.fn(async () => workerStatus),
     startWorker: vi.fn(async (kind: string) => {
       const row = workerStatus.workers.find((worker) => worker.kind === kind) ?? makeMockWorkerStatusEntry(kind);
       return row;
@@ -348,6 +466,14 @@ export function createMockInvoker(
     });
   }
 
+  function setHistoryTasks(entries: TaskHistoryEntry[]) {
+    historySnapshot = entries;
+  }
+
+  function setEvents(taskId: string, events: TaskEvent[]) {
+    eventsByTask.set(taskId, events);
+  }
+
   function setActionGraph(response: ActionGraphResponse) {
     actionGraphSnapshot = response;
   }
@@ -356,6 +482,11 @@ export function createMockInvoker(
   }
   function setWorkerStatus(status: WorkerStatusSnapshot) {
     workerStatus = status;
+  }
+  function setWorkerDecisions(
+    resolver: WorkerDecisionsResponse | ((request: WorkerDecisionsRequest) => WorkerDecisionsResponse | Promise<WorkerDecisionsResponse>),
+  ) {
+    workerDecisionsResolver = resolver;
   }
 
 
@@ -378,9 +509,22 @@ export function createMockInvoker(
     }
   }
 
+  function firePlanningChatStream(event: InAppPlanningStreamEvent) {
+    for (const callback of planningChatStreamCallbacks) {
+      callback(event);
+    }
+  }
+
   function fireWorkflowMutationFailed(event: WorkflowMutationFailedEvent) {
     for (const callback of workflowMutationFailedCallbacks) {
       callback(event);
+    }
+  }
+
+  function fireRuntimeStatus(status: RuntimeStatus) {
+    runtimeStatus = status;
+    for (const callback of runtimeStatusCallbacks) {
+      callback(status);
     }
   }
 
@@ -396,21 +540,30 @@ export function createMockInvoker(
   function cleanup() {
     delete (window as unknown as { invoker?: InvokerAPI }).invoker;
     delete (window as unknown as { __INVOKER_BOOTSTRAP__?: unknown }).__INVOKER_BOOTSTRAP__;
+    planningChatStreamCallbacks.clear();
     terminalOutputCallbacks.clear();
     workflowMutationFailedCallbacks.clear();
+    runtimeStatusCallbacks.clear();
+    eventsByTask.clear();
+    historySnapshot = [];
   }
 
   return {
     api,
     setTasks,
+    setHistoryTasks,
+    setEvents,
     setActionGraph,
     setRuntimeStatus,
     setWorkerStatus,
+    setWorkerDecisions,
     fireDelta,
     fireGraphEvent,
     fireWorkflowsChanged,
     fireTerminalOutput,
+    firePlanningChatStream,
     fireWorkflowMutationFailed,
+    fireRuntimeStatus,
     install,
     cleanup,
   };
@@ -420,12 +573,15 @@ function makeMockWorkerStatusEntry(kind: string): WorkerStatusEntry {
   return {
     kind,
     note: '',
+    source: 'built-in',
+    availability: 'available',
     lifecycle: 'stopped',
     policy: 'unknown',
     autoStarts: false,
     startable: false,
     stoppable: false,
     recentActions: [],
+    recentLogs: [],
   };
 }
 

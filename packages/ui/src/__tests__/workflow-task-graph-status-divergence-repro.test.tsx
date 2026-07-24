@@ -24,6 +24,11 @@ vi.mock('@xyflow/react', async () => {
   return createReactFlowMock();
 });
 
+// Rendering the full <App /> exceeds Vitest's default 5s on 1-2 vCPU CI
+// runners (observed 7-8s). packages/ui/vite.config.ts does not extend
+// vitest.shared.ts, so raise the timeout for this file only.
+vi.setConfig({ testTimeout: 20_000 });
+
 const { App } = await import('../App.js');
 
 /** Build WorkflowMeta whose status/rollup come from the real workflow rollup. */
@@ -57,6 +62,7 @@ async function renderWorkflow(
   workflows: WorkflowMeta[],
 ): Promise<HTMLElement> {
   render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
   act(() => mock.setTasks(tasks, workflows));
 
   await waitFor(() => {

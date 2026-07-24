@@ -14,11 +14,15 @@ import { createWorkerRuntime, type WorkerRuntime, type WorkerTick } from '../wor
 
 export const CODERABBIT_ADDRESS_WORKER_KIND = 'coderabbit-address';
 export const PR_CONFLICT_REBASE_WORKER_KIND = 'pr-conflict-rebase';
+export const PR_CI_FAILURE_SCAN_WORKER_KIND = 'pr-ci-failure-scan';
+export const PR_ADMIN_BYPASS_LAND_WORKER_KIND = 'pr-admin-bypass-land';
 export const DEFAULT_PR_MAINTENANCE_WORKER_INTERVAL_MS = 5 * 60_000;
 
 export type PrMaintenanceWorkerKind =
   | typeof CODERABBIT_ADDRESS_WORKER_KIND
-  | typeof PR_CONFLICT_REBASE_WORKER_KIND;
+  | typeof PR_CONFLICT_REBASE_WORKER_KIND
+  | typeof PR_CI_FAILURE_SCAN_WORKER_KIND
+  | typeof PR_ADMIN_BYPASS_LAND_WORKER_KIND;
 
 type EnvOverrides = Record<string, string | undefined>;
 
@@ -39,13 +43,23 @@ const PR_CONFLICT_REBASE_ENTRYPOINT: PrMaintenanceEntrypoint = {
   scriptRelativePath: 'scripts/cron-pr-conflict-rebase.sh',
   note: 'Runs the PR conflict rebase-recreate cron entrypoint under worker scheduling.',
 };
+const PR_CI_FAILURE_SCAN_ENTRYPOINT: PrMaintenanceEntrypoint = {
+  kind: PR_CI_FAILURE_SCAN_WORKER_KIND,
+  scriptRelativePath: 'packages/execution-engine/scripts/cron-pr-ci-failure.sh',
+  note: 'Runs the mapped-PR CI scan cron entrypoint under worker scheduling.',
+};
+const PR_ADMIN_BYPASS_LAND_ENTRYPOINT: PrMaintenanceEntrypoint = {
+  kind: PR_ADMIN_BYPASS_LAND_WORKER_KIND,
+  scriptRelativePath: 'scripts/cron-pr-admin-bypass-land.sh',
+  note: 'Runs the admin-bypass land babysitting cron entrypoint under worker scheduling.',
+};
 
 export interface PrMaintenanceWorkerConfig {
   /** Repository root that owns the shell scripts. Defaults to the current Invoker repo root. */
   repoRoot?: string;
   /** Environment overrides passed to the shell entrypoint. `undefined` removes a variable. */
   env?: EnvOverrides;
-  /** Poll cadence for both PR-maintenance workers. Defaults to five minutes. */
+  /** Poll cadence for PR-maintenance workers. Defaults to five minutes. */
   intervalMs?: number;
   /** Shared cron lock path. Defaults to the shell script's `INVOKER_PR_CRON_LOCK` behavior. */
   lockPath?: string;
@@ -86,12 +100,14 @@ export interface PrMaintenanceTickOptions extends PrMaintenanceWorkerConfig {
   lockProbe?: PrMaintenanceLockProbe;
 }
 
-/** Register both built-in PR-maintenance workers in cron job order. */
+/** Register built-in PR-maintenance workers in cron job order. */
 export function registerPrMaintenanceWorkers(
   registry: WorkerRegistry<WorkerRuntimeDependencies>,
 ): WorkerRegistry<WorkerRuntimeDependencies> {
   registerCoderabbitAddressWorker(registry);
   registerPrConflictRebaseWorker(registry);
+  registerPrCiFailureScanWorker(registry);
+  registerPrAdminBypassLandWorker(registry);
   return registry;
 }
 
@@ -126,6 +142,38 @@ export function registerPrConflictRebaseWorker(
   });
   return registry;
 }
+export function registerPrCiFailureScanWorker(
+  registry: WorkerRegistry<WorkerRuntimeDependencies>,
+): WorkerRegistry<WorkerRuntimeDependencies> {
+  registry.register({
+    kind: PR_CI_FAILURE_SCAN_WORKER_KIND,
+    note: PR_CI_FAILURE_SCAN_ENTRYPOINT.note,
+    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
+      createPrCiFailureScanWorker({
+        logger: deps.logger,
+        ...deps.prMaintenance,
+        store: deps.store,
+      }),
+  });
+  return registry;
+}
+
+export function registerPrAdminBypassLandWorker(
+  registry: WorkerRegistry<WorkerRuntimeDependencies>,
+): WorkerRegistry<WorkerRuntimeDependencies> {
+  registry.register({
+    kind: PR_ADMIN_BYPASS_LAND_WORKER_KIND,
+    note: PR_ADMIN_BYPASS_LAND_ENTRYPOINT.note,
+    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
+      createPrAdminBypassLandWorker({
+        logger: deps.logger,
+        ...deps.prMaintenance,
+        store: deps.store,
+      }),
+  });
+  return registry;
+}
+
 
 export function createCoderabbitAddressWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
   return createPrMaintenanceWorker(CODERABBIT_ADDRESS_ENTRYPOINT, options);
@@ -134,10 +182,18 @@ export function createCoderabbitAddressWorker(options: PrMaintenanceWorkerOption
 export function createPrConflictRebaseWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
   return createPrMaintenanceWorker(PR_CONFLICT_REBASE_ENTRYPOINT, options);
 }
+export function createPrCiFailureScanWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
+  return createPrMaintenanceWorker(PR_CI_FAILURE_SCAN_ENTRYPOINT, options);
+}
+
+export function createPrAdminBypassLandWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
+  return createPrMaintenanceWorker(PR_ADMIN_BYPASS_LAND_ENTRYPOINT, options);
+}
+
 
 export function createPrMaintenanceTick(options: PrMaintenanceTickOptions): WorkerTick {
-  return async () => {
-    await runPrMaintenanceEntrypoint(options);
+  return async (ctx) => {
+    await runPrMaintenanceEntrypoint(options, ctx.signal);
   };
 }
 
@@ -145,6 +201,8 @@ export function probePrMaintenanceLock(options: PrMaintenanceLockProbeOptions): 
   const flockProbe = spawnSync('flock', ['-n', options.lockPath, '-c', 'true'], {
     env: options.env,
     stdio: 'ignore',
+    timeout: 3_000,
+    killSignal: 'SIGKILL',
   });
   if (!flockProbe.error || (flockProbe.error as NodeJS.ErrnoException).code !== 'ENOENT') {
     return flockProbe.status === 0
@@ -195,7 +253,12 @@ function createPrMaintenanceWorker(
   });
 }
 
-async function runPrMaintenanceEntrypoint(options: PrMaintenanceTickOptions): Promise<void> {
+async function runPrMaintenanceEntrypoint(
+  options: PrMaintenanceTickOptions,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+
   const repoRoot = resolvePrMaintenanceRepoRoot(options.repoRoot);
   const startedAt = new Date().toISOString();
   const runExternalKey = `${options.entrypoint.kind}:${repoRoot}:${startedAt}`;
@@ -208,6 +271,8 @@ async function runPrMaintenanceEntrypoint(options: PrMaintenanceTickOptions): Pr
     env,
     staleLockSeconds: parsePositiveInteger(env.INVOKER_PR_CRON_LOCK_STALE_SECS),
   });
+
+  signal?.throwIfAborted();
 
   if (lock.held) {
     options.logger.info(`[worker:${options.entrypoint.kind}] shared PR maintenance lock held; skipping tick`, {
@@ -263,7 +328,28 @@ async function runPrMaintenanceEntrypoint(options: PrMaintenanceTickOptions): Pr
       fn();
     };
 
+    const onAbort = (): void => {
+      if (!child.killed) {
+        child.kill('SIGTERM');
+      }
+      settle(() => {
+        recordPrMaintenanceRun(options, runExternalKey, repoRoot, 'failed', 'PR maintenance aborted by stop', {
+          reason: 'aborted',
+        });
+        resolvePromise();
+      });
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
     child.once('error', (err) => {
+      signal?.removeEventListener('abort', onAbort);
       settle(() => {
         options.logger.error(`[worker:${options.entrypoint.kind}] process error`, {
           module: 'pr-maintenance-worker',
@@ -278,13 +364,14 @@ async function runPrMaintenanceEntrypoint(options: PrMaintenanceTickOptions): Pr
       });
     });
 
-    child.once('close', (code, signal) => {
+    child.once('close', (code, closeSignal) => {
+      signal?.removeEventListener('abort', onAbort);
       settle(() => {
         const fields = {
           module: 'pr-maintenance-worker',
           worker: options.entrypoint.kind,
           code,
-          signal,
+          signal: closeSignal,
         };
         if (code === 0) {
           options.logger.info(`[worker:${options.entrypoint.kind}] shell entrypoint completed`, fields);
@@ -292,13 +379,17 @@ async function runPrMaintenanceEntrypoint(options: PrMaintenanceTickOptions): Pr
           resolvePromise();
           return;
         }
+        if (signal?.aborted) {
+          resolvePromise();
+          return;
+        }
         const message = `PR maintenance worker ${options.entrypoint.kind} exited with code ${code ?? 'null'}`
-          + (signal ? ` signal ${signal}` : '');
+          + (closeSignal ? ` signal ${closeSignal}` : '');
         options.logger.error(`[worker:${options.entrypoint.kind}] shell entrypoint failed`, fields);
         recordPrMaintenanceRun(options, runExternalKey, repoRoot, 'failed', message, {
           reason: 'nonzero-exit',
           code,
-          signal,
+          signal: closeSignal,
         });
         rejectPromise(new Error(message));
       });

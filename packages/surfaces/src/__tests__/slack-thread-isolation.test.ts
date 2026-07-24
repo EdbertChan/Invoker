@@ -99,6 +99,13 @@ function getMessageHandler(surface: SlackSurface): Function {
   return handler;
 }
 
+function getActionHandler(surface: SlackSurface, pattern: string): Function {
+  const app = surface.getApp() as any;
+  const handler = app._actionHandlers.find((h: MockHandler) => h.pattern === pattern)?.handler;
+  if (!handler) throw new Error(`Missing action handler: ${pattern}`);
+  return handler;
+}
+
 // ── Tests ───────────────────────────────────────────────────
 
 describe('Slack thread isolation', () => {
@@ -111,6 +118,7 @@ describe('Slack thread isolation', () => {
     mockPlanConversationCtor.mockClear();
 
     surface = new SlackSurface({
+      defaultRepoUrl: 'https://github.com/example/repo.git',
       botToken: 'xoxb-test',
       appToken: 'xapp-test',
       signingSecret: 'test-secret',
@@ -154,7 +162,6 @@ describe('Slack thread isolation', () => {
     it('reuses same PlanConversation for replies in same thread', async () => {
       await surface.start(async () => {});
       const mentionHandler = getMentionHandler(surface);
-      const messageHandler = getMessageHandler(surface);
       const say = vi.fn();
 
       // Initial @mention creates the conversation
@@ -167,8 +174,8 @@ describe('Slack thread isolation', () => {
       expect(initialConversation).toBeDefined();
 
       // Reply in same thread — should reuse the same conversation
-      await messageHandler({
-        event: { text: 'Add authentication too', ts: '999.999', thread_ts: 'thread-C', user: 'U1' },
+      await mentionHandler({
+        event: { text: '<@U_BOT> Add authentication too', ts: '999.999', thread_ts: 'thread-C', user: 'U1' },
         say,
       });
 
@@ -181,7 +188,6 @@ describe('Slack thread isolation', () => {
     it('does not cross-contaminate messages between threads', async () => {
       await surface.start(async () => {});
       const mentionHandler = getMentionHandler(surface);
-      const messageHandler = getMessageHandler(surface);
       const say = vi.fn();
 
       // Thread D
@@ -197,8 +203,8 @@ describe('Slack thread isolation', () => {
       });
 
       // Reply to thread D — should only go to thread D's conversation
-      await messageHandler({
-        event: { text: 'Follow-up for D', ts: '100.100', thread_ts: 'thread-D', user: 'U1' },
+      await mentionHandler({
+        event: { text: '<@U_BOT> Follow-up for D', ts: '100.100', thread_ts: 'thread-D', user: 'U1' },
         say,
       });
 
@@ -346,10 +352,9 @@ describe('Slack thread isolation', () => {
       );
     });
 
-    it('all messages go through sendMessage (no confirmation shortcut)', async () => {
+    it('routes tagged replies through sendMessage when no confirmation is pending', async () => {
       await surface.start(async (cmd) => { receivedCommands.push(cmd); });
       const mentionHandler = getMentionHandler(surface);
-      const messageHandler = getMessageHandler(surface);
       const say = vi.fn();
 
       await mentionHandler({
@@ -359,9 +364,8 @@ describe('Slack thread isolation', () => {
 
       const conv = conversationInstances.get('thread-confirm');
 
-      // "yes" goes through sendMessage just like any other message
-      await messageHandler({
-        event: { text: 'yes', ts: '600.600', thread_ts: 'thread-confirm', user: 'U1' },
+      await mentionHandler({
+        event: { text: '<@U_BOT> yes', ts: '600.600', thread_ts: 'thread-confirm', user: 'U1' },
         say,
       });
 
@@ -392,9 +396,8 @@ describe('Slack thread isolation', () => {
       convI.sendMessage.mockRejectedValueOnce(new Error('API timeout'));
 
       // Reply to thread I (will fail)
-      const messageHandler = getMessageHandler(surface);
-      await messageHandler({
-        event: { text: 'continue I', ts: '700.700', thread_ts: 'thread-I', user: 'U2' },
+      await mentionHandler({
+        event: { text: '<@U_BOT> continue I', ts: '700.700', thread_ts: 'thread-I', user: 'U2' },
         say,
       });
 
@@ -409,8 +412,8 @@ describe('Slack thread isolation', () => {
       // Thread H should still work
       const convH = conversationInstances.get('thread-H');
       convH.sendMessage.mockClear();
-      await messageHandler({
-        event: { text: 'continue H', ts: '800.800', thread_ts: 'thread-H', user: 'U1' },
+      await mentionHandler({
+        event: { text: '<@U_BOT> continue H', ts: '800.800', thread_ts: 'thread-H', user: 'U1' },
         say,
       });
       expect(convH.sendMessage).toHaveBeenCalledWith('continue H');
@@ -450,6 +453,7 @@ describe('Slack conversation recovery with persistence', () => {
     ]);
 
     surface = new SlackSurface({
+      defaultRepoUrl: 'https://github.com/example/repo.git',
       botToken: 'xoxb-test',
       appToken: 'xapp-test',
       signingSecret: 'test-secret',
@@ -477,6 +481,7 @@ describe('Slack conversation recovery with persistence', () => {
     ], { name: 'Plan', tasks: [{ id: 't1', description: 'Test', dependencies: [] }] } as any, true);
 
     surface = new SlackSurface({
+      defaultRepoUrl: 'https://github.com/example/repo.git',
       botToken: 'xoxb-test',
       appToken: 'xapp-test',
       signingSecret: 'test-secret',
@@ -495,6 +500,7 @@ describe('Slack conversation recovery with persistence', () => {
 
   it('skips recovery when no conversationRepo is configured', async () => {
     surface = new SlackSurface({
+      defaultRepoUrl: 'https://github.com/example/repo.git',
       botToken: 'xoxb-test',
       appToken: 'xapp-test',
       signingSecret: 'test-secret',
@@ -517,6 +523,7 @@ describe('Slack conversation recovery with persistence', () => {
     ]);
 
     surface = new SlackSurface({
+      defaultRepoUrl: 'https://github.com/example/repo.git',
       botToken: 'xoxb-test',
       appToken: 'xapp-test',
       signingSecret: 'test-secret',
@@ -549,6 +556,7 @@ describe('Slack conversation recovery with persistence', () => {
 
   it('stop clears in-memory conversations', async () => {
     surface = new SlackSurface({
+      defaultRepoUrl: 'https://github.com/example/repo.git',
       botToken: 'xoxb-test',
       appToken: 'xapp-test',
       signingSecret: 'test-secret',
@@ -604,6 +612,7 @@ Want me to execute this?`;
     mockPlanConversationCtor.mockClear();
 
     surface = new SlackSurface({
+      defaultRepoUrl: 'https://github.com/example/repo.git',
       botToken: 'xoxb-test',
       appToken: 'xapp-test',
       signingSecret: 'test-secret',
@@ -612,10 +621,9 @@ Want me to execute this?`;
     });
   });
 
-  it('mention → plan drafted → explicit submit → confirm → start_plan', async () => {
+  it('mention → plan draft with approval button → start_plan', async () => {
     await surface.start(async (cmd) => { receivedCommands.push(cmd); });
     const mentionHandler = getMentionHandler(surface);
-    const messageHandler = getMessageHandler(surface);
     const say = vi.fn();
 
     // Step 1: User explicitly asks for an Invoker plan.
@@ -627,37 +635,28 @@ Want me to execute this?`;
     expect(conv).toBeDefined();
     expect(conv.sendMessage).toHaveBeenCalledTimes(1);
 
-    // Step 2: Bot drafts a YAML plan; nothing submitted.
+    // Step 2: Bot drafts a YAML plan and stages its approval in the same response.
     say.mockClear();
     conv.sendMessage.mockResolvedValueOnce(YAML_PLAN);
-    await messageHandler({
-      event: { text: 'I want GET and POST for /users', ts: '100.100', thread_ts: 'thread-e2e', user: 'U1' },
-      say,
-    });
-    expect(say).toHaveBeenCalledWith(
-      expect.objectContaining({ text: YAML_PLAN, thread_ts: 'thread-e2e' }),
-    );
-    expect(receivedCommands).not.toContainEqual(expect.objectContaining({ type: 'start_plan' }));
-
-    // Step 3: Explicit submit → plain-English summary + confirmation, still no start_plan.
-    say.mockClear();
     const expectedPlanText = 'name: "Add REST API"\ntasks:\n  - id: implement\n    description: "Implement the REST API endpoints"\n    dependencies: []\n';
-    conv.submittedPlanText = expectedPlanText; // exposed via getDraftedPlan()
+    conv.submittedPlanText = expectedPlanText;
     await mentionHandler({
-      event: { text: '<@UBOT> submit', ts: '150.150', thread_ts: 'thread-e2e', user: 'U1' },
-      say,
-    });
-    expect(receivedCommands).not.toContainEqual(expect.objectContaining({ type: 'start_plan' }));
-
-    // Step 4: User confirms → start_plan with the raw plan text.
-    say.mockClear();
-    await messageHandler({
-      event: { text: 'yes', ts: '200.200', thread_ts: 'thread-e2e', user: 'U1' },
+      event: { text: '<@U_BOT> I want GET and POST for /users', ts: '100.100', thread_ts: 'thread-e2e', user: 'U1' },
       say,
     });
     expect(say).toHaveBeenCalledWith(
-      expect.objectContaining({ text: expect.stringContaining('Starting') }),
+      expect.objectContaining({ text: expect.stringContaining('Approve to execute'), thread_ts: 'thread-e2e' }),
     );
+    expect(receivedCommands).not.toContainEqual(expect.objectContaining({ type: 'start_plan' }));
+
+    // Step 3: Approve the original draft → start_plan with the raw plan text.
+    say.mockClear();
+    await getActionHandler(surface, 'lobby_confirm')({
+      action: { type: 'button', value: 'thread-e2e' },
+      body: { channel: { id: 'C-test' }, message: { thread_ts: 'thread-e2e' } },
+      ack: vi.fn().mockResolvedValue(undefined),
+      respond: vi.fn().mockResolvedValue(undefined),
+    });
     expect(receivedCommands).toHaveLength(1);
     expect(receivedCommands[0]).toEqual(
       expect.objectContaining({ type: 'start_plan', planText: expectedPlanText }),

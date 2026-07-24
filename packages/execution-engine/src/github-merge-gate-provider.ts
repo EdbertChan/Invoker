@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { normalizeBranchForGithubCli } from './github-branch-ref.js';
 import { killProcessGroup, SIGKILL_TIMEOUT_MS } from './process-utils.js';
 import type {
@@ -104,6 +107,27 @@ export class GitHubMergeGateProvider implements MergeGateProvider {
     return stdout.trim();
   }
 
+  async updateReviewBody(opts: {
+    identifier: string;
+    cwd: string;
+    body: string;
+  }): Promise<void> {
+    const { identifier, cwd, body } = opts;
+    const targetRepo = await this.resolveTargetRepo(cwd);
+    const tempDir = mkdtempSync(join(tmpdir(), 'invoker-pr-body-'));
+    const bodyPath = join(tempDir, 'body.md');
+    try {
+      writeFileSync(bodyPath, body, 'utf8');
+      await retryTransientGitHubCli(() => this.exec('gh', [
+        'pr', 'edit', identifier,
+        '--repo', targetRepo,
+        '--body-file', bodyPath,
+      ], cwd));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
   async checkApproval(opts: {
     identifier: string;
     cwd: string;
@@ -152,6 +176,7 @@ export class GitHubMergeGateProvider implements MergeGateProvider {
       headSha: data.headRefOid,
       headRef: data.headRefName,
       mergeState: normalizeMergeState(data.mergeStateStatus),
+      hasMergeConflict: data.mergeStateStatus === 'DIRTY',
       checks: summarizeStatusChecks(data.statusCheckRollup),
     };
   }
@@ -321,14 +346,37 @@ function stringProp(value: Record<string, unknown>, ...keys: string[]): string |
   return undefined;
 }
 
+function checkRecencyMs(check: Record<string, unknown>): number {
+  const stamp = stringProp(check, 'completedAt', 'startedAt');
+  if (!stamp) return Number.NEGATIVE_INFINITY;
+  const ms = Date.parse(stamp);
+  return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
+}
+
+// statusCheckRollup retains historical runs; only the latest per name is current.
+function latestStatusChecksByName(items: unknown[]): Record<string, unknown>[] {
+  const latestByName = new Map<string, { check: Record<string, unknown>; recency: number; index: number }>();
+  items.forEach((item, index) => {
+    if (!item || typeof item !== 'object') return;
+    const check = item as Record<string, unknown>;
+    const name = stringProp(check, 'name', 'workflowName', 'context') ?? 'unknown check';
+    const recency = checkRecencyMs(check);
+    const previous = latestByName.get(name);
+    if (!previous || recency > previous.recency || (recency === previous.recency && index > previous.index)) {
+      latestByName.set(name, { check, recency, index });
+    }
+  });
+  return [...latestByName.values()]
+    .sort((a, b) => a.index - b.index)
+    .map((entry) => entry.check);
+}
+
 function summarizeStatusChecks(items: unknown[] | undefined): MergeGateApprovalStatus['checks'] {
   if (!Array.isArray(items) || items.length === 0) return undefined;
 
   let hasPending = false;
   const failed: MergeGateFailedCheck[] = [];
-  for (const item of items) {
-    if (!item || typeof item !== 'object') continue;
-    const check = item as Record<string, unknown>;
+  for (const check of latestStatusChecksByName(items)) {
     const name = stringProp(check, 'name', 'workflowName', 'context') ?? 'unknown check';
     const status = stringProp(check, 'status')?.toUpperCase();
     const conclusion = stringProp(check, 'conclusion')?.toUpperCase();

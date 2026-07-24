@@ -70,6 +70,7 @@ describe('SlackSurface', () => {
   beforeEach(() => {
     receivedCommands = [];
     surface = new SlackSurface({
+      defaultRepoUrl: 'https://github.com/example/repo.git',
       botToken: 'xoxb-test',
       appToken: 'xapp-test',
       signingSecret: 'test-secret',
@@ -110,6 +111,31 @@ describe('SlackSurface', () => {
       const app = surface.getApp() as any;
       expect(app.client.auth.test).toHaveBeenCalled();
     });
+
+    it('logs receipt and route for every app mention before replying', async () => {
+      const log = vi.fn();
+      surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-lobby',
+        lobbyChannelId: 'C-lobby',
+        instanceId: 'do1-proof',
+        log,
+      });
+      await surface.start(async () => {});
+      const app = surface.getApp() as any;
+      const mention = app._eventHandlers.find((handler: MockHandler) => handler.pattern === 'app_mention').handler;
+
+      await mention({
+        event: { text: '<@U_BOT> hello', ts: 'event-1', user: 'U1', channel: 'C-other' },
+        say: vi.fn().mockResolvedValue(undefined),
+      });
+
+      expect(log).toHaveBeenCalledWith('slack', 'info', expect.stringContaining('[MENTION_RECEIVED] instance=do1-proof event_ts=event-1'));
+      expect(log).toHaveBeenCalledWith('slack', 'info', expect.stringContaining('[MENTION_ROUTE] instance=do1-proof event_ts=event-1 route=planning'));
+    });
   });
 
   describe('stop', () => {
@@ -122,74 +148,107 @@ describe('SlackSurface', () => {
   });
 
   describe('handleEvent', () => {
-    it('posts a new message for task_delta created', async () => {
-      await surface.start(async () => {});
-      const app = surface.getApp() as any;
-
-      const event: SurfaceEvent = {
-        type: 'task_delta',
-        delta: {
-          type: 'created',
-          task: { id: 't1', description: 'Test task', status: 'pending', dependencies: [], createdAt: new Date(), config: {}, execution: {} },
-        },
+    function surfaceWithMappedWorkflow(): SlackSurface {
+      const mockRepo = {
+        getByWorkflowId: vi.fn((id: string) => (id === 'wf-1' ? { channelId: 'C-mapped', workflowId: 'wf-1' } : null)),
+        getByChannelId: vi.fn(() => undefined),
+        list: vi.fn(() => [{ channelId: 'C-mapped', workflowId: 'wf-1' }]),
+        save: vi.fn(),
+        delete: vi.fn(),
       };
+      return new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        workflowChannelRepo: mockRepo as any,
+      });
+    }
 
-      await surface.handleEvent(event);
-
-      expect(app.client.chat.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          channel: 'C-test',
-        }),
-      );
-
-      // Should track the message timestamp
-      expect(surface.getTaskMessages().get('t1')).toBe('1234567890.123456');
-    });
-
-    it('updates existing message for task_delta updated', async () => {
+    it('suppresses task_delta created when the workflow channel is unmapped', async () => {
       await surface.start(async () => {});
       const app = surface.getApp() as any;
 
-      // First, create the task (posts new message)
       await surface.handleEvent({
         type: 'task_delta',
         delta: {
           type: 'created',
-          task: { id: 't1', description: 'Test', status: 'pending', dependencies: [], createdAt: new Date(), config: {}, execution: {} },
+          task: { id: 'wf-1/t1', description: 'Test task', status: 'pending', dependencies: [], createdAt: new Date(), config: {}, execution: {} },
         },
       });
 
-      // Then update it (should update, not post new)
+      expect(app.client.chat.postMessage).not.toHaveBeenCalled();
+      expect(surface.getTaskMessages().has('wf-1/t1')).toBe(false);
+    });
+
+    it('posts a new message for task_delta created on a mapped workflow channel', async () => {
+      const mapped = surfaceWithMappedWorkflow();
+      await mapped.start(async () => {});
+      const app = mapped.getApp() as any;
+
+      await mapped.handleEvent({
+        type: 'task_delta',
+        delta: {
+          type: 'created',
+          task: { id: 'wf-1/t1', description: 'Test task', status: 'pending', dependencies: [], createdAt: new Date(), config: {}, execution: {} },
+        },
+      });
+
+      expect(app.client.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          channel: 'C-mapped',
+        }),
+      );
+      expect(mapped.getTaskMessages().get('wf-1/t1')).toBe('1234567890.123456');
+    });
+
+    it('updates existing message for task_delta updated on a mapped workflow channel', async () => {
+      const mapped = surfaceWithMappedWorkflow();
+      await mapped.start(async () => {});
+      const app = mapped.getApp() as any;
+
+      await mapped.handleEvent({
+        type: 'task_delta',
+        delta: {
+          type: 'created',
+          task: { id: 'wf-1/t1', description: 'Test', status: 'pending', dependencies: [], createdAt: new Date(), config: {}, execution: {} },
+        },
+      });
+
       app.client.chat.postMessage.mockClear();
 
-      await surface.handleEvent({
+      await mapped.handleEvent({
         type: 'task_delta',
-        delta: { type: 'updated', taskId: 't1', changes: { status: 'running' } },
+        delta: { type: 'updated', taskId: 'wf-1/t1', changes: { status: 'running' } },
       });
 
       expect(app.client.chat.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          channel: 'C-test',
+          channel: 'C-mapped',
           ts: '1234567890.123456',
         }),
       );
-      // Should not post a new message
       expect(app.client.chat.postMessage).not.toHaveBeenCalled();
     });
 
-    it('posts message for workflow_status event', async () => {
-      await surface.start(async () => {});
-      const app = surface.getApp() as any;
+    it('posts workflow_status only when the workflow channel is mapped', async () => {
+      const mapped = surfaceWithMappedWorkflow();
+      await mapped.start(async () => {});
+      const app = mapped.getApp() as any;
 
-      await surface.handleEvent({
+      await mapped.handleEvent({
         type: 'workflow_status',
+        workflowId: 'wf-1',
         status: { total: 5, completed: 2, failed: 0, closed: 0, running: 1, pending: 2 },
       });
 
-      expect(app.client.chat.postMessage).toHaveBeenCalled();
+      expect(app.client.chat.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ channel: 'C-mapped' }),
+      );
     });
 
-    it('posts message for error event', async () => {
+    it('suppresses error events that do not resolve to a mapped workflow channel', async () => {
       await surface.start(async () => {});
       const app = surface.getApp() as any;
 
@@ -198,7 +257,7 @@ describe('SlackSurface', () => {
         message: 'Something broke',
       });
 
-      expect(app.client.chat.postMessage).toHaveBeenCalled();
+      expect(app.client.chat.postMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -212,6 +271,7 @@ describe('SlackSurface', () => {
         delete: vi.fn(),
       };
       const cardSurface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 's',
@@ -344,6 +404,7 @@ describe('SlackSurface', () => {
   describe('conversation admin commands', () => {
     it('denies non-admin users', async () => {
       const adminSurface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -375,6 +436,7 @@ describe('SlackSurface', () => {
       };
 
       const adminSurface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -400,6 +462,7 @@ describe('SlackSurface', () => {
 
     it('returns error when persistence is not configured', async () => {
       const adminSurface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -431,6 +494,7 @@ describe('SlackSurface', () => {
       };
 
       const adminSurface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -463,6 +527,7 @@ describe('SlackSurface', () => {
       };
 
       const adminSurface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -497,6 +562,7 @@ describe('SlackSurface', () => {
       mockDraftedPlan = null;
 
       surfaceWithApi = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -505,7 +571,7 @@ describe('SlackSurface', () => {
       });
     });
 
-    it('submits the drafted plan only after an explicit submit + confirmation', async () => {
+    it('submits the drafted plan from its inline approval button', async () => {
       const planText = 'name: "Test Plan"\ntasks:\n  - id: t1\n    description: "Do something useful"\n    dependencies: []\n';
       mockSendMessage.mockResolvedValue('Here is your plan.');
       mockDraftedPlan = planText;
@@ -516,22 +582,23 @@ describe('SlackSurface', () => {
 
       const app = surfaceWithApi.getApp() as any;
       const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
-      const messageHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'message')?.handler;
+      const confirmHandler = app._actionHandlers.find((h: MockHandler) => h.pattern === 'lobby_confirm')?.handler;
 
-      // Explicit plan request → a planning conversation in the thread; nothing submitted.
+      // Explicit plan request → a planning conversation with inline approval; nothing submitted.
       const say1 = vi.fn().mockResolvedValue({ ts: '1111.001' });
       await mentionHandler({ event: { text: '<@U_BOT> plan: build me a REST API', ts: '1111', thread_ts: undefined }, say: say1 });
       expect(receivedCommands).toHaveLength(0);
+      expect(app.client.chat.update).toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining('Approve to execute'),
+        blocks: expect.arrayContaining([expect.objectContaining({ type: 'actions' })]),
+      }));
 
-      // Explicit submit → plain-English summary + confirmation, still no start_plan.
-      const say2 = vi.fn().mockResolvedValue({ ts: '1111.002' });
-      await mentionHandler({ event: { text: '<@UBOT> submit', ts: '1111.5', thread_ts: '1111' }, say: say2 });
-      expect(say2).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining('Do something useful') }));
-      expect(receivedCommands).toHaveLength(0);
-
-      // Confirm → start_plan with the raw plan text.
-      const say3 = vi.fn().mockResolvedValue({ ts: '1111.003' });
-      await messageHandler({ event: { text: 'yes', ts: '1111.6', thread_ts: '1111', user: 'U1' }, say: say3 });
+      await confirmHandler({
+        action: { type: 'button', value: '1111' },
+        body: { channel: { id: 'C-test' }, message: { thread_ts: '1111' } },
+        ack: vi.fn().mockResolvedValue(undefined),
+        respond: vi.fn().mockResolvedValue(undefined),
+      });
       expect(receivedCommands).toEqual([
         expect.objectContaining({ type: 'start_plan', planText }),
       ]);
@@ -576,6 +643,7 @@ describe('SlackSurface', () => {
       });
 
       const surfaceNoAck = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -608,6 +676,7 @@ describe('SlackSurface', () => {
   describe('typing indicator', () => {
     it('adds and removes reaction when useTypingIndicator is enabled', async () => {
       const surfaceWithTyping = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -652,6 +721,7 @@ describe('SlackSurface', () => {
 
     it('does not add reaction when useTypingIndicator is false', async () => {
       const surfaceNoTyping = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -684,6 +754,7 @@ describe('SlackSurface', () => {
   describe('planning config threading', () => {
     it('accepts planningTimeoutSeconds and planningHeartbeatIntervalSeconds config', () => {
       const configuredSurface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -692,6 +763,69 @@ describe('SlackSurface', () => {
         planningHeartbeatIntervalSeconds: 30,
       });
       expect(configuredSurface).toBeDefined();
+    });
+  });
+
+  describe('multi-repo [repo:] tag resolution', () => {
+    it('threads a [repo:<alias>] tag into the created session instead of the default repo', async () => {
+      const MockedPlanConversation = vi.mocked((await import('../slack/plan-conversation.js')).PlanConversation);
+      MockedPlanConversation.mockClear();
+
+      const multiRepoSurface = new SlackSurface({
+        defaultRepoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+        repoAliases: { notarepo: 'git@github.com:EdbertChan/notarepo.git' },
+      });
+
+      await multiRepoSurface.start(async () => {});
+      const app = multiRepoSurface.getApp() as any;
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+
+      const say = vi.fn().mockResolvedValue({ ts: '5555.001' });
+      await mentionHandler({
+        event: { text: '<@U_BOT> [repo:notarepo] plan: add a health endpoint', ts: '5555', thread_ts: undefined, user: 'U1' },
+        say,
+      });
+
+      expect(MockedPlanConversation).toHaveBeenCalledWith(
+        expect.objectContaining({ repoUrl: 'git@github.com:EdbertChan/notarepo.git' }),
+      );
+      expect(MockedPlanConversation).not.toHaveBeenCalledWith(
+        expect.objectContaining({ repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git' }),
+      );
+    });
+
+    it('falls back to the default repoUrl when the mention carries no [repo:] tag', async () => {
+      const MockedPlanConversation = vi.mocked((await import('../slack/plan-conversation.js')).PlanConversation);
+      MockedPlanConversation.mockClear();
+
+      const multiRepoSurface = new SlackSurface({
+        defaultRepoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git',
+        repoAliases: { notarepo: 'git@github.com:EdbertChan/notarepo.git' },
+      });
+
+      await multiRepoSurface.start(async () => {});
+      const app = multiRepoSurface.getApp() as any;
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+
+      const say = vi.fn().mockResolvedValue({ ts: '6666.001' });
+      await mentionHandler({
+        event: { text: '<@U_BOT> plan: add a health endpoint', ts: '6666', thread_ts: undefined, user: 'U1' },
+        say,
+      });
+
+      expect(MockedPlanConversation).toHaveBeenCalledWith(
+        expect.objectContaining({ repoUrl: 'git@github.com:Neko-Catpital-Labs/Invoker.git' }),
+      );
     });
   });
 });

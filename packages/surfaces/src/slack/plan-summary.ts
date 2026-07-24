@@ -10,11 +10,17 @@ import { parse as parseYaml } from 'yaml';
 
 // ── Types ───────────────────────────────────────────────────
 
+export interface PlanSummaryTaskGroup {
+  workflow: string | null;
+  tasks: string[];
+}
+
 export interface PlanSummary {
   name: string;
   steps: string[];
   taskCount: number;
   workflowCount?: number;
+  taskGroups: PlanSummaryTaskGroup[];
 }
 
 interface PlanTask {
@@ -42,6 +48,7 @@ export function summarizePlanText(planText: string): PlanSummary | null {
   if (Array.isArray(rawWorkflows)) {
     if (rawWorkflows.length === 0) return null;
     const workflowNames: string[] = [];
+    const taskGroups: PlanSummaryTaskGroup[] = [];
     let taskCount = 0;
     for (const rawWorkflow of rawWorkflows) {
       if (!isRecord(rawWorkflow)) return null;
@@ -49,10 +56,15 @@ export function summarizePlanText(planText: string): PlanSummary | null {
       if (typeof workflowName !== 'string' || workflowName.trim().length === 0) return null;
       const workflowTasks = parseTasks(rawWorkflow.tasks);
       if (!workflowTasks) return null;
-      workflowNames.push(summarizeDescription(workflowName));
+      const label = summarizeDescription(workflowName);
+      workflowNames.push(label);
+      taskGroups.push({
+        workflow: label,
+        tasks: topoSort(workflowTasks).map((t) => summarizeDescription(t.description)),
+      });
       taskCount += workflowTasks.length;
     }
-    return { name, steps: workflowNames, taskCount, workflowCount: rawWorkflows.length };
+    return { name, steps: workflowNames, taskCount, workflowCount: rawWorkflows.length, taskGroups };
   }
 
   const tasks = parseTasks(parsed.tasks);
@@ -61,7 +73,41 @@ export function summarizePlanText(planText: string): PlanSummary | null {
   const ordered = topoSort(tasks);
   const steps = ordered.map((t) => summarizeDescription(t.description));
 
-  return { name, steps, taskCount: tasks.length };
+  return { name, steps, taskCount: tasks.length, taskGroups: [{ workflow: null, tasks: steps }] };
+}
+
+/**
+ * Deterministic per-task summary lines, grouped by workflow. This is the single
+ * source of truth for the plan summary the user reads on every surface, so a
+ * cut-off or verbose planner reply can never change what tasks are shown.
+ */
+export function formatPlanSummaryLines(summary: PlanSummary): string[] {
+  const lines: string[] = [];
+  const flat = summary.taskGroups.length === 1 && summary.taskGroups[0].workflow === null;
+  for (const group of summary.taskGroups) {
+    if (group.workflow && !flat) lines.push(group.workflow);
+    for (const task of group.tasks) {
+      lines.push(flat ? `• ${task}` : `   • ${task}`);
+    }
+  }
+  return lines;
+}
+
+export function formatSlackPlanBrief(summary: PlanSummary): string {
+  const deliverySlices = summary.taskGroups
+    .flatMap((group) => group.tasks)
+    .filter((task) => !isVerificationOnly(task))
+    .map(summarizeDeliverySlice)
+    .filter(Boolean);
+  const slices = dedupe(deliverySlices).slice(0, 6);
+  const fallbackSlices = summary.steps.map(summarizeDeliverySlice).filter(Boolean).slice(0, 3);
+  const orderedSlices = slices.length > 0 ? slices : fallbackSlices;
+  const title = truncateWords(summary.name, 8);
+  const order = orderedSlices
+    .map((slice, index) => `${index + 1}) ${slice}`)
+    .join('; ');
+  const brief = `Drafted *${title}* (${summary.taskCount} task${summary.taskCount === 1 ? '' : 's'}). Delivery order: ${order}. Each slice includes focused verification.`;
+  return truncateWords(brief, 72);
 }
 
 // ── Internals ───────────────────────────────────────────────
@@ -139,4 +185,32 @@ function topoSort(tasks: PlanTask[]): PlanTask[] {
 
 function summarizeDescription(description: string): string {
   return description.replace(/\s+/g, ' ').trim();
+}
+
+function isVerificationOnly(description: string): boolean {
+  return /\bLayer:\s*app_regression\b/i.test(description)
+    || /\bGoal:\s*(?:run|verify|build|type-check)\b/i.test(description);
+}
+
+function summarizeDeliverySlice(description: string): string {
+  const normalized = summarizeDescription(description);
+  const goal = normalized.match(/\bGoal:\s*(.+?)(?=\s+(?:Motivation|Alternative considerations|Implementation details|Acceptance criteria|Non-goals|Layer|Feature state):|$)/i)?.[1]
+    ?? normalized.split(/(?<=[.!?])\s+/)[0];
+  return truncateWords(goal.replace(/[.:;]+$/, ''), 7);
+}
+
+function dedupe(values: string[]): string[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = value.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function truncateWords(text: string, maxWords: number): string {
+  const words = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  if (words.length <= maxWords) return words.join(' ');
+  return `${words.slice(0, maxWords).join(' ')}…`;
 }

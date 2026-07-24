@@ -12,7 +12,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SlackSurface } from '../slack/slack-surface.js';
-import { splitForSlack } from '../slack/slack-message-helpers.js';
+import { redactAbsolutePaths, sanitizeSlashCommands, sanitizeSlackOutbound, splitForSlack } from '../slack/slack-message-helpers.js';
 import type { SurfaceCommand } from '../surface.js';
 
 // ── Mock @slack/bolt ────────────────────────────────────────
@@ -143,6 +143,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
     it('sends immediate ack, processes request, then replaces ack with actual response', async () => {
       // Setup: Create surface with immediate ack enabled (default)
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -202,6 +203,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('handles the explicit plan submission flow correctly', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -210,7 +212,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
       });
 
       const planText = 'name: "Debug Issue"\ntasks:\n  - id: t1\n    description: "Run the debugger"\n    dependencies: []\n';
-      mockSendMessage.mockResolvedValue('Plan ready. Say `submit` to run it.');
+      mockSendMessage.mockResolvedValue('unused planner reply');
       mockDraftedPlan = planText;
 
       await surface.start(async (cmd) => {
@@ -234,30 +236,88 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
       });
       expect(apiCalls[0].text).toBe('Processing your request...');
       expect(apiCalls[1].method).toBe('update');
-      expect(apiCalls[1].text).toBe('Plan ready. Say `submit` to run it.');
+      expect(apiCalls[1].text).toContain('Drafted *Debug Issue*');
+      expect(apiCalls[1].text).toContain('Approve to execute');
       expect(receivedCommands).toHaveLength(0);
 
-      // Explicit submit → summary + confirmation, still no start_plan.
+      // Approve-inline stages a pending submit confirm; plain submit/yes executes it.
       await mentionHandler({
         event: { text: '<@UBOT123456> submit', ts: '1111.5', thread_ts: '1111.001', user: 'U123' },
-        say,
-      });
-      expect(receivedCommands).toHaveLength(0);
-
-      // Confirm → start_plan with the raw plan text.
-      await messageHandler({
-        event: { text: 'yes', ts: '1111.6', thread_ts: '1111.001', user: 'U123' },
         say,
       });
       expect(receivedCommands).toEqual([
         expect.objectContaining({ type: 'start_plan', planText }),
       ]);
     });
+
+    it('clears a leftover Processing ack when plan: is empty', async () => {
+      surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        anthropicApiKey: 'test-anthropic-key',
+      });
+      await surface.start(async () => {});
+
+      const app = surface.getApp() as any;
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+      const say = vi.fn().mockImplementation(async ({ text }) => {
+        const ts = `${Date.now()}.${Math.random().toString(36).substr(2, 6)}`;
+        apiCalls.push({ method: 'postMessage', channel: 'C-test', text, ts });
+        return { ts, ok: true };
+      });
+
+      await mentionHandler({
+        event: { text: '<@UBOT123456> plan:', ts: '3333.001', user: 'U123' },
+        say,
+      });
+
+      expect(apiCalls[0]).toEqual(expect.objectContaining({
+        method: 'postMessage',
+        text: 'Processing your request...',
+      }));
+      expect(apiCalls.some((c) => c.method === 'delete' && c.ts === apiCalls[0].ts)).toBe(true);
+      expect(mockSendMessage).not.toHaveBeenCalled();
+    });
+
+    it('clears a leftover Processing ack when the planner throws', async () => {
+      surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        anthropicApiKey: 'test-anthropic-key',
+      });
+      mockSendMessage.mockRejectedValue(new Error('planner crashed'));
+      await surface.start(async () => {});
+
+      const app = surface.getApp() as any;
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+      const say = vi.fn().mockImplementation(async ({ text }) => {
+        const ts = `${Date.now()}.${Math.random().toString(36).substr(2, 6)}`;
+        apiCalls.push({ method: 'postMessage', channel: 'C-test', text, ts });
+        return { ts, ok: true };
+      });
+
+      await mentionHandler({
+        event: { text: '<@UBOT123456> fix the typo', ts: '4444.001', user: 'U123' },
+        say,
+      });
+
+      const ack = apiCalls.find((c) => c.method === 'postMessage' && c.text === 'Processing your request...');
+      expect(ack).toBeTruthy();
+      expect(apiCalls.some((c) => c.method === 'postMessage' && c.text?.includes('planner crashed'))).toBe(true);
+      expect(apiCalls.some((c) => c.method === 'delete' && c.ts === ack?.ts)).toBe(true);
+    });
   });
 
   describe('Configuration Options', () => {
     it('disables immediate ack when enableImmediateAck is false', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -305,6 +365,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
       const customMessage = 'Hold on, thinking...';
 
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -346,6 +407,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
   describe('Typing Indicator Integration', () => {
     it('adds reaction before processing, removes after response', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -408,6 +470,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('does not add reactions when useTypingIndicator is false', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -450,6 +513,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('removes reaction even when message processing fails', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -496,6 +560,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
   describe('Edge Cases and Error Handling', () => {
     it('handles ack posting failure gracefully', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -545,6 +610,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('falls back to new message when chat.update fails (msg_too_long)', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -603,6 +669,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('maintains correct message sequence in threaded conversation', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -659,6 +726,47 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
       expect(updates[0].text).toBe('First response');
       expect(updates[1].text).toBe('Second response');
     });
+  });
+});
+
+describe('sanitizeSlashCommands', () => {
+  it('replaces hallucinated /invoker commands but keeps /invoker conversations', () => {
+    expect(sanitizeSlashCommands('run `/invoker start_plan` now')).toBe(
+      'reply with "yes", "go", or "execute" to confirm now',
+    );
+    expect(sanitizeSlashCommands('Please `/invoker approve task-1`')).toBe(
+      'Please reply with "yes", "go", or "execute" to confirm',
+    );
+    expect(sanitizeSlashCommands('use /invoker conversations list')).toBe(
+      'use /invoker conversations list',
+    );
+  });
+
+  it('does not rewrite ordinary Invoker prose', () => {
+    expect(sanitizeSlashCommands('This thread can’t create or submit an Invoker plan')).toBe(
+      'This thread can’t create or submit an Invoker plan',
+    );
+    expect(sanitizeSlashCommands('I can’t submit or execute an Invoker plan; try submit')).toBe(
+      'I can’t submit or execute an Invoker plan; try submit',
+    );
+    expect(sanitizeSlashCommands('Start a new Invoker workflow channel')).toBe(
+      'Start a new Invoker workflow channel',
+    );
+  });
+});
+
+describe('redactAbsolutePaths', () => {
+  it('collapses host absolute paths to a short tail', () => {
+    const input = 'Changed: [tsup.config.ts](/home/invoker/.invoker/slack-manager/planning-clones/64a63486912a/packages/app/tsup.config.ts:5)';
+    expect(redactAbsolutePaths(input)).toBe(
+      'Changed: [tsup.config.ts](…/packages/app/tsup.config.ts:5)',
+    );
+  });
+
+  it('is applied by sanitizeSlackOutbound', () => {
+    expect(sanitizeSlackOutbound('see /Users/edbert/Documents/GitHub/Invoker/packages/app/foo.ts')).toBe(
+      'see …/packages/app/foo.ts',
+    );
   });
 });
 

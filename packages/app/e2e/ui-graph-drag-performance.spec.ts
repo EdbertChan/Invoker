@@ -1,6 +1,13 @@
 import { expect, test, E2E_REPO_URL } from './fixtures/electron-app.js';
 import { stringify as yamlStringify } from 'yaml';
 import type { Page } from '@playwright/test';
+import {
+  activityLogWatermark,
+  maxPayloadNumber,
+  numberOrZero,
+  uiPerfPayloadsSince,
+  type UiPerfPayload,
+} from './fixtures/ui-perf.js';
 
 const WORKFLOW_COUNT = 50;
 const TASKS_PER_WORKFLOW = 8;
@@ -14,6 +21,21 @@ const MIN_FRAME_COUNT = 35;
 const MAX_P95_FRAME_GAP_MS = 80;
 const MAX_FRAME_GAP_MS = 250;
 const MIN_TRANSFORM_CHANGES = 12;
+const MAX_FIRST_TRANSFORM_MS = 600;
+const MAX_RENDERER_EVENT_LOOP_LAG_MS = 1000;
+const MAX_RENDERER_LONG_TASK_MS = 1500;
+const MAX_TASK_DELTA_BATCH_SIZE = 250;
+
+const DRAG_PERF_BUDGETS = {
+  minFrameCount: MIN_FRAME_COUNT,
+  maxP95FrameGapMs: MAX_P95_FRAME_GAP_MS,
+  maxFrameGapMs: MAX_FRAME_GAP_MS,
+  minTransformChanges: MIN_TRANSFORM_CHANGES,
+  maxFirstTransformMs: MAX_FIRST_TRANSFORM_MS,
+  maxRendererEventLoopLagMs: MAX_RENDERER_EVENT_LOOP_LAG_MS,
+  maxRendererLongTaskMs: MAX_RENDERER_LONG_TASK_MS,
+  maxTaskDeltaBatchSize: MAX_TASK_DELTA_BATCH_SIZE,
+};
 
 interface DragPerfResult {
   frameCount: number;
@@ -21,6 +43,7 @@ interface DragPerfResult {
   p95FrameGapMs: number;
   transformChanges: number;
   transformChanged: boolean;
+  firstTransformMs: number | null;
   durationMs: number;
 }
 
@@ -50,6 +73,23 @@ function buildPlan(index: number) {
   };
 }
 
+async function dismissKnownOverlays(page: Page): Promise<void> {
+  // Re-query each iteration: dismissing one overlay shifts the remaining buttons.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const button = page.getByRole('button', { name: /^(Dismiss|Close|Skip for now|Not now)$/i }).first();
+    if (!(await button.isVisible().catch(() => false))) {
+      return;
+    }
+    await button.dispatchEvent('click', { bubbles: true, cancelable: true });
+    await page.waitForTimeout(100);
+  }
+}
+
+async function openPlanGraph(page: Page): Promise<void> {
+  await dismissKnownOverlays(page);
+  await page.getByTestId('sidebar-planning').dispatchEvent('click', { bubbles: true, cancelable: true });
+  await page.getByRole('heading', { name: 'Plan graph' }).waitFor({ state: 'visible', timeout: 30_000 });
+}
 
 async function seedLargeWorkflowGraph(page: Page): Promise<void> {
   const plans = Array.from({ length: WORKFLOW_COUNT }, (_, index) => yamlStringify(buildPlan(index)));
@@ -63,8 +103,10 @@ async function seedLargeWorkflowGraph(page: Page): Promise<void> {
     WORKFLOW_COUNT,
     { timeout: 30_000 },
   );
-  await page.getByRole('button', { name: 'Refresh' }).click();
-  await page.locator('[data-testid^="workflow-node-"]:visible').first().waitFor({ state: 'visible', timeout: 10_000 });
+  await openPlanGraph(page);
+  await dismissKnownOverlays(page);
+  await page.getByRole('button', { name: 'Refresh' }).dispatchEvent('click', { bubbles: true, cancelable: true });
+  await page.locator('[data-testid^="workflow-node-"]:visible').first().waitFor({ state: 'visible', timeout: 30_000 });
 }
 
 async function recordDragPerformance(
@@ -125,8 +167,12 @@ async function recordDragPerformance(
       gaps.push(state.frames[i] - state.frames[i - 1]);
     }
     let transformChanges = 0;
+    let firstTransformMs: number | null = null;
     for (let i = 1; i < state.transforms.length; i += 1) {
-      if (state.transforms[i] !== state.transforms[i - 1]) transformChanges += 1;
+      if (state.transforms[i] !== state.transforms[i - 1]) {
+        transformChanges += 1;
+        firstTransformMs ??= state.frames[i] - state.startedAt;
+      }
     }
     const sorted = [...gaps].sort((a, b) => a - b);
     const p95Index = sorted.length === 0 ? 0 : Math.ceil(sorted.length * 0.95) - 1;
@@ -136,6 +182,7 @@ async function recordDragPerformance(
       p95FrameGapMs: sorted[p95Index] ?? 0,
       transformChanges,
       transformChanged: new Set(state.transforms).size > 1,
+      firstTransformMs,
       durationMs: state.finishedAt - state.startedAt,
     };
   });
@@ -176,42 +223,53 @@ async function streamTaskUpdatesDuringDrag(page: Page): Promise<number> {
   return updateCount;
 }
 
-function expectSmoothDrag(result: DragPerfResult): void {
-  expect(result.frameCount, JSON.stringify(result)).toBeGreaterThanOrEqual(MIN_FRAME_COUNT);
-  expect(result.p95FrameGapMs, JSON.stringify(result)).toBeLessThanOrEqual(MAX_P95_FRAME_GAP_MS);
-  expect(result.maxFrameGapMs, JSON.stringify(result)).toBeLessThanOrEqual(MAX_FRAME_GAP_MS);
-  if (result.transformChanged) {
-    expect(result.transformChanges, JSON.stringify(result)).toBeGreaterThanOrEqual(1);
-  }
+function expectSmoothDrag(
+  result: DragPerfResult,
+  perf: Record<string, unknown>,
+  perfPayloads: readonly UiPerfPayload[],
+): void {
+  const evidence = JSON.stringify({ ...result, perf, perfPayloads, budgets: DRAG_PERF_BUDGETS });
+  expect(result.frameCount, evidence).toBeGreaterThanOrEqual(MIN_FRAME_COUNT);
+  expect(result.p95FrameGapMs, evidence).toBeLessThanOrEqual(MAX_P95_FRAME_GAP_MS);
+  expect(result.maxFrameGapMs, evidence).toBeLessThanOrEqual(MAX_FRAME_GAP_MS);
+  expect(result.transformChanged, evidence).toBe(true);
+  expect(result.transformChanges, evidence).toBeGreaterThanOrEqual(MIN_TRANSFORM_CHANGES);
+  expect(result.firstTransformMs ?? Number.POSITIVE_INFINITY, evidence).toBeLessThanOrEqual(MAX_FIRST_TRANSFORM_MS);
+  expect(numberOrZero(perf.maxRendererEventLoopLagMs), evidence).toBeLessThanOrEqual(MAX_RENDERER_EVENT_LOOP_LAG_MS);
+  expect(numberOrZero(perf.maxRendererLongTaskMs), evidence).toBeLessThanOrEqual(MAX_RENDERER_LONG_TASK_MS);
+  expect(maxPayloadNumber(perfPayloads, 'renderer_event_loop_lag', 'lagMs'), evidence).toBeLessThanOrEqual(MAX_RENDERER_EVENT_LOOP_LAG_MS);
+  expect(maxPayloadNumber(perfPayloads, 'renderer_long_task', 'durationMs'), evidence).toBeLessThanOrEqual(MAX_RENDERER_LONG_TASK_MS);
+  expect(numberOrZero(perf.maxTaskDeltaBatchSize), evidence).toBeLessThanOrEqual(MAX_TASK_DELTA_BATCH_SIZE);
 }
 
 test('workflow graph pan stays responsive under a large persisted graph', async ({ page }) => {
   await seedLargeWorkflowGraph(page);
 
+  const perfWatermark = await activityLogWatermark(page);
   const result = await recordDragPerformance(
     page,
     '[data-testid="workflow-graph-react-flow"] .react-flow__pane',
     '[data-testid="workflow-graph-react-flow"] .react-flow__viewport',
   );
+  const perfPayloads = await uiPerfPayloadsSince(page, perfWatermark);
+  const perf = await page.evaluate(async () => await window.invoker.getUiPerfStats());
 
   console.log(`UI_GRAPH_DRAG_BENCH_RESULT=${JSON.stringify({
     ...result,
     workflowCount: WORKFLOW_COUNT,
     taskCount: WORKFLOW_COUNT * TASKS_PER_WORKFLOW,
-    thresholds: {
-      minFrameCount: MIN_FRAME_COUNT,
-      maxP95FrameGapMs: MAX_P95_FRAME_GAP_MS,
-      maxFrameGapMs: MAX_FRAME_GAP_MS,
-      minTransformChanges: MIN_TRANSFORM_CHANGES,
-    },
+    perfPayloads,
+    perf,
+    budgets: DRAG_PERF_BUDGETS,
   })}`);
-  expectSmoothDrag(result);
+  expectSmoothDrag(result, perf, perfPayloads);
 });
 
 test('workflow graph pan stays responsive while task updates arrive', async ({ page }) => {
   await seedLargeWorkflowGraph(page);
 
   let updateCount = 0;
+  const perfWatermark = await activityLogWatermark(page);
   const result = await recordDragPerformance(
     page,
     '[data-testid="workflow-graph-react-flow"] .react-flow__pane',
@@ -220,6 +278,8 @@ test('workflow graph pan stays responsive while task updates arrive', async ({ p
       updateCount = await streamTaskUpdatesDuringDrag(page);
     },
   );
+  const perfPayloads = await uiPerfPayloadsSince(page, perfWatermark);
+  const perf = await page.evaluate(async () => await window.invoker.getUiPerfStats());
 
   console.log(`UI_GRAPH_DRAG_WITH_UPDATES_BENCH_RESULT=${JSON.stringify({
     ...result,
@@ -228,13 +288,11 @@ test('workflow graph pan stays responsive while task updates arrive', async ({ p
     updateCount,
     updateBursts: UPDATE_BURSTS,
     updatesPerBurst: UPDATES_PER_BURST,
-    thresholds: {
-      minFrameCount: MIN_FRAME_COUNT,
-      maxP95FrameGapMs: MAX_P95_FRAME_GAP_MS,
-      maxFrameGapMs: MAX_FRAME_GAP_MS,
-      minTransformChanges: MIN_TRANSFORM_CHANGES,
-    },
+    perfPayloads,
+    perf,
+    budgets: DRAG_PERF_BUDGETS,
   })}`);
-  expect(updateCount).toBe(UPDATE_BURSTS * UPDATES_PER_BURST);
-  expectSmoothDrag(result);
+  const evidence = JSON.stringify({ ...result, updateCount, perfPayloads, perf, budgets: DRAG_PERF_BUDGETS });
+  expect(updateCount, evidence).toBe(UPDATE_BURSTS * UPDATES_PER_BURST);
+  expectSmoothDrag(result, perf, perfPayloads);
 });
