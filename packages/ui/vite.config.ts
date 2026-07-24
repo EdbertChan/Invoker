@@ -63,10 +63,6 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test-setup.ts'],
-    // Integration tests rendering the full <App /> exceed Vitest's default
-    // 5s on 1-2 vCPU CI runners (observed 7-8s). Mirror vitest.shared.ts,
-    // which this config does not extend.
-    testTimeout: 20_000,
     reporters: ['default', new MergifyReporter()],
   },
 });
