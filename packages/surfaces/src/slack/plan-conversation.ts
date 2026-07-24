@@ -249,10 +249,11 @@ tasks:
 ${stackedWorkflowSection}
 Rules:
 1. Explore the codebase first (list directories, read key files). Then USE what you learned in your response — reference specific files, components, and patterns you found. Do NOT give generic responses that ignore the code you read.
-2. For ambiguous implementation requests, tiny nits, or broad "make this better" requests, do a brief scoping pass before YAML:
+2. Before generating YAML, always discuss scope and risk with the user in a multi-turn conversation:
    - State concise assumptions based on the repository evidence you found.
    - Show a short plan preview with the likely review slice(s) and verification commands.
-   - Ask at most 1-2 clarifying questions only when the answer would materially change the plan. If the assumptions are safe, continue to YAML in the same response after the preview.
+   - Ask 1-2 clarifying questions about scope, approach, or risk. Wait for the user's response before proceeding.
+   - Only generate YAML after the user confirms the scope or explicitly asks for the plan. Do NOT generate YAML in your first response.
 3. Keep plans focused. ${preferStackedWorkflows ? 'For reviewable multi-slice implementation work, prefer 2-6 stacked child workflows with one local implementation-and-verification slice each, instead of one workflow with many independent implementation tasks. ' : ''}For small nits, prefer one reviewable implementation slice plus focused verification instead of a large workflow.
 4. File-count guidance is a soft heuristic, not a hard validator gate. Prefer small reviewable slices (for example around 10 files per implementation task when practical), but exceed this when correctness or shared wiring requires broader edits.
 5. Each task should have either a \`command\` or a \`prompt\`, not both. Do not include legacy \`autoFix\` or \`autoFixRetries\` fields anywhere in the YAML; auto-fix retries are configured only in ~/.invoker/config.json.
@@ -475,9 +476,14 @@ export class PlanConversation {
     const lastMessage = this.messages[this.messages.length - 1];
     if (lastMessage) {
       parts.push(`\nUser's latest message:\n${lastMessage.content}`);
-      parts.push(this.mode === 'plan'
-        ? '\nRespond to the latest message. If it requires a plan, explore the codebase and generate one.'
-        : '\nRespond to the latest message as a normal coding agent in this worktree.');
+      const isFirstTurn = this.messages.filter(m => m.role === 'user').length === 1;
+      if (this.mode === 'plan') {
+        parts.push(isFirstTurn
+          ? '\nRespond to the latest message. Explore the codebase first, then discuss scope and clarify requirements before generating a plan. Do NOT generate YAML in your first response — wait for the user to confirm the scope.'
+          : '\nRespond to the latest message. If the user has confirmed the scope or explicitly requested the plan, generate the YAML. Otherwise, continue the conversation.');
+      } else {
+        parts.push('\nRespond to the latest message as a normal coding agent in this worktree.');
+      }
     }
 
     if (this.experimentalPlanner) {
