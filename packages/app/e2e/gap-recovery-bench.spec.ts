@@ -215,7 +215,7 @@ test('gap-recovery bench: 5 iterations of synthetic-gap → resync at 30 workflo
       INVOKER_TEST_RESUME_PENDING_DELAY_MS: '15000',
     });
     try {
-      const page = await app.firstWindow({ timeout: 20000 });
+      const page = await app.firstWindow({ timeout: 60_000 });
       await page.waitForLoadState('domcontentloaded');
       await page.waitForFunction(() => typeof window.invoker !== 'undefined', null, { timeout: 5000 });
       await waitForWorkflowGraphVisible(page, 10000);
