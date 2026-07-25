@@ -86,10 +86,20 @@ invoker_e2e_ssh_setup_keys() {
 # --------------------------------------------------------------------------- #
 invoker_e2e_ssh_cleanup_keys() {
   local authorized_keys="${_INVOKER_E2E_SSH_HOME:-}/.ssh/authorized_keys"
+  local profile_path="${_INVOKER_E2E_SSH_HOME:-}/.profile"
   if [ -n "${_INVOKER_E2E_SSH_TAG:-}" ] && [ -f "$authorized_keys" ]; then
     grep -v "$_INVOKER_E2E_SSH_TAG" "$authorized_keys" > "${authorized_keys}.tmp" || true
     mv "${authorized_keys}.tmp" "$authorized_keys"
     chmod 600 "$authorized_keys"
+  fi
+  if [ -n "${_INVOKER_E2E_SSH_TAG:-}" ] && [ -f "$profile_path" ]; then
+    # Remove the marker line and the following PATH export we appended.
+    awk -v marker="# invoker-e2e-ssh-pnpm-path ${_INVOKER_E2E_SSH_TAG}" '
+      $0 == marker { skip=1; next }
+      skip && /^export PATH=/ { skip=0; next }
+      { skip=0; print }
+    ' "$profile_path" > "${profile_path}.tmp" || true
+    mv "${profile_path}.tmp" "$profile_path"
   fi
   rm -rf "${_INVOKER_E2E_SSH_TMPDIR:-}" 2>/dev/null || true
 }
@@ -149,14 +159,52 @@ invoker_e2e_ssh_init() {
     return 1
   fi
 
-  # Verify pnpm is reachable via non-interactive SSH session.
+  if ! invoker_e2e_ssh_install_login_path; then
+    invoker_e2e_ssh_cleanup_keys
+    return 1
+  fi
+}
+
+# --------------------------------------------------------------------------- #
+# Ensure host pnpm/node are on the remote login-shell PATH.
+# SshExecutor uses `bash -l` and does not forward the host PATH.
+# --------------------------------------------------------------------------- #
+invoker_e2e_ssh_install_login_path() {
+  local pnpm_bin node_bin pnpm_dir node_dir
+  pnpm_bin="$(command -v pnpm || true)"
+  node_bin="$(command -v node || true)"
+  if [ -z "$pnpm_bin" ] || [ -z "$node_bin" ]; then
+    echo "ERROR: host pnpm/node not found; cannot provision remote login PATH." >&2
+    return 1
+  fi
+  pnpm_dir="$(cd "$(dirname "$pnpm_bin")" && pwd)"
+  node_dir="$(cd "$(dirname "$node_bin")" && pwd)"
+
+  ssh -o BatchMode=yes \
+      -o ConnectTimeout=5 \
+      -o StrictHostKeyChecking=no \
+      -i "$INVOKER_E2E_SSH_KEY" \
+      "$_INVOKER_E2E_SSH_USER@localhost" \
+      "bash -s" <<EOF
+set -euo pipefail
+marker='# invoker-e2e-ssh-pnpm-path ${_INVOKER_E2E_SSH_TAG}'
+touch "\$HOME/.profile"
+if ! grep -Fq "\$marker" "\$HOME/.profile" 2>/dev/null; then
+  {
+    printf '%s\n' "\$marker"
+    printf 'export PATH="%s:%s:\$PATH"\n' '${node_dir}' '${pnpm_dir}'
+  } >> "\$HOME/.profile"
+fi
+EOF
+
+  # Verify via login shell — matches SshExecutor.buildRemoteCommand().
   if ! ssh -o BatchMode=yes \
            -o ConnectTimeout=5 \
            -o StrictHostKeyChecking=no \
            -i "$INVOKER_E2E_SSH_KEY" \
-           "$_INVOKER_E2E_SSH_USER@localhost" "env PATH='$PATH' pnpm --version" >/dev/null 2>&1; then
-    echo "ERROR: 'pnpm' not found in non-interactive SSH session PATH." >&2
-    invoker_e2e_ssh_cleanup_keys
+           "$_INVOKER_E2E_SSH_USER@localhost" \
+           "bash -l -c 'command -v pnpm >/dev/null && pnpm --version'" >/dev/null 2>&1; then
+    echo "ERROR: 'pnpm' not found in remote login-shell PATH (bash -l)." >&2
     return 1
   fi
 }

@@ -7,6 +7,7 @@
 
 import { execFileSync, execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import type { PlanDefinition } from '@invoker/workflow-core';
 import { loadConfig, resolveDefaultExecutionAgent } from './config.js';
@@ -160,12 +161,21 @@ export function detectDefaultBranchRemote(repoUrl: string): string {
   return 'main';
 }
 
+function assertLocalGitRepoReadable(localPath: string): void {
+  if (!existsSync(localPath)) throw new Error('Path does not exist');
+  execFileSync('git', ['-c', 'safe.directory=*', '-C', localPath, 'rev-parse', '--git-dir'], {
+    stdio: ['ignore', 'ignore', 'ignore'],
+    timeout: 10_000,
+  });
+}
+
 export function assertRepoUrlCloneable(repoUrl: string): void {
   const trimmed = repoUrl.trim();
   const isLocalPath = trimmed.startsWith('/') || trimmed.startsWith('./') || trimmed.startsWith('../');
-  const isRemoteUrl = /^(?:git@|https?:\/\/|ssh:\/\/|file:\/\/)/.test(trimmed);
+  const isFileUrl = trimmed.startsWith('file://');
+  const isRemoteUrl = /^(?:git@|https?:\/\/|ssh:\/\/)/.test(trimmed);
 
-  if (!isLocalPath && !isRemoteUrl) {
+  if (!isLocalPath && !isFileUrl && !isRemoteUrl) {
     throw new PlanParseError(
       `repoUrl "${repoUrl}" is not a valid git repository. Use a full clone URL or a configured Slack alias.`,
     );
@@ -173,11 +183,11 @@ export function assertRepoUrlCloneable(repoUrl: string): void {
 
   try {
     if (isLocalPath) {
-      if (!existsSync(trimmed)) throw new Error('Path does not exist');
-      execFileSync('git', ['-C', trimmed, 'rev-parse', '--git-dir'], {
-        stdio: ['ignore', 'ignore', 'ignore'],
-        timeout: 10_000,
-      });
+      assertLocalGitRepoReadable(trimmed);
+      return;
+    }
+    if (isFileUrl) {
+      assertLocalGitRepoReadable(fileURLToPath(trimmed));
       return;
     }
     execFileSync('git', ['ls-remote', '--exit-code', '--', trimmed, 'HEAD'], {
