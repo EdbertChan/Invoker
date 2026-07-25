@@ -344,6 +344,16 @@ export function parsePlanningRequest(
   };
 }
 
+function isRepoRootUrl(rawUrl: string): boolean {
+  if (/^(ssh:\/\/|git@)/.test(rawUrl)) return true;
+  try {
+    const u = new URL(rawUrl);
+    return /^\/[^/]+\/[^/]+(?:\.git|\/)?$/.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function extractRepositoryUrls(text: string): string[] {
   const slackLinks = [...text.matchAll(/<((?:https?|ssh):\/\/[^|>\s]+)(?:\|[^>]+)?>/gi)];
   const withoutSlackLinks = text.replace(/<(?:(?:https?|ssh):\/\/[^>]+)>/gi, ' ');
@@ -353,7 +363,7 @@ function extractRepositoryUrls(text: string): string[] {
     ...withoutSlackLinks.matchAll(/\bssh:\/\/[^\s<>]+/gi),
     ...withoutSlackLinks.matchAll(/\bgit@[\w.-]+:[^\s<>]+/gi),
   ].map((match) => (match[1] ?? match[0]).replace(/[),.;]+$/, ''));
-  return [...new Set(candidates)];
+  return [...new Set(candidates)].filter(isRepoRootUrl);
 }
 
 function repositoryIdentity(repoUrl: string): string {
