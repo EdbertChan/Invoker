@@ -101,6 +101,27 @@ tasks:
     execFileSyncSpy.mockRestore();
   });
 
+  it('accepts a file:// checkout URL for the local workspace', async () => {
+    vi.restoreAllMocks();
+    const { pathToFileURL } = await import('node:url');
+    const repoRoot = childProcess.execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+    }).trim();
+    const planPath = join(tmpdir(), `invoker-file-url-repo-${process.pid}.yaml`);
+    writeFileSync(planPath, `
+name: File URL Repo
+repoUrl: ${pathToFileURL(repoRoot).href}
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+`);
+
+    const plan = await parsePlanFile(planPath);
+    expect(plan.repoUrl).toBe(pathToFileURL(repoRoot).href);
+    expect(plan.tasks).toHaveLength(1);
+  });
+
   it('rejects plan without repoUrl', () => {
     const yaml = `
 name: No Repo Plan
