@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SshExecutor } from '../ssh-executor.js';
@@ -217,11 +217,8 @@ describe('SshExecutor managed workspace mode', () => {
     expect(callScript).toContain('cat > "$RUNNER_PATH" <<');
     expect(callScript).toContain('cat > "$PAYLOAD_PATH" <<');
     expect(callScript).not.toContain('cat > "$PROVISION_PATH" <<');
-    expect(callScript).toContain('ensure_managed_pnpm_workspace');
-    expect(callScript).toContain('pnpm install --frozen-lockfile');
-    expect(callScript.indexOf('pnpm install --frozen-lockfile')).toBeLessThan(
-      callScript.indexOf('echo "[SshExecutor] Running task payload..."'),
-    );
+    expect(callScript).not.toContain('ensure_managed_pnpm_workspace');
+    expect(callScript).not.toContain('pnpm install --frozen-lockfile');
     expect(callScript).toContain('start_bootstrap_heartbeat');
     expect(callScript).toContain('stop_bootstrap_heartbeat');
     expect(callScript.indexOf('stop_bootstrap_heartbeat')).toBeLessThan(callScript.indexOf('"$RUNNER_PATH" "$PAYLOAD_PATH"'));
@@ -232,7 +229,7 @@ describe('SshExecutor managed workspace mode', () => {
     expect(callFinalize).toEqual({ branch: handle.branch, worktreePath: handle.workspacePath });
   });
 
-  it('managed mode installs pnpm dependencies when node_modules is missing before payload', async () => {
+  it('managed mode skips provisioning when provisionCommand is unset', async () => {
     const ssh = new SshExecutor({
       host: 'localhost',
       user: 'testuser',
@@ -270,37 +267,88 @@ describe('SshExecutor managed workspace mode', () => {
       throw new Error('Managed SSH bootstrap did not embed a workspace path');
     }
 
-    const fakeHome = mkdtempSync(join(tmpdir(), 'ssh-pnpm-bootstrap-home-'));
+    const fakeHome = mkdtempSync(join(tmpdir(), 'ssh-no-provision-home-'));
     try {
       const workspacePath = workspaceMatch[1].replace(/^~(?=\/|$)/, fakeHome);
-      const binDir = join(fakeHome, 'bin');
       mkdirSync(workspacePath, { recursive: true });
-      mkdirSync(binDir, { recursive: true });
       writeFileSync(join(workspacePath, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n');
-      const pnpmPath = join(binDir, 'pnpm');
-      writeFileSync(
-        pnpmPath,
-        '#!/usr/bin/env bash\nprintf "%s\\n" "$*" > "$HOME/pnpm-args.txt"\nprintf "%s\\n" "$PWD" > "$HOME/pnpm-cwd.txt"\nmkdir -p node_modules\n',
-      );
-      chmodSync(pnpmPath, 0o755);
 
       const childProcessModule = await vi.importActual<typeof import('node:child_process')>('node:child_process');
       const result = childProcessModule.spawnSync('/bin/bash', ['-c', bootstrapScript], {
         encoding: 'utf8',
-        env: { ...process.env, HOME: fakeHome, PATH: `${binDir}:${process.env.PATH ?? ''}` },
+        env: { ...process.env, HOME: fakeHome, PATH: process.env.PATH ?? '' },
       });
 
       expect(result.status).toBe(0);
-      expect(result.stdout).toContain('[SshExecutor] Installing pnpm dependencies for managed worktree...');
-      expect(result.stdout).toContain('[SshExecutor] Running task payload...');
-      expect(readFileSync(join(fakeHome, 'pnpm-args.txt'), 'utf8')).toBe('install --frozen-lockfile\n');
-      expect(readFileSync(join(fakeHome, 'pnpm-cwd.txt'), 'utf8')).toBe(`${workspacePath}\n`);
-      expect(existsSync(join(workspacePath, 'node_modules'))).toBe(true);
+      expect(bootstrapScript).not.toContain('ensure_managed_pnpm_workspace');
+      expect(result.stdout).not.toContain('[SshExecutor] Installing managed worktree dependencies...');
+      expect(existsSync(join(workspacePath, 'node_modules'))).toBe(false);
       expect(readFileSync(join(workspacePath, 'payload.out'), 'utf8')).toBe('payload-ran\n');
     } finally {
       rmSync(fakeHome, { recursive: true, force: true });
       proc.emit('close', 0, null);
       await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  });
+  it('managed mode runs the configured provisionCommand before payload', async () => {
+    const ssh = new SshExecutor({
+      host: 'localhost',
+      user: 'testuser',
+      sshKeyPath: '/dev/null',
+      managedWorkspaces: true,
+      remoteHeartbeatIntervalSeconds: 1,
+      remoteInvokerHome: '~/.invoker',
+      provisionCommand: 'printf "%s\\n" custom-provision > "$HOME/provision.log"\nmkdir -p node_modules',
+    }) as any;
+
+    vi.spyOn(ssh, 'execRemoteCapture').mockImplementation(async (script: string) => {
+      if (script.includes('__INVOKER_BASE_REF__=')) {
+        return '__INVOKER_BASE_REF__=origin/main\n__INVOKER_BASE_HEAD__=abc123def456abc123def456abc123def456abc1';
+      }
+      if (script.includes('printf %s "$HOME"')) return '/home/testuser';
+      if (script.includes('worktree list --porcelain')) return '';
+      return '';
+    });
+    vi.spyOn(ssh, 'setupTaskBranch').mockResolvedValue(undefined);
+
+    await ssh.start(makeRequest({
+      actionType: 'command',
+      inputs: {
+        command: "printf 'payload-ran\\n' > payload.out",
+        description: 'run tests',
+        repoUrl: 'git@github.com:owner/repo.git',
+      },
+    }));
+
+    const proc = spawnedProcesses[spawnedProcesses.length - 1];
+    const writeMock = (proc.stdin as any).write as ReturnType<typeof vi.fn>;
+    const bootstrapScript = writeMock.mock.calls[0]![0] as string;
+    const workspaceMatch = bootstrapScript.match(/WT=\$\(normalize_remote_path '([^']+)'\)/);
+    if (!workspaceMatch?.[1]) {
+      throw new Error('Managed SSH bootstrap did not embed a workspace path');
+    }
+
+    const fakeHome = mkdtempSync(join(tmpdir(), 'ssh-custom-provision-home-'));
+    try {
+      const workspacePath = workspaceMatch[1].replace(/^~(?=\/|$)/, fakeHome);
+      mkdirSync(workspacePath, { recursive: true });
+      writeFileSync(join(workspacePath, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n');
+
+      const childProcessModule = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+      const result = childProcessModule.spawnSync('/bin/bash', ['-c', bootstrapScript], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: fakeHome, PATH: process.env.PATH ?? '' },
+      });
+
+      expect(result.status).toBe(0);
+      expect(bootstrapScript).toContain('ensure_managed_pnpm_workspace');
+      expect(result.stdout).toContain('[SshExecutor] Installing managed worktree dependencies...');
+      expect(readFileSync(join(fakeHome, 'provision.log'), 'utf8')).toBe('custom-provision\n');
+      expect(existsSync(join(workspacePath, 'node_modules'))).toBe(true);
+      expect(readFileSync(join(workspacePath, 'payload.out'), 'utf8')).toBe('payload-ran\n');
+    } finally {
+      rmSync(fakeHome, { recursive: true, force: true });
+      proc.emit('close', 0, null);
     }
   });
 
