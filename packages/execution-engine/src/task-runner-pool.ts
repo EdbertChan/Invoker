@@ -106,7 +106,6 @@ export type TaskRunnerPoolHost = Pick<
   | 'getRemoteTargets'
   | 'getWorktreeTargets'
   | 'getExecutionPools'
-  | 'resolveExecutionAgent'
   | 'resolveExecutionModel'
   | 'executorRegistry'
   | 'dockerConfig'
