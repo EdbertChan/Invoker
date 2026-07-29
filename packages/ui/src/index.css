@@ -145,8 +145,8 @@ body {
 }
 
 .react-flow__controls-button {
-  --xy-controls-button-color: #000;
-  --xy-controls-button-color-hover: #000;
+  --xy-controls-button-color: #ec4899;
+  --xy-controls-button-color-hover: #ec4899;
 }
 
 .scrollbar-sleek {
