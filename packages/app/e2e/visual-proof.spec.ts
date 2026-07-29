@@ -1210,6 +1210,24 @@ test.describe('Visual proof capture', () => {
     await assertPageScreenshot(page, 'dag-loaded');
   });
 
+  test('pink React Flow control icons', async ({ page }) => {
+    await loadPlan(page, TEST_PLAN);
+    const controlButton = page.locator('.react-flow__controls-button:visible').first();
+    await expect(controlButton).toBeVisible();
+
+    const colors = await controlButton.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        default: style.getPropertyValue('--xy-controls-button-color').trim(),
+        hover: style.getPropertyValue('--xy-controls-button-color-hover').trim(),
+      };
+    });
+    expect(colors.default).toBe('#ec4899');
+    expect(colors.hover).toBe('#ec4899');
+
+    await captureScreenshot(page, 'pink-react-flow-control-icons');
+  });
+
   test('system setup readiness report shows a failing default preset check', async ({ page, electronApp }) => {
     const configPath = await electronApp.evaluate(() => process.env.INVOKER_REPO_CONFIG_PATH);
     if (!configPath) throw new Error('INVOKER_REPO_CONFIG_PATH was not injected into the Electron test app');
