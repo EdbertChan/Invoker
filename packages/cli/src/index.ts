@@ -50,7 +50,7 @@ import {
 import { runMcpServer } from './mcp-server.js';
 import { runDoctor, runSetup } from './onboarding.js';
 
-const VERSION = '0.0.8';
+const VERSION = '0.0.9';
 
 type CliOptions = {
   dbDir?: string;
