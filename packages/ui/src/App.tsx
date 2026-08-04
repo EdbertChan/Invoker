@@ -4195,16 +4195,16 @@ export function App() {
   return (
     <div ref={appRootRef} className="h-screen flex flex-col bg-background text-foreground font-sans" onClick={() => closeContextMenu()}>
       <Toaster
-        theme="dark"
+        theme="light"
         position="bottom-right"
         richColors
         closeButton
         toastOptions={{
           className: 'font-sans',
           style: {
-            background: 'rgb(23 23 23)',
+            background: 'rgb(255 224 241)',
             border: '1px solid var(--border-color)',
-            color: 'rgb(250 250 250)',
+            color: 'rgb(61 20 40)',
             fontSize: '13px',
           },
         }}

@@ -97,10 +97,10 @@ export interface EdgeStyle {
   hoverWidth: number;
 }
 
-const EDGE_BASE_STROKE = 'rgba(255,255,255,0.22)';
-const EDGE_BASE_HOVER = 'rgba(255,255,255,0.42)';
-const EDGE_MUTED_STROKE = 'rgba(255,255,255,0.14)';
-const EDGE_MUTED_HOVER = 'rgba(255,255,255,0.3)';
+const EDGE_BASE_STROKE = 'rgba(61,20,40,0.22)';
+const EDGE_BASE_HOVER = 'rgba(61,20,40,0.42)';
+const EDGE_MUTED_STROKE = 'rgba(61,20,40,0.14)';
+const EDGE_MUTED_HOVER = 'rgba(61,20,40,0.3)';
 const EDGE_COMPLETED_STROKE = 'rgba(52,211,153,0.6)';
 const EDGE_COMPLETED_HOVER = 'rgba(52,211,153,0.9)';
 const EDGE_RUNNING_STROKE = 'rgba(96,165,250,0.7)';
