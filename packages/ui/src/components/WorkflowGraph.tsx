@@ -235,7 +235,7 @@ function workflowEdgeVisual(kind: WorkflowGraphEdge['kind']): {
 } {
   if (kind === 'detached') {
     return {
-      stroke: 'rgba(217,119,6,0.58)',
+      stroke: 'rgba(146,64,14,0.85)',
       strokeWidth: 1.5,
       strokeDasharray: '5 6',
       ariaLabel: 'Detached workflow lineage',
@@ -243,14 +243,14 @@ function workflowEdgeVisual(kind: WorkflowGraphEdge['kind']): {
   }
   if (kind === 'historical') {
     return {
-      stroke: 'rgba(245,158,11,0.5)',
+      stroke: 'rgba(120,53,15,0.78)',
       strokeWidth: 1.5,
       strokeDasharray: '6 6',
       ariaLabel: 'Historical workflow dependency',
     };
   }
   return {
-    stroke: 'rgba(148,163,184,0.55)',
+    stroke: 'rgba(71,85,105,0.85)',
     strokeWidth: 2,
     ariaLabel: 'Active workflow dependency',
   };
