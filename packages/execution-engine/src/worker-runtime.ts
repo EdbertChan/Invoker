@@ -47,6 +47,12 @@ export interface WorkerRuntimeStopOptions {
   settleTimeoutMs?: number;
 }
 
+export interface WorkerRuntimeHealth {
+  consecutiveTickFailures: number;
+  lastTickError?: { message: string; at: string };
+  lastTickAt: string;
+}
+
 export interface WorkerRuntimeOptions {
   /** Worker family. Combined with `instanceId` to form the identity. */
   kind: string;
@@ -70,6 +76,8 @@ export interface WorkerRuntimeOptions {
   backoffBaseMs?: number;
   /** Maximum delay before a queued follow-up tick after repeated failures. Default 30s. */
   backoffMaxMs?: number;
+  /** Consecutive tick failures before the one-shot escalated error log. Default 5. */
+  failureStreakThreshold?: number;
   /** OS signals that trigger deterministic shutdown. Default `SIGINT`/`SIGTERM`. */
   shutdownSignals?: NodeJS.Signals[];
   /** Install process signal handlers on `start()`. Default `true`. */
@@ -102,6 +110,13 @@ export interface WorkerRuntime {
   stop(options?: WorkerRuntimeStopOptions): Promise<void>;
   /** True between `start()` and `stop()`. */
   isRunning(): boolean;
+  /**
+   * Read-only snapshot of the persistent consecutive-failure streak, reset only
+   * by a successful tick; aborted ticks neither count nor reset. Wrapper
+   * runtimes without an inner createWorkerRuntime (external child-process
+   * workers) do not provide it.
+   */
+  health?(): WorkerRuntimeHealth;
 }
 
 const DEFAULT_SHUTDOWN_SIGNALS: NodeJS.Signals[] = ['SIGINT', 'SIGTERM'];
@@ -136,6 +151,7 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
   const tickOnStart = options.tickOnStart ?? true;
   const shutdownSignals = options.shutdownSignals ?? DEFAULT_SHUTDOWN_SIGNALS;
   const installSignalHandlers = options.installSignalHandlers ?? true;
+  const failureStreakThreshold = options.failureStreakThreshold ?? 5;
   const logFields = { module: 'worker-runtime', kind: identity.kind, instanceId: identity.instanceId };
 
   let started = false;
@@ -146,6 +162,9 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
   let pendingReason: WorkerTickReason | null = null;
   let tickNumber = 0;
   let lastTickActivityAt = Date.now();
+  let consecutiveTickFailures = 0;
+  let lastTickError: { message: string; at: string } | null = null;
+  let failureStreakLogged = false;
   let watchdogTimer: NodeJS.Timeout | null = null;
   let stallLogged = false;
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
@@ -162,6 +181,9 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
     lastTickActivityAt = Date.now();
     try {
       await options.onTick(ctx);
+      consecutiveTickFailures = 0;
+      lastTickError = null;
+      failureStreakLogged = false;
       return true;
     } catch (err) {
       if (abortController.signal.aborted) {
@@ -169,6 +191,15 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
         return true;
       }
       options.logger.error(`[worker:${identity.kind}] tick failed`, { ...logFields, reason, err });
+      consecutiveTickFailures += 1;
+      lastTickError = { message: err instanceof Error ? err.message : String(err), at: new Date().toISOString() };
+      if (!failureStreakLogged && consecutiveTickFailures >= failureStreakThreshold) {
+        failureStreakLogged = true;
+        options.logger.error(
+          `[worker:${identity.kind}] tick failed ${consecutiveTickFailures} consecutive times (${consecutiveTickFailures}/${failureStreakThreshold}) — worker is failing every tick`,
+          { ...logFields, tickNumber, lastError: lastTickError.message },
+        );
+      }
       return false;
     } finally {
       lastTickActivityAt = Date.now();
@@ -350,5 +381,11 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
 
   const isRunning = (): boolean => started && !stopped;
 
-  return { identity, start, wake, tick, stop, isRunning };
+  const health = (): WorkerRuntimeHealth => ({
+    consecutiveTickFailures,
+    ...(lastTickError ? { lastTickError: { ...lastTickError } } : {}),
+    lastTickAt: new Date(lastTickActivityAt).toISOString(),
+  });
+
+  return { identity, start, wake, tick, stop, isRunning, health };
 }

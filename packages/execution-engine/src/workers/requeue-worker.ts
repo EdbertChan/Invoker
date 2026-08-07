@@ -284,6 +284,7 @@ export function createRequeueWorker(options: RequeueWorkerOptions): WorkerRuntim
     tick: runtime.tick,
     stop,
     isRunning: runtime.isRunning,
+    health: runtime.health,
   };
 }
 

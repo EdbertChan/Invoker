@@ -216,6 +216,7 @@ export function createWorkflowResumeWorker(options: WorkflowResumeWorkerOptions)
     tick: runtime.tick,
     stop,
     isRunning: runtime.isRunning,
+    health: runtime.health,
   };
 }
 

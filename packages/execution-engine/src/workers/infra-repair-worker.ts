@@ -879,6 +879,7 @@ export function createInfraRepairWorker(options: InfraRepairWorkerOptions): Work
     tick: runtime.tick,
     stop,
     isRunning: runtime.isRunning,
+    health: runtime.health,
   };
 }
 

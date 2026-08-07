@@ -505,5 +505,6 @@ export function createAutoApproveWorker(options: AutoApproveWorkerOptions): Work
     tick: runtime.tick,
     stop,
     isRunning: runtime.isRunning,
+    health: runtime.health,
   };
 }

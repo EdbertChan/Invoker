@@ -642,5 +642,6 @@ export function createRecoveryWorker(options: RecoveryWorkerOptions): WorkerRunt
     tick: runtime.tick,
     stop,
     isRunning: runtime.isRunning,
+    health: runtime.health,
   };
 }
