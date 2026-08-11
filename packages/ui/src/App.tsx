@@ -4604,9 +4604,9 @@ export function App() {
     return (
       <aside
         data-testid="planning-context-panel"
-        className={`${planningContextCollapsed ? 'w-16' : 'w-72'} shrink-0 border-l border-border bg-card/60 transition-all duration-150`}
+        className={`${planningContextCollapsed ? 'w-16' : 'w-72'} flex h-full min-h-0 shrink-0 flex-col border-l border-border bg-card/60 transition-all duration-150`}
       >
-        <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2.5">
           {!planningContextCollapsed && (
             <h2 className="text-sm font-semibold text-foreground">{reviewingDraft ? 'Review draft' : 'Current plan'}</h2>
           )}
@@ -4622,7 +4622,7 @@ export function App() {
         </div>
         {!planningContextCollapsed && (
           reviewingDraft ? (
-            <div className="space-y-4 p-4 text-sm">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4 text-sm">
               <p data-testid="planning-draft-locked-note" className="text-xs text-muted-foreground">
                 This draft is locked — critique in chat, or ask Invoker to re-draft, to change it.
               </p>
@@ -4683,7 +4683,7 @@ export function App() {
               </button>
             </div>
           ) : (
-            <div className="space-y-4 p-4 text-sm">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4 text-sm">
               <div>
                 <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Goal</div>
                 <p className="mt-1 text-foreground">
