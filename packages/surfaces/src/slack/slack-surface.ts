@@ -104,6 +104,8 @@ export interface SlackSurfaceConfig {
   plannerRetryBaseDelayMs?: number;
   /** Opt in to scoping-first conversational planning before YAML drafting. Default: false. */
   conversationalPlanning?: boolean;
+  /** Canonical full skill-doctor script used before exposing review drafts. */
+  planDoctorScriptPath?: string;
 
   // ── Slack-native workflow extensions ──────────────────────
   /** Lobby channel where `@Invoker` starts planning. Defaults to channelId. */
@@ -594,6 +596,7 @@ export class SlackSurface implements Surface {
   private plannerRetryLimit: number;
   private plannerRetryBaseDelayMs: number;
   private conversationalPlanning: boolean;
+  private planDoctorScriptPath?: string;
   /** Minimum spacing between thread message posts to avoid Slack burst limits. */
   private readonly messagePacingMs = 1_100;
   /** Session lifecycle metrics */
@@ -656,6 +659,7 @@ export class SlackSurface implements Surface {
     this.plannerRetryLimit = Math.max(0, config.plannerRetryLimit ?? DEFAULT_PLANNER_RETRY_LIMIT);
     this.plannerRetryBaseDelayMs = Math.max(0, config.plannerRetryBaseDelayMs ?? DEFAULT_PLANNER_RETRY_BASE_DELAY_MS);
     this.conversationalPlanning = config.conversationalPlanning ?? false;
+    this.planDoctorScriptPath = config.planDoctorScriptPath;
     this.lobbyChannelId = config.lobbyChannelId ?? config.channelId;
     this.planningCommandBuilder = config.planningCommandBuilder;
     this.prepareRepoCheckout = config.prepareRepoCheckout;
@@ -691,6 +695,7 @@ export class SlackSurface implements Surface {
         plannerRetryLimit: this.plannerRetryLimit,
         plannerRetryBaseDelayMs: this.plannerRetryBaseDelayMs,
         conversationalPlanning: this.conversationalPlanning,
+        planDoctorScriptPath: this.planDoctorScriptPath,
         onHarnessSessionId: (id, sessionId) => this.persistHarnessSessionId(id.threadTs, sessionId),
       });
     }
@@ -3290,6 +3295,7 @@ ${text}`;
         plannerRetryBaseDelayMs: this.plannerRetryBaseDelayMs,
         conversationalPlanning: this.conversationalPlanning,
         planningSurface: 'slack',
+        planDoctorScriptPath: this.planDoctorScriptPath,
         harnessSessionDriver: opts?.harnessSessionDriver,
         harnessSessionId: opts?.harnessSessionId,
         onHarnessSessionId: (sessionId) => this.persistHarnessSessionId(threadTs, sessionId),
@@ -3390,6 +3396,7 @@ ${text}`;
             plannerRetryBaseDelayMs: this.plannerRetryBaseDelayMs,
             conversationalPlanning: this.conversationalPlanning,
             planningSurface: 'slack',
+            planDoctorScriptPath: this.planDoctorScriptPath,
             ...this.harnessDriverSessionOpts(harness, context ?? {}),
             onHarnessSessionId: (sessionId) => this.persistHarnessSessionId(entry.threadTs, sessionId),
           });
