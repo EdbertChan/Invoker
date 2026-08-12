@@ -15,6 +15,11 @@ import type { ActionGraphNode, ExecutionDefaults, ExecutionHarnessOption, InAppP
 import type { TaskState, TaskReplacementDef, ExternalGatePolicyUpdate, WorkflowMeta, WorkflowStatus, WorkerActionSummary, WorkerLogEntry, WorkerStatusEntry } from './types.js';
 import type { SidebarSurface } from './lib/workflow-progress-surfaces.js';
 import { reportUiNavigation } from './lib/report-ui-navigation.js';
+import {
+  persistRendererRecoveryState,
+  readRendererRecoveryState,
+  type RendererRecoveryViewMode,
+} from './lib/renderer-recovery-state.js';
 
 import { useTasks } from './hooks/useTasks.js';
 import { useQueueStatus } from './hooks/useQueueStatus.js';
@@ -1043,7 +1048,8 @@ export function App() {
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
   const loadedTasks = useMemo(() => [...tasks.values()], [tasks]);
-  const [viewMode, setViewMode] = useState<'dag' | 'history' | 'timeline' | 'queue' | 'actionGraph'>('dag');
+  const initialRendererRecoveryState = useMemo(readRendererRecoveryState, []);
+  const [viewMode, setViewMode] = useState<RendererRecoveryViewMode>(initialRendererRecoveryState.viewMode);
   const {
     graph: actionGraph,
     error: actionGraphError,
@@ -1081,13 +1087,13 @@ export function App() {
   const lastGoodSelectedWorkflowGraphRef = useRef<SelectedWorkflowGraphSnapshot | null>(null);
   const suppressDagSurfaceDismissRef = useRef(false);
   const contextMenuTaskRef = useRef<TaskState | null>(null);
-  const [sidebarSurface, setSidebarSurface] = useState<SidebarSurface>('home');
+  const [sidebarSurface, setSidebarSurface] = useState<SidebarSurface>(initialRendererRecoveryState.sidebarSurface);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(initialRendererRecoveryState.selectedTaskId);
   const selectedTaskIdRef = useRef<string | null>(selectedTaskId);
   selectedTaskIdRef.current = selectedTaskId;
   const [selectedWorkerKind, setSelectedWorkerKind] = useState<string | null>(null);
-  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(initialRendererRecoveryState.selectedWorkflowId);
   const [reviewGateByWorkflowId, setReviewGateByWorkflowId] = useState<Record<string, ReviewGateQueryResponse | null>>({});
   const [stickySelectedWorkflow, setStickySelectedWorkflow] = useState<WorkflowMeta | null>(null);
   const [workflowSelectionDismissed, setWorkflowSelectionDismissed] = useState(false);
@@ -1167,7 +1173,7 @@ export function App() {
   const [setupPending, setSetupPending] = useState(false);
   const [setupResult, setSetupResult] = useState<InvokerSetupResult | null>(null);
   const [updateCliError, setUpdateCliError] = useState<string | null>(null);
-  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(initialRendererRecoveryState.inspectorCollapsed);
   const [inspectorManualOpen, setInspectorManualOpen] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => (typeof window === 'undefined' ? 1600 : window.innerWidth));
   const [advancedMetadataExpanded, setAdvancedMetadataExpanded] = useState(false);
@@ -1204,6 +1210,16 @@ export function App() {
   const planningTypingSequenceRef = useRef(0);
   const planningTypingFrameIdsRef = useRef<Set<number>>(new Set());
   const systemSetupAutoOpenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    persistRendererRecoveryState({
+      sidebarSurface,
+      viewMode,
+      selectedTaskId,
+      selectedWorkflowId,
+      inspectorCollapsed,
+    });
+  }, [inspectorCollapsed, selectedTaskId, selectedWorkflowId, sidebarSurface, viewMode]);
 
   const cancelPendingSystemSetupAutoOpen = useCallback(() => {
     if (systemSetupAutoOpenTimerRef.current !== null) {
