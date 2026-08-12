@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "evals" / "plan-to-invoker" / "cases.jsonl"
 DEFAULT_RUNNER_CONFIG = ROOT / "evals" / "plan-to-invoker" / "runners.example.json"
+DEFAULT_REPORT_TEMPLATE = ROOT / "scripts" / "report_template.html"
 WEIGHTS = {
     "correctness": 0.35,
     "autonomy": 0.25,
@@ -312,6 +314,138 @@ def run_evaluations(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_usd(value: float) -> str:
+    return f"${value:.2f}"
+
+
+def _nice_ticks(raw_max: float) -> tuple[float, list[float]]:
+    """Pick a rounded axis ceiling and 5 evenly spaced ticks from 0 to it."""
+    if raw_max <= 0:
+        return 1.0, [0.0, 0.2, 0.4, 0.6, 0.8]
+    steps = [0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 25, 50, 100]
+    target = raw_max / 4
+    step = next((candidate for candidate in steps if candidate >= target), None)
+    while step is None:
+        steps = [value * 10 for value in steps]
+        step = next((candidate for candidate in steps if candidate >= target), None)
+    ticks = [round(step * i, 6) for i in range(5)]
+    max_val = round(step * 4 * 1.08, 6)
+    return max_val, ticks
+
+
+def generate_report(args: argparse.Namespace) -> int:
+    cases = {case["id"]: case for case in load_cases(args.cases)}
+    responses = read_jsonl(args.responses)
+
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    for row in responses:
+        grouped[row["case_id"]][row["condition"]].append(row)
+
+    missing_baseline = sorted(cid for cid in cases if not grouped[cid]["baseline"])
+    missing_candidate = sorted(cid for cid in cases if not grouped[cid]["candidate"])
+    if missing_baseline or missing_candidate:
+        raise ValueError(
+            "A report needs both conditions for every case.\n"
+            f"Missing baseline responses: {missing_baseline or 'none'}\n"
+            f"Missing candidate responses: {missing_candidate or 'none'}"
+        )
+
+    entries = []
+    for case_id, case in cases.items():
+        baseline_rows = grouped[case_id]["baseline"]
+        candidate_rows = grouped[case_id]["candidate"]
+        baseline_cost = sum(float(row.get("cost_usd") or 0) for row in baseline_rows) / len(baseline_rows)
+        candidate_cost = sum(float(row.get("cost_usd") or 0) for row in candidate_rows) / len(candidate_rows)
+        entries.append({
+            "id": case_id,
+            "category": case.get("category", ""),
+            "prompt": case.get("prompt", ""),
+            "risk": case.get("risk", "medium"),
+            "baseline": round(baseline_cost, 6),
+            "candidate": round(candidate_cost, 6),
+            "baselineResponse": baseline_rows[0].get("response", ""),
+            "candidateResponse": candidate_rows[0].get("response", ""),
+        })
+    entries.sort(key=lambda entry: entry["candidate"], reverse=True)
+
+    case_count = len(entries)
+    baseline_calls = sum(len(grouped[cid]["baseline"]) for cid in cases)
+    candidate_calls = sum(len(grouped[cid]["candidate"]) for cid in cases)
+    total_calls = baseline_calls + candidate_calls
+    baseline_total = sum(entry["baseline"] for entry in entries)
+    candidate_total = sum(entry["candidate"] for entry in entries)
+    baseline_avg = baseline_total / case_count if case_count else 0.0
+    candidate_avg = candidate_total / case_count if case_count else 0.0
+    multiplier = (candidate_avg / baseline_avg) if baseline_avg else 0.0
+
+    raw_max = max((entry["baseline"] for entry in entries), default=0.0)
+    raw_max = max(raw_max, max((entry["candidate"] for entry in entries), default=0.0))
+    max_val, ticks = _nice_ticks(raw_max)
+
+    if args.condition_skill:
+        skill_line_count = len(args.condition_skill.read_text(encoding="utf-8").splitlines())
+        skill_lines_label = f"{skill_line_count} lines"
+        skill_path_label = str(args.condition_skill)
+    else:
+        skill_lines_label = "an unrecorded number of lines"
+        skill_path_label = "(skill file not given to `report`)"
+
+    trial_counts = [len(rows) for by_condition in grouped.values() for rows in by_condition.values()]
+    max_trials = max(trial_counts, default=1)
+    trials_label = "1 per case" if max_trials <= 1 else f"up to {max_trials} per case, averaged"
+
+    cases_json = {
+        entry["id"]: {"category": entry["category"], "prompt": entry["prompt"], "risk": entry["risk"]}
+        for entry in entries
+    }
+    data_json = [
+        {"id": entry["id"], "baseline": entry["baseline"], "candidate": entry["candidate"]}
+        for entry in entries
+    ]
+    responses_json = {
+        entry["id"]: {"baseline": entry["baselineResponse"], "candidate": entry["candidateResponse"]}
+        for entry in entries
+    }
+
+    replacements = {
+        "{{TITLE}}": args.title,
+        "{{EYEBROW}}": args.eyebrow,
+        "{{CASE_COUNT}}": str(case_count),
+        "{{SKILL_PATH}}": skill_path_label,
+        "{{MODEL}}": args.model,
+        "{{TOTAL_CALLS}}": str(total_calls),
+        "{{TRIALS_LABEL}}": trials_label,
+        "{{RECORDED_DATE}}": args.recorded_date or date.today().strftime("%b %d, %Y"),
+        "{{TOTAL_COST}}": _fmt_usd(baseline_total + candidate_total),
+        "{{BASELINE_TOTAL}}": _fmt_usd(baseline_total),
+        "{{BASELINE_AVG}}": _fmt_usd(baseline_avg),
+        "{{CANDIDATE_TOTAL}}": _fmt_usd(candidate_total),
+        "{{CANDIDATE_AVG}}": _fmt_usd(candidate_avg),
+        "{{MULTIPLIER}}": f"{multiplier:.1f}",
+        "{{SKILL_LINES}}": skill_lines_label,
+        "{{CANDIDATE_CALLS}}": str(candidate_calls),
+        "{{CASES_PATH}}": str(args.cases),
+        "{{RESPONSES_PATH}}": str(args.responses),
+        "{{CASES_JSON}}": json.dumps(cases_json, ensure_ascii=False),
+        "{{DATA_JSON}}": json.dumps(data_json, ensure_ascii=False),
+        "{{RESPONSES_JSON}}": json.dumps(responses_json, ensure_ascii=False),
+        "{{MAX_VAL}}": repr(max_val),
+        "{{TICKS_JSON}}": json.dumps(ticks),
+    }
+
+    output_html = args.template.read_text(encoding="utf-8")
+    for token, value in replacements.items():
+        output_html = output_html.replace(token, value)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(output_html, encoding="utf-8")
+    print(
+        f"Wrote report: {args.output} "
+        f"({case_count} cases, {total_calls} calls, {_fmt_usd(baseline_total + candidate_total)} total)"
+    )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -340,6 +474,18 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--allow-unmetered", action="store_true")
     run.add_argument("--output", type=Path, required=True)
     run.set_defaults(handler=run_evaluations)
+
+    report = subparsers.add_parser("report", help="Render a cost/conversation HTML report from run results")
+    report.add_argument("--cases", type=Path, default=DEFAULT_CASES)
+    report.add_argument("--responses", type=Path, required=True, help="A results JSONL file written by `run`")
+    report.add_argument("--condition-skill", type=Path, help="The skill file used for the candidate condition")
+    report.add_argument("--template", type=Path, default=DEFAULT_REPORT_TEMPLATE)
+    report.add_argument("--output", type=Path, required=True)
+    report.add_argument("--title", default="Skill Eval Cost Report")
+    report.add_argument("--eyebrow", default="Eval cost benchmark")
+    report.add_argument("--model", default="(model not recorded)", help="Label only; not read from the results file")
+    report.add_argument("--recorded-date", help="Defaults to today; pass to keep a report reproducibly dated")
+    report.set_defaults(handler=generate_report)
     return parser
 
 
