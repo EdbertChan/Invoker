@@ -489,7 +489,12 @@ install_repo_dependencies() {
 
   local attempt delay_seconds
   for ((attempt = 1; attempt <= INVOKER_PNPM_INSTALL_ATTEMPTS; attempt += 1)); do
-    if (cd "$REPO_DIR" && pnpm install --frozen-lockfile); then
+    if (
+      cd "$REPO_DIR"
+      INVOKER_SKIP_ELECTRON_INSTALL=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile \
+        && node scripts/electron.cjs --install-only \
+        && node scripts/fix-node-pty-spawn-helper.mjs
+    ); then
       return 0
     fi
     if [[ "$attempt" -eq "$INVOKER_PNPM_INSTALL_ATTEMPTS" ]]; then

@@ -17,6 +17,8 @@ mkdir -p \
   "$TMP_ROOT/home"
 
 cp "$ROOT/scripts/provision-ssh-worker.sh" "$REPO_DIR/scripts/provision-ssh-worker.sh"
+printf 'process.exit(0);\n' > "$REPO_DIR/scripts/electron.cjs"
+printf 'process.exit(0);\n' > "$REPO_DIR/scripts/fix-node-pty-spawn-helper.mjs"
 printf '{"private":true}\n' > "$REPO_DIR/package.json"
 printf 'lockfileVersion: 9.0\n' > "$REPO_DIR/pnpm-lock.yaml"
 
