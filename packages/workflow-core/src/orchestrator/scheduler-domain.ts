@@ -128,13 +128,15 @@ function hasPendingLaunchRuntimeState(task: TaskState): boolean {
 function planPendingLaunchQueue(
   host: SchedulerDomainHost,
   candidateJobs: TaskJob[],
-  opts?: LaunchReadinessOptions,
+  opts?: LaunchReadinessOptions & { alreadyRefreshed?: boolean },
 ): TaskJob[] {
   // Refresh once for the whole batch, not once per candidate job below --
   // readiness for every job in this pass is evaluated against the same
   // in-memory snapshot, so a per-job refresh only re-reads data this
   // function already has.
-  host.refreshFromDb();
+  if (!opts?.alreadyRefreshed) {
+    host.refreshFromDb();
+  }
   const mergedJobs = new Map<string, TaskJob>();
   for (const sourceJob of [...host.scheduler.getQueuedJobs(), ...candidateJobs]) {
     const task = host.stateGetTask(sourceJob.taskId);
@@ -198,8 +200,9 @@ function planPendingLaunchQueue(
 export function getPendingLaunchQueueSnapshotImpl(
   host: SchedulerDomainHost,
   candidateJobs: TaskJob[],
+  opts?: { alreadyRefreshed?: boolean },
 ): TaskJob[] {
-  return planPendingLaunchQueue(host, candidateJobs);
+  return planPendingLaunchQueue(host, candidateJobs, opts);
 }
 
 function rebuildPendingLaunchQueue(
