@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import {
   closeSync,
   existsSync,
@@ -9,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -36,6 +37,7 @@ export const AUTOMATION_CHECKOUT_DIRS = [
 export const AUTOMATION_CHECKOUT_MIN_AGE_HOURS = 48;
 
 export const STALE_WORKTREE_MIN_AGE_HOURS = 48;
+export const STALE_WORKTREE_GIT_TIMEOUT_MS = 5 * 60 * 1000;
 
 export const LOG_TRIM_MAX_BYTES = 100 * 1024 * 1024;
 export const LOG_TRIM_KEEP_BYTES = 20 * 1024 * 1024;
@@ -231,12 +233,28 @@ export async function reapDeletingOrphans(opts: {
   return results;
 }
 
-export function reapLocalStaleWorktrees(opts: {
+type RunLocalGit = (args: string[], timeoutMs: number) => Promise<void>;
+
+function defaultRunLocalGit(args: string[], timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { timeout: timeoutMs, windowsHide: true }, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+export async function reapLocalStaleWorktrees(opts: {
   invokerHome: string;
   logger?: Logger;
   userHome?: string;
   nowMs?: number;
-}): string[] {
+  runLocalGit?: RunLocalGit;
+  gitTimeoutMs?: number;
+}): Promise<string[]> {
   const userHome = opts.userHome ?? homedir();
   const home = expandTildeHome(opts.invokerHome, userHome);
   if (!isSafeInvokerHome(home, userHome)) return [];
@@ -246,6 +264,8 @@ export function reapLocalStaleWorktrees(opts: {
 
   const nowMs = opts.nowMs ?? Date.now();
   const minAgeMs = STALE_WORKTREE_MIN_AGE_HOURS * 60 * 60 * 1000;
+  const runLocalGit = opts.runLocalGit ?? defaultRunLocalGit;
+  const gitTimeoutMs = opts.gitTimeoutMs ?? STALE_WORKTREE_GIT_TIMEOUT_MS;
   const staleByRepoHash = new Map<string, string[]>();
 
   let repoHashes: string[];
@@ -282,15 +302,16 @@ export function reapLocalStaleWorktrees(opts: {
     const repoPath = join(home, 'repos', repoHash);
     for (const path of paths) {
       try {
-        execFileSync('git', ['-C', repoPath, 'worktree', 'remove', '--force', path], {
-          stdio: 'ignore',
-        });
+        await runLocalGit(
+          ['-C', repoPath, 'worktree', 'remove', '--force', path],
+          gitTimeoutMs,
+        );
       } catch (err) {
         opts.logger?.warn?.(`[reaper] git worktree remove failed for ${path}: ${errorDetail(err)}`, {
           module: 'reaper',
         });
         try {
-          rmSync(path, { recursive: true, force: true });
+          await rm(path, { recursive: true, force: true });
         } catch (rmErr) {
           opts.logger?.warn?.(`[reaper] failed to remove stale worktree ${path}: ${errorDetail(rmErr)}`, {
             module: 'reaper',
@@ -303,7 +324,7 @@ export function reapLocalStaleWorktrees(opts: {
     }
 
     try {
-      execFileSync('git', ['-C', repoPath, 'worktree', 'prune'], { stdio: 'ignore' });
+      await runLocalGit(['-C', repoPath, 'worktree', 'prune'], gitTimeoutMs);
     } catch (err) {
       opts.logger?.warn?.(`[reaper] git worktree prune failed for ${repoPath}: ${errorDetail(err)}`, {
         module: 'reaper',
@@ -427,6 +448,8 @@ export async function reapStaleWorktrees(opts: {
   userHome?: string;
   nowMs?: number;
   runRemoteScript?: (target: RemoteDiskTarget, script: string) => Promise<string>;
+  runLocalGit?: RunLocalGit;
+  gitTimeoutMs?: number;
 }): Promise<DiskCleanupResult[]> {
   const targetKey = `local ${opts.invokerHome}`;
   const userHome = opts.userHome ?? homedir();
@@ -444,7 +467,7 @@ export async function reapStaleWorktrees(opts: {
         targetKey,
         ok: true,
         reason: 'reap-worktrees',
-        detail: `removed ${reapLocalStaleWorktrees(opts).length}`,
+        detail: `removed ${(await reapLocalStaleWorktrees(opts)).length}`,
         protectedSkipCount: 0,
         protectedSkipBytes: 0,
       };
