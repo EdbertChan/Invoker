@@ -111,7 +111,9 @@ describe('window-lifecycle', () => {
 
     electronMock.webContentsHandlers.get('did-fail-load')?.({}, -6, 'ERR_FILE_NOT_FOUND', 'file:///missing/index.html');
 
-    expect(electronMock.fakeWindow.loadURL).toHaveBeenCalledWith(expect.stringContaining('The UI failed to load'));
+    const fallbackUrl = electronMock.fakeWindow.loadURL.mock.calls[0]?.[0];
+    expect(fallbackUrl).toMatch(/^data:text\/html;charset=utf-8,/);
+    expect(decodeURIComponent(fallbackUrl)).toContain('The UI failed to load');
     expect(logger.error).toHaveBeenCalledWith(
       'main window did-fail-load: code=-6 desc=ERR_FILE_NOT_FOUND url=file:///missing/index.html',
       { module: 'window' },
@@ -134,7 +136,9 @@ describe('window-lifecycle', () => {
 
     electronMock.webContentsHandlers.get('render-process-gone')?.({}, { reason: 'crashed', exitCode: 9 });
 
-    expect(electronMock.fakeWindow.loadURL).toHaveBeenCalledWith(expect.stringContaining('The UI failed to load'));
+    const fallbackUrl = electronMock.fakeWindow.loadURL.mock.calls[0]?.[0];
+    expect(fallbackUrl).toMatch(/^data:text\/html;charset=utf-8,/);
+    expect(decodeURIComponent(fallbackUrl)).toContain('The UI failed to load');
   });
 
   it('maps and focuses e2e compositor windows', () => {

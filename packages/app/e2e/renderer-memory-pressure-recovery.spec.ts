@@ -1,7 +1,6 @@
 import { expect, test, waitForInvokerBridge } from './fixtures/electron-app.js';
 
 test('critical memory pressure keeps the UI responsive and renderer loss shows a diagnostic', async ({ electronApp }) => {
-  test.fail(true, 'renderer-loss fallback is truncated by its unescaped data URL');
   const page = await electronApp.firstWindow();
   await waitForInvokerBridge(page);
 
