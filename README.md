@@ -152,3 +152,5 @@ Invoker also includes the **Neko Catpital Ventures, LLC Addendum** in [LICENSE](
 - except for evaluation or testing, you may not use the Software to replace employees or reduce headcount for substantially similar roles for six months after first production use
 
 The `LICENSE` file is the controlling text, including the full NCV Addendum.
+
+stack repro 20260812020815
