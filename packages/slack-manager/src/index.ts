@@ -146,6 +146,7 @@ async function main(): Promise<void> {
     prepareRepoCheckout: createPrepareRepoCheckout(path.join(managerHome, 'planning-clones')),
     defaultBranch: process.env.INVOKER_DEFAULT_BRANCH ?? 'master',
     conversationalPlanning: process.env.INVOKER_SLACK_CONVERSATIONAL_PLANNING !== '0',
+    planDoctorScriptPath: path.join(repoRoot, 'skills', 'plan-to-invoker', 'scripts', 'skill-doctor.sh'),
     repoUrl,
     defaultRepoUrl: repoUrl,
     repoAliases: runtimeConfig.repoAliases,
