@@ -1,15 +1,18 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import YAML from 'yaml';
 
 const FULL_CI_GATE = "${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') }}";
 const NON_PR_GATE = "${{ github.event_name != 'pull_request' }}";
 const ORDINARY_PR_GATE = "${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'mergify/merge-queue/') }}";
 const PR_BODY_MERGE_QUEUE_CANCEL_GATE = "${{ !startsWith(github.head_ref, 'mergify/merge-queue/') }}";
+const MERGE_QUEUE_HEAD_GATE = "${{ startsWith(github.head_ref, 'mergify/merge-queue/') }}";
+const HEAD_REF_EXPRESSION = '${{ github.head_ref }}';
 const FULL_CI_JOBS = new Set(['build-artifacts', 'e2e-proof', 'e2e-proof-aggregate', 'required-fast', 'playwright', 'ssh', 'optional-other']);
 
 const workflow = YAML.parse(readFileSync('.github/workflows/ci.yml', 'utf8'));
 const prBodyWorkflow = YAML.parse(readFileSync('.github/workflows/pr-body.yml', 'utf8'));
+const closeCleanupPath = '.github/workflows/merge-queue-close-cleanup.yml';
 const mergify = YAML.parse(readFileSync('.mergify.yml', 'utf8'));
 const jobs = workflow.jobs ?? {};
 
@@ -72,6 +75,36 @@ assert(
   prBodyWorkflow.concurrency['cancel-in-progress'] === PR_BODY_MERGE_QUEUE_CANCEL_GATE,
   'PR Body workflow must not cancel in-progress merge-queue runs',
 );
+
+assert(
+  existsSync(closeCleanupPath),
+  'Merge-queue close cleanup workflow must cancel runs left behind by closed wrapper PRs',
+);
+const closeCleanupWorkflow = YAML.parse(readFileSync(closeCleanupPath, 'utf8'));
+assert(
+  closeCleanupWorkflow.on?.pull_request_target?.types?.length === 1
+    && closeCleanupWorkflow.on.pull_request_target.types[0] === 'closed',
+  'Merge-queue close cleanup workflow must run only when a PR closes',
+);
+
+for (const [jobName, sourceWorkflow] of [
+  ['cancel-ci', workflow],
+  ['cancel-pr-body', prBodyWorkflow],
+]) {
+  assert(
+    String(sourceWorkflow.concurrency?.group ?? '').includes("format('merge-queue-{0}', github.head_ref)"),
+    `${sourceWorkflow.name} must isolate merge-queue runs by head ref`,
+  );
+  const cleanupJob = closeCleanupWorkflow.jobs?.[jobName];
+  assert(cleanupJob, `Missing merge-queue close cleanup job ${jobName}`);
+  assert(cleanupJob.if === MERGE_QUEUE_HEAD_GATE, `${jobName} must target only Mergify merge-queue wrappers`);
+  assert(cleanupJob['runs-on'] === 'ubuntu-latest', `${jobName} must not consume the self-hosted capacity it repairs`);
+  assert(cleanupJob.concurrency?.['cancel-in-progress'] === true, `${jobName} must cancel the matching stale run`);
+  assert(
+    cleanupJob.concurrency?.group === `${sourceWorkflow.name}-merge-queue-${HEAD_REF_EXPRESSION}`,
+    `${jobName} must reuse ${sourceWorkflow.name}'s merge-queue concurrency group`,
+  );
+}
 
 const mergeConditions = (mergify.queue_rules ?? []).flatMap((rule) => rule.merge_conditions ?? []);
 const requiredChecks = new Set(
