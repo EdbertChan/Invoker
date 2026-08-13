@@ -30,6 +30,7 @@ import {
   type WorkerRuntime,
   type WorkerRuntimeDependencies,
 } from '@invoker/execution-engine';
+import { SLACK_BUG_SCAN_WORKER_KIND } from '@invoker/slack-bug-scan';
 import { collectRecoveryWorkerStatus } from './recovery-worker-observability.js';
 
 /** Worker kinds auto-started on every owner boot, regardless of config. */
@@ -45,8 +46,13 @@ export const PR_MAINTENANCE_AUTO_STARTED_WORKER_KINDS = [
   PR_AUTO_LABEL_WORKER_KIND,
 ] as const;
 
+export const SLACK_BUG_SCAN_AUTO_STARTED_WORKER_KINDS = [
+  SLACK_BUG_SCAN_WORKER_KIND,
+] as const;
+
 type AutoStartedOwnerWorkerKindOptions = {
   prMaintenanceEnabled?: boolean;
+  slackBugScanEnabled?: boolean;
   diskHeadroomCleanupEnabled?: boolean;
   autoApproveAIFixes?: boolean;
   infraRepairEnabled?: boolean;
@@ -58,6 +64,7 @@ type AutoStartedOwnerWorkerKindOptions = {
 
 type AutoStartedOwnerWorkerKindConfig = {
   prMaintenance?: { enabled?: boolean };
+  slackBugScan?: { enabled?: boolean };
   diskHeadroom?: { cleanupEnabled?: boolean };
   autoApproveAIFixes?: boolean;
   infraRepair?: { enabled?: boolean };
@@ -70,8 +77,8 @@ type AutoStartedOwnerWorkerKindConfig = {
 
 /**
  * Compute the owner worker kinds that auto-start on boot. The PR-maintenance
- * workers are gated on `prMaintenance.enabled` (matching the config docstring).
- * Saved per-worker desired state still overrides in both directions.
+ * and Slack bug-scan workers are gated on their own `enabled` flags. Saved
+ * per-worker desired state still overrides in both directions.
  */
 export function autoStartedOwnerWorkerKinds(
   options: AutoStartedOwnerWorkerKindOptions = {},
@@ -85,6 +92,7 @@ export function autoStartedOwnerWorkerKinds(
     options.reaperEnabled,
     options.workflowResumeEnabled,
     options.requeueEnabled,
+    options.slackBugScanEnabled,
   ].some((value) => value !== undefined);
   if (options.prMaintenanceEnabled && !hasWorkerGateOverrides) {
     workerKinds.push(PR_ADMIN_BYPASS_LAND_WORKER_KIND, INFRA_REPAIR_WORKER_KIND);
@@ -114,6 +122,9 @@ export function autoStartedOwnerWorkerKinds(
   if (options.requeueEnabled) {
     workerKinds.push(REQUEUE_WORKER_KIND);
   }
+  if (options.slackBugScanEnabled) {
+    workerKinds.push(...SLACK_BUG_SCAN_AUTO_STARTED_WORKER_KINDS);
+  }
   return workerKinds;
 }
 
@@ -130,6 +141,7 @@ export function autoStartedOwnerWorkerKindsForConfig(
     reaperEnabled: Boolean(config?.reaper?.enabled),
     workflowResumeEnabled: Boolean(config?.workflowResume?.enabled),
     requeueEnabled: Boolean(config?.requeueEnabled),
+    slackBugScanEnabled: Boolean(config?.slackBugScan?.enabled),
   });
   return config?.e2eAutoFixEnabled
     ? [...workerKinds, E2E_AUTOFIX_WORKER_KIND]
@@ -273,6 +285,7 @@ const BUILT_IN_WORKER_KINDS = new Set<string>([
   PR_AUTO_LABEL_WORKER_KIND,
   REAPER_WORKER_KIND,
   WORKFLOW_RESUME_WORKER_KIND,
+  SLACK_BUG_SCAN_WORKER_KIND,
 ]);
 
 export function createWorkerRuntimeController(options: {
