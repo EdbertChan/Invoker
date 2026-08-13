@@ -47,7 +47,8 @@ export function registerMainWindowActivateHandler(deps: MainWindowActivateDeps):
   });
 }
 
-const FALLBACK_WINDOW_HTML = 'data:text/html,<html><body style="background:#1a1a2e;color:#eee;font-family:system-ui;padding:2rem"><h1>Invoker</h1><p>The UI failed to load. Restart Invoker. If this keeps happening, reinstall Invoker or rebuild the UI from a source checkout.</p></body></html>';
+const FALLBACK_WINDOW_DOCUMENT = '<html><body style="background:#1a1a2e;color:#eee;font-family:system-ui;padding:2rem"><h1>Invoker</h1><p>The UI failed to load. Restart Invoker. If this keeps happening, reinstall Invoker or rebuild the UI from a source checkout.</p></body></html>';
+const FALLBACK_WINDOW_HTML = `data:text/html;charset=utf-8,${encodeURIComponent(FALLBACK_WINDOW_DOCUMENT)}`;
 
 export function createMainWindow(deps: MainWindowLifecycleDeps): BrowserWindow {
   deps.recordStartupMark('createWindow.begin');
