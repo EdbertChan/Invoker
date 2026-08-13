@@ -903,6 +903,38 @@ test.describe('Visual proof capture', () => {
     });
   });
 
+  test('plan doctor rejection stays out of the review UI', async ({ page }) => {
+    const rejectedReply = [
+      'Draft not shown: the plan doctor rejected it.',
+      '',
+      'Nothing was submitted.',
+      '',
+      '- Task "define-terminal-workflow-cleanup-policy" uses "autoFix", which is no longer supported in plan YAML.',
+    ].join('\n');
+    await page.evaluate(async (replyOnly) => {
+      await window.invoker.setTestPlanningChatResponse({ replyOnly } as never);
+    }, rejectedReply);
+
+    await page.getByTestId('sidebar-home').click();
+    await page.getByRole('button', { name: 'Options' }).click();
+    await expect(page.getByRole('heading', { name: 'Planning chat' })).toBeVisible();
+    await page.getByTestId('invoker-terminal-input').fill('Draft the approved plan');
+    await page.getByRole('button', { name: 'Send' }).click();
+
+    const transcript = page.getByTestId('invoker-terminal-transcript');
+    await expect(transcript).toContainText('Draft not shown: the plan doctor rejected it.');
+    await expect(transcript).toContainText('Nothing was submitted.');
+    await expect(transcript).toContainText('uses "autoFix", which is no longer supported');
+    await expect(page.getByRole('button', { name: 'Review draft' })).toHaveCount(0);
+    await expect(page.getByTestId('invoker-terminal-ready-bar')).toHaveCount(0);
+
+    await captureScreenshot(page, 'plan-doctor-rejection-no-review');
+
+    await page.evaluate(async () => {
+      await window.invoker.setTestPlanningChatResponse(null);
+    });
+  });
+
   test('planning context sidebar shows repo bind status', async ({ page }) => {
     await page.getByTestId('sidebar-home').click();
     await page.getByRole('button', { name: 'Options' }).click();
