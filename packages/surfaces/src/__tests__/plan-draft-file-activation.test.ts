@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import * as child_process from 'node:child_process';
 import { buildPlanSystemPrompt, PlanConversation, isConfirmation } from '../slack/plan-conversation.js';
@@ -17,6 +18,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 const mockSpawn = vi.mocked(child_process.spawn);
+const testDir = dirname(fileURLToPath(import.meta.url));
 
 function fakePlannerChild(stdout: string, beforeClose?: () => void): any {
   const proc = new EventEmitter() as any;
@@ -165,6 +167,22 @@ describe('plan draft file - activation side', () => {
     expect(draftedPlan).not.toBeNull();
     const parsedDraft = parseYaml(draftedPlan!) as Record<string, unknown>;
     expect(parsedDraft.name).toBe('Draft Activation');
+  });
+
+  it.fails('does not expose the 76829fbb sidecar incident before the draft passes validation', async () => {
+    const conversation = new PlanConversation({ workingDir, threadTs: '76829fbb-432f-4115-b401-72d08c1645a4', plannerRetryLimit: 0 });
+    const path = conversation.planDraftFilePath();
+    if (!path) throw new Error('expected a plan draft path');
+    const incidentPlan = readFileSync(join(testDir, 'planning-review-76829fbb.yaml'), 'utf8');
+
+    mockSpawn.mockReturnValueOnce(fakePlannerChild(
+      'Drafted the plan.',
+      () => writeFileSync(path, incidentPlan, 'utf8'),
+    ));
+    await conversation.sendMessage('Draft the approved plan');
+
+    expect(conversation.lastTurnDraftPlanText).toBeNull();
+    expect(conversation.getDraftedPlan()).toBeNull();
   });
 });
 
