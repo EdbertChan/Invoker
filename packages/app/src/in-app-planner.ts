@@ -91,6 +91,8 @@ export interface InAppPlannerDeps {
   logger?: Logger;
   plannerReplyOverride?: (formattedMessage: string) => Promise<string>;
   onRawPlannerOutput?: (event: InAppPlanningStreamEvent) => void;
+  /** Canonical full skill-doctor script. Kept separate from target worktrees. */
+  planDoctorScriptPath?: string;
 }
 
 export interface InAppPlanningChatSession {
@@ -602,7 +604,7 @@ export function isDraftingAuthorizedByTurn(message: string, messagesBeforeTurn: 
 
 function planConversationConfig(
   preset: HarnessPreset,
-  deps: Pick<InAppPlannerDeps, 'config' | 'workingDir' | 'planningCommandBuilder' | 'executionAgentRegistry' | 'conversationRepo' | 'logger' | 'onRawPlannerOutput'> & { mcpConfigPath?: string },
+  deps: Pick<InAppPlannerDeps, 'config' | 'workingDir' | 'planningCommandBuilder' | 'executionAgentRegistry' | 'conversationRepo' | 'logger' | 'onRawPlannerOutput' | 'planDoctorScriptPath'> & { mcpConfigPath?: string },
   threadTs: string,
   selectHarnessSessionDriver: PlannerSurfacesModule['selectHarnessSessionDriver'],
   options: { conversationalPlanning?: boolean; draftingPreauthorized?: boolean } = {},
@@ -629,6 +631,7 @@ function planConversationConfig(
     }),
     plannerRetryLimit: deps.config.plannerRetryLimit,
     plannerRetryBaseDelayMs: deps.config.plannerRetryBaseDelayMs,
+    planDoctorScriptPath: deps.planDoctorScriptPath,
     onRawPlannerOutput: deps.onRawPlannerOutput
       ? (chunk) => deps.onRawPlannerOutput?.({ sessionId: threadTs, chunk })
       : undefined,
@@ -685,7 +688,12 @@ async function createSession(
     };
   }
   const conversationDeps = worktreeBinding
-    ? { ...deps, workingDir: worktreeBinding.worktreePath, mcpConfigPath: planningMcpConfigPath(worktreeBinding.worktreePath) }
+    ? {
+        ...deps,
+        planDoctorScriptPath: deps.planDoctorScriptPath,
+        workingDir: worktreeBinding.worktreePath,
+        mcpConfigPath: planningMcpConfigPath(worktreeBinding.worktreePath),
+      }
     : deps;
 
   const session: InAppPlanningChatSession = {
@@ -753,7 +761,7 @@ export async function planFromGoal(
     const { PlanConversation, extractYamlPlan, selectHarnessSessionDriver } = await loadPlannerSurfaces();
     const conversation = new PlanConversation(planConversationConfig(preset, deps, randomUUID(), selectHarnessSessionDriver, { conversationalPlanning: true, draftingPreauthorized: true }));
     const plannerOutput = await conversation.sendMessage(goal);
-    const planText = extractYamlPlan(plannerOutput);
+    const planText = conversation.lastTurnDraftPlanText ?? extractYamlPlan(plannerOutput);
     if (!planText) {
       return { ok: false, error: 'Planner did not return a valid YAML plan.' };
     }
@@ -1107,6 +1115,8 @@ export async function rebindPlanningChatRepo(
     sessions: InAppPlanningChatSessions;
     planningSessionStore?: InAppPlanningSessionStore;
     repoPool?: PlanningRepoPool;
+    workingDir?: string;
+    planDoctorScriptPath?: string;
   },
 ): Promise<InAppPlanningRebindRepoResponse> {
   const rawRequest = request as Partial<InAppPlanningRebindRepoRequest> | null | undefined;
@@ -1171,6 +1181,7 @@ export async function rebindPlanningChatRepo(
     const { PlanConversation, selectHarnessSessionDriver } = await loadPlannerSurfaces();
     const conversationDeps = {
       ...deps,
+      planDoctorScriptPath: deps.planDoctorScriptPath,
       workingDir: provisioned.worktreePath,
       mcpConfigPath: planningMcpConfigPath(provisioned.worktreePath),
     };
@@ -1294,7 +1305,12 @@ export async function restorePlanningChatSessions(
       }
     }
     const conversationDeps = restoredWorktreePath
-      ? { ...deps, workingDir: restoredWorktreePath, mcpConfigPath: planningMcpConfigPath(restoredWorktreePath) }
+      ? {
+          ...deps,
+          planDoctorScriptPath: deps.planDoctorScriptPath,
+          workingDir: restoredWorktreePath,
+          mcpConfigPath: planningMcpConfigPath(restoredWorktreePath),
+        }
       : deps;
 
     const conversation = new PlanConversation(planConversationConfig(preset, conversationDeps, record.id, selectHarnessSessionDriver, { conversationalPlanning: true }));

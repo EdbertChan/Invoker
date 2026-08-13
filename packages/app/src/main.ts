@@ -559,6 +559,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const repoRoot = resolveRepoRoot(__dirname, { fallback: process.resourcesPath });
+const planDoctorScriptPath = path.join(repoRoot, 'skills', 'plan-to-invoker', 'scripts', 'skill-doctor.sh');
 
 // Load secrets from ~/.invoker/.env (canonical) then the repo .env BEFORE any startup guard
 // reads process.env. dotenv never overrides vars already set in the real environment.
@@ -1286,6 +1287,7 @@ function startHeadlessMode(): void {
       await restorePlanningChatSessions(persistence.listInAppPlanningSessions(), {
         config: invokerConfig,
         workingDir: repoRoot,
+        planDoctorScriptPath,
         sessions: planningChatSessions,
         planningCommandBuilder,
         executionAgentRegistry: agentRegistry,
@@ -1299,6 +1301,7 @@ function startHeadlessMode(): void {
       let testPlanningChatResponse:
         | { planYaml: string; planName: string; reply?: string; delayMs?: number }
         | { throwError: string }
+        | { replyOnly: string }
         | null = null;
 
       const executeStandaloneGuiMutation = async (payload: GuiMutationPayload): Promise<unknown> => {
@@ -1334,6 +1337,7 @@ function startHeadlessMode(): void {
             return planFromGoalInApp(payload.args[0] as InAppPlanRequest, {
               config: invokerConfig,
               workingDir: repoRoot,
+              planDoctorScriptPath,
               loadGeneratedPlan,
               planningCommandBuilder,
               conversationRepo: planningConversationRepo,
@@ -1343,6 +1347,7 @@ function startHeadlessMode(): void {
             return createPlanningChatSession(payload.args[0] as InAppPlanningCreateSessionRequest | undefined, {
               config: invokerConfig,
               workingDir: repoRoot,
+              planDoctorScriptPath,
               sessions: planningChatSessions,
               planningCommandBuilder,
               executionAgentRegistry: agentRegistry,
@@ -1363,6 +1368,9 @@ function startHeadlessMode(): void {
                 if ('throwError' in planningChatResponseOverride) {
                   throw new Error(planningChatResponseOverride.throwError);
                 }
+                if ('replyOnly' in planningChatResponseOverride) {
+                  return planningChatResponseOverride.replyOnly;
+                }
                 if (planningChatResponseOverride.delayMs) {
                   await new Promise((resolve) => setTimeout(resolve, planningChatResponseOverride.delayMs));
                 }
@@ -1372,6 +1380,7 @@ function startHeadlessMode(): void {
             return sendPlanningChatMessage(payload.args[0] as InAppPlanningChatRequest, {
               config: invokerConfig,
               workingDir: repoRoot,
+              planDoctorScriptPath,
               sessions: planningChatSessions,
               planningCommandBuilder,
               executionAgentRegistry: agentRegistry,
@@ -1408,6 +1417,8 @@ function startHeadlessMode(): void {
               sessions: planningChatSessions,
               planningSessionStore: readOnlyMode ? undefined : persistence,
               repoPool: (executorRegistry.get('worktree') as WorktreeExecutor).getRepoPool(),
+              workingDir: repoRoot,
+              planDoctorScriptPath,
             });
           }
           case 'invoker:planning-chat-delete': {
