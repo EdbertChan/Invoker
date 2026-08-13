@@ -47,7 +47,7 @@ function createStaleWorktree(): { home: string; root: string; worktreePath: stri
 }
 
 describe('stale-worktree reaper responsiveness (real git)', { timeout: 30_000 }, () => {
-  it.fails('allows owner-loop callbacks to run while Git removes a stale worktree', async () => {
+  it('allows owner-loop callbacks to run while Git removes a stale worktree', async () => {
     const { home, root, worktreePath } = createStaleWorktree();
     let reapCompleted = false;
     let callbackSawReapComplete: boolean | undefined;
