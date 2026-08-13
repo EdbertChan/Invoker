@@ -138,7 +138,7 @@ describe('extractYamlPlan', () => {
     expect(plan.onFinish).toBeUndefined();
   });
 
-  it('preserves explicit supported fields and strips legacy auto-fix fields from planner YAML', () => {
+  it('preserves legacy auto-fix fields so the doctor can reject instead of silently sanitizing them', () => {
     const text = `\`\`\`yaml
 name: "Full"
 onFinish: merge
@@ -162,14 +162,14 @@ tasks:
     expect(plan.baseBranch).toBe('develop');
     expect(plan.featureBranch).toBe('feature/test');
     expect(plan.mergeMode).toBe('automatic');
-    expect(plan.autoFixRetries).toBeUndefined();
+    expect(plan.autoFixRetries).toBe(3);
     expect(plan.tasks[0].pivot).toBe(true);
-    expect(plan.tasks[0].autoFix).toBeUndefined();
-    expect(plan.tasks[0].autoFixRetries).toBeUndefined();
+    expect(plan.tasks[0].autoFix).toBe(true);
+    expect(plan.tasks[0].autoFixRetries).toBe(2);
     expect(plan.tasks[0].requiresManualApproval).toBe(true);
   });
 
-  it('accepts stacked workflow YAML and strips legacy fields recursively', () => {
+  it('preserves stacked legacy fields for recursive doctor diagnostics', () => {
     const text = `\`\`\`yaml
 name: "Workers Surface"
 repoUrl: git@github.com:test/repo.git
@@ -203,9 +203,9 @@ workflows:
       'Workers Surface Contracts',
       'Workers Surface UI',
     ]);
-    expect(plan.autoFixRetries).toBeUndefined();
-    expect(plan.workflows[0].autoFixRetries).toBeUndefined();
-    expect(plan.workflows[0].tasks[0].autoFix).toBeUndefined();
+    expect(plan.autoFixRetries).toBe(3);
+    expect(plan.workflows[0].autoFixRetries).toBe(2);
+    expect(plan.workflows[0].tasks[0].autoFix).toBe(true);
   });
 
   it('preserves discovered repo commands without rewriting them', () => {
@@ -902,6 +902,8 @@ describe('PlanConversation prompt construction', () => {
     expect(prompt).toContain('plan-to-invoker');
     expect(prompt).toContain('skills/plan-to-invoker/SKILL.md');
     expect(prompt).toContain('Harness handoff mode');
+    expect(prompt).toContain('Never include `autoFix` or `autoFixRetries`');
+    expect(prompt).toContain('will not present the draft until every check passes');
     expect(prompt).not.toContain('tasks:\n  - id: task-1');
     expect(prompt).not.toContain('name: "Plan Name"');
   });
