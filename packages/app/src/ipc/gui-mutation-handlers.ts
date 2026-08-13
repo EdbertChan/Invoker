@@ -1204,6 +1204,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
     return Boolean(mainWindow && !mainWindow.isDestroyed());
   };
   const ownerMode = getOwnerMode();
+  const planDoctorScriptPath = join(repoRoot, 'skills', 'plan-to-invoker', 'scripts', 'skill-doctor.sh');
   const workerRuntimeController = getWorkerRuntimeController();
   const workflowIdForTaskArg = actions.workflowIdForTaskArg;
   const workflowIdForTargetArg = actions.workflowIdForTargetArg;
@@ -1311,6 +1312,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
   await restorePlanningChatSessions(persistence.listInAppPlanningSessions(), {
     config: invokerConfig,
     workingDir: repoRoot,
+    planDoctorScriptPath,
     sessions: planningChatSessions,
     planningCommandBuilder,
     executionAgentRegistry: agentRegistry,
@@ -1329,6 +1331,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
   let testPlanningChatResponse:
     | { planYaml: string; planName: string; reply?: string; delayMs?: number }
     | { throwError: string }
+    | { replyOnly: string }
     | null = null;
 
 
@@ -1340,6 +1343,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
     return planFromGoalInApp(args[0] as InAppPlanRequest, {
       config: invokerConfig,
       workingDir: repoRoot,
+      planDoctorScriptPath,
       loadGeneratedPlan: loadGeneratedPlanPreview,
       planningCommandBuilder,
       conversationRepo: planningConversationRepo,
@@ -1349,6 +1353,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
     return createPlanningChatSession(request as InAppPlanningCreateSessionRequest | undefined, {
       config: invokerConfig,
       workingDir: repoRoot,
+      planDoctorScriptPath,
       sessions: planningChatSessions,
       planningCommandBuilder,
       executionAgentRegistry: agentRegistry,
@@ -1370,6 +1375,9 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
         if ('throwError' in planningChatResponseOverride) {
           throw new Error(planningChatResponseOverride.throwError);
         }
+        if ('replyOnly' in planningChatResponseOverride) {
+          return planningChatResponseOverride.replyOnly;
+        }
         if (planningChatResponseOverride.delayMs) {
           await new Promise((resolve) => setTimeout(resolve, planningChatResponseOverride.delayMs));
         }
@@ -1379,6 +1387,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
     return sendPlanningChatMessage(request as InAppPlanningChatRequest, {
       config: invokerConfig,
       workingDir: repoRoot,
+      planDoctorScriptPath,
       sessions: planningChatSessions,
       planningCommandBuilder,
       executionAgentRegistry: agentRegistry,
@@ -1425,6 +1434,8 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
       sessions: planningChatSessions,
       planningSessionStore: ownerMode ? persistence : undefined,
       repoPool: (executorRegistry.get('worktree') as WorktreeExecutor).getRepoPool(),
+      workingDir: repoRoot,
+      planDoctorScriptPath,
     });
   });
   registerGuiMutationHandler('invoker:load-plan', async (planTextArg: unknown) => {
