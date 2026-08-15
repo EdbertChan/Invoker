@@ -2,7 +2,13 @@
 process.env.TZ = 'UTC';
 
 import '@testing-library/jest-dom/vitest';
+import { configure } from '@testing-library/react';
 import { beforeEach } from 'vitest';
+
+// The selected-workflow graph body intentionally mounts after a one-second
+// interaction delay. Keep async assertions beyond that product timer so they
+// observe the rendered graph instead of racing Testing Library's 1s default.
+configure({ asyncUtilTimeout: 3_000 });
 
 if (typeof globalThis.ResizeObserver === 'undefined') {
   class ResizeObserverPolyfill {

@@ -89,15 +89,23 @@ const uiVitestSteps = jobs['ui-vitest']?.steps ?? [];
 const uiVitestNodeSetupIndex = uiVitestSteps.findIndex((step) => step.uses === 'actions/setup-node@v4');
 assert(uiVitestNodeSetupIndex >= 0, 'ui-vitest must configure Node with actions/setup-node@v4');
 const uiVitestLibatomicIndex = uiVitestSteps.findIndex(
-  (step) => String(step.run ?? '').includes('apt-get install -y libatomic1'),
+  (step) => String(step.run ?? '').includes('libatomic1'),
 );
 assert(
   uiVitestLibatomicIndex >= 0 && uiVitestLibatomicIndex < uiVitestNodeSetupIndex,
   'ui-vitest must install libatomic1 before actions/setup-node@v4',
 );
+assert(
+  String(uiVitestSteps[uiVitestLibatomicIndex]?.run ?? '').includes('build-essential'),
+  'ui-vitest must install build-essential before pnpm builds native dependencies',
+);
 
 assert(jobs['required-fast-extra'], 'Missing required-fast-extra job');
 assert(jobs['required-fast-extra'].if === FULL_CI_GATE, 'required-fast-extra must run only for full CI events');
+assert(
+  jobs['required-fast-extra']['runs-on'] === '${{ matrix.runner_label }}',
+  'required-fast-extra must resolve each matrix runner label directly so ubuntu-latest selects GitHub-hosted capacity',
+);
 assertStepBefore(
   jobs['required-fast-extra'],
   'Install system libraries for Node',
@@ -117,6 +125,12 @@ assert(mergeGateConcurrencyEntry, 'required-fast-extra matrix must include Merge
 assert(
   mergeGateConcurrencyEntry.runner_label === 'Runner_2_4_core',
   'Merge Gate Concurrency Repro must run on the core runner, not the smaller Runner_1 host that missed Node runtime libraries',
+);
+const launchDispatchQueueEntry = requiredFastExtraEntries.find((entry) => entry.name === 'Launch Dispatch Queue Repro');
+assert(launchDispatchQueueEntry, 'required-fast-extra matrix must include Launch Dispatch Queue Repro');
+assert(
+  launchDispatchQueueEntry.runner_label === 'ubuntu-latest',
+  'Launch Dispatch Queue Repro must use fresh GitHub-hosted capacity so disk pressure cannot fail before workflow steps run',
 );
 
 const optionalOtherSteps = stepNames('optional-other');

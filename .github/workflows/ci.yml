@@ -168,7 +168,7 @@ jobs:
               SUDO="sudo"
             fi
             $SUDO apt-get update
-            $SUDO apt-get install -y libatomic1
+            $SUDO apt-get install -y libatomic1 build-essential
           fi
 
       - name: Use Node.js ${{ env.NODE_VERSION }}
@@ -477,8 +477,7 @@ jobs:
   required-fast-extra:
     if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'mergify/merge-queue/') }}
     needs: build-artifacts
-    runs-on:
-      labels: ${{ matrix.runner_label }}
+    runs-on: ${{ matrix.runner_label }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -495,7 +494,7 @@ jobs:
             runner_label: Runner_2_4_core
           - name: Launch Dispatch Queue Repro
             command: bash scripts/test-suites/required/25-launch-dispatch-queue-handoff-repro.sh
-            runner_label: Runner_2_4_core
+            runner_label: ubuntu-latest
           - name: PR Babysit Harness
             command: bash scripts/test-suites/required/28-pr-babysit-harness.sh
             runner_label: Runner_2_4_core
