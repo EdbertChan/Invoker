@@ -100,6 +100,12 @@ assert(
   uiVitestLibatomicIndex >= 0 && uiVitestLibatomicIndex < uiVitestNodeSetupIndex,
   'ui-vitest must install libatomic1 before actions/setup-node@v4',
 );
+const uiVitestNodePrerequisiteStep = uiVitestSteps[uiVitestLibatomicIndex];
+assert(
+  String(uiVitestNodePrerequisiteStep?.run ?? '').includes('make')
+    && String(uiVitestNodePrerequisiteStep?.run ?? '').includes('g++'),
+  'ui-vitest must install make and g++ so pnpm can build native dependencies on self-hosted runners',
+);
 
 const requiredFastEntries = jobs['required-fast'].strategy?.matrix?.include ?? [];
 const vitestWorkspaceEntry = requiredFastEntries.find((entry) => entry.name === 'Vitest Workspace');
