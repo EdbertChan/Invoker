@@ -32,6 +32,7 @@ import type {
 } from '@invoker/data-store';
 import type { AgentRegistry } from '@invoker/execution-engine';
 import type { HarnessPreset, PlanConversation, PlanConversationConfig, PlanningCommandBuilder } from '@invoker/surfaces';
+import { detectDefaultBranchRemote } from '@invoker/workflow-core';
 import type { InvokerConfig } from './config.js';
 
 export interface LoadedGeneratedPlan {
@@ -375,6 +376,15 @@ export function isDraftingAuthorizedByTurn(message: string, messagesBeforeTurn: 
   return isShortDraftConfirmation(message) && previousAssistantAskedWhetherToDraft(messagesBeforeTurn);
 }
 
+function resolveDefaultBranch(config: InvokerConfig): string | undefined {
+  if (config.defaultBranch) return config.defaultBranch;
+  if (config.defaultRepoUrl) {
+    const detected = detectDefaultBranchRemote(config.defaultRepoUrl);
+    if (detected) return detected;
+  }
+  return undefined;
+}
+
 function planConversationConfig(
   preset: HarnessPreset,
   deps: Pick<InAppPlannerDeps, 'config' | 'workingDir' | 'planningCommandBuilder' | 'conversationRepo' | 'onRawPlannerOutput'>,
@@ -388,7 +398,7 @@ function planConversationConfig(
     model: preset.model,
     workingDir: deps.workingDir,
     timeoutMs: (deps.config.planningTimeoutSeconds ?? 7200) * 1000,
-    defaultBranch: deps.config.defaultBranch,
+    defaultBranch: resolveDefaultBranch(deps.config),
     repoUrl: deps.config.defaultRepoUrl,
     experimentalPlanner: deps.config.experimentalPlanner,
     conversationalPlanning: options.conversationalPlanning ?? false,
@@ -632,11 +642,22 @@ export async function sendPlanningChatMessage(
           draftPlanSummary: summary,
         } as InAppPlanningChatResponse;
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const isAuthError = /\b(OAuth|access token|expired|authenticate|401)\b/i.test(errorMessage);
+        activeSession.status = 'planner_error';
+        appendSessionMessage(
+          activeSession,
+          'system',
+          isAuthError
+            ? 'The planner cannot authenticate. Ask your admin to re-authenticate the agent (e.g. Claude OAuth) and try again.'
+            : `Planner failed: ${errorMessage.slice(0, 200)}`,
+          'error',
+        );
         persistPlanningSession(activeSession, deps.planningSessionStore, false);
         return {
           ok: false,
           sessionId: activeSession.id,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
         };
       }
     });

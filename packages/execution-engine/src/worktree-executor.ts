@@ -63,6 +63,19 @@ interface WorktreeEntry extends BaseEntry {
   poolSlotReleased?: boolean;
 }
 
+export function isCloneableRepoUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed || trimmed === '.' || trimmed === '..') return false;
+  if (trimmed.startsWith('./') || trimmed.startsWith('../')) return false;
+  if (/^https?:\/\//i.test(trimmed)) return true;
+  if (/^git@[\w.-]+:/i.test(trimmed)) return true;
+  if (/^ssh:\/\//i.test(trimmed)) return true;
+  if (/^git:\/\//i.test(trimmed)) return true;
+  if (/^file:\/\//i.test(trimmed)) return true;
+  if (trimmed.startsWith('/')) return true;
+  return false;
+}
+
 /**
  * Executor implementation that runs tasks inside git worktrees.
  *
@@ -121,6 +134,13 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       throw new Error(
         `WorktreeExecutor.start(): missing repoUrl for task "${request.actionId}". ` +
         `Plans must declare a repoUrl.`,
+      );
+    }
+    if (!isCloneableRepoUrl(repoUrl)) {
+      throw new Error(
+        `WorktreeExecutor.start(): invalid repoUrl "${repoUrl}" for task "${request.actionId}". ` +
+        `Expected a git URL (https://..., git@..., or an absolute path). ` +
+        `Plans must declare a valid repoUrl.`,
       );
     }
     traceExecution(

@@ -460,7 +460,8 @@ export type InAppPlanningSessionStatus =
   | 'still_discussing'
   | 'waiting_for_answer'
   | 'draft_ready'
-  | 'submitted';
+  | 'submitted'
+  | 'planner_error';
 
 export type PlanningTerminalMode = 'chat' | 'tmux';
 

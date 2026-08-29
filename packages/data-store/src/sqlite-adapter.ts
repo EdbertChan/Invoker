@@ -563,7 +563,8 @@ function isInAppPlanningSessionStatus(value: unknown): value is InAppPlanningSes
   return value === 'still_discussing'
     || value === 'waiting_for_answer'
     || value === 'draft_ready'
-    || value === 'submitted';
+    || value === 'submitted'
+    || value === 'planner_error';
 }
 
 function isPlanningTerminalMode(value: unknown): value is PlanningTerminalMode {

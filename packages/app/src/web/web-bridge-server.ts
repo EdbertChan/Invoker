@@ -119,6 +119,50 @@ function sendJson(res: ServerResponse, status: number, body: unknown, req?: Inco
   res.end(responseBody);
 }
 
+function sendUnlockPage(res: ServerResponse): void {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invoker — Access Required</title>
+  <style>
+    :root { --bg: #0f0f0f; --fg: #e5e5e5; --muted: #737373; --accent: #6366f1; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+           background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
+    .container { text-align: center; padding: 2rem; max-width: 28rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 0.5rem; }
+    p { margin: 0 0 1.5rem; color: var(--muted); line-height: 1.5; }
+    form { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
+    input { flex: 1; min-width: 12rem; padding: 0.75rem 1rem; border-radius: 0.5rem;
+            border: 1px solid #333; background: #1a1a1a; color: var(--fg); font-size: 1rem; }
+    input::placeholder { color: var(--muted); }
+    input:focus { outline: none; border-color: var(--accent); }
+    button { padding: 0.75rem 1.5rem; border-radius: 0.5rem; border: none;
+             background: var(--accent); color: white; font-size: 1rem; font-weight: 500; cursor: pointer; }
+    button:hover { opacity: 0.9; }
+    .error { margin-top: 1rem; color: #ef4444; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Invoker</h1>
+    <p>This demo is protected. Enter the access token or use the link provided.</p>
+    <form action="/" method="get">
+      <input type="password" name="token" placeholder="Access token" autocomplete="off" required>
+      <button type="submit">Unlock</button>
+    </form>
+  </div>
+</body>
+</html>`;
+  res.writeHead(401, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': String(Buffer.byteLength(html, 'utf8')),
+  });
+  res.end(html);
+}
+
 /**
  * Resolve the directory holding the built UI (`web.html` + assets), mirroring
  * window-lifecycle's packaged-vs-repo resolution. `appRootDir` is the main
@@ -281,7 +325,7 @@ export function startWebBridge(deps: WebBridgeDeps): WebBridge {
         const queryToken = url.searchParams.get('token');
         if (pathname === '/' && queryToken !== null) {
           if (!safeEqual(queryToken, token)) {
-            sendJson(res, 401, { error: 'unauthorized' });
+            sendUnlockPage(res);
             return;
           }
           res.writeHead(302, {
@@ -293,7 +337,7 @@ export function startWebBridge(deps: WebBridgeDeps): WebBridge {
         }
 
         if (!cookieValid(req)) {
-          sendJson(res, 401, { error: 'unauthorized' });
+          sendUnlockPage(res);
           return;
         }
         serveStatic(res, pathname);
