@@ -30,6 +30,23 @@ import { inspectTaskFreshness } from './task-specification-preflight.js';
 // Re-export for backward compatibility
 export { computeContentHash, buildExperimentBranchName } from './branch-utils.js';
 
+/**
+ * Validate that a repoUrl is cloneable. Rejects relative paths, `.`, `..`,
+ * and strings that don't look like git URLs.
+ */
+export function isCloneableRepoUrl(repoUrl: string): boolean {
+  const trimmed = repoUrl.trim();
+  if (!trimmed) return false;
+  if (trimmed === '.' || trimmed === '..') return false;
+  if (trimmed.startsWith('./') || trimmed.startsWith('../')) return false;
+  if (!trimmed.includes('/') && !trimmed.includes(':')) return false;
+  if (/^https?:\/\//.test(trimmed)) return true;
+  if (/^git@[\w.-]+:/.test(trimmed)) return true;
+  if (/^ssh:\/\//.test(trimmed)) return true;
+  if (/^file:\/\//.test(trimmed)) return true;
+  if (/^[\w.-]+\/[\w.-]+$/.test(trimmed)) return true;
+  return false;
+}
 
 export interface WorktreeExecutorConfig {
   /** Directory where worktrees are created. */
@@ -157,6 +174,12 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       throw new Error(
         `WorktreeExecutor.start(): missing repoUrl for task "${request.actionId}". ` +
         `Plans must declare a repoUrl.`,
+      );
+    }
+    if (!isCloneableRepoUrl(repoUrl)) {
+      throw new Error(
+        `WorktreeExecutor.start(): invalid repoUrl "${repoUrl}" for task "${request.actionId}". ` +
+        `Expected a valid git URL (e.g. https://github.com/owner/repo or git@github.com:owner/repo.git).`,
       );
     }
     traceExecution(

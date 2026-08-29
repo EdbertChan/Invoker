@@ -21,7 +21,7 @@ vi.mock('node:fs', async (importOriginal) => {
 // Must import after mock setup
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
-import { WorktreeExecutor, computeContentHash } from '../worktree-executor.js';
+import { WorktreeExecutor, computeContentHash, isCloneableRepoUrl } from '../worktree-executor.js';
 import { BaseExecutor, isHeartbeatAliveDuringFinalize, normalizeRepoUrlForProvisionLookup } from '../base-executor.js';
 import { registerBuiltinAgents } from '../agents/index.js';
 import { SIGKILL_TIMEOUT_MS } from '../process-utils.js';
@@ -2131,5 +2131,49 @@ describe('WorktreeExecutor', () => {
         vi.useRealTimers();
       }
     });
+  });
+});
+
+describe('isCloneableRepoUrl', () => {
+  it('accepts valid HTTPS URLs', () => {
+    expect(isCloneableRepoUrl('https://github.com/owner/repo')).toBe(true);
+    expect(isCloneableRepoUrl('https://github.com/owner/repo.git')).toBe(true);
+    expect(isCloneableRepoUrl('http://gitlab.example.com/group/project')).toBe(true);
+  });
+
+  it('accepts valid SSH URLs', () => {
+    expect(isCloneableRepoUrl('git@github.com:owner/repo.git')).toBe(true);
+    expect(isCloneableRepoUrl('git@gitlab.example.com:group/project.git')).toBe(true);
+    expect(isCloneableRepoUrl('ssh://git@github.com/owner/repo.git')).toBe(true);
+  });
+
+  it('accepts file:// URLs', () => {
+    expect(isCloneableRepoUrl('file:///path/to/repo')).toBe(true);
+  });
+
+  it('accepts shorthand owner/repo format', () => {
+    expect(isCloneableRepoUrl('owner/repo')).toBe(true);
+    expect(isCloneableRepoUrl('some-owner/some-repo')).toBe(true);
+  });
+
+  it('rejects `.` and `..`', () => {
+    expect(isCloneableRepoUrl('.')).toBe(false);
+    expect(isCloneableRepoUrl('..')).toBe(false);
+  });
+
+  it('rejects relative paths', () => {
+    expect(isCloneableRepoUrl('./repo')).toBe(false);
+    expect(isCloneableRepoUrl('../other-repo')).toBe(false);
+    expect(isCloneableRepoUrl('./path/to/repo')).toBe(false);
+  });
+
+  it('rejects empty and whitespace-only strings', () => {
+    expect(isCloneableRepoUrl('')).toBe(false);
+    expect(isCloneableRepoUrl('   ')).toBe(false);
+  });
+
+  it('rejects bare words without slashes or colons', () => {
+    expect(isCloneableRepoUrl('repo')).toBe(false);
+    expect(isCloneableRepoUrl('myrepo')).toBe(false);
   });
 });
