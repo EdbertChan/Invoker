@@ -188,7 +188,7 @@ export function SystemSetupModal({
           : cliInstaller.installedVersion
             ? `Update ${cliInstaller.installedVersion} to ${cliInstaller.bundledVersion}`
             : `Install ${cliInstaller.bundledVersion} on PATH`
-        : 'Not needed in this app mode',
+        : 'Managed externally',
       status: cliInstaller?.supported && !cliInstaller.upToDate ? 'Needs setup' : 'Ready',
     },
     {
@@ -232,7 +232,7 @@ export function SystemSetupModal({
           <DialogTitle>System Setup</DialogTitle>
           <p className="text-sm text-muted-foreground mt-1">
             {diagnostics
-              ? `Invoker ${diagnostics.appVersion} on ${diagnostics.platform}/${diagnostics.arch}${diagnostics.isPackaged ? ' (packaged app)' : ' (repo/dev mode)'}`
+              ? `Invoker ${diagnostics.appVersion || '(version unknown)'} on ${diagnostics.platform}/${diagnostics.arch}`
               : 'Loading system diagnostics...'}
           </p>
         </DialogHeader>

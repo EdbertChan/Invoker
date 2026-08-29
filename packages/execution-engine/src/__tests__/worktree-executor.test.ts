@@ -21,7 +21,7 @@ vi.mock('node:fs', async (importOriginal) => {
 // Must import after mock setup
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
-import { WorktreeExecutor, computeContentHash } from '../worktree-executor.js';
+import { WorktreeExecutor, computeContentHash, isCloneableRepoUrl } from '../worktree-executor.js';
 import { BaseExecutor } from '../base-executor.js';
 import { registerBuiltinAgents } from '../agents/index.js';
 
@@ -1713,5 +1713,44 @@ describe('WorktreeExecutor', () => {
         vi.useRealTimers();
       }
     });
+  });
+});
+
+describe('isCloneableRepoUrl', () => {
+  describe('accepts valid git URLs', () => {
+    it.each([
+      'https://github.com/user/repo.git',
+      'https://github.com/user/repo',
+      'http://github.com/user/repo.git',
+      'git@github.com:user/repo.git',
+      'git@gitlab.com:user/repo.git',
+      'ssh://git@github.com/user/repo.git',
+      'git://github.com/user/repo.git',
+      'file:///home/user/repo.git',
+      '/absolute/path/to/repo',
+      '/home/user/projects/repo.git',
+    ])('accepts %s', (url) => {
+      expect(isCloneableRepoUrl(url)).toBe(true);
+    });
+  });
+
+  describe('rejects invalid repoUrl values', () => {
+    it.each([
+      '.',
+      '..',
+      './relative/path',
+      '../relative/path',
+      '',
+      '   ',
+      'relative/path',
+      'just-a-name',
+    ])('rejects %j', (url) => {
+      expect(isCloneableRepoUrl(url)).toBe(false);
+    });
+  });
+
+  it('handles whitespace-padded URLs', () => {
+    expect(isCloneableRepoUrl('  https://github.com/user/repo.git  ')).toBe(true);
+    expect(isCloneableRepoUrl('  .  ')).toBe(false);
   });
 });
