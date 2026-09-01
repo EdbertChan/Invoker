@@ -75,7 +75,7 @@ import {
 } from './worker-toggles.js';
 import { runAutoApproveAuthorsCommand } from './auto-approve-authors-config.js';
 
-const VERSION = '0.0.14';
+const VERSION = '0.0.15';
 
 type CliOptions = {
   dbDir?: string;
