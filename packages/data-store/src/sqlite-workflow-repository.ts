@@ -35,7 +35,7 @@ import type {
 } from './adapter.js';
 import { mapRowToWorkflow, mapRowToTask } from './sqlite-row-mappers.js';
 import type { SqliteExecutor } from './sqlite-executor.js';
-import { appendJournalEntry } from './sync-journal.js';
+import { appendJournalEntry, appendJournalEntryWithoutReadback } from './sync-journal.js';
 
 export const SQLITE_MAX_VARIABLE_NUMBER = 32000;
 
@@ -103,31 +103,43 @@ export class SqliteWorkflowRepository {
 
   saveWorkflow(workflow: WorkflowSaveInput): void {
     assertWorkflowConsistent(workflow);
+    const payload = {
+      id: workflow.id,
+      name: workflow.name,
+      description: workflow.description ?? null,
+      visual_proof: workflow.visualProof ? 1 : 0,
+      plan_file: workflow.planFile ?? null,
+      repo_url: workflow.repoUrl ?? null,
+      intermediate_repo_url: workflow.intermediateRepoUrl ?? null,
+      branch: workflow.branch ?? null,
+      on_finish: workflow.onFinish ?? null,
+      base_branch: workflow.baseBranch ?? null,
+      parent_remote: null,
+      feature_branch: workflow.featureBranch ?? null,
+      merge_mode: workflow.mergeMode ?? null,
+      review_provider: workflow.reviewProvider ?? null,
+      external_dependencies: workflow.externalDependencies ? JSON.stringify(workflow.externalDependencies) : null,
+      external_dependency_changes: workflow.externalDependencyChanges ? JSON.stringify(workflow.externalDependencyChanges) : null,
+      detached_external_dependencies: workflow.detachedExternalDependencies ? JSON.stringify(workflow.detachedExternalDependencies) : null,
+      generation: workflow.generation ?? 0,
+      staged: workflow.staged ? 1 : 0,
+      deleted_at: workflow.deletedAt ?? null,
+      created_at: workflow.createdAt,
+      updated_at: workflow.updatedAt,
+    };
     this.exec.runTransaction(() => {
       this.exec.execRun(`
         INSERT OR REPLACE INTO workflows (id, name, description, visual_proof, plan_file, repo_url, intermediate_repo_url, branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode, review_provider, external_dependencies, external_dependency_changes, detached_external_dependencies, generation, staged, deleted_at, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
-        workflow.id, workflow.name,
-        workflow.description ?? null,
-        workflow.visualProof ? 1 : 0,
-        workflow.planFile ?? null, workflow.repoUrl ?? null, workflow.intermediateRepoUrl ?? null, workflow.branch ?? null,
-        workflow.onFinish ?? null, workflow.baseBranch ?? null, null, workflow.featureBranch ?? null,
-        workflow.mergeMode ?? null,
-        workflow.reviewProvider ?? null,
-        workflow.externalDependencies ? JSON.stringify(workflow.externalDependencies) : null,
-        workflow.externalDependencyChanges ? JSON.stringify(workflow.externalDependencyChanges) : null,
-        workflow.detachedExternalDependencies ? JSON.stringify(workflow.detachedExternalDependencies) : null,
-        workflow.generation ?? 0,
-        workflow.staged ? 1 : 0,
-        workflow.deletedAt ?? null,
-        workflow.createdAt, workflow.updatedAt,
+        payload.id, payload.name, payload.description, payload.visual_proof,
+        payload.plan_file, payload.repo_url, payload.intermediate_repo_url, payload.branch,
+        payload.on_finish, payload.base_branch, payload.parent_remote, payload.feature_branch,
+        payload.merge_mode, payload.review_provider, payload.external_dependencies,
+        payload.external_dependency_changes, payload.detached_external_dependencies,
+        payload.generation, payload.staged, payload.deleted_at, payload.created_at, payload.updated_at,
       ]);
-      const payload = this.loadWorkflowJournalPayload(workflow.id);
-      if (!payload) {
-        throw new Error(`Failed to load workflow ${workflow.id} after insert for sync journal`);
-      }
-      appendJournalEntry(this.exec, {
+      appendJournalEntryWithoutReadback(this.exec, {
         entityType: 'workflow',
         entityId: workflow.id,
         op: 'upsert',
