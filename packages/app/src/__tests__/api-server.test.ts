@@ -1328,6 +1328,47 @@ describe('PATCH metadata endpoints', () => {
   });
 });
 
+describe('Encoded and malformed paths', () => {
+  it('decodes the id segment before dispatching', async () => {
+    const res = await request(port, 'GET', '/api/tasks/task%201/output');
+    expect(res.status).toBe(200);
+    expect(res.body.taskId).toBe('task 1');
+    expect(mocks.persistence.getTaskOutput).toHaveBeenCalledWith('task 1');
+  });
+
+  it('treats an encoded slash as part of the id, not a path separator', async () => {
+    const res = await request(port, 'GET', '/api/tasks/wf-1%2Ftask-9');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Task "wf-1/task-9" not found');
+    expect(mocks.orchestrator.getTask).toHaveBeenCalledWith('wf-1/task-9');
+  });
+
+  it('returns 500 when a matched route has a malformed escape in its id', async () => {
+    const res = await request(port, 'GET', '/api/tasks/%zz');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+  });
+
+  it('does not decode the id for routes that never read it', async () => {
+    const res = await request(port, 'POST', '/api/tasks/%zz/edit-type');
+    expect(res.status).toBe(410);
+  });
+
+  it('does not decode the id when no handler claims the method', async () => {
+    const res = await request(port, 'PUT', '/api/tasks/%zz');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Not found');
+  });
+
+  it('rejects trailing-slash, empty-id, and over-long pathnames', async () => {
+    for (const path of ['/api/tasks/task-1/', '/api/tasks//cancel', '/api/tasks/task-1/events/extra']) {
+      const res = await request(port, 'GET', path);
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Not found');
+    }
+  });
+});
+
 describe('Unknown routes', () => {
   it('returns 404 for unknown path', async () => {
     const res = await request(port, 'GET', '/api/nonexistent');
