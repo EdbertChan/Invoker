@@ -241,6 +241,7 @@ beforeAll(async () => {
   mocks = createMocks();
   // Use port 0 for ephemeral port assignment
   process.env.INVOKER_API_PORT = '0';
+  process.env.INVOKER_REPO_CONFIG_PATH = '/nonexistent/invoker-api-server-test-config.json';
   api = startApiServer({
     orchestrator: mocks.orchestrator as any,
     persistence: mocks.persistence as any,
@@ -264,6 +265,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await api.close();
   delete process.env.INVOKER_API_PORT;
+  delete process.env.INVOKER_REPO_CONFIG_PATH;
 });
 
 beforeEach(() => {
