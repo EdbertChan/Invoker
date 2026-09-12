@@ -158,6 +158,46 @@ function parseRoute(url: string): { path: string; query: Record<string, string> 
   return { path, query };
 }
 
+export interface ApiRoute {
+  readonly resource: string;
+  readonly encodedId: string;
+  readonly action: string | null;
+  /** Percent-decoded id. Lazy on purpose: a malformed escape must surface where a handler
+   *  reads the id, so paths that match no method keep falling through to 404. */
+  readonly id: string;
+}
+
+export class ApiRouteParser {
+  parse(path: string): ApiRoute | null {
+    const segments = path.split('/');
+    if (segments.length < 4 || segments.length > 5) return null;
+    const [root, namespace, resource, encodedId] = segments;
+    if (root !== '' || namespace !== 'api') return null;
+    if (!resource || !encodedId) return null;
+    const action = segments.length === 5 ? segments[4] : null;
+    if (action === '') return null;
+    return {
+      resource,
+      encodedId,
+      action,
+      get id(): string {
+        return decodeURIComponent(encodedId);
+      },
+    };
+  }
+
+  match(
+    route: ApiRoute | null,
+    resource: string,
+    action: string | null = null,
+  ): ApiRoute | null {
+    if (!route || route.resource !== resource) return null;
+    return route.action === action ? route : null;
+  }
+}
+
+const routeParser = new ApiRouteParser();
+
 function serializeTask(task: any): any {
   const obj: any = { ...task };
   if (obj.createdAt instanceof Date) obj.createdAt = obj.createdAt.toISOString();
@@ -221,6 +261,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
     try {
       const method = req.method ?? 'GET';
       const { path, query } = parseRoute(req.url ?? '/');
+      const route = routeParser.parse(path);
 
       // GET /api/health
       if (method === 'GET' && path === '/api/health') {
@@ -246,9 +287,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // GET /api/tasks/:id
-      const taskMatch = path.match(/^\/api\/tasks\/([^/]+)$/);
-      if (method === 'GET' && taskMatch) {
-        const taskId = decodeURIComponent(taskMatch[1]);
+      const taskRoute = routeParser.match(route, 'tasks');
+      if (method === 'GET' && taskRoute) {
+        const taskId = taskRoute.id;
         const task = orchestrator.getTask(taskId);
         if (!task) {
           json(res, 404, { error: `Task "${taskId}" not found` });
@@ -259,9 +300,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // DELETE /api/tasks/:id
-      const deleteTaskMatch = path.match(/^\/api\/tasks\/([^/]+)$/);
-      if (method === 'DELETE' && deleteTaskMatch) {
-        const taskId = decodeURIComponent(deleteTaskMatch[1]);
+      const deleteTaskRoute = routeParser.match(route, 'tasks');
+      if (method === 'DELETE' && deleteTaskRoute) {
+        const taskId = deleteTaskRoute.id;
         try {
           const result = await mutations.deleteTask(taskId);
           json(res, 200, { ok: true, taskId, action: 'deleted', tasksStarted: result.runnable.length });
@@ -272,9 +313,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/cancel
-      const cancelMatch = path.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
-      if (method === 'POST' && cancelMatch) {
-        const taskId = decodeURIComponent(cancelMatch[1]);
+      const cancelRoute = routeParser.match(route, 'tasks', 'cancel');
+      if (method === 'POST' && cancelRoute) {
+        const taskId = cancelRoute.id;
         try {
           const result = await mutations.cancelTask(taskId);
           json(res, 200, { ok: true, cancelled: result.cancelled, runningCancelled: result.runningCancelled });
@@ -285,11 +326,11 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/retry  (legacy: /api/tasks/:id/restart)
-      const retryMatch = path.match(/^\/api\/tasks\/([^/]+)\/retry$/);
-      const restartMatch = path.match(/^\/api\/tasks\/([^/]+)\/restart$/);
-      if (method === 'POST' && (retryMatch || restartMatch)) {
-        const isLegacy = !!restartMatch;
-        const taskId = decodeURIComponent((retryMatch ?? restartMatch)![1]);
+      const retryRoute = routeParser.match(route, 'tasks', 'retry');
+      const restartRoute = routeParser.match(route, 'tasks', 'restart');
+      if (method === 'POST' && (retryRoute || restartRoute)) {
+        const isLegacy = !!restartRoute;
+        const taskId = (retryRoute ?? restartRoute)!.id;
         try {
           const result = await mutations.retryTask(taskId);
           if (isLegacy) {
@@ -312,9 +353,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/recreate
-      const recreateTaskMatch = path.match(/^\/api\/tasks\/([^/]+)\/recreate$/);
-      if (method === 'POST' && recreateTaskMatch) {
-        const taskId = decodeURIComponent(recreateTaskMatch[1]);
+      const recreateTaskRoute = routeParser.match(route, 'tasks', 'recreate');
+      if (method === 'POST' && recreateTaskRoute) {
+        const taskId = recreateTaskRoute.id;
         try {
           const result = await mutations.recreateTask(taskId);
           json(res, 200, { ok: true, taskId, action: 'recreated', tasksStarted: result.runnable.length });
@@ -325,9 +366,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/recreate-downstream
-      const recreateDownstreamMatch = path.match(/^\/api\/tasks\/([^/]+)\/recreate-downstream$/);
-      if (method === 'POST' && recreateDownstreamMatch) {
-        const taskId = decodeURIComponent(recreateDownstreamMatch[1]);
+      const recreateDownstreamRoute = routeParser.match(route, 'tasks', 'recreate-downstream');
+      if (method === 'POST' && recreateDownstreamRoute) {
+        const taskId = recreateDownstreamRoute.id;
         try {
           const result = await mutations.recreateDownstream(taskId);
           json(res, 200, { ok: true, taskId, action: 'recreated_downstream', tasksStarted: result.runnable.length });
@@ -338,9 +379,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/resolve-conflict   body: { agent? }
-      const resolveConflictMatch = path.match(/^\/api\/tasks\/([^/]+)\/resolve-conflict$/);
-      if (method === 'POST' && resolveConflictMatch) {
-        const taskId = decodeURIComponent(resolveConflictMatch[1]);
+      const resolveConflictRoute = routeParser.match(route, 'tasks', 'resolve-conflict');
+      if (method === 'POST' && resolveConflictRoute) {
+        const taskId = resolveConflictRoute.id;
         try {
           let agent: string | undefined;
           const body = await readBody(req);
@@ -364,9 +405,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/approve
-      const approveMatch = path.match(/^\/api\/tasks\/([^/]+)\/approve$/);
-      if (method === 'POST' && approveMatch) {
-        const taskId = decodeURIComponent(approveMatch[1]);
+      const approveRoute = routeParser.match(route, 'tasks', 'approve');
+      if (method === 'POST' && approveRoute) {
+        const taskId = approveRoute.id;
         try {
           await mutations.approveTask(taskId);
           json(res, 200, { ok: true, taskId, action: 'approved' });
@@ -377,9 +418,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/reject
-      const rejectMatch = path.match(/^\/api\/tasks\/([^/]+)\/reject$/);
-      if (method === 'POST' && rejectMatch) {
-        const taskId = decodeURIComponent(rejectMatch[1]);
+      const rejectRoute = routeParser.match(route, 'tasks', 'reject');
+      if (method === 'POST' && rejectRoute) {
+        const taskId = rejectRoute.id;
         try {
           let reason: string | undefined;
           const body = await readBody(req);
@@ -399,9 +440,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
 
       // GET /api/workflows
       // GET /api/workflows/:id/review-gate
-      const reviewGateMatch = path.match(/^\/api\/workflows\/([^/]+)\/review-gate$/);
-      if (method === 'GET' && reviewGateMatch) {
-        const workflowId = decodeURIComponent(reviewGateMatch[1]);
+      const reviewGateRoute = routeParser.match(route, 'workflows', 'review-gate');
+      if (method === 'GET' && reviewGateRoute) {
+        const workflowId = reviewGateRoute.id;
         const workflow = persistence.loadWorkflow(workflowId);
         if (!workflow) {
           json(res, 404, { error: 'Workflow not found' });
@@ -430,11 +471,11 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/recreate  (legacy: /api/workflows/:id/restart)
-      const wfRecreateMatch = path.match(/^\/api\/workflows\/([^/]+)\/recreate$/);
-      const wfRestartMatch = path.match(/^\/api\/workflows\/([^/]+)\/restart$/);
-      if (method === 'POST' && (wfRecreateMatch || wfRestartMatch)) {
-        const isLegacy = !!wfRestartMatch;
-        const workflowId = decodeURIComponent((wfRecreateMatch ?? wfRestartMatch)![1]);
+      const wfRecreateRoute = routeParser.match(route, 'workflows', 'recreate');
+      const wfRestartRoute = routeParser.match(route, 'workflows', 'restart');
+      if (method === 'POST' && (wfRecreateRoute || wfRestartRoute)) {
+        const isLegacy = !!wfRestartRoute;
+        const workflowId = (wfRecreateRoute ?? wfRestartRoute)!.id;
         try {
           const result = await mutations.recreateWorkflow(workflowId);
           if (isLegacy) {
@@ -458,9 +499,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/retry
-      const wfRetryMatch = path.match(/^\/api\/workflows\/([^/]+)\/retry$/);
-      if (method === 'POST' && wfRetryMatch) {
-        const workflowId = decodeURIComponent(wfRetryMatch[1]);
+      const wfRetryRoute = routeParser.match(route, 'workflows', 'retry');
+      if (method === 'POST' && wfRetryRoute) {
+        const workflowId = wfRetryRoute.id;
         try {
           const result = await mutations.retryWorkflow(workflowId);
           const tasksStarted = result.runnable.length;
@@ -472,9 +513,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/rebase-retry
-      const wfRebaseRetryMatch = path.match(/^\/api\/workflows\/([^/]+)\/rebase-retry$/);
-      if (method === 'POST' && wfRebaseRetryMatch) {
-        const workflowTarget = decodeURIComponent(wfRebaseRetryMatch[1]);
+      const wfRebaseRetryRoute = routeParser.match(route, 'workflows', 'rebase-retry');
+      if (method === 'POST' && wfRebaseRetryRoute) {
+        const workflowTarget = wfRebaseRetryRoute.id;
         try {
           const workflowId = resolveHeadlessTargetWorkflowId(workflowTarget, persistence);
           const result = await mutations.rebaseRetry(workflowId);
@@ -492,9 +533,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/rebase-recreate
-      const wfRebaseRecreateMatch = path.match(/^\/api\/workflows\/([^/]+)\/rebase-recreate$/);
-      if (method === 'POST' && wfRebaseRecreateMatch) {
-        const workflowTarget = decodeURIComponent(wfRebaseRecreateMatch[1]);
+      const wfRebaseRecreateRoute = routeParser.match(route, 'workflows', 'rebase-recreate');
+      if (method === 'POST' && wfRebaseRecreateRoute) {
+        const workflowTarget = wfRebaseRecreateRoute.id;
         try {
           const workflowId = resolveHeadlessTargetWorkflowId(workflowTarget, persistence);
           if (deps.queueWorkflowMutation) {
@@ -524,9 +565,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/fork
-      const wfForkMatch = path.match(/^\/api\/workflows\/([^/]+)\/fork$/);
-      if (method === 'POST' && wfForkMatch) {
-        const workflowId = decodeURIComponent(wfForkMatch[1]);
+      const wfForkRoute = routeParser.match(route, 'workflows', 'fork');
+      if (method === 'POST' && wfForkRoute) {
+        const workflowId = wfForkRoute.id;
         try {
           const result = await mutations.forkWorkflow(workflowId);
           json(res, 200, {
@@ -542,9 +583,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/cancel
-      const wfCancelMatch = path.match(/^\/api\/workflows\/([^/]+)\/cancel$/);
-      if (method === 'POST' && wfCancelMatch) {
-        const workflowId = decodeURIComponent(wfCancelMatch[1]);
+      const wfCancelRoute = routeParser.match(route, 'workflows', 'cancel');
+      if (method === 'POST' && wfCancelRoute) {
+        const workflowId = wfCancelRoute.id;
         try {
           const result = await mutations.cancelWorkflow(workflowId);
           json(res, 200, { ok: true, cancelled: result.cancelled, runningCancelled: result.runningCancelled });
@@ -562,9 +603,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // GET /api/tasks/:id/events?limit=&sortBy=&beforeId=
-      const eventsMatch = path.match(/^\/api\/tasks\/([^/]+)\/events$/);
-      if (method === 'GET' && eventsMatch) {
-        const taskId = decodeURIComponent(eventsMatch[1]);
+      const eventsRoute = routeParser.match(route, 'tasks', 'events');
+      if (method === 'GET' && eventsRoute) {
+        const taskId = eventsRoute.id;
         try {
           const limit = query.limit !== undefined ? Number(query.limit) : NaN;
           const beforeId = query.beforeId !== undefined ? Number(query.beforeId) : undefined;
@@ -581,18 +622,18 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // GET /api/tasks/:id/output
-      const outputMatch = path.match(/^\/api\/tasks\/([^/]+)\/output$/);
-      if (method === 'GET' && outputMatch) {
-        const taskId = decodeURIComponent(outputMatch[1]);
+      const outputRoute = routeParser.match(route, 'tasks', 'output');
+      if (method === 'GET' && outputRoute) {
+        const taskId = outputRoute.id;
         const output = persistence.getTaskOutput(taskId);
         json(res, 200, { taskId, output });
         return;
       }
 
       // POST /api/tasks/:id/input
-      const inputMatch = path.match(/^\/api\/tasks\/([^/]+)\/input$/);
-      if (method === 'POST' && inputMatch) {
-        const taskId = decodeURIComponent(inputMatch[1]);
+      const inputRoute = routeParser.match(route, 'tasks', 'input');
+      if (method === 'POST' && inputRoute) {
+        const taskId = inputRoute.id;
         try {
           const body = await readBody(req);
           const { text } = JSON.parse(body);
@@ -609,9 +650,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/edit
-      const editMatch = path.match(/^\/api\/tasks\/([^/]+)\/edit$/);
-      if (method === 'POST' && editMatch) {
-        const taskId = decodeURIComponent(editMatch[1]);
+      const editRoute = routeParser.match(route, 'tasks', 'edit');
+      if (method === 'POST' && editRoute) {
+        const taskId = editRoute.id;
         try {
           const body = await readBody(req);
           const { command } = JSON.parse(body);
@@ -628,9 +669,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/edit-prompt
-      const editPromptMatch = path.match(/^\/api\/tasks\/([^/]+)\/edit-prompt$/);
-      if (method === 'POST' && editPromptMatch) {
-        const taskId = decodeURIComponent(editPromptMatch[1]);
+      const editPromptRoute = routeParser.match(route, 'tasks', 'edit-prompt');
+      if (method === 'POST' && editPromptRoute) {
+        const taskId = editPromptRoute.id;
         try {
           const body = await readBody(req);
           const { prompt } = JSON.parse(body);
@@ -647,16 +688,16 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/edit-type
-      const editTypeMatch = path.match(/^\/api\/tasks\/([^/]+)\/edit-type$/);
-      if (method === 'POST' && editTypeMatch) {
+      const editTypeRoute = routeParser.match(route, 'tasks', 'edit-type');
+      if (method === 'POST' && editTypeRoute) {
         json(res, 410, { error: 'Executor selection is internal; use the headless set pool command instead.' });
         return;
       }
 
       // POST /api/tasks/:id/edit-agent
-      const editAgentMatch = path.match(/^\/api\/tasks\/([^/]+)\/edit-agent$/);
-      if (method === 'POST' && editAgentMatch) {
-        const taskId = decodeURIComponent(editAgentMatch[1]);
+      const editAgentRoute = routeParser.match(route, 'tasks', 'edit-agent');
+      if (method === 'POST' && editAgentRoute) {
+        const taskId = editAgentRoute.id;
         try {
           const body = await readBody(req);
           const { agent } = JSON.parse(body);
@@ -673,9 +714,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/tasks/:id/gate-policy
-      const gatePolicyMatch = path.match(/^\/api\/tasks\/([^/]+)\/gate-policy$/);
-      if (method === 'POST' && gatePolicyMatch) {
-        const taskId = decodeURIComponent(gatePolicyMatch[1]);
+      const gatePolicyRoute = routeParser.match(route, 'tasks', 'gate-policy');
+      if (method === 'POST' && gatePolicyRoute) {
+        const taskId = gatePolicyRoute.id;
         try {
           const body = await readBody(req);
           const parsed = JSON.parse(body);
@@ -693,9 +734,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/gate-policy
-      const workflowGatePolicyMatch = path.match(/^\/api\/workflows\/([^/]+)\/gate-policy$/);
-      if (method === 'POST' && workflowGatePolicyMatch) {
-        const workflowId = decodeURIComponent(workflowGatePolicyMatch[1]);
+      const workflowGatePolicyRoute = routeParser.match(route, 'workflows', 'gate-policy');
+      if (method === 'POST' && workflowGatePolicyRoute) {
+        const workflowId = workflowGatePolicyRoute.id;
         try {
           const body = await readBody(req);
           const parsed = JSON.parse(body);
@@ -713,9 +754,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // PATCH /api/tasks/:id/metadata
-      const taskMetadataMatch = path.match(/^\/api\/tasks\/([^/]+)\/metadata$/);
-      if (method === 'PATCH' && taskMetadataMatch) {
-        const taskId = decodeURIComponent(taskMetadataMatch[1]);
+      const taskMetadataRoute = routeParser.match(route, 'tasks', 'metadata');
+      if (method === 'PATCH' && taskMetadataRoute) {
+        const taskId = taskMetadataRoute.id;
         try {
           const body = await readBody(req);
           const patch = parseMetadataPatchBody(body);
@@ -728,9 +769,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // DELETE /api/workflows/:id
-      const wfDeleteMatch = path.match(/^\/api\/workflows\/([^/]+)$/);
-      if (method === 'DELETE' && wfDeleteMatch) {
-        const workflowId = decodeURIComponent(wfDeleteMatch[1]);
+      const wfDeleteRoute = routeParser.match(route, 'workflows');
+      if (method === 'DELETE' && wfDeleteRoute) {
+        const workflowId = wfDeleteRoute.id;
         try {
           await deleteWorkflow(workflowId);
           json(res, 200, { ok: true, workflowId, action: 'deleted' });
@@ -741,9 +782,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/detach
-      const wfDetachMatch = path.match(/^\/api\/workflows\/([^/]+)\/detach$/);
-      if (method === 'POST' && wfDetachMatch) {
-        const workflowId = decodeURIComponent(wfDetachMatch[1]);
+      const wfDetachRoute = routeParser.match(route, 'workflows', 'detach');
+      if (method === 'POST' && wfDetachRoute) {
+        const workflowId = wfDetachRoute.id;
         try {
           const body = await readBody(req);
           const { upstreamWorkflowId } = JSON.parse(body);
@@ -765,9 +806,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // POST /api/workflows/:id/merge-mode
-      const wfMergeModeMatch = path.match(/^\/api\/workflows\/([^/]+)\/merge-mode$/);
-      if (method === 'POST' && wfMergeModeMatch) {
-        const workflowId = decodeURIComponent(wfMergeModeMatch[1]);
+      const wfMergeModeRoute = routeParser.match(route, 'workflows', 'merge-mode');
+      if (method === 'POST' && wfMergeModeRoute) {
+        const workflowId = wfMergeModeRoute.id;
         try {
           const body = await readBody(req);
           const { mode } = JSON.parse(body);
@@ -784,9 +825,9 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
       }
 
       // PATCH /api/workflows/:id/metadata
-      const wfMetadataMatch = path.match(/^\/api\/workflows\/([^/]+)\/metadata$/);
-      if (method === 'PATCH' && wfMetadataMatch) {
-        const workflowId = decodeURIComponent(wfMetadataMatch[1]);
+      const wfMetadataRoute = routeParser.match(route, 'workflows', 'metadata');
+      if (method === 'PATCH' && wfMetadataRoute) {
+        const workflowId = wfMetadataRoute.id;
         try {
           const body = await readBody(req);
           const patch = parseMetadataPatchBody(body);

@@ -1341,3 +1341,48 @@ describe('Unknown routes', () => {
     expect(res.body.error).toBe('Not found');
   });
 });
+
+describe('Route path parsing', () => {
+  it('decodes percent-encoded ids before dispatching', async () => {
+    mocks.orchestrator.getTask.mockImplementation((id: string) =>
+      id === 'group/task 1' ? makeTask({ id }) : undefined,
+    );
+    const res = await request(port, 'GET', '/api/tasks/group%2Ftask%201');
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('group/task 1');
+    expect(mocks.orchestrator.getTask).toHaveBeenCalledWith('group/task 1');
+  });
+
+  it('decodes percent-encoded ids on action routes', async () => {
+    const res = await request(port, 'GET', '/api/tasks/group%2Ftask-1/output');
+    expect(res.status).toBe(200);
+    expect(mocks.persistence.getTaskOutput).toHaveBeenCalledWith('group/task-1');
+  });
+
+  it('returns 500 for a malformed escape on a route the method matches', async () => {
+    const res = await request(port, 'GET', '/api/tasks/%zz');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+  });
+
+  it('returns 404 for a malformed escape when no method matches the route', async () => {
+    const res = await request(port, 'PUT', '/api/tasks/%zz');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Not found');
+  });
+
+  it.each([
+    ['GET', '/api/tasks/'],
+    ['GET', '/api/tasks/task-1/'],
+    ['GET', '/tasks/task-1'],
+    ['GET', '/api/tasks/wf-1/task-1'],
+    ['POST', '/api/tasks//cancel'],
+    ['POST', '/api/tasks/wf-1/task-1/cancel'],
+    ['POST', '/api/tasks/task-1/cancel/extra'],
+    ['DELETE', '/api//wf-1'],
+  ])('returns 404 for malformed path %s %s', async (method, path) => {
+    const res = await request(port, method, path);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Not found');
+  });
+});
