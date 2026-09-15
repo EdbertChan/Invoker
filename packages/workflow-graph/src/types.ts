@@ -88,7 +88,6 @@ interface PooledRepositoryTaskConfig extends BaseTaskConfig {
   readonly dockerImage?: never;
 }
 
-/** A repository task whose executor is selected from its pool at launch. */
 export interface PooledTaskConfig extends PooledRepositoryTaskConfig {
   readonly runnerKind?: 'worktree' | 'ssh';
 }
