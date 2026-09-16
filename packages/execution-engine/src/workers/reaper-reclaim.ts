@@ -8,6 +8,7 @@ import {
   readSync,
   rmSync,
   statSync,
+  statfsSync,
   writeFileSync,
 } from 'node:fs';
 import { rm } from 'node:fs/promises';
@@ -20,6 +21,7 @@ import { buildSshConnectionArgs } from '../ssh-transport-options.js';
 import { bashNormalizeTildePath, execRemoteCapture, shellPosixSingleQuote } from '../ssh-git-exec.js';
 
 import type { RemoteDiskTarget } from './disk-headroom-monitor.js';
+import { DEFAULT_DISK_CRITICAL_PERCENT } from './disk-headroom.js';
 import {
   expandTildeHome,
   isDeletingOrphanName,
@@ -44,6 +46,7 @@ export const STALE_INVOKER_CLI_TEMP_MIN_AGE_HOURS = 48;
 export const LOG_TRIM_MAX_BYTES = 100 * 1024 * 1024;
 export const LOG_TRIM_KEEP_BYTES = 20 * 1024 * 1024;
 export const REAPER_LOG_SUFFIX = '.log';
+export const DEFAULT_EMERGENCY_SNAPSHOT_RETENTION = 6;
 
 function errorDetail(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -585,9 +588,25 @@ export async function reapStaleInvokerCliTempDirs(opts: {
 export function enforceHourlySnapshotRetention(
   invokerHome: string,
   userHome: string = homedir(),
+  diskUsedPercent: number | null = readDiskUsedPercent(invokerHome),
 ): number {
   const home = expandTildeHome(invokerHome, userHome);
-  return pruneHourlySnapshots(join(home, 'db-backups'), hourlySnapshotRetention());
+  const retention = diskUsedPercent !== null && diskUsedPercent >= DEFAULT_DISK_CRITICAL_PERCENT
+    ? Math.min(hourlySnapshotRetention(), DEFAULT_EMERGENCY_SNAPSHOT_RETENTION)
+    : hourlySnapshotRetention();
+  return pruneHourlySnapshots(join(home, 'db-backups'), retention);
+}
+
+function readDiskUsedPercent(path: string): number | null {
+  try {
+    const stats = statfsSync(path);
+    const blocks = Number(stats.blocks);
+    const available = Number(stats.bavail);
+    if (!Number.isFinite(blocks) || !Number.isFinite(available) || blocks <= 0) return null;
+    return ((blocks - available) / blocks) * 100;
+  } catch {
+    return null;
+  }
 }
 
 export function trimOversizedLogs(opts: {

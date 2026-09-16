@@ -331,6 +331,21 @@ describe('enforceHourlySnapshotRetention', () => {
     expect(enforceHourlySnapshotRetention(home, root)).toBe(0);
     expect(readdirSync(backupDir)).toEqual(['invoker.db.hourly-auto-20260101-000001-000Z']);
   });
+
+  it('falls back to emergency retention when the filesystem is critically full', () => {
+    const { root, home } = makeHome();
+    const backupDir = join(home, 'db-backups');
+    mkdirSync(backupDir, { recursive: true });
+    for (let i = 1; i <= 8; i += 1) {
+      writeFileSync(join(backupDir, `invoker.db.hourly-auto-20260101-00000${i}-000Z`), `${i}`);
+    }
+
+    const removed = enforceHourlySnapshotRetention(home, root, 99);
+
+    expect(removed).toBe(2);
+    expect(readdirSync(backupDir)).toHaveLength(6);
+    expect(readdirSync(backupDir)).toContain('invoker.db.hourly-auto-20260101-000008-000Z');
+  });
 });
 
 describe('trimOversizedLogs', () => {
