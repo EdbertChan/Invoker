@@ -5,13 +5,24 @@
  * Never touches invoker.db / config.json / the home root / paths outside the home.
  */
 
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync } from 'node:fs';
+import { rm as rmAsync } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, resolve, sep } from 'node:path';
+import { promisify } from 'node:util';
 
 import type { Logger } from '@invoker/contracts';
+import type { TaskState } from '@invoker/workflow-core';
 
+import { computeRepoCacheHash } from '../git-utils.js';
 import { buildSshConnectionArgs } from '../ssh-transport-options.js';
+import {
+  hasFreshInUseMark,
+  IN_USE_MARK_DIR,
+  IN_USE_MARK_MAX_AGE_SECONDS,
+} from '../workspace-in-use-mark.js';
 import { bashNormalizeTildePath, execRemoteCapture, shellPosixSingleQuote } from '../ssh-git-exec.js';
 
 import type { RemoteDiskTarget } from './disk-headroom-monitor.js';
@@ -30,21 +41,17 @@ export const DISK_RECLAIMABLE_DIRS = [
 
 export type DiskReclaimableDir = (typeof DISK_RECLAIMABLE_DIRS)[number];
 
-/**
- * Invoker/test scratch name globs reclaimed from the shared temp dir. The
- * disk-headroom cleaner never wipes `/tmp` wholesale — only entries matching
- * these globs, plus stale mktemp leftovers older than the age threshold below.
- */
-export const TMP_SCRATCH_GLOBS = [
-  'invoker-*',
-  'scoped_dir*',
-  'electron-download-*',
-  'playwright-artifacts-*',
-  'playwright-transform-cache-*',
-  'esbuild-*.map',
-  'node-compile-cache',
-  'runner-test-*',
-  'omp-*',
+export const TMP_SCRATCH_PROTECT_GLOBS = [
+  'systemd-private-*',
+  'snap-*',
+  '.X11-unix',
+  '.X[0-9]*-lock',
+  '.font-unix',
+  '.ICE-unix',
+  '.*-unix',
+  'ssh-*',
+  'claude-*',
+  '*.lock',
 ] as const;
 
 export const TMP_TRANSIENT_TEST_GLOBS = [
@@ -62,6 +69,29 @@ export interface DiskCleanupResult {
   ok: boolean;
   reason: string;
   detail?: string;
+  protectedSkipCount: number;
+  protectedSkipBytes: number;
+  protectedSkipBytesTruncated?: boolean;
+}
+
+export type LocalDiskCleanupMode = 'critical' | 'stale-only';
+
+/**
+ * 'stale-only' skips the destructive Invoker-managed-dir wipe entirely and
+ * only age-gate-sweeps shared /tmp CI scratch -- safe to run at the `warn`
+ * threshold instead of waiting for `critical`, mirroring
+ * cleanupLocalInvokerHome's stale-only contract for local targets.
+ */
+export type RemoteDiskCleanupMode = 'critical' | 'stale-only';
+
+export interface CleanupLocalInvokerHomeOptions {
+  invokerHome: string;
+  targetKey?: string;
+  logger?: Logger;
+  userHome?: string;
+  store?: DiskHeadroomWorkerStore;
+  mode?: LocalDiskCleanupMode;
+  minAgeMinutes?: number;
 }
 
 /**
@@ -113,26 +143,63 @@ export function isSafeRemoteInvokerHomePath(remotePath: string): boolean {
   return true;
 }
 
-function isDeletingOrphanName(name: string): boolean {
+export function isDeletingOrphanName(name: string): boolean {
   return name.includes('.deleting.');
 }
+
+/** Reclaimable dirs swept one child at a time so `preservePaths` can protect a single in-use child without protecting its siblings. */
+const REMOTE_CHILD_SWEPT_DIRS = ['repos', 'worktrees', 'merge-clones', 'merge-launches'] as const;
 
 /**
  * Remote bash that frees Invoker-managed disk under `$INVOKER_HOME`.
  * Kills only provision grinders (pnpm install / electron unzip), not every
  * process whose argv mentions the home (that can kill the SSH session).
  * Deletes synchronously so SSH timeout cannot leave fire-and-forget orphans.
+ *
+ * `preservePaths` are paths relative to `$INVOKER_HOME` (e.g. `repos/<hash>`,
+ * `worktrees/<hash>/<branch>`) for in-flight work on this target's own pool.
+ * Each direct child of a REMOTE_CHILD_SWEPT_DIRS entry is checked against
+ * this set before deletion; a match is passed over instead of removed.
  */
-export function buildInvokerHomeCleanupScript(invokerHome: string): string {
+export function buildInvokerHomeCleanupScript(
+  invokerHome: string,
+  preservePaths: readonly string[] = [],
+  mode: RemoteDiskCleanupMode = 'critical',
+): string {
   const homeQ = shellPosixSingleQuote(invokerHome);
-  const removeCalls = DISK_RECLAIMABLE_DIRS
-    .map((name) => `remove_path "$INVOKER_HOME/${name}"`)
+  const preserveArrayLiteral = preservePaths.map((p) => shellPosixSingleQuote(p)).join(' ');
+  const childSweptRemoveCalls = REMOTE_CHILD_SWEPT_DIRS
+    .map((name) => `sweep_children_preserving "$INVOKER_HOME/${name}" "${name}"`)
     .join('\n');
+  const wholeDirRemoveCalls = `remove_path "$INVOKER_HOME/runtime"
+# pr-cron-work: PR #6632 retired its only producer, so there is nothing to preserve here.
+remove_path "$INVOKER_HOME/pr-cron-work"`;
   const mkdirArgs = DISK_RECLAIMABLE_DIRS
     .map((name) => `"$INVOKER_HOME/${name}"`)
     .join(' ');
-  const tmpGlobList = TMP_SCRATCH_GLOBS.join(' ');
+  const inUseMarkMaxAgeMinutes = Math.ceil(IN_USE_MARK_MAX_AGE_SECONDS / 60);
+  const tmpProtectArrayLiteral = TMP_SCRATCH_PROTECT_GLOBS
+    .map((glob) => shellPosixSingleQuote(glob))
+    .join(' ');
   const transientTestGlobList = TMP_TRANSIENT_TEST_GLOBS.join(' ');
+  // stale-only (warn-paced) never kills provision grinders, wipes Invoker's own
+  // managed dirs, or recreates them -- it only age-gate-sweeps shared /tmp CI
+  // scratch, the same non-destructive contract cleanupLocalInvokerHome's
+  // stale-only mode already keeps for local targets.
+  const destructiveSection = mode === 'critical' ? `# Provision grinders only — do not pkill -f INVOKER_HOME (kills this SSH session).
+pkill -9 -f 'pnpm install --frozen-lockfile' >/dev/null 2>&1
+pkill -9 -f 'pnpm install' >/dev/null 2>&1
+pkill -9 -f 'electron-v[0-9].*-linux-x64.zip' >/dev/null 2>&1
+pkill -9 -f 'node_modules/.pnpm/electron@' >/dev/null 2>&1
+sleep 1
+# Prior rename leftovers from interrupted cleanups.
+rm -rf "$INVOKER_HOME"/*.deleting.* >/dev/null 2>&1
+${childSweptRemoveCalls}
+${wholeDirRemoveCalls}
+rm -rf "$INVOKER_HOME"/*.deleting.* >/dev/null 2>&1
+mkdir -p ${mkdirArgs}
+chmod 700 ${mkdirArgs}
+` : '';
   return `set +e
 INVOKER_HOME=${homeQ}
 ${bashNormalizeTildePath('INVOKER_HOME')}
@@ -142,16 +209,8 @@ case "$INVOKER_HOME" in
     exit 64
     ;;
 esac
-echo "[disk-headroom-cleanup] begin home=$INVOKER_HOME"
+echo "[disk-headroom-cleanup] ${mode === 'stale-only' ? 'stale-only ' : ''}begin home=$INVOKER_HOME"
 df -h / | tail -1
-# Provision grinders only — do not pkill -f INVOKER_HOME (kills this SSH session).
-pkill -9 -f 'pnpm install --frozen-lockfile' >/dev/null 2>&1
-pkill -9 -f 'pnpm install' >/dev/null 2>&1
-pkill -9 -f 'electron-v[0-9].*-linux-x64.zip' >/dev/null 2>&1
-pkill -9 -f 'node_modules/.pnpm/electron@' >/dev/null 2>&1
-sleep 1
-# Prior rename leftovers from interrupted cleanups.
-rm -rf "$INVOKER_HOME"/*.deleting.* >/dev/null 2>&1
 remove_path() {
   local path="$1"
   if [ -e "$path" ]; then
@@ -162,63 +221,337 @@ remove_path() {
     rm -rf "$path" 2>/dev/null || true
   fi
 }
-${removeCalls}
-rm -rf "$INVOKER_HOME"/*.deleting.* >/dev/null 2>&1
-mkdir -p ${mkdirArgs}
-chmod 700 ${mkdirArgs}
-# Shared temp dir: reclaim only Invoker/test scratch, never a blanket /tmp wipe.
+# In-flight work on this target's own pool — checked before a child is removed below.
+PRESERVE=(${preserveArrayLiteral})
+is_preserved() {
+  local rel="$1"
+  local p
+  for p in "\${PRESERVE[@]}"; do
+    case "$p" in
+      "$rel") return 0 ;;
+      "$rel"/*) return 0 ;;
+    esac
+  done
+  return 1
+}
+# A task sent by another Invoker owner is invisible to PRESERVE above; its
+# running task refreshes this mark on the host, so a fresh mark is never deleted.
+IN_USE_MARK_ROOT="$INVOKER_HOME/${IN_USE_MARK_DIR}/worktrees"
+has_fresh_in_use_mark() {
+  local base="$1"
+  [ -e "$IN_USE_MARK_ROOT/$base" ] || return 1
+  find "$IN_USE_MARK_ROOT/$base" -type f -mmin -${inUseMarkMaxAgeMinutes} -print -quit 2>/dev/null | grep -q .
+}
+sweep_children_preserving() {
+  local dir="$1"
+  local prefix="$2"
+  [ -d "$dir" ] || return 0
+  find "$dir" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | while IFS= read -r -d '' child; do
+    local base
+    base=$(basename "$child")
+    if is_preserved "$prefix/$base"; then
+      echo "[disk-headroom-cleanup] preserve $child (in-use)"
+      continue
+    fi
+    case "$prefix" in
+      worktrees|repos)
+        if has_fresh_in_use_mark "$base"; then
+          echo "[disk-headroom-cleanup] preserve $child (fresh in-use mark)"
+          continue
+        fi
+        ;;
+    esac
+    remove_path "$child"
+  done
+}
+${destructiveSection}# Shared temp dir: sweep stale entries this user owns, never a blanket /tmp wipe.
 # Age guard leaves entries newer than ${TMP_SCRATCH_MIN_AGE_MINUTES}m alone (an active run may hold them).
 TMP_CLEAN="\${TMPDIR:-/tmp}"
 TMP_CLEAN="\${TMP_CLEAN%/}"
 case "$TMP_CLEAN" in
   ""|"/"|"$HOME") TMP_CLEAN=/tmp ;;
 esac
+SWEEP_USER="$(id -un 2>/dev/null)"
+[ -n "$SWEEP_USER" ] || SWEEP_USER="$(id -u 2>/dev/null)"
+# Names that survive the sweep even when stale and user-owned.
+TMP_PROTECT=(${tmpProtectArrayLiteral})
+is_protected_tmp_name() {
+  local base="$1"
+  local pattern
+  for pattern in "\${TMP_PROTECT[@]}"; do
+    case "$base" in
+      $pattern) return 0 ;;
+    esac
+  done
+  return 1
+}
 # Never reap a temp entry that holds mineable .jsonl session data (agent transcripts).
 reap_tmp() {
   [ -e "$1" ] || return 0
   if find "$1" -type f -name '*.jsonl' -print -quit 2>/dev/null | grep -q .; then
+    echo "[disk-headroom-cleanup] preserve $1 (transcripts)"
     return 0
   fi
   rm -rf "$1" >/dev/null 2>&1
+  echo "[disk-headroom-cleanup] remove $1"
 }
 reap_transient_test_tmp() {
   [ -e "$1" ] || return 0
   rm -rf "$1" >/dev/null 2>&1
+  echo "[disk-headroom-cleanup] remove $1"
 }
+if [ -z "$SWEEP_USER" ]; then
+  echo "[disk-headroom-cleanup] skip tmp sweep: cannot resolve the running user" >&2
+else
 set -f
 for pat in ${transientTestGlobList}; do
   find "$TMP_CLEAN" -mindepth 1 -maxdepth 1 -name "$pat" -mmin +${TMP_SCRATCH_MIN_AGE_MINUTES} \\
+    -user "$SWEEP_USER" \\
     ! -path "$INVOKER_HOME" -print0 2>/dev/null | while IFS= read -r -d '' entry; do
     reap_transient_test_tmp "$entry"
   done
 done
-for pat in ${tmpGlobList}; do
-  find "$TMP_CLEAN" -mindepth 1 -maxdepth 1 -name "$pat" -mmin +${TMP_SCRATCH_MIN_AGE_MINUTES} \\
-    ! -path "$INVOKER_HOME" -print0 2>/dev/null | while IFS= read -r -d '' entry; do
-    reap_tmp "$entry"
-  done
-done
 set +f
 find "$TMP_CLEAN" -mindepth 1 -maxdepth 1 -mmin +${TMP_SCRATCH_MIN_AGE_MINUTES} \\
+  -user "$SWEEP_USER" \\
   ! -path "$INVOKER_HOME" \\
-  ! -name 'systemd-private-*' ! -name 'snap-*' ! -name '.*-unix' \\
-  ! -name 'ssh-*' ! -name 'claude-*' ! -name '*.lock' \\
   -print0 2>/dev/null | while IFS= read -r -d '' entry; do
+  if is_protected_tmp_name "$(basename "$entry")"; then
+    echo "[disk-headroom-cleanup] preserve $entry (protected name)"
+    continue
+  fi
   reap_tmp "$entry"
 done
-echo "[disk-headroom-cleanup] done"
+fi
+echo "[disk-headroom-cleanup] ${mode === 'stale-only' ? 'stale-only ' : ''}done"
 df -h / | tail -1
 exit 0
 `;
 }
 
-function removeLocalDir(path: string, errors: string[]): void {
-  if (!existsSync(path)) return;
+const LOCAL_RM_MAX_RETRIES = 5;
+const LOCAL_RM_RETRY_DELAY_MS = 100;
+const PROTECTED_SKIP_BYTE_WALK_ENTRY_CAP = 10_000;
+const execFileAsync = promisify(execFile);
+
+type ProcessWithNoAsar = NodeJS.Process & { noAsar?: boolean };
+
+interface ProtectedSkipAccounting {
+  paths: string[];
+  count: number;
+  bytes: number;
+  truncated: boolean;
+}
+
+interface ApproximateTreeBytesResult {
+  bytes: number;
+  truncated: boolean;
+}
+
+/**
+ * Read-only accessor for Invoker's own workflow/task state, used to derive
+ * which local paths are still in active use before the disk-headroom
+ * cleaner deletes anything. Mirrors WorkflowResumeWorkerStore's shape.
+ */
+export interface DiskHeadroomWorkerStore {
+  listWorkflows(): ReadonlyArray<{ id: string; repoUrl?: string }>;
+  loadTasks(workflowId: string): TaskState[];
+}
+
+export const DISK_HEADROOM_TERMINAL_TASK_STATUSES = ['completed', 'closed', 'skipped', 'stale'] as const;
+
+const TERMINAL_TASK_STATUS_SET = new Set<string>(DISK_HEADROOM_TERMINAL_TASK_STATUSES);
+
+/**
+ * Resolved workspacePaths for every non-terminal task across all workflows.
+ * These are "in use" regardless of whether any OS process currently touches
+ * them, so the cleaner must never delete them. Fails safe to an empty set
+ * (protects nothing) on any store error -- see cleanupLocalInvokerHome for
+ * why that is the safer failure mode for this worker.
+ */
+export function computeProtectedLocalPaths(store: DiskHeadroomWorkerStore): Set<string> {
   try {
-    rmSync(path, { recursive: true, force: true });
-  } catch (err) {
-    errors.push(`${path}: ${err instanceof Error ? err.message : String(err)}`);
+    const protectedPaths = new Set<string>();
+    for (const workflow of store.listWorkflows()) {
+      for (const task of store.loadTasks(workflow.id)) {
+        if (TERMINAL_TASK_STATUS_SET.has(task.status)) continue;
+        if (task.execution?.workspacePath) {
+          protectedPaths.add(resolve(task.execution.workspacePath));
+        }
+      }
+    }
+    return protectedPaths;
+  } catch {
+    return new Set();
   }
+}
+
+/**
+ * Repo-cache hashes (`repos/<hash>` dir names) for non-terminal tasks' workflows.
+ * A shared git mirror is named by hash, not by workspacePath, so it needs its
+ * own liveness check alongside computeProtectedLocalPaths. Fails safe to an
+ * empty set (protects nothing) on any store error, same rationale as above.
+ */
+export function computeProtectedRepoHashes(store: DiskHeadroomWorkerStore): Set<string> {
+  try {
+    const protectedHashes = new Set<string>();
+    for (const workflow of store.listWorkflows()) {
+      if (!workflow.repoUrl) continue;
+      const tasks = store.loadTasks(workflow.id);
+      const hasNonTerminalTask = tasks.some((task) => !TERMINAL_TASK_STATUS_SET.has(task.status));
+      if (hasNonTerminalTask) {
+        protectedHashes.add(computeRepoCacheHash(workflow.repoUrl));
+      }
+    }
+    return protectedHashes;
+  } catch {
+    return new Set();
+  }
+}
+
+function pathIsProtected(candidate: string, protectedPaths: ReadonlySet<string>): boolean {
+  if (protectedPaths.size === 0) return false;
+  const resolved = resolve(candidate);
+  for (const protectedPath of protectedPaths) {
+    if (resolved === protectedPath) return true;
+    if (resolved.startsWith(`${protectedPath}${sep}`)) return true;
+    if (protectedPath.startsWith(`${resolved}${sep}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Renames `path` aside before erasing the renamed copy, mirroring
+ * remove_path() in buildInvokerHomeCleanupScript above. A partial failure
+ * mid-erase then leaves a `.deleting.<random>` orphan (swept up by
+ * sweepLocalDeletingOrphans next pass) instead of a half-gone directory
+ * still sitting under the name other code looks up. Erases out of process
+ * (`rm -rf` via execFile) so a large tree does not block the event loop;
+ * falls back to the async fs.rm if the rename or the subprocess fails.
+ */
+async function eraseLocalPath(path: string, errors: string[]): Promise<void> {
+  const removeWithNode = async (deletePath: string) => {
+    await rmAsync(deletePath, {
+      recursive: true,
+      force: true,
+      maxRetries: LOCAL_RM_MAX_RETRIES,
+      retryDelay: LOCAL_RM_RETRY_DELAY_MS,
+    });
+  };
+
+  let deletePath = `${path}.deleting.${randomUUID().slice(0, 8)}`;
+  try {
+    renameSync(path, deletePath);
+  } catch {
+    deletePath = path;
+    try {
+      await removeWithNode(deletePath);
+    } catch (fallbackErr) {
+      errors.push(`${path}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
+    }
+    return;
+  }
+
+  try {
+    await execFileAsync('rm', ['-rf', deletePath]);
+  } catch {
+    try {
+      await removeWithNode(deletePath);
+    } catch (fallbackErr) {
+      errors.push(`${path}: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`);
+    }
+  }
+}
+
+function approximateTreeBytes(path: string, capEntries: number): ApproximateTreeBytesResult {
+  const stack = [path];
+  let visited = 0;
+  let bytes = 0;
+  let truncated = false;
+
+  while (stack.length > 0) {
+    if (visited >= capEntries) {
+      truncated = true;
+      break;
+    }
+
+    const current = stack.pop()!;
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      truncated = true;
+      continue;
+    }
+    visited += 1;
+    bytes += stat.size;
+
+    if (!stat.isDirectory()) continue;
+    let children: string[];
+    try {
+      children = readdirSync(current);
+    } catch {
+      truncated = true;
+      continue;
+    }
+    for (const child of children) {
+      stack.push(join(current, child));
+    }
+  }
+
+  return { bytes, truncated };
+}
+
+function recordProtectedSkip(
+  path: string,
+  protectedSkips: ProtectedSkipAccounting,
+  reason: string,
+  logger?: Logger,
+  targetKey?: string,
+): void {
+  const approximateBytes = approximateTreeBytes(path, PROTECTED_SKIP_BYTE_WALK_ENTRY_CAP);
+  protectedSkips.paths.push(path);
+  protectedSkips.count += 1;
+  protectedSkips.bytes += approximateBytes.bytes;
+  protectedSkips.truncated ||= approximateBytes.truncated;
+  logger?.warn?.(`[disk-headroom-cleanup] skip ${path}: ${reason}`, {
+    module: 'disk-headroom',
+    targetKey,
+    path,
+    protectedSkipBytes: approximateBytes.bytes,
+    protectedSkipBytesTruncated: approximateBytes.truncated,
+  });
+}
+
+function inUseMarkKeepsChild(home: string, name: string, errors: string[]): boolean {
+  try {
+    return hasFreshInUseMark(home, name, Date.now());
+  } catch (err) {
+    const markPath = join(home, IN_USE_MARK_DIR, 'worktrees', name);
+    errors.push(`in-use mark ${markPath}: ${err instanceof Error ? err.message : String(err)}`);
+    return true;
+  }
+}
+
+async function removeLocalDir(
+  path: string,
+  errors: string[],
+  protectedSkips: ProtectedSkipAccounting,
+  protectedPaths: ReadonlySet<string>,
+  logger?: Logger,
+  targetKey?: string,
+  markGuard?: (name: string) => boolean,
+): Promise<void> {
+  if (!existsSync(path)) return;
+  if (pathIsProtected(path, protectedPaths)) {
+    recordProtectedSkip(path, protectedSkips, 'protected-path-in-use', logger, targetKey);
+    return;
+  }
+  if (markGuard?.(basename(path))) {
+    recordProtectedSkip(path, protectedSkips, 'fresh-in-use-mark', logger, targetKey);
+    return;
+  }
+  await eraseLocalPath(path, errors);
 }
 
 function ensureLocalDir(path: string, errors: string[]): void {
@@ -229,7 +562,39 @@ function ensureLocalDir(path: string, errors: string[]): void {
   }
 }
 
-function sweepLocalDeletingOrphans(home: string, errors: string[]): void {
+function logLocalCleanupDone(opts: {
+  logger?: Logger;
+  mode: LocalDiskCleanupMode;
+  home: string;
+  targetKey: string;
+  ok: boolean;
+  reason: string;
+  protectedSkips: ProtectedSkipAccounting;
+}): void {
+  const stalePrefix = opts.mode === 'stale-only' ? 'stale-only ' : '';
+  const truncated = opts.protectedSkips.truncated
+    ? ' protectedSkipBytesTruncated=true'
+    : '';
+  opts.logger?.info?.(
+    `[disk-headroom-cleanup] local ${stalePrefix}done home=${opts.home} ok=${opts.ok ? 'true' : 'false'} reason=${opts.reason} protectedSkipCount=${opts.protectedSkips.count} protectedSkipBytes=${opts.protectedSkips.bytes}${truncated}`,
+    {
+      module: 'disk-headroom',
+      targetKey: opts.targetKey,
+      protectedSkipCount: opts.protectedSkips.count,
+      protectedSkipBytes: opts.protectedSkips.bytes,
+      protectedSkipBytesTruncated: opts.protectedSkips.truncated,
+    },
+  );
+}
+
+async function sweepLocalDeletingOrphans(
+  home: string,
+  errors: string[],
+  protectedSkips: ProtectedSkipAccounting,
+  protectedPaths: ReadonlySet<string>,
+  logger?: Logger,
+  targetKey?: string,
+): Promise<void> {
   if (!existsSync(home)) return;
   let entries: string[];
   try {
@@ -240,63 +605,358 @@ function sweepLocalDeletingOrphans(home: string, errors: string[]): void {
   }
   for (const name of entries) {
     if (!isDeletingOrphanName(name)) continue;
-    removeLocalDir(join(home, name), errors);
+    await removeLocalDir(join(home, name), errors, protectedSkips, protectedPaths, logger, targetKey);
   }
 }
 
-export async function cleanupLocalInvokerHome(opts: {
-  invokerHome: string;
-  targetKey?: string;
-  logger?: Logger;
-  userHome?: string;
-}): Promise<DiskCleanupResult> {
+/**
+ * Sweeps a reclaimable top-level dir (e.g. `worktrees`) one child at a time
+ * so a single in-use subdirectory only protects itself, not its siblings.
+ */
+async function sweepReclaimableChildren(
+  dirPath: string,
+  errors: string[],
+  protectedSkips: ProtectedSkipAccounting,
+  protectedPaths: ReadonlySet<string>,
+  logger?: Logger,
+  targetKey?: string,
+  markGuard?: (name: string) => boolean,
+): Promise<void> {
+  if (!existsSync(dirPath)) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(dirPath);
+  } catch (err) {
+    errors.push(`readdir ${dirPath}: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  for (const name of entries) {
+    await removeLocalDir(
+      join(dirPath, name),
+      errors,
+      protectedSkips,
+      protectedPaths,
+      logger,
+      targetKey,
+      markGuard,
+    );
+  }
+}
+
+/**
+ * Sweeps `repos/` one shared git mirror at a time. Mirrors are named by
+ * repo-cache hash, not by task workspacePath, so a child is left alone when
+ * either its own hash is protected or its resolved path matches/sits above a
+ * protected workspacePath.
+ */
+async function sweepRepoChildren(
+  dirPath: string,
+  errors: string[],
+  protectedSkips: ProtectedSkipAccounting,
+  protectedRepoHashes: ReadonlySet<string>,
+  protectedPaths: ReadonlySet<string>,
+  logger?: Logger,
+  targetKey?: string,
+  markGuard?: (name: string) => boolean,
+): Promise<void> {
+  if (!existsSync(dirPath)) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(dirPath);
+  } catch (err) {
+    errors.push(`readdir ${dirPath}: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  for (const name of entries) {
+    const childPath = join(dirPath, name);
+    if (protectedRepoHashes.has(name) || pathIsProtected(childPath, protectedPaths)) {
+      recordProtectedSkip(childPath, protectedSkips, 'protected-path-in-use', logger, targetKey);
+      continue;
+    }
+    if (markGuard?.(name)) {
+      recordProtectedSkip(childPath, protectedSkips, 'fresh-in-use-mark', logger, targetKey);
+      continue;
+    }
+    await eraseLocalPath(childPath, errors);
+  }
+}
+
+async function sweepStaleReclaimableChildren(
+  dirPath: string,
+  minAgeMinutes: number,
+  errors: string[],
+  protectedSkips: ProtectedSkipAccounting,
+  protectedPaths: ReadonlySet<string>,
+  logger?: Logger,
+  targetKey?: string,
+  markGuard?: (name: string) => boolean,
+): Promise<void> {
+  if (!existsSync(dirPath)) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(dirPath);
+  } catch (err) {
+    errors.push(`readdir ${dirPath}: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+
+  const cutoffMs = Date.now() - minAgeMinutes * 60 * 1000;
+  for (const name of entries) {
+    const childPath = join(dirPath, name);
+    try {
+      if (lstatSync(childPath).mtimeMs > cutoffMs) continue;
+    } catch (err) {
+      errors.push(`lstat ${childPath}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+    await removeLocalDir(
+      childPath,
+      errors,
+      protectedSkips,
+      protectedPaths,
+      logger,
+      targetKey,
+      markGuard,
+    );
+  }
+}
+
+export async function cleanupLocalInvokerHome(
+  opts: CleanupLocalInvokerHomeOptions,
+): Promise<DiskCleanupResult> {
   const targetKey = opts.targetKey ?? `local ${opts.invokerHome}`;
   const userHome = opts.userHome ?? homedir();
   const home = expandTildeHome(opts.invokerHome, userHome);
+  const mode = opts.mode ?? 'critical';
   if (!isSafeInvokerHome(home, userHome)) {
-    return { targetKey, ok: false, reason: 'path-guard', detail: home };
-  }
-
-  opts.logger?.info?.(`[disk-headroom-cleanup] local begin home=${home}`, {
-    module: 'disk-headroom',
-    targetKey,
-  });
-
-  const errors: string[] = [];
-  sweepLocalDeletingOrphans(home, errors);
-  for (const name of DISK_RECLAIMABLE_DIRS) {
-    removeLocalDir(join(home, name), errors);
-  }
-  for (const name of DISK_RECLAIMABLE_DIRS) {
-    ensureLocalDir(join(home, name), errors);
-  }
-
-  if (errors.length > 0) {
-    opts.logger?.warn?.(`[disk-headroom-cleanup] local partial failures`, {
-      module: 'disk-headroom',
-      targetKey,
-      errors,
-    });
     return {
       targetKey,
       ok: false,
-      reason: 'cleanup-error',
-      detail: errors.slice(0, 5).join('; '),
+      reason: 'path-guard',
+      detail: home,
+      protectedSkipCount: 0,
+      protectedSkipBytes: 0,
     };
   }
 
-  opts.logger?.info?.(`[disk-headroom-cleanup] local done home=${home}`, {
-    module: 'disk-headroom',
-    targetKey,
-  });
-  return { targetKey, ok: true, reason: 'critical-cleanup' };
+  const processWithNoAsar = process as ProcessWithNoAsar;
+  const hadNoAsar = Object.prototype.hasOwnProperty.call(processWithNoAsar, 'noAsar');
+  const previousNoAsar = processWithNoAsar.noAsar;
+  processWithNoAsar.noAsar = true;
+
+  try {
+    opts.logger?.info?.(`[disk-headroom-cleanup] local ${mode === 'stale-only' ? 'stale-only ' : ''}begin home=${home}`, {
+      module: 'disk-headroom',
+      targetKey,
+    });
+
+    const protectedPaths = opts.store ? computeProtectedLocalPaths(opts.store) : new Set<string>();
+    const protectedRepoHashes = opts.store ? computeProtectedRepoHashes(opts.store) : new Set<string>();
+    const errors: string[] = [];
+    const protectedSkips: ProtectedSkipAccounting = {
+      paths: [],
+      count: 0,
+      bytes: 0,
+      truncated: false,
+    };
+    const markGuardFor = (dirName: string): ((name: string) => boolean) | undefined =>
+      dirName === 'worktrees' || dirName === 'repos'
+        ? (name: string) => inUseMarkKeepsChild(home, name, errors)
+        : undefined;
+    if (mode === 'stale-only') {
+      const minAgeMinutes = Math.max(
+        opts.minAgeMinutes ?? TMP_SCRATCH_MIN_AGE_MINUTES,
+        TMP_SCRATCH_MIN_AGE_MINUTES,
+      );
+      for (const name of DISK_RECLAIMABLE_DIRS) {
+        await sweepStaleReclaimableChildren(
+          join(home, name),
+          minAgeMinutes,
+          errors,
+          protectedSkips,
+          protectedPaths,
+          opts.logger,
+          targetKey,
+          markGuardFor(name),
+        );
+      }
+    } else {
+      await sweepLocalDeletingOrphans(home, errors, protectedSkips, protectedPaths, opts.logger, targetKey);
+      await sweepRepoChildren(
+        join(home, 'repos'),
+        errors,
+        protectedSkips,
+        protectedRepoHashes,
+        protectedPaths,
+        opts.logger,
+        targetKey,
+        markGuardFor('repos'),
+      );
+      for (const name of ['runtime', 'worktrees', 'merge-clones', 'merge-launches'] as const) {
+        await sweepReclaimableChildren(
+          join(home, name),
+          errors,
+          protectedSkips,
+          protectedPaths,
+          opts.logger,
+          targetKey,
+          markGuardFor(name),
+        );
+      }
+      // pr-cron-work: PR #6632 retired its only producer, so there is nothing there to preserve.
+      await removeLocalDir(join(home, 'pr-cron-work'), errors, protectedSkips, protectedPaths, opts.logger, targetKey);
+      for (const name of DISK_RECLAIMABLE_DIRS) {
+        ensureLocalDir(join(home, name), errors);
+      }
+    }
+
+    const resultBase = {
+      targetKey,
+      protectedSkipCount: protectedSkips.count,
+      protectedSkipBytes: protectedSkips.bytes,
+      ...(protectedSkips.truncated ? { protectedSkipBytesTruncated: true } : {}),
+    };
+
+    if (errors.length > 0) {
+      opts.logger?.warn?.(`[disk-headroom-cleanup] local partial failures`, {
+        module: 'disk-headroom',
+        targetKey,
+        errors,
+      });
+      logLocalCleanupDone({
+        logger: opts.logger,
+        mode,
+        home,
+        targetKey,
+        ok: false,
+        reason: 'cleanup-error',
+        protectedSkips,
+      });
+      return {
+        ...resultBase,
+        ok: false,
+        reason: 'cleanup-error',
+        detail: errors.slice(0, 5).join('; '),
+      };
+    }
+
+    if (protectedSkips.count > 0) {
+      opts.logger?.warn?.(`[disk-headroom-cleanup] local skipped in-use paths`, {
+        module: 'disk-headroom',
+        targetKey,
+        protectedSkips: protectedSkips.paths,
+        protectedSkipCount: protectedSkips.count,
+        protectedSkipBytes: protectedSkips.bytes,
+        protectedSkipBytesTruncated: protectedSkips.truncated,
+      });
+      logLocalCleanupDone({
+        logger: opts.logger,
+        mode,
+        home,
+        targetKey,
+        ok: true,
+        reason: mode === 'stale-only' ? 'warn-paced' : 'protected-path-in-use',
+        protectedSkips,
+      });
+      return {
+        ...resultBase,
+        ok: true,
+        reason: mode === 'stale-only' ? 'warn-paced' : 'protected-path-in-use',
+        detail: protectedSkips.paths.slice(0, 5).join('; '),
+      };
+    }
+
+    logLocalCleanupDone({
+      logger: opts.logger,
+      mode,
+      home,
+      targetKey,
+      ok: true,
+      reason: mode === 'stale-only' ? 'warn-paced' : 'critical-cleanup',
+      protectedSkips,
+    });
+    return {
+      ...resultBase,
+      ok: true,
+      reason: mode === 'stale-only' ? 'warn-paced' : 'critical-cleanup',
+    };
+  } finally {
+    if (hadNoAsar) {
+      processWithNoAsar.noAsar = previousNoAsar;
+    } else {
+      Reflect.deleteProperty(processWithNoAsar, 'noAsar');
+    }
+  }
+}
+
+/**
+ * Eagerly reads every workflow and task out of `store`, so a real accessor
+ * error propagates here instead of being swallowed into an empty ("protect
+ * nothing") result by computeProtectedLocalPaths/computeProtectedRepoHashes.
+ * Not narrowed to one pool member: several configured targets can name the
+ * same host and home (the owner host itself included), so a task launched
+ * through any of them owns folders every one of them would sweep.
+ */
+function snapshotStoreOrThrow(store: DiskHeadroomWorkerStore): DiskHeadroomWorkerStore {
+  const workflows = store.listWorkflows();
+  const tasksByWorkflowId = new Map<string, TaskState[]>();
+  for (const workflow of workflows) {
+    tasksByWorkflowId.set(workflow.id, store.loadTasks(workflow.id));
+  }
+  return {
+    listWorkflows: () => workflows,
+    loadTasks: (workflowId) => tasksByWorkflowId.get(workflowId) ?? [],
+  };
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === '/') end -= 1;
+  return value.slice(0, end);
+}
+
+function relativeToRemoteHome(path: string, remoteHome: string): string | undefined {
+  if (remoteHome.startsWith('~/')) {
+    const marker = `/${trimTrailingSlashes(remoteHome.slice(2))}/`;
+    const index = path.indexOf(marker);
+    return index === -1 ? undefined : path.slice(index + marker.length) || undefined;
+  }
+  const homePrefix = `${resolve(remoteHome)}${sep}`;
+  return path.startsWith(homePrefix) ? path.slice(homePrefix.length) || undefined : undefined;
+}
+
+/**
+ * The preservation set sent to one target, as paths relative to
+ * `target.remotePath`: `repos/<hash>` for every repo an in-flight task uses
+ * and `worktrees/<hash>/<branch>` (etc.) for every in-flight task workspace,
+ * from every pool member and the owner's local targets alike. Throws if
+ * `store` throws — callers must fail closed on that, not fall back to an
+ * unprotected remote wipe.
+ */
+export function computeRemotePreservationPaths(
+  store: DiskHeadroomWorkerStore,
+  target: RemoteDiskTarget,
+): string[] {
+  const snapshot = snapshotStoreOrThrow(store);
+  const preserved = new Set<string>();
+  for (const hash of computeProtectedRepoHashes(snapshot)) {
+    preserved.add(`repos/${hash}`);
+  }
+  for (const path of computeProtectedLocalPaths(snapshot)) {
+    const relative = relativeToRemoteHome(path, target.remotePath);
+    if (relative) preserved.add(relative);
+  }
+  return [...preserved];
 }
 
 export async function cleanupRemoteInvokerHome(opts: {
   target: RemoteDiskTarget;
   logger?: Logger;
+  store?: DiskHeadroomWorkerStore;
+  mode?: RemoteDiskCleanupMode;
   runRemoteScript?: (target: RemoteDiskTarget, script: string) => Promise<string>;
 }): Promise<DiskCleanupResult> {
+  const mode = opts.mode ?? 'critical';
   const targetKey = `ssh:${opts.target.name} ${opts.target.remotePath}`;
   if (!isSafeRemoteInvokerHomePath(opts.target.remotePath)) {
     return {
@@ -304,30 +964,66 @@ export async function cleanupRemoteInvokerHome(opts: {
       ok: false,
       reason: 'path-guard',
       detail: opts.target.remotePath,
+      protectedSkipCount: 0,
+      protectedSkipBytes: 0,
     };
   }
 
-  const script = buildInvokerHomeCleanupScript(opts.target.remotePath);
+  let preservePaths: string[] = [];
+  if (mode === 'critical') {
+    if (!opts.store) {
+      const detail = 'no task store to read in-use paths from; refusing critical cleanup';
+      opts.logger?.error?.(`[disk-headroom-cleanup] remote ${detail} ${targetKey}`, { module: 'disk-headroom', targetKey });
+      return { targetKey, ok: false, reason: 'cleanup-error', detail, protectedSkipCount: 0, protectedSkipBytes: 0 };
+    }
+    try {
+      preservePaths = computeRemotePreservationPaths(opts.store, opts.target);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      opts.logger?.error?.(
+        `[disk-headroom-cleanup] remote preservation lookup failed ${targetKey}: ${detail}`,
+        { module: 'disk-headroom', targetKey },
+      );
+      return { targetKey, ok: false, reason: 'cleanup-error', detail, protectedSkipCount: 0, protectedSkipBytes: 0 };
+    }
+  }
+
+  const script = buildInvokerHomeCleanupScript(opts.target.remotePath, preservePaths, mode);
   const run = opts.runRemoteScript ?? defaultRunRemoteCleanup;
+  const reason = mode === 'stale-only' ? 'warn-paced' : 'critical-cleanup';
   try {
-    opts.logger?.info?.(`[disk-headroom-cleanup] remote begin ${targetKey}`, {
+    opts.logger?.info?.(`[disk-headroom-cleanup] remote ${mode === 'stale-only' ? 'stale-only ' : ''}begin ${targetKey}`, {
       module: 'disk-headroom',
       targetKey,
     });
     const output = await run(opts.target, script);
-    opts.logger?.info?.(`[disk-headroom-cleanup] remote done ${targetKey}`, {
+    opts.logger?.info?.(`[disk-headroom-cleanup] remote ${mode === 'stale-only' ? 'stale-only ' : ''}done ${targetKey}`, {
       module: 'disk-headroom',
       targetKey,
       outputTail: output.slice(-400),
     });
-    return { targetKey, ok: true, reason: 'critical-cleanup', detail: output.slice(-400) };
+    return {
+      targetKey,
+      ok: true,
+      reason,
+      detail: output.slice(-400),
+      protectedSkipCount: 0,
+      protectedSkipBytes: 0,
+    };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     opts.logger?.error?.(`[disk-headroom-cleanup] remote failed ${targetKey}: ${detail}`, {
       module: 'disk-headroom',
       targetKey,
     });
-    return { targetKey, ok: false, reason: 'cleanup-error', detail };
+    return {
+      targetKey,
+      ok: false,
+      reason: 'cleanup-error',
+      detail,
+      protectedSkipCount: 0,
+      protectedSkipBytes: 0,
+    };
   }
 }
 

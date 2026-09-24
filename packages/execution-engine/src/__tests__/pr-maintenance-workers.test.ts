@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -11,17 +11,27 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Logger } from '@invoker/contracts';
 import type { WorkerActionRecord, WorkerActionWrite } from '@invoker/data-store';
 
+import { SIGKILL_TIMEOUT_MS } from '../process-utils.js';
+import { createWorkerRegistry } from '../worker-registry.js';
+import type { WorkerRuntimeDependencies } from '../worker-runtime-dependencies.js';
 import {
-  CODERABBIT_ADDRESS_WORKER_KIND,
   DEFAULT_PR_MAINTENANCE_WORKER_INTERVAL_MS,
   PR_ADMIN_BYPASS_LAND_WORKER_KIND,
-  PR_CONFLICT_REBASE_WORKER_KIND,
+  PR_AUTO_LABEL_WORKER_KIND,
+  PR_DUPLICATE_CLOSE_WORKER_KIND,
+  PR_JAILBREAK_LAND_WORKER_KIND,
+  PR_MAINTENANCE_WORKER_STAGGER_STEP_MS,
+  PR_ORPHAN_REPAIR_WORKER_KIND,
+  buildPrMaintenanceEnv,
   createPrAdminBypassLandWorker,
-  createCoderabbitAddressWorker,
-  createPrCiFailureScanWorker,
-  createPrConflictRebaseWorker,
+  createPrAutoLabelWorker,
+  createPrDuplicateCloseWorker,
+  createPrOrphanRepairWorker,
+  probePrMaintenanceLock,
+  registerPrMaintenanceWorkers,
   type PrMaintenanceLockProbeOptions,
 } from '../workers/pr-maintenance-workers.js';
+import { chmodSync } from 'node:fs';
 
 type SpawnCall = {
   command: string;
@@ -77,6 +87,35 @@ function makeSpawnHarness(options: {
   return { calls, spawnProcess: spawnProcess as unknown as typeof spawn };
 }
 
+function makeHungSpawnHarness(options: {
+  cooperativeKill?: boolean;
+} = {}): { calls: SpawnCall[]; spawnProcess: typeof spawn } {
+  const calls: SpawnCall[] = [];
+  const spawnProcess = vi.fn((command: string, args: string[], spawnOptions: SpawnOptions) => {
+    calls.push({ command, args, options: spawnOptions });
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      stdin: null,
+      killed: false,
+      pid: 12345,
+      // Never emits 'close' or 'error' on its own — simulates a wedged
+      // child (e.g. blocked on a dead owner's IPC handshake).
+      kill: vi.fn(() => {
+        if (options.cooperativeKill) {
+          queueMicrotask(() => child.emit('close', null, 'SIGTERM'));
+        }
+        return true;
+      }),
+    }) as unknown as ChildProcess;
+    return child;
+  });
+
+  return { calls, spawnProcess: spawnProcess as unknown as typeof spawn };
+}
+
 describe('PR maintenance workers', () => {
   let tmpRoot: string | undefined;
 
@@ -94,13 +133,44 @@ describe('PR maintenance workers', () => {
     return tmpRoot;
   }
 
-  it('spawns the CodeRabbit shell entrypoint with the configured cwd and env', async () => {
+  it(
+    'probePrMaintenanceLock treats a spawnSync timeout as not-held, not as a genuine lock holder',
+    async () => {
+      // Real repro, no mocking: `flock -n` is non-blocking and always returns
+      // immediately regardless of the lock's state, so the only way the probe's
+      // spawnSync call can hit its own timeout is if the child process itself
+      // never got scheduled (e.g. the owner is under heavy CPU load) -- which
+      // says nothing about whether the lock is actually held. This installs a
+      // real, slow `flock` shim ahead of the real one on PATH so the probe's
+      // spawnSync call genuinely times out, then asserts it does not falsely
+      // report the lock as held.
+      const repoRoot = makeRepoRoot();
+      const lockPath = join(repoRoot, 'pr-crons.lock');
+      const fakeBinDir = join(repoRoot, 'fake-bin');
+      const { mkdirSync, writeFileSync: writeFile } = await import('node:fs');
+      mkdirSync(fakeBinDir, { recursive: true });
+      const fakeFlockPath = join(fakeBinDir, 'flock');
+      writeFile(fakeFlockPath, '#!/bin/bash\nsleep 5\n');
+      chmodSync(fakeFlockPath, 0o755);
+
+      const result = probePrMaintenanceLock({
+        lockPath,
+        env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH ?? ''}` },
+      });
+
+      expect(result.held).toBe(false);
+      expect(result.reason).toBe('probe-timeout');
+    },
+    8_000,
+  );
+
+  it('spawns the admin-bypass shell entrypoint with the configured cwd and env', async () => {
     const repoRoot = makeRepoRoot();
     const lockPath = join(repoRoot, 'locks', 'pr-crons.lock');
     const logger = makeLogger();
-    const spawnHarness = makeSpawnHarness({ stdout: 'addressed one PR\n', stderr: 'diagnostic line\n' });
+    const spawnHarness = makeSpawnHarness({ stdout: 'planned one PR\n', stderr: 'diagnostic line\n' });
     const lockProbe = vi.fn((_options: PrMaintenanceLockProbeOptions) => ({ held: false }));
-    const worker = createCoderabbitAddressWorker({
+    const worker = createPrAdminBypassLandWorker({
       logger,
       repoRoot,
       env: {
@@ -127,7 +197,7 @@ describe('PR maintenance workers', () => {
     expect(spawnHarness.calls).toEqual([
       expect.objectContaining({
         command: 'bash',
-        args: [resolve(repoRoot, 'scripts/cron-coderabbit-address.sh')],
+        args: [resolve(repoRoot, 'scripts/cron-pr-admin-bypass-land.sh')],
         options: expect.objectContaining({
           cwd: repoRoot,
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -141,20 +211,39 @@ describe('PR maintenance workers', () => {
       }),
     ]);
     expect(logger.info).toHaveBeenCalledWith(
-      `[worker:${CODERABBIT_ADDRESS_WORKER_KIND}] addressed one PR`,
+      `[worker:${PR_ADMIN_BYPASS_LAND_WORKER_KIND}] planned one PR`,
       expect.objectContaining({ stream: 'stdout' }),
     );
     expect(logger.warn).toHaveBeenCalledWith(
-      `[worker:${CODERABBIT_ADDRESS_WORKER_KIND}] diagnostic line`,
+      `[worker:${PR_ADMIN_BYPASS_LAND_WORKER_KIND}] diagnostic line`,
       expect.objectContaining({ stream: 'stderr' }),
     );
   });
 
-  it('spawns the PR conflict rebase shell entrypoint', async () => {
+  it('forces admin-bypass queue children into existing-owner submitter mode', () => {
+    const repoRoot = makeRepoRoot();
+    const originalStandalone = process.env.INVOKER_HEADLESS_STANDALONE;
+    process.env.INVOKER_HEADLESS_STANDALONE = '1';
+    try {
+      const env = buildPrMaintenanceEnv(repoRoot, undefined);
+
+      expect(env.INVOKER_HEADLESS_STANDALONE).toBeUndefined();
+      expect(env.INVOKER_HEADLESS_REQUIRE_EXISTING_OWNER).toBe('1');
+      expect(env.INVOKER_REPO_ROOT).toBe(repoRoot);
+    } finally {
+      if (originalStandalone === undefined) {
+        delete process.env.INVOKER_HEADLESS_STANDALONE;
+      } else {
+        process.env.INVOKER_HEADLESS_STANDALONE = originalStandalone;
+      }
+    }
+  });
+
+  it('spawns the orphan-repair shell entrypoint', async () => {
     const repoRoot = makeRepoRoot();
     const logger = makeLogger();
     const spawnHarness = makeSpawnHarness();
-    const worker = createPrConflictRebaseWorker({
+    const worker = createPrOrphanRepairWorker({
       logger,
       repoRoot,
       spawnProcess: spawnHarness.spawnProcess,
@@ -166,15 +255,16 @@ describe('PR maintenance workers', () => {
 
     expect(spawnHarness.calls[0]).toEqual(expect.objectContaining({
       command: 'bash',
-      args: [resolve(repoRoot, 'scripts/cron-pr-conflict-rebase.sh')],
+      args: [resolve(repoRoot, 'scripts/cron-pr-orphan-repair.sh')],
       options: expect.objectContaining({ cwd: repoRoot }),
     }));
   });
-  it('spawns the PR CI scan shell entrypoint', async () => {
+
+  it('spawns the duplicate-close shell entrypoint', async () => {
     const repoRoot = makeRepoRoot();
     const logger = makeLogger();
     const spawnHarness = makeSpawnHarness();
-    const worker = createPrCiFailureScanWorker({
+    const worker = createPrDuplicateCloseWorker({
       logger,
       repoRoot,
       spawnProcess: spawnHarness.spawnProcess,
@@ -186,42 +276,180 @@ describe('PR maintenance workers', () => {
 
     expect(spawnHarness.calls[0]).toEqual(expect.objectContaining({
       command: 'bash',
-      args: [resolve(repoRoot, 'packages/execution-engine/scripts/cron-pr-ci-failure.sh')],
+      args: [resolve(repoRoot, 'scripts/cron-pr-duplicate-close.sh')],
       options: expect.objectContaining({ cwd: repoRoot }),
     }));
   });
 
-  it('spawns the admin-bypass land shell entrypoint', async () => {
+  it('spawns the auto-label shell entrypoint', async () => {
     const repoRoot = makeRepoRoot();
     const logger = makeLogger();
     const spawnHarness = makeSpawnHarness();
+    const worker = createPrAutoLabelWorker({
+      logger,
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => ({ held: false }),
+      installSignalHandlers: false,
+    });
+
+    await worker.tick();
+
+    expect(spawnHarness.calls[0]).toEqual(expect.objectContaining({
+      command: 'bash',
+      args: [resolve(repoRoot, 'scripts/cron-pr-auto-label.sh')],
+      options: expect.objectContaining({ cwd: repoRoot }),
+    }));
+  });
+
+  it('registers the jailbreak-land worker with its shell entrypoint', async () => {
+    const repoRoot = makeRepoRoot();
+    const logger = makeLogger();
+    const spawnHarness = makeSpawnHarness();
+    const registry = registerPrMaintenanceWorkers(createWorkerRegistry<WorkerRuntimeDependencies>());
+    const definition = registry.get(PR_JAILBREAK_LAND_WORKER_KIND);
+
+    expect(definition?.kind).toBe(PR_JAILBREAK_LAND_WORKER_KIND);
+
+    const worker = definition!.factory({
+      logger,
+      store: {} as WorkerRuntimeDependencies['store'],
+      submitter: { submit: vi.fn(() => 0) } as WorkerRuntimeDependencies['submitter'],
+      prMaintenance: {
+        repoRoot,
+        spawnProcess: spawnHarness.spawnProcess,
+        lockProbe: () => ({ held: false }),
+      },
+    } as WorkerRuntimeDependencies);
+
+    await worker.tick();
+
+    expect(spawnHarness.calls[0]).toEqual(expect.objectContaining({
+      command: 'bash',
+      args: [resolve(repoRoot, 'scripts/cron-pr-jailbreak-land.sh')],
+      options: expect.objectContaining({ cwd: repoRoot }),
+    }));
+  });
+
+  it('staggers the duplicate-close worker 2/4 of the interval after the other workers', async () => {
+    vi.useFakeTimers();
+    expect(PR_MAINTENANCE_WORKER_STAGGER_STEP_MS).toBe(DEFAULT_PR_MAINTENANCE_WORKER_INTERVAL_MS / 4);
+
+    // createWorkerRuntime's beginPolling() sets an interval-cadence timer once
+    // startDelayMs elapses, so the *first* tick lands at startDelayMs +
+    // intervalMs, not at startDelayMs alone (verified against the existing
+    // "polls on the five-minute default interval" case above, where
+    // startDelayMs=0 and the first tick still lands at intervalMs).
+    const repoRoot = makeRepoRoot();
+    const spawnHarness = makeSpawnHarness();
+    const worker = createPrDuplicateCloseWorker({
+      logger: makeLogger(),
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => ({ held: false }),
+      installSignalHandlers: false,
+      startDelayMs: 2 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS,
+    });
+
+    worker.start();
+    expect(spawnHarness.calls).toEqual([]);
+
+    const firstTickAt = 2 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS + DEFAULT_PR_MAINTENANCE_WORKER_INTERVAL_MS;
+    await vi.advanceTimersByTimeAsync(firstTickAt - 1);
+    expect(spawnHarness.calls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnHarness.calls).toHaveLength(1);
+    await worker.stop();
+  });
+
+  it('staggers the auto-label worker 3/4 of the interval after the other workers', async () => {
+    vi.useFakeTimers();
+
+    const repoRoot = makeRepoRoot();
+    const spawnHarness = makeSpawnHarness();
+    const worker = createPrAutoLabelWorker({
+      logger: makeLogger(),
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => ({ held: false }),
+      installSignalHandlers: false,
+      startDelayMs: 3 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS,
+    });
+
+    worker.start();
+    expect(spawnHarness.calls).toEqual([]);
+
+    const firstTickAt = 3 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS + DEFAULT_PR_MAINTENANCE_WORKER_INTERVAL_MS;
+    await vi.advanceTimersByTimeAsync(firstTickAt - 1);
+    expect(spawnHarness.calls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawnHarness.calls).toHaveLength(1);
+    await worker.stop();
+  });
+
+  it('waits for the shared PR-maintenance lock to free up instead of skipping the tick', async () => {
+    const repoRoot = makeRepoRoot();
+    const logger = makeLogger();
+    const spawnHarness = makeSpawnHarness();
+    let probes = 0;
     const worker = createPrAdminBypassLandWorker({
       logger,
       repoRoot,
       spawnProcess: spawnHarness.spawnProcess,
-      lockProbe: () => ({ held: false }),
+      lockProbe: () => {
+        probes += 1;
+        return probes <= 2 ? { held: true, reason: 'test-lock-held' } : { held: false };
+      },
+      lockPollMs: 1,
       installSignalHandlers: false,
     });
 
     await worker.tick();
 
-    expect(spawnHarness.calls[0]).toEqual(expect.objectContaining({
-      command: 'bash',
-      args: [resolve(repoRoot, 'scripts/cron-pr-admin-bypass-land.sh')],
-      options: expect.objectContaining({ cwd: repoRoot }),
-    }));
-    expect(worker.identity.kind).toBe(PR_ADMIN_BYPASS_LAND_WORKER_KIND);
+    expect(probes).toBe(3);
+    expect(spawnHarness.calls).toHaveLength(1);
+  });
+
+  it('skips the tick only after the lock stays held past the wait limit', async () => {
+    const repoRoot = makeRepoRoot();
+    const logger = makeLogger();
+    const spawnHarness = makeSpawnHarness();
+    let probes = 0;
+    const worker = createPrAdminBypassLandWorker({
+      logger,
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => {
+        probes += 1;
+        return { held: true, reason: 'test-lock-held' };
+      },
+      lockWaitMs: 30,
+      lockPollMs: 5,
+      installSignalHandlers: false,
+    });
+
+    await worker.tick();
+
+    expect(probes).toBeGreaterThan(1);
+    expect(spawnHarness.calls).toEqual([]);
+    expect(logger.info).toHaveBeenCalledWith(
+      `[worker:${PR_ADMIN_BYPASS_LAND_WORKER_KIND}] shared PR maintenance lock held; skipping tick`,
+      expect.objectContaining({ worker: PR_ADMIN_BYPASS_LAND_WORKER_KIND, reason: 'test-lock-held' }),
+    );
   });
 
   it('skips cleanly when the shared PR-maintenance lock is already held', async () => {
     const repoRoot = makeRepoRoot();
     const logger = makeLogger();
     const spawnHarness = makeSpawnHarness();
-    const worker = createPrConflictRebaseWorker({
+    const worker = createPrOrphanRepairWorker({
       logger,
       repoRoot,
       spawnProcess: spawnHarness.spawnProcess,
       lockProbe: () => ({ held: true, reason: 'test-lock-held' }),
+      lockWaitMs: 0,
       installSignalHandlers: false,
     });
 
@@ -229,9 +457,34 @@ describe('PR maintenance workers', () => {
 
     expect(spawnHarness.calls).toEqual([]);
     expect(logger.info).toHaveBeenCalledWith(
-      `[worker:${PR_CONFLICT_REBASE_WORKER_KIND}] shared PR maintenance lock held; skipping tick`,
+      `[worker:${PR_ORPHAN_REPAIR_WORKER_KIND}] shared PR maintenance lock held; skipping tick`,
       expect.objectContaining({
-        worker: PR_CONFLICT_REBASE_WORKER_KIND,
+        worker: PR_ORPHAN_REPAIR_WORKER_KIND,
+        reason: 'test-lock-held',
+      }),
+    );
+  });
+
+  it('skips cleanly when the shared PR-maintenance lock is already held (duplicate-close)', async () => {
+    const repoRoot = makeRepoRoot();
+    const logger = makeLogger();
+    const spawnHarness = makeSpawnHarness();
+    const worker = createPrDuplicateCloseWorker({
+      logger,
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => ({ held: true, reason: 'test-lock-held' }),
+      lockWaitMs: 0,
+      installSignalHandlers: false,
+    });
+
+    await worker.tick();
+
+    expect(spawnHarness.calls).toEqual([]);
+    expect(logger.info).toHaveBeenCalledWith(
+      `[worker:${PR_DUPLICATE_CLOSE_WORKER_KIND}] shared PR maintenance lock held; skipping tick`,
+      expect.objectContaining({
+        worker: PR_DUPLICATE_CLOSE_WORKER_KIND,
         reason: 'test-lock-held',
       }),
     );
@@ -258,13 +511,14 @@ describe('PR maintenance workers', () => {
         return saved;
       }),
     };
-    const worker = createCoderabbitAddressWorker({
+    const worker = createPrAdminBypassLandWorker({
       logger,
       repoRoot,
       spawnProcess: spawnHarness.spawnProcess,
       lockProbe: () => ({ held: false }),
       installSignalHandlers: false,
       store,
+      env: { INVOKER_MERGIFY_ADMIN_REQUEUE_STATE_FILE: join(repoRoot, 'mergify-admin-requeue-state.jsonl') },
     });
 
     await worker.tick();
@@ -272,31 +526,114 @@ describe('PR maintenance workers', () => {
     const statuses = store.upsertWorkerAction.mock.calls.map((call) => call[0].status);
     expect(statuses).toEqual(['running', 'completed']);
     expect(store.upsertWorkerAction.mock.calls[0]?.[0]).toMatchObject({
-      workerKind: CODERABBIT_ADDRESS_WORKER_KIND,
+      workerKind: PR_ADMIN_BYPASS_LAND_WORKER_KIND,
       actionType: 'pr-maintenance-run',
       subjectType: 'repo',
       subjectId: repoRoot,
     });
   });
 
-  it('does not record a decision row when the lock is held', async () => {
+  it('ignores admin-bypass blocked ledger rows with malformed PR numbers', async () => {
     const repoRoot = makeRepoRoot();
+    const ledgerPath = join(repoRoot, 'mergify-admin-requeue-state.jsonl');
+    writeFileSync(ledgerPath, [
+      JSON.stringify({
+        kind: 'comment-blocked',
+        pr: '12invalid',
+        headSha: 'bad-trailing',
+        key: 'review-thread',
+        meta: { detail: 'would be the wrong PR' },
+      }),
+      JSON.stringify({
+        kind: 'comment-blocked',
+        pr: '3.5',
+        headSha: 'bad-fraction',
+        key: 'review-thread',
+        meta: { detail: 'would truncate to the wrong PR' },
+      }),
+      JSON.stringify({
+        kind: 'comment-blocked',
+        pr: ' 14 ',
+        headSha: 'good',
+        key: 'review-thread',
+        meta: { detail: 'valid blocked PR' },
+      }),
+    ].join('\n'));
     const store = {
       getWorkerAction: vi.fn(() => undefined),
-      upsertWorkerAction: vi.fn(),
+      upsertWorkerAction: vi.fn((write: WorkerActionWrite) => write as WorkerActionRecord),
     };
-    const worker = createPrConflictRebaseWorker({
+    const worker = createPrAdminBypassLandWorker({
       logger: makeLogger(),
       repoRoot,
-      spawnProcess: makeSpawnHarness().spawnProcess,
-      lockProbe: () => ({ held: true, reason: 'lock-held' }),
+      env: { INVOKER_MERGIFY_ADMIN_REQUEUE_STATE_FILE: ledgerPath },
+      spawnProcess: makeSpawnHarness({ exitCode: 0 }).spawnProcess,
+      lockProbe: () => ({ held: false }),
       installSignalHandlers: false,
       store,
     });
 
     await worker.tick();
 
-    expect(store.upsertWorkerAction).not.toHaveBeenCalled();
+    const prWrites = store.upsertWorkerAction.mock.calls
+      .map((call) => call[0] as WorkerActionWrite)
+      .filter((write) => write.subjectType === 'pr');
+    expect(prWrites.map((write) => write.subjectId)).toEqual(['14', '14']);
+    expect(prWrites.map((write) => write.actionType)).toEqual(['mergify-blocked-pr', 'alert-send']);
+  });
+
+  it('records one skipped decision row when the shared lock stays held', async () => {
+    const repoRoot = makeRepoRoot();
+    const lockPath = join(repoRoot, 'locks', 'pr-crons.lock');
+    const spawnHarness = makeSpawnHarness();
+    const actions = new Map<string, WorkerActionRecord>();
+    const store = {
+      getWorkerAction: vi.fn((kind: string, key: string) => actions.get(`${kind}:${key}`)),
+      upsertWorkerAction: vi.fn((write: WorkerActionWrite) => {
+        const mapKey = `${write.workerKind}:${write.externalKey}`;
+        const existing = actions.get(mapKey);
+        const saved = {
+          ...write,
+          attemptCount: write.attemptCount ?? 0,
+          id: existing?.id ?? write.id,
+          createdAt: existing?.createdAt ?? 'now',
+          updatedAt: 'now',
+        } as WorkerActionRecord;
+        actions.set(mapKey, saved);
+        return saved;
+      }),
+    };
+    const worker = createPrOrphanRepairWorker({
+      logger: makeLogger(),
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => ({ held: true, reason: 'test-lock-held' }),
+      lockPath,
+      lockWaitMs: 0,
+      installSignalHandlers: false,
+      store,
+    });
+
+    await worker.tick();
+    await worker.tick();
+
+    expect(spawnHarness.calls).toEqual([]);
+    expect(actions.size).toBe(1);
+    const row = actions.get(`${PR_ORPHAN_REPAIR_WORKER_KIND}:${PR_ORPHAN_REPAIR_WORKER_KIND}:${repoRoot}:lock-held`);
+    expect(row).toMatchObject({
+      workerKind: PR_ORPHAN_REPAIR_WORKER_KIND,
+      actionType: 'pr-maintenance-run',
+      externalKey: `${PR_ORPHAN_REPAIR_WORKER_KIND}:${repoRoot}:lock-held`,
+      subjectType: 'repo',
+      subjectId: repoRoot,
+      status: 'skipped',
+      attemptCount: 2,
+      summary: 'Shared PR maintenance lock held; tick not run',
+      payload: {
+        reason: 'test-lock-held',
+        lockPath,
+      },
+    });
   });
 
   it('polls on the five-minute default interval without ticking on start', async () => {
@@ -304,7 +641,7 @@ describe('PR maintenance workers', () => {
     const repoRoot = makeRepoRoot();
     const logger = makeLogger();
     const spawnHarness = makeSpawnHarness();
-    const worker = createCoderabbitAddressWorker({
+    const worker = createPrAdminBypassLandWorker({
       logger,
       repoRoot,
       spawnProcess: spawnHarness.spawnProcess,
@@ -321,5 +658,107 @@ describe('PR maintenance workers', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(spawnHarness.calls).toHaveLength(1);
     await worker.stop();
+  });
+
+  it('reproduces the pre-fix hang: a hung child with the tick timeout disabled wedges the scheduler forever', async () => {
+    vi.useFakeTimers();
+    const repoRoot = makeRepoRoot();
+    const logger = makeLogger();
+    const spawnHarness = makeHungSpawnHarness();
+    const worker = createPrAdminBypassLandWorker({
+      logger,
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => ({ held: false }),
+      installSignalHandlers: false,
+      tickTimeoutMs: 0,
+      intervalMs: 60_000,
+    });
+
+    worker.start();
+    await vi.advanceTimersByTimeAsync(60_000 * 5);
+
+    expect(spawnHarness.calls).toHaveLength(1);
+    await worker.stop({ settleTimeoutMs: 0 });
+  });
+
+  it('kills a hung child after the tick timeout and lets the next scheduled tick proceed', async () => {
+    vi.useFakeTimers();
+    const repoRoot = makeRepoRoot();
+    const logger = makeLogger();
+    const spawnHarness = makeHungSpawnHarness();
+    const worker = createPrAdminBypassLandWorker({
+      logger,
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => ({ held: false }),
+      installSignalHandlers: false,
+      tickTimeoutMs: 1_000,
+      intervalMs: 10_000,
+    });
+
+    worker.start();
+    await vi.advanceTimersByTimeAsync(10_000 + 999);
+    expect(spawnHarness.calls).toHaveLength(1);
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('killing spawned child'),
+      expect.anything(),
+    );
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('killing spawned child'),
+      expect.anything(),
+    );
+
+    await vi.advanceTimersByTimeAsync(SIGKILL_TIMEOUT_MS + 1_000);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('force-abandoning'),
+      expect.anything(),
+    );
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(spawnHarness.calls).toHaveLength(2);
+
+    await worker.stop({ settleTimeoutMs: 0 });
+  });
+
+  it('fails the tick as tick-timeout (not force-abandoned) when the child cooperates with SIGTERM/SIGKILL, and pins detached:true on the spawn call', async () => {
+    vi.useFakeTimers();
+    const repoRoot = makeRepoRoot();
+    const logger = makeLogger();
+    const spawnHarness = makeHungSpawnHarness({ cooperativeKill: true });
+    const store = {
+      getWorkerAction: vi.fn(() => undefined),
+      upsertWorkerAction: vi.fn((write: WorkerActionWrite) => write as WorkerActionRecord),
+    };
+    const worker = createPrAdminBypassLandWorker({
+      logger,
+      repoRoot,
+      spawnProcess: spawnHarness.spawnProcess,
+      lockProbe: () => ({ held: false }),
+      installSignalHandlers: false,
+      tickTimeoutMs: 1_000,
+      intervalMs: 10_000,
+      store,
+    });
+
+    worker.start();
+    await vi.advanceTimersByTimeAsync(10_000 + 1_000);
+
+    const failedCall = store.upsertWorkerAction.mock.calls
+      .map((call) => call[0] as WorkerActionWrite)
+      .find((write) => write.status === 'failed');
+    expect(failedCall?.payload).toMatchObject({ reason: 'tick-timeout' });
+    expect(logger.error).not.toHaveBeenCalledWith(
+      expect.stringContaining('force-abandoning'),
+      expect.anything(),
+    );
+    expect(spawnHarness.calls[0]?.options.detached).toBe(process.platform !== 'win32');
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(spawnHarness.calls).toHaveLength(2);
+
+    await worker.stop({ settleTimeoutMs: 0 });
   });
 });

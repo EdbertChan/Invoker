@@ -133,7 +133,7 @@ function makeAutoFixHarness(options: {
   const scanTask = options.scanTask ?? makeFailedTask();
   const latestTask = 'latestTask' in options ? options.latestTask : scanTask;
   const store = {
-    listWorkflows: vi.fn(() => [{ id: 'wf-1' }]),
+    listWorkflows: vi.fn(() => [{ id: 'wf-1', repoUrl: 'https://example.com/repo.git' }]),
     loadTasks: vi.fn((workflowId: string) => (workflowId === 'wf-1' ? [scanTask] : [])),
     loadTask: vi.fn(() => latestTask),
     listWorkflowMutationIntents: vi.fn(() => []),
@@ -190,7 +190,7 @@ describe('autofix decision ledger', () => {
     await tick(tickCtx);
 
     expect(submit).toHaveBeenCalledTimes(2);
-    expect(submit.mock.calls[0]?.[2]).toBe('invoker:restart-task');
+    expect(submit.mock.calls[0]?.[2]).toBe('invoker:retry-task');
     expect(submit.mock.calls[1]?.[2]).toBe('invoker:fix-with-agent');
     const autoFixWrite = upserts.find((w) => w.actionType === 'auto-fix');
     expect(autoFixWrite).toMatchObject({

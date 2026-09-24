@@ -1,8 +1,23 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import {
+  copyFileSync,
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  unlinkSync,
+} from 'node:fs';
 import * as path from 'node:path';
-import { resolveInvokerHomeRoot } from '@invoker/contracts';
+import { createGzip } from 'node:zlib';
+import { pipeline } from 'node:stream/promises';
+import {
+  resolveInvokerHomeRoot,
+  hourlySnapshotRetention,
+  pruneHourlySnapshots,
+} from '@invoker/contracts';
 
-export { resolveInvokerHomeRoot };
+export { resolveInvokerHomeRoot, hourlySnapshotRetention, pruneHourlySnapshots };
 
 /**
  * Caller-supplied backup implementation, expected to write a fully
@@ -24,6 +39,61 @@ function utcTimestampCompact(): string {
   return iso.replace(/[-:]/g, '').replace('T', '-').replace('.', '-');
 }
 
+/**
+ * Gzip `rawPath` to `rawPath + '.gz'` and remove the raw file. Streamed (not
+ * `zlib.gzipSync`) so a ~700MB+ snapshot never gets buffered twice in memory
+ * or blocks the event loop on small droplets.
+ */
+async function gzipInPlace(rawPath: string): Promise<string> {
+  const gzPath = `${rawPath}.gz`;
+  try {
+    await pipeline(createReadStream(rawPath), createGzip(), createWriteStream(gzPath));
+  } catch (err) {
+    removeFailedSnapshotFiles([rawPath, gzPath]);
+    throw err;
+  }
+  unlinkSync(rawPath);
+  return gzPath;
+}
+
+function removeFailedSnapshotFiles(paths: string[]): void {
+  for (const leftover of paths) {
+    try {
+      rmSync(leftover, { force: true });
+    } catch (err) {
+      console.warn(
+        `[db-snapshot] failed to remove ${leftover} after a failed snapshot: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+}
+
+const SNAPSHOT_NAME = /^invoker\.db\..+-\d{8}-\d{6}-\d{3}Z$/;
+const inFlightSnapshotPaths = new Set<string>();
+
+function removeRawSnapshotsWithGzSibling(backupDir: string): void {
+  const names = new Set(readdirSync(backupDir));
+  for (const name of names) {
+    if (!SNAPSHOT_NAME.test(name) || !names.has(`${name}.gz`)) continue;
+    if (inFlightSnapshotPaths.has(path.join(backupDir, name))) continue;
+    for (const leftover of [name, `${name}.gz`]) {
+      const leftoverPath = path.join(backupDir, leftover);
+      try {
+        rmSync(leftoverPath, { force: true });
+        console.warn(`[db-snapshot] removed ${leftoverPath} left by an interrupted snapshot`);
+      } catch (err) {
+        console.warn(
+          `[db-snapshot] failed to remove ${leftoverPath} left by an interrupted snapshot: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+}
+
 async function createDbSnapshot(
   label: string,
   invokerHomeRoot: string,
@@ -34,10 +104,30 @@ async function createDbSnapshot(
 
   const backupDir = path.join(invokerHomeRoot, 'db-backups');
   mkdirSync(backupDir, { recursive: true });
+  removeRawSnapshotsWithGzSibling(backupDir);
 
   const stamp = utcTimestampCompact();
   const snapshotPath = path.join(backupDir, `invoker.db.${label}-${stamp}`);
 
+  inFlightSnapshotPaths.add(snapshotPath);
+  try {
+    try {
+      await writeRawSnapshot(dbPath, snapshotPath, backup);
+    } catch (err) {
+      removeFailedSnapshotFiles([snapshotPath, `${snapshotPath}-journal`]);
+      throw err;
+    }
+    return await gzipInPlace(snapshotPath);
+  } finally {
+    inFlightSnapshotPaths.delete(snapshotPath);
+  }
+}
+
+async function writeRawSnapshot(
+  dbPath: string,
+  snapshotPath: string,
+  backup: SnapshotBackupFn | undefined,
+): Promise<void> {
   if (backup) {
     // WAL-safe AND WAL-complete path: the callback (SQLiteAdapter.backupTo)
     // checkpoints the source's WAL frames into the snapshot as part of the
@@ -50,8 +140,6 @@ async function createDbSnapshot(
     // commits still in the live `-wal`. Preserved for backward compatibility.
     copyFileSync(dbPath, snapshotPath);
   }
-
-  return snapshotPath;
 }
 
 /**
@@ -66,68 +154,6 @@ export async function createDeleteAllSnapshot(
   backup?: SnapshotBackupFn,
 ): Promise<string | null> {
   return createDbSnapshot('before-delete-all', invokerHomeRoot, backup);
-}
-
-const DEFAULT_HOURLY_SNAPSHOT_RETENTION = 48;
-const HOURLY_SNAPSHOT_PREFIX = 'invoker.db.hourly-auto-';
-
-function hourlySnapshotRetention(): number {
-  const raw = process.env.INVOKER_HOURLY_BACKUP_RETENTION;
-  // Treat empty/blank as unset: Number('') and Number('   ') are 0, which would
-  // otherwise pass the >= 0 check and silently disable pruning (reintroducing the
-  // unbounded growth this guards against). `export VAR=` should fall back, not disable.
-  if (raw === undefined || raw.trim() === '') return DEFAULT_HOURLY_SNAPSHOT_RETENTION;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0
-    ? Math.floor(parsed)
-    : DEFAULT_HOURLY_SNAPSHOT_RETENTION;
-}
-
-/**
- * Delete the oldest `hourly-auto` snapshots (and any legacy `-wal`/`-shm`
- * sidecars left over from the pre-fix raw-copy era) so at most `retain`
- * remain. Without this the hourly backup grows without bound — a single
- * host accumulated 1,554 snapshots (~363 GB). `retain <= 0` disables
- * pruning. Only `hourly-auto` snapshots are pruned; manual and
- * pre-delete-all snapshots are left untouched. Returns the number of
- * snapshots removed.
- */
-export function pruneHourlySnapshots(backupDir: string, retain: number): number {
-  if (retain <= 0) return 0;
-  let entries: string[];
-  try {
-    entries = readdirSync(backupDir);
-  } catch {
-    return 0;
-  }
-  // Base snapshot files only; the timestamp suffix (YYYYMMDD-HHMMSS-mmmZ) sorts
-  // chronologically, so the oldest snapshots come first.
-  const snapshots = entries
-    .filter(
-      (name) =>
-        name.startsWith(HOURLY_SNAPSHOT_PREFIX) &&
-        !name.endsWith('-wal') &&
-        !name.endsWith('-shm'),
-    )
-    .sort();
-  const excess = snapshots.length - retain;
-  if (excess <= 0) return 0;
-  let removed = 0;
-  for (const name of snapshots.slice(0, excess)) {
-    for (const suffix of ['', '-wal', '-shm']) {
-      try {
-        rmSync(path.join(backupDir, `${name}${suffix}`), { force: true });
-      } catch (err) {
-        console.warn(
-          `[delete-all-snapshot] failed to prune snapshot file ${name}${suffix}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    }
-    removed += 1;
-  }
-  return removed;
 }
 
 /**

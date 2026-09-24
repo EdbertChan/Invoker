@@ -13,23 +13,59 @@
  */
 
 import type {
+  BundledSkillsInstallMode,
   BundledSkillsStatus,
+  CliInstallResult,
+  InvokerSetupRequest,
+  InvokerSetupResult,
   Logger,
-  WorkflowMeta,
 } from '@invoker/contracts';
 import { Channels, type MessageBus } from '@invoker/transport';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import { createWorkerRegistry, registerBuiltinAgents, registerBuiltinWorkers, type AgentRegistry, type WorkerRuntimeDependencies } from '@invoker/execution-engine';
+import {
+  createWorkerRegistry,
+  registerBuiltinAgents,
+  registerBuiltinWorkers,
+  type AgentRegistry,
+  type ExecutorRegistry,
+  type WorkerRuntimeDependencies,
+} from '@invoker/execution-engine';
 import type { Orchestrator, TaskDelta } from '@invoker/workflow-core';
 import { loadConfig, type InvokerConfig } from '../config.js';
 import type { ApiMutationFacade } from '../api-server.js';
+import { createEmbeddedTerminalBackend } from '../embedded-terminal-backend.js';
+import { EmbeddedTerminalManager } from '../embedded-terminal-manager.js';
+import type { TaskHandleMap } from '../execution/task-runner-wiring.js';
+import { registerExternalWorkersFromConfig } from '../external-worker-loader.js';
+import {
+  createTaskTerminalAdapter,
+  type TaskTerminalAdapter,
+} from '../task-terminal-adapter.js';
 import { createTaskGraphEventPublisher } from '../task-graph-event-publisher.js';
 import { createTaskDeltaStreamSequence } from '../task-delta-stream-sequence.js';
+import { publishForcedRefreshTaskGraphSnapshot } from '../refresh-task-graph.js';
+import {
+  createTerminalUiPerfCounters,
+  createTerminalUiPerfReporter,
+  createTerminalUiPerfSink,
+} from '../terminal-ui-perf.js';
+import {
+  createPlanningTerminalAdapter,
+  registerTerminalSessionPersistence,
+  type PlanningTerminalAdapter,
+  type TerminalSessionPersistenceHandle,
+} from '../terminal-session-ipc.js';
+import type { InAppPlanningChatSessions } from '../in-app-planner.js';
+import type { OwnerCapabilityRegistry } from '../owner-capability-registry.js';
 import { WorkflowRollupProjection } from '../workflow-rollup-projection.js';
+import { autoStartedOwnerWorkerKindsForConfig, createLocalWorkerStatusSnapshot } from '../worker-control.js';
 import { buildWebInvokerDispatch } from './web-invoker-dispatch.js';
-import { registerExternalWorkersFromConfig } from '../external-worker-loader.js';
-import { AUTO_STARTED_OWNER_WORKER_KINDS, createLocalWorkerStatusSnapshot } from '../worker-control.js';
-import { startWebBridge, resolveWebUiDistDir, type WebBridge } from './web-bridge-server.js';
+import {
+  startWebBridge,
+  resolveWebUiDistDir,
+  type WebBridge,
+  type WebBridgeTerminalEvents,
+} from './web-bridge-server.js';
 
 const DEFAULT_WEB_HOST = '127.0.0.1';
 const DEFAULT_WEB_PORT = 4200;
@@ -61,9 +97,18 @@ export interface StartHeadlessWebSurfaceDeps {
   detachWorkflow: (workflowId: string, upstreamWorkflowId: string) => Promise<void>;
   loadConfig: () => InvokerConfig;
   config: InvokerConfig;
+  repoRoot?: string;
+  executorRegistry?: ExecutorRegistry;
+  taskHandles?: TaskHandleMap;
   /** Main process dist directory (`__dirname` of main.js) used to locate the built UI. */
   appRootDir: string;
   getBundledSkillsStatus?: () => BundledSkillsStatus;
+  installBundledSkills?: (mode?: BundledSkillsInstallMode) => BundledSkillsStatus;
+  updateInvokerCli?: () => CliInstallResult;
+  runInvokerCliSetup?: (request: InvokerSetupRequest) => Promise<InvokerSetupResult>;
+  ownerCapabilities?: OwnerCapabilityRegistry;
+  /** Enables planning terminals over the web when present (with repoRoot + executorRegistry + taskHandles). */
+  planningChatSessions?: InAppPlanningChatSessions;
 }
 
 export function startHeadlessWebSurface(deps: StartHeadlessWebSurfaceDeps): WebBridge | null {
@@ -80,6 +125,66 @@ export function startHeadlessWebSurface(deps: StartHeadlessWebSurfaceDeps): WebB
   const port = resolveWebPort(deps.config);
   const uiDistDir = resolveWebUiDistDir(deps.appRootDir);
 
+  let terminalSessionPersistenceHandle: TerminalSessionPersistenceHandle | null = null;
+  let taskTerminals: TaskTerminalAdapter | undefined;
+  let planningTerminals: PlanningTerminalAdapter | undefined;
+  let terminalEvents: WebBridgeTerminalEvents | undefined;
+  if (deps.repoRoot && deps.executorRegistry && deps.taskHandles) {
+    const embeddedTerminalManager = new EmbeddedTerminalManager({
+      backend: createEmbeddedTerminalBackend(deps.config),
+    });
+    const terminalUiPerfStats = createTerminalUiPerfCounters();
+    const terminalUiPerf = createTerminalUiPerfReporter();
+    const terminalUiPerfSink = createTerminalUiPerfSink(
+      (source, level, message) => {
+        deps.persistence.writeActivityLog(source, level, message);
+      },
+      terminalUiPerfStats,
+    );
+    terminalSessionPersistenceHandle = registerTerminalSessionPersistence({
+      embeddedTerminalManager,
+      persistence: deps.persistence,
+      uiPerfStats: terminalUiPerfStats,
+      terminalUiPerf,
+      terminalUiPerfSink,
+    });
+    taskTerminals = createTaskTerminalAdapter({
+      persistence: deps.persistence,
+      executorRegistry: deps.executorRegistry,
+      executionAgentRegistry: deps.agentRegistry,
+      repoRoot: deps.repoRoot,
+      taskHandles: deps.taskHandles,
+      embeddedTerminalManager,
+      uiPerfStats: terminalUiPerfStats,
+      terminalUiPerf,
+      terminalUiPerfSink,
+      logger: deps.logger,
+    });
+    terminalEvents = {
+      onOutput(cb) {
+        embeddedTerminalManager.on('output', cb);
+        return () => {
+          embeddedTerminalManager.off('output', cb);
+        };
+      },
+      onExit(cb) {
+        embeddedTerminalManager.on('exit', cb);
+        return () => {
+          embeddedTerminalManager.off('exit', cb);
+        };
+      },
+    };
+    if (deps.planningChatSessions) {
+      const planningChatSessions = deps.planningChatSessions;
+      planningTerminals = createPlanningTerminalAdapter({
+        embeddedTerminalManager,
+        logger: deps.logger,
+        planningChatSessions,
+        getPlanningSessionStore: () => deps.persistence,
+        repoRoot: deps.repoRoot,
+      });
+    }
+  }
   const streamSeq = createTaskDeltaStreamSequence();
   const projection = new WorkflowRollupProjection();
   let bridge: WebBridge | null = null;
@@ -88,7 +193,6 @@ export function startHeadlessWebSurface(deps: StartHeadlessWebSurfaceDeps): WebB
     getMainWindow: () => null,
     isUiInteractive: () => false,
     stampDelta: (delta) => streamSeq.stamp(delta),
-    getStreamSequence: () => streamSeq.current(),
     onEvent: (event) => bridge?.broadcast('invoker:task-graph-event', event),
   });
 
@@ -96,18 +200,20 @@ export function startHeadlessWebSurface(deps: StartHeadlessWebSurfaceDeps): WebB
     const d = delta as TaskDelta;
     const rollups = projection.applyDelta(d);
     publisher.publishDelta(d, rollups);
+    bridge?.requestWorkflowsPush();
   });
 
   const refreshTaskGraph = async (): Promise<void> => {
     deps.orchestrator.syncAllFromDb();
     const tasks = deps.orchestrator.getAllTasks();
+    const workflows = deps.persistence.listWorkflows();
+    const streamSequence = streamSeq.current();
     projection.replaceAll(tasks);
-    publisher.publishSnapshot(
-      'refresh-task-graph',
+    publishForcedRefreshTaskGraphSnapshot(publisher, 'refresh-task-graph', {
       tasks,
-      deps.persistence.listWorkflows() as WorkflowMeta[],
-      true,
-    );
+      workflows,
+      streamSequence,
+    });
   };
 
   const dispatch = buildWebInvokerDispatch({
@@ -121,16 +227,31 @@ export function startHeadlessWebSurface(deps: StartHeadlessWebSurfaceDeps): WebB
     deleteWorkflow: deps.deleteWorkflow,
     detachWorkflow: deps.detachWorkflow,
     getBundledSkillsStatus: deps.getBundledSkillsStatus,
+    installBundledSkills: deps.installBundledSkills,
+    updateInvokerCli: deps.updateInvokerCli,
+    runInvokerCliSetup: deps.runInvokerCliSetup,
     getWorkers: () => createLocalWorkerStatusSnapshot({
       registry: registerExternalWorkersFromConfig(
         deps.config.externalWorkers,
         registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>()),
       ),
       persistence: deps.persistence,
-      autoStartKinds: AUTO_STARTED_OWNER_WORKER_KINDS,
+      autoStartKinds: autoStartedOwnerWorkerKindsForConfig(deps.config),
     }),
+    taskTerminals,
+    ownerCapabilities: deps.ownerCapabilities,
+    planningTerminals,
     logger: deps.logger,
   });
+
+  const buildSnapshot = () => {
+    deps.orchestrator.syncAllFromDb();
+    const tasks = deps.orchestrator.getAllTasks();
+    const workflows = deps.persistence.listWorkflows();
+    const streamSequence = streamSeq.current();
+    projection.replaceAll(tasks);
+    return { tasks, workflows, streamSequence };
+  };
 
   bridge = startWebBridge({
     logger: deps.logger,
@@ -141,17 +262,31 @@ export function startHeadlessWebSurface(deps: StartHeadlessWebSurfaceDeps): WebB
     token,
     host,
     port,
+    terminalEvents,
+    onClientConnect: (sendToClient) => {
+      const snapshot = buildSnapshot();
+      sendToClient('invoker:task-graph-event', {
+        type: 'snapshot',
+        tasks: snapshot.tasks,
+        workflows: snapshot.workflows,
+        streamSequence: snapshot.streamSequence,
+        reason: 'sse-connect',
+        forced: true,
+      });
+    },
   });
 
   const originalClose = bridge.close;
   return {
     whenReady: bridge.whenReady,
     broadcast: bridge.broadcast,
+    requestWorkflowsPush: bridge.requestWorkflowsPush,
     get port(): number {
       return bridge!.port;
     },
     close: async (): Promise<void> => {
       unsubscribe?.();
+      terminalSessionPersistenceHandle?.dispose();
       await originalClose();
     },
   };
@@ -165,8 +300,16 @@ export interface HeadlessWebSurfaceHost {
   messageBus: MessageBus;
   executionAgentRegistry?: AgentRegistry;
   invokerConfig: InvokerConfig;
+  repoRoot?: string;
+  executorRegistry?: ExecutorRegistry;
+  taskHandles?: TaskHandleMap;
   appRootDir?: string;
   getBundledSkillsStatus?: () => BundledSkillsStatus;
+  installBundledSkills?: (mode?: BundledSkillsInstallMode) => BundledSkillsStatus;
+  updateInvokerCli?: () => CliInstallResult;
+  runInvokerCliSetup?: (request: InvokerSetupRequest) => Promise<InvokerSetupResult>;
+  ownerCapabilities?: OwnerCapabilityRegistry;
+  planningChatSessions?: InAppPlanningChatSessions;
 }
 
 /**
@@ -193,7 +336,15 @@ export function startWebSurfaceForHeadless(
     detachWorkflow: apiServerDeps.detachWorkflow,
     loadConfig,
     config: host.invokerConfig,
+    repoRoot: host.repoRoot,
+    executorRegistry: host.executorRegistry,
+    taskHandles: host.taskHandles,
     appRootDir: host.appRootDir ?? __dirname,
     getBundledSkillsStatus: host.getBundledSkillsStatus,
+    installBundledSkills: host.installBundledSkills,
+    updateInvokerCli: host.updateInvokerCli,
+    runInvokerCliSetup: host.runInvokerCliSetup,
+    ownerCapabilities: host.ownerCapabilities,
+    planningChatSessions: host.planningChatSessions,
   });
 }

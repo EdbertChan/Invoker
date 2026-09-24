@@ -412,7 +412,7 @@ describe('Flow 2: restart task', () => {
     h.failTask('A', 'initial failure');
 
     expect(h.getTask('A')!.status).toBe('failed');
-    expect(h.getTask('B')!.status).toBe('pending');
+    expect(h.getTask('B')!.status).toBe('skipped');
 
     // Restart A
     h.orchestrator.retryTask('A');
@@ -535,7 +535,7 @@ describe('Flow 4: edit/fork mutations', () => {
     h.failTask('A', 'broken');
 
     expect(h.getTask('A')!.status).toBe('failed');
-    expect(h.getTask('B')!.status).toBe('pending');
+    expect(h.getTask('B')!.status).toBe('skipped');
 
     // Steps 11 → 14 (`docs/architecture/task-invalidation-roadmap.md`):
     // `replaceTask` on a *live* workflow now routes through
@@ -1156,7 +1156,7 @@ const MANUAL_MERGE_ONFINISH_NONE_PLAN: PlanDefinition = {
 
 // ── Flow 9c: UI external_review merge mode ───────────────────
 
-describe('Flow 9c: set-merge-mode external_review', () => {
+describe('Flow 9c: workflow merge mode external_review', () => {
   const mockMergeGate: MergeGateProvider = {
     name: 'mock',
     createReview: async () => ({

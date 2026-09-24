@@ -8,7 +8,6 @@ import type {
   AutoFixWorkerConfig,
 } from './auto-fix-recovery.js';
 import type { ReviewGateCiRepairStore, ReviewGateCiRepairSubmitter } from './review-gate-ci-repair.js';
-import type { CiFailureWorkerStore, CiFailureWorkerSubmitter } from './workers/ci-failure-worker.js';
 import type {
   AutoApproveWorkerStore,
   AutoApproveWorkerSubmitter,
@@ -16,38 +15,70 @@ import type {
 } from './workers/auto-approve-worker.js';
 import type { PrMaintenanceWorkerConfig } from './workers/pr-maintenance-workers.js';
 import type { E2eAutoFixWorkerConfig } from './workers/e2e-autofix-worker.js';
+import type { WorkerSessionMineWorkerConfig } from './workers/worker-session-mine-worker.js';
+import type { SessionTokenPushWorkerConfig } from './workers/session-token-push-worker.js';
+import type { WorkflowCleanupWorkerStore } from './workers/workflow-cleanup-worker.js';
 import type { DiskHeadroomWorkerConfig } from './workers/disk-headroom-worker.js';
-import type { PrStatusReviewGate } from './workers/pr-status-worker.js';
+import type { ClaudeOauthRefreshWorkerConfig } from './workers/claude-oauth-refresh-worker.js';
+import type { DiskHeadroomWorkerStore } from './workers/disk-headroom-reclaim.js';
+import type { SlackBugScanWorkerConfig } from './workers/slack-bug-scan-worker.js';
+import type { CrossRepoResearchWorkerConfig } from './workers/cross-repo-research-worker.js';
+import type { CatstackDeployWorkerConfig } from './workers/catstack-deploy-worker.js';
+import type { SelfDeployWorkerConfig } from './workers/self-deploy-worker.js';
+import type { MergifyQueueResearchWorkerConfig } from './workers/mergify-queue-research-worker.js';
+import type { AgentLoginWatchWorkerConfig } from './workers/agent-login-watch-worker.js';
 import type {
-  ReviewGateMergeConflictWorkerStore,
-  ReviewGateMergeConflictWorkerSubmitter,
-} from './workers/review-gate-merge-conflict-worker.js';
+  InfraRepairWorkerConfig,
+  InfraRepairWorkerStore,
+  InfraRepairWorkerSubmitter,
+} from './workers/infra-repair-worker.js';
+import type { PrStatusReviewGate } from './workers/pr-status-worker.js';
 import type { RequeueWorkerConfig, RequeueWorkerSubmitter } from './workers/requeue-worker.js';
 import type {
   WorkflowResumeWorkerConfig,
   WorkflowResumeWorkerStore,
   WorkflowResumeWorkerSubmitter,
 } from './workers/workflow-resume-worker.js';
-import type { PrSummaryRefreshWorkerStore } from './workers/pr-summary-refresh-worker.js';
+import type {
+  IdleTaskCleanupWorkerConfig,
+  IdleTaskCleanupWorkerStore,
+  IdleTaskCleanupWorkerSubmitter,
+} from './workers/idle-task-cleanup-worker.js';
+import type { DbReaperWorkerConfig, DbReaperWorkerStore } from './workers/db-reaper-worker.js';
+import type {
+  SpendCircuitBreakerWorkerConfig,
+  SpendCircuitBreakerWorkerStore,
+} from './workers/spend-circuit-breaker-worker.js';
+import type {
+  AdminBypassE2eBabysitWorkerConfig,
+  InvestigativePlanSubmitter,
+  RepairFilingStore,
+  WorkerLifecycleReader,
+  WorkerLifecycleStarter,
+} from './workers/admin-bypass-e2e-babysit-worker.js';
 
 /** Dependencies injected into a built-in worker factory when its runtime is built. */
 export interface WorkerRuntimeDependencies {
   /** Persisted workflow/task state accessor. */
   store: AutoFixRecoveryStore
-    & CiFailureWorkerStore
     & ReviewGateCiRepairStore
     & AutoApproveWorkerStore
-    & ReviewGateMergeConflictWorkerStore
+    & InfraRepairWorkerStore
     & WorkflowResumeWorkerStore
-    & PrSummaryRefreshWorkerStore;
+    & DiskHeadroomWorkerStore
+    & IdleTaskCleanupWorkerStore
+    & DbReaperWorkerStore
+    & SpendCircuitBreakerWorkerStore;
+  deleteWorkflow?: (workflowId: string) => void;
+  workflowCleanup?: WorkflowCleanupWorkerStore;
   /** Action-output channel used to submit follow-up mutation intents. */
   submitter: AutoFixRecoverySubmitter
-    & CiFailureWorkerSubmitter
     & ReviewGateCiRepairSubmitter
     & RequeueWorkerSubmitter
     & AutoApproveWorkerSubmitter
-    & ReviewGateMergeConflictWorkerSubmitter
-    & WorkflowResumeWorkerSubmitter;
+    & InfraRepairWorkerSubmitter
+    & WorkflowResumeWorkerSubmitter
+    & IdleTaskCleanupWorkerSubmitter;
   /** Operator logger. */
   logger: Logger;
   /** Optional bus that turns lifecycle events into immediate wakeups. */
@@ -64,10 +95,34 @@ export interface WorkerRuntimeDependencies {
   prMaintenance?: PrMaintenanceWorkerConfig;
   /** Disk-headroom worker configuration (local/remote paths and thresholds). */
   diskHeadroom?: DiskHeadroomWorkerConfig;
+  /** Claude OAuth refresh worker configuration (local credentials path and SSH pool distribution targets). */
+  claudeOauthRefresh?: ClaudeOauthRefreshWorkerConfig;
+  /** Infra-repair worker configuration (owner/local repo plus remote SSH repair targets). */
+  infraRepair?: InfraRepairWorkerConfig;
   /** Auto-approval tuning for worker-owned AI fix approvals. */
   autoApprove?: AutoApproveWorkerConfig;
   /** Workflow-resume worker tuning (cooldown and poll cadence). */
   workflowResume?: WorkflowResumeWorkerConfig;
-  /** e2e auto-fix battery worker configuration. */
+  /** e2e auto-fix/default-branch CI watcher configuration. */
   e2eAutoFix?: E2eAutoFixWorkerConfig;
+  /** Worker session thrash miner (off by default; enable on DO1). */
+  workerSessionMine?: WorkerSessionMineWorkerConfig;
+  sessionTokenPush?: SessionTokenPushWorkerConfig;
+  slackBugScan?: SlackBugScanWorkerConfig;
+  /** Cross-repo research worker configuration. */
+  crossRepoResearch?: CrossRepoResearchWorkerConfig;
+  /** Catstack deploy worker configuration (local + remoteTargets clone/pull/install). */
+  catstackDeploy?: CatstackDeployWorkerConfig;
+  selfDeploy?: SelfDeployWorkerConfig;
+  /** Mergify queue research worker configuration. */
+  mergifyQueueResearch?: MergifyQueueResearchWorkerConfig;
+  /** Idle-task-cleanup worker configuration (dry-run only; see the worker's own docs). */
+  idleTaskCleanup?: IdleTaskCleanupWorkerConfig;
+  dbReaper?: DbReaperWorkerConfig;
+  spendCircuitBreaker?: SpendCircuitBreakerWorkerConfig;
+  agentLoginWatch?: AgentLoginWatchWorkerConfig;
+  adminBypassE2eBabysit?: AdminBypassE2eBabysitWorkerConfig;
+  workerLifecycleStarter?: WorkerLifecycleReader & WorkerLifecycleStarter;
+  repairFilingStore?: RepairFilingStore;
+  investigativePlanSubmitter?: InvestigativePlanSubmitter;
 }

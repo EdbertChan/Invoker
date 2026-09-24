@@ -1,14 +1,18 @@
-# Invoker-on-Invoker dogfood example with explicit Mergify Stacks publication.
+# Invoker-on-Invoker dogfood example with reviewed GitHub publication through Mergify Stacks.
 # Source: examples.md Section 7
 
-name: "Dogfood Invoker CI docs update"
+name: "Dogfood Invoker fixture handoff refresh"
 description: |
-  Updates Invoker's own contributor guidance for merge automation.
+  Refreshes Invoker's checked-in dogfood fixture for default GitHub publication.
 
-  This plan still uses the normal Invoker PR gate shape: `onFinish: pull_request`
-  with `mergeMode: external_review`. Because the target repo is Invoker itself, the
-  branch publication workflow after the commits are ready should use
-  `mergify stack push` so stacked PRs stay synchronized.
+  This plan still uses the normal Invoker review gate shape:
+  `onFinish: pull_request` with `mergeMode: external_review`. Approval of the
+  reviewed plan authorizes workflow execution and publication of the prepared
+  GitHub PR stack.
+
+  Because the target repo is Invoker itself, the declared publication outcome
+  uses Mergify Stacks. The `publish-invoker-pr-stack` task runs `mergify stack push`
+  after fixture proof passes without requiring a second authorization prompt.
 onFinish: pull_request
 mergeMode: external_review
 repoUrl: git@github.com:EdbertChan/Invoker.git
@@ -16,23 +20,129 @@ baseBranch: master
 featureBranch: docs/dogfood-mergify-stack
 
 tasks:
-  - id: update-dogfood-guidance
-    description: "Clarify when Invoker-on-Invoker changes should use Mergify Stacks"
-    prompt: |
-      Update the Invoker skills and examples so they are explicit about the
-      repo-specific dogfood rule:
-
-      1. When the target repo is Invoker itself, keep `mergeMode: external_review`
-         and publish/update the resulting commit stack with `mergify stack push`.
-      2. When the target repo is an external repo, keep normal PR flow unless
-         that repo independently uses Mergify Stacks.
-
+  - id: refresh-dogfood-fixture
+    description: |
+      Review claim:
+      - Refresh the positive dogfood fixture so reviewed implementation approval includes GitHub publication.
+      Review lane:
+      - docs
+      Safety invariant:
+      - Touch only `skills/plan-to-invoker/fixtures/positive/06-invoker-dogfood-mergify-stack.yaml`.
+      Slice rationale:
+      - One fixture slice keeps the checked-in example aligned with the default publication policy.
+      Architectural effect:
+      - The canonical Invoker dogfood example now models the same publication authority as the handoff text.
+      Goal:
+      - Keep the positive fixture aligned with default GitHub publication.
+      Motivation:
+      - The example should reinforce the same reading as the text.
+      Alternative considerations:
+      - Option A (chosen): bind Invoker-on-Invoker Mergify publication to the reviewed `onFinish: pull_request` outcome.
+      - Option B: require a redundant second authorization after plan approval.
+      Implementation details:
+      - Update the positive fixture so Invoker-on-Invoker publication is part of the reviewed `onFinish: pull_request` outcome.
+      Non-goals:
+      - No planning-skill edits, handoff-entry edits, handoff-check edits, runtime code changes, or unrelated docs cleanup.
+      Layer: docs
+      Feature state: active
+      Files:
+      - skills/plan-to-invoker/fixtures/positive/06-invoker-dogfood-mergify-stack.yaml
+      Change types:
+      - skills/plan-to-invoker/fixtures/positive/06-invoker-dogfood-mergify-stack.yaml: modify
       Acceptance criteria:
-      - Relevant skills mention the Invoker-only scope.
-      - Examples include an Invoker positive case and an external-repo counterexample.
+      - Approval language includes the reviewed GitHub publication outcome.
+      - Mergify publication is visible without a redundant manual-approval gate.
+      - Pass condition: bash skills/plan-to-invoker/scripts/test-fixtures.sh exits 0.
+    prompt: |
+      Review claim:
+      - Refresh the positive dogfood fixture so reviewed implementation approval includes GitHub publication.
+      Review lane:
+      - docs
+      Safety invariant:
+      - Touch only `skills/plan-to-invoker/fixtures/positive/06-invoker-dogfood-mergify-stack.yaml`.
+      Slice rationale:
+      - One fixture slice keeps the checked-in example aligned with the default publication policy.
+      Architectural effect:
+      - The canonical Invoker dogfood example now models the same publication authority as the handoff text.
+      Goal:
+      - Keep the positive fixture aligned with default GitHub publication.
+      Motivation:
+      - The example should reinforce the same reading as the text.
+      Alternative considerations:
+      - Option A (chosen): bind Invoker-on-Invoker Mergify publication to the reviewed `onFinish: pull_request` outcome.
+      - Option B: require a redundant second authorization after plan approval.
+      Implementation details:
+      - Assume no prior context. Update `skills/plan-to-invoker/fixtures/positive/06-invoker-dogfood-mergify-stack.yaml` so the Invoker-on-Invoker example is explicit about default GitHub publication:
+      1. Approval of the reviewed plan authorizes workflow execution and its declared GitHub publication outcome.
+      2. Keep `onFinish: pull_request` with `mergeMode: external_review`.
+      3. Publish the Invoker PR stack with `mergify stack push` after fixture proof passes.
+      4. Do not add a second manual-approval gate for that declared publication outcome.
+      Non-goals:
+      - No planning-skill edits, handoff-entry edits, handoff-check edits, runtime code changes, or unrelated docs cleanup.
+      Files:
+      - skills/plan-to-invoker/fixtures/positive/06-invoker-dogfood-mergify-stack.yaml
+      Change types:
+      - skills/plan-to-invoker/fixtures/positive/06-invoker-dogfood-mergify-stack.yaml: modify
+      Acceptance criteria:
+      - Approval language includes the reviewed GitHub publication outcome.
+      - Mergify publication is visible without a redundant manual-approval gate.
+      - Pass condition: bash skills/plan-to-invoker/scripts/test-fixtures.sh exits 0.
     dependencies: []
 
   - id: verify-skill-fixtures
-    description: "Run the plan-to-invoker fixture tests"
+    description: |
+      Review claim:
+      - Run focused fixture validation for the dogfood fixture refresh.
+      Review lane:
+      - proof
+      Safety invariant:
+      - This command only validates checked-in plan-to-invoker fixtures.
+      Slice rationale:
+      - Fixture proof stays separate from the fixture update.
+      Architectural effect:
+      - No architecture change; the proof validates fixture compatibility.
+      Goal:
+      - Run the plan-to-invoker fixture tests.
+      Motivation:
+      - Ensure the refreshed dogfood fixture remains a valid positive example.
+      Alternative considerations:
+      - Option A (chosen): run the existing fixture test script.
+      - Option B: rely on manual YAML inspection only.
+      Implementation details:
+      - Execute the fixture test script from the repository root.
+      Non-goals:
+      - Do not modify source files during verification.
+      Layer exception: allowed
+      - Proof depends on the fixture slice so validation runs after the example update.
+      Layer: e2e_regression
+      Feature state: active
     command: "bash skills/plan-to-invoker/scripts/test-fixtures.sh"
-    dependencies: [update-dogfood-guidance]
+    dependencies: [refresh-dogfood-fixture]
+
+  - id: publish-invoker-pr-stack
+    description: |
+      Review claim:
+      - Publish the prepared Invoker PR stack with Mergify as the reviewed `onFinish` outcome.
+      Review lane:
+      - docs
+      Safety invariant:
+      - This task runs only after fixture proof and within the reviewed publication authority.
+      Slice rationale:
+      - Publication remains an explicit executable action without adding a second authorization gate.
+      Architectural effect:
+      - The workflow example binds publication to the reviewed `onFinish` outcome.
+      Goal:
+      - Publish or update the prepared Invoker PR stack after the commits are ready.
+      Motivation:
+      - Keep Invoker-on-Invoker stacked PRs synchronized under the reviewed publication outcome.
+      Alternative considerations:
+      - Option A (chosen): execute `mergify stack push` after proof under the reviewed `onFinish` authority.
+      - Option B: require a second authorization prompt that contradicts the default publication policy.
+      Implementation details:
+      - Run `mergify stack push` from the working branch after Invoker has prepared the commit stack.
+      Non-goals:
+      - Do not run Mergify for external target repositories.
+      Layer: docs
+      Feature state: active
+    command: "mergify stack push"
+    dependencies: [verify-skill-fixtures]

@@ -2,6 +2,10 @@
 process.env.TZ = 'UTC';
 
 import '@testing-library/jest-dom/vitest';
+import { configure } from '@testing-library/react';
+import { beforeEach } from 'vitest';
+
+configure({ asyncUtilTimeout: 2_000 });
 
 if (typeof globalThis.ResizeObserver === 'undefined') {
   class ResizeObserverPolyfill {
@@ -16,9 +20,9 @@ if (typeof Element !== 'undefined' && typeof Element.prototype.scrollIntoView !=
   Element.prototype.scrollIntoView = function noopScrollIntoView(): void {};
 }
 
-if (typeof window !== 'undefined' && !window.localStorage) {
+function createMemoryStorage(): Storage {
   const store: Record<string, string> = {};
-  const storage: Storage = {
+  return {
     getItem: (key) => (key in store ? store[key] : null),
     setItem: (key, value) => {
       store[key] = String(value);
@@ -34,9 +38,48 @@ if (typeof window !== 'undefined' && !window.localStorage) {
       return Object.keys(store).length;
     },
   };
+}
+
+if (typeof window !== 'undefined') {
   Object.defineProperty(window, 'localStorage', {
     configurable: true,
-    value: storage,
+    value: createMemoryStorage(),
+  });
+  Object.defineProperty(window, 'sessionStorage', {
+    configurable: true,
+    value: createMemoryStorage(),
+  });
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  window.sessionStorage.clear();
+});
+
+if (typeof HTMLCanvasElement !== 'undefined') {
+  const context = {
+    canvas: null,
+    fillStyle: '#000000',
+    globalCompositeOperation: 'source-over',
+    clearRect: () => {},
+    createLinearGradient: () => ({ addColorStop: () => {} }),
+    drawImage: () => {},
+    fillRect: () => {},
+    fillText: () => {},
+    getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 255]) }),
+    measureText: (text: string) => ({ width: text.length * 8 }),
+    putImageData: () => {},
+    restore: () => {},
+    save: () => {},
+    scale: () => {},
+    strokeText: () => {},
+  } as unknown as CanvasRenderingContext2D;
+
+  Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+    configurable: true,
+    value(contextId: string) {
+      return contextId === '2d' ? context : null;
+    },
   });
 }
 

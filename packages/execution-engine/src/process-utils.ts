@@ -1,5 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { accessSync, constants } from 'node:fs';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { accessSync, constants, readFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 
 export const SIGKILL_TIMEOUT_MS = 5_000;
@@ -34,17 +34,50 @@ let initializationPromise: Promise<ShellEnvironmentInitResult> | null = null;
 let initializationResult: ShellEnvironmentInitResult | null = null;
 
 /**
- * Sends a signal to the entire process group.
- * Uses negative PID to target the group when the process was spawned with detached: true.
+ * Read the process group id for `pid`. A group kill aimed at `-pid` only
+ * reaches that process's own tree when the process leads its group
+ * (`pgid === pid`). When it does not — or when a recycled pid matches a
+ * foreign group — the same call signals whichever group happens to carry
+ * that id (including the Invoker owner). Matches the e2e
+ * `killOwnedProcessGroup` leader check.
+ */
+export function readProcessGroupId(pid: number): number | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const afterComm = stat.slice(stat.lastIndexOf(')') + 2);
+    const fields = afterComm.split(' ');
+    const pgid = Number.parseInt(fields[2] ?? '', 10);
+    return Number.isFinite(pgid) ? pgid : null;
+  } catch {
+    // /proc unavailable (non-linux) — fall through to ps.
+  }
+  try {
+    const out = execFileSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' });
+    const pgid = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(pgid) ? pgid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Sends a signal to the entire process group only when the child verifiably
+ * leads it (`pgid === pid`). Otherwise falls back to signaling the child
+ * alone — never `kill(-pid)` against an unverified / recycled group id.
  */
 export function killProcessGroup(child: ChildProcess, signal: NodeJS.Signals): boolean {
   if (child.pid == null) return false;
-  try {
-    process.kill(-child.pid, signal);
-    return true;
-  } catch {
-    return child.kill(signal);
+  const pid = child.pid;
+  const pgid = readProcessGroupId(pid);
+  if (pgid === pid) {
+    try {
+      process.kill(-pid, signal);
+      return true;
+    } catch {
+      return child.kill(signal);
+    }
   }
+  return child.kill(signal);
 }
 
 export function childProcessHasExited(child: ChildProcess): boolean {
@@ -258,13 +291,58 @@ export function cleanElectronEnv(): NodeJS.ProcessEnv {
   delete env.ELECTRON_NO_ASAR;
   delete env.ELECTRON_NO_ATTACH_CONSOLE;
   delete env.INVOKER_REPO_CONFIG_PATH;
+  delete env.INVOKER_HEADLESS_STANDALONE;
   env.PATH = getEffectivePath();
   return env;
+}
+
+/**
+ * Strip Git repository-scoping environment variables from helper processes.
+ * These variables are valid inside Git hooks and parent Git subprocesses, but
+ * they make `git -C <repo>` ignore the intended repository or worktree.
+ */
+export function cleanGitRepositoryEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const clean = { ...env };
+  for (const key of [
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_COMMON_DIR',
+    'GIT_NAMESPACE',
+    'GIT_PREFIX',
+    'GIT_QUARANTINE_PATH',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+  ]) {
+    delete clean[key];
+  }
+  for (const key of Object.keys(clean)) {
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(key)) {
+      delete clean[key];
+    }
+  }
+  return clean;
 }
 
 const AGENT_OUTPUT_DETAIL_MAX_CHARS = 2000;
 
 const CODEX_STDIN_NOISE = /^Reading additional input from stdin\.\.\.$/;
+
+/** Lines that actually explain a non-zero exit, as opposed to build progress,
+ * download spinners, or delegation traces that happen to print alongside them.
+ * Position-tailing the raw output buries the real cause under whatever printed
+ * last (e.g. a successful vite/tsup build log), so these lines are surfaced first. */
+const AGENT_ERROR_SIGNAL =
+  /\b(?:errors?|failed|failure|fatal|panic|exception|traceback|refused|denied|rejected|unable|cannot|missing)\b|\bexit(?:ed)?\b[^\n]*\bcode\b|exitcode|\btimed out\b|not found|\bno\b[^\n]+\bfound\b/i;
+
+/** Keep only the lines that read as failure signal. Returns '' when nothing
+ * matches, so callers can fall back to the raw (tail-limited) output. */
+function extractErrorSignal(text: string): string {
+  const signalLines = text.split('\n').filter((line) => AGENT_ERROR_SIGNAL.test(line));
+  return signalLines.join('\n');
+}
 
 function nonEmptyTrimmedLines(text: string): string[] {
   return text.split('\n').map((line) => line.trim()).filter(Boolean);
@@ -294,7 +372,7 @@ export function buildAgentExitFailureDetail(
   const meaningfulDisplay = stripCodexStdinNoise(displayStdout ?? '');
   const meaningfulStdout = stripCodexStdinNoise(rawStdout);
   const candidate = meaningfulStderr || meaningfulDisplay || meaningfulStdout;
-  if (candidate) return tailChars(candidate);
+  if (candidate) return tailChars(extractErrorSignal(candidate) || candidate);
 
   // Nothing meaningful survived. If the only thing either stream emitted was the
   // benign codex stdin/TTY noise, return an actionable hint instead of echoing it

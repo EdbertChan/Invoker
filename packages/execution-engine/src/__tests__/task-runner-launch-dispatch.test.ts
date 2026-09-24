@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { TaskState } from '@invoker/workflow-core';
+import { resolveTaskConfig, type TaskState } from '@invoker/workflow-core';
 import type { WorkResponse, Logger } from '@invoker/contracts';
 import { TaskRunner, type LaunchOutboxAck, type TaskRunnerCallbacks } from '../task-runner.js';
 import { ResourceLimitError } from '../repo-pool.js';
@@ -18,16 +18,17 @@ function makeLogger(): Logger {
 }
 
 function makeTask(overrides: Partial<TaskState> = {}): TaskState {
+  const { config, ...taskOverrides } = overrides;
   return {
     id: 'wf-d/t1',
     description: 'launch-dispatch test task',
     status: 'pending',
     dependencies: [],
     createdAt: new Date(),
-    config: { workflowId: 'wf-d' },
+    config: resolveTaskConfig({ workflowId: 'wf-d', ...config }),
     execution: { selectedAttemptId: 'attempt-1', generation: 1, phase: 'launching' },
-    ...overrides,
-  } as TaskState;
+    ...taskOverrides,
+  };
 }
 
 interface RunnerEnv {
@@ -126,14 +127,21 @@ function buildRunnerEnv(task: TaskState, options: {
 }
 
 function makeLaunchOutbox(): LaunchOutboxAck & {
+  acceptCalls: number[];
   completeCalls: number[];
   failCalls: Array<[number, unknown]>;
 } {
+  const acceptCalls: number[] = [];
   const completeCalls: number[] = [];
   const failCalls: Array<[number, unknown]> = [];
   return {
+    acceptCalls,
     completeCalls,
     failCalls,
+    acceptDispatch(id) {
+      acceptCalls.push(id);
+      return true;
+    },
     completeDispatch(id) {
       completeCalls.push(id);
       return true;
@@ -203,8 +211,26 @@ describe('TaskRunner launch-dispatch wiring', () => {
 
     resolveStart?.();
     await vi.waitFor(() => expect(env.executor.onComplete).toHaveBeenCalled());
+    expect(launchOutbox.completeCalls).toHaveLength(0);
     env.triggerComplete();
     await run;
+    expect(launchOutbox.completeCalls).toEqual([99]);
+  });
+
+  it('keeps the dispatch row leased until executor completion', async () => {
+    const task = makeTask();
+    const env = buildRunnerEnv(task);
+    const launchOutbox = makeLaunchOutbox();
+
+    const run = env.runner.executeTask(task, { dispatchId: 100, launchOutbox });
+    await vi.waitFor(() => expect(env.executor.onComplete).toHaveBeenCalled());
+
+    expect(launchOutbox.completeCalls).toHaveLength(0);
+
+    env.triggerComplete();
+    await run;
+
+    expect(launchOutbox.completeCalls).toEqual([100]);
   });
 
   it('fails the dispatch when markTaskRunningAfterLaunch rejects the launch', async () => {

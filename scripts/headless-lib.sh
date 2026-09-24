@@ -20,12 +20,16 @@
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER="$REPO_ROOT/run.sh"
 ELECTRON="$REPO_ROOT/scripts/electron.cjs"
+if [[ -n "${INVOKER_HEADLESS_ELECTRON_BIN:-}" ]]; then
+  ELECTRON="$INVOKER_HEADLESS_ELECTRON_BIN"
+fi
 MAIN="$REPO_ROOT/packages/app/dist/main.js"
 IPC_HELPER="$REPO_ROOT/scripts/headless-ipc.js"
 if [[ -n "${INVOKER_HEADLESS_IPC_HELPER:-}" ]]; then
   IPC_HELPER="$INVOKER_HEADLESS_IPC_HELPER"
 fi
 STANDALONE_MODE="${INVOKER_HEADLESS_STANDALONE:-0}"
+FORCE_OWNER_IPC="${INVOKER_HEADLESS_FORCE_OWNER_IPC:-0}"
 
 # ---------------------------------------------------------------------------
 # Electron sandbox detection (Linux)
@@ -46,19 +50,103 @@ fi
 # Core transport helpers
 # ---------------------------------------------------------------------------
 
-# Read-only Electron query (stderr suppressed for clean parsing).
+# Safety invariant: a live owner is the only Invoker process. Query through
+# that owner (invoker-ui / headless-client IPC). Spawn checkout Electron only
+# for isolated STANDALONE tests. Do not boot a second Invoker to read state.
+#
+# Bounded by INVOKER_HEADLESS_QUERY_TIMEOUT_SECONDS (default 60; 0 disables).
+# Safe to kill on timeout: this only runs `query` subcommands, which never
+# write to the DB, so there is no stuck-row risk the way there is for
+# headless_mutation (see run_with_optional_timeout's use in rebase-retry-all.sh
+# for that different, deliberately-timeout-free case).
+_headless_query_invoke() {
+  local seconds="$1"
+  shift
+  local use_electron=0
+  if [ "$FORCE_OWNER_IPC" = "1" ]; then
+    use_electron=0
+  elif [ -n "${INVOKER_HEADLESS_ELECTRON_BIN:-}" ] || [ "$STANDALONE_MODE" = "1" ]; then
+    use_electron=1
+  fi
+  if [ "$use_electron" = "1" ]; then
+    # shellcheck disable=SC2086
+    run_with_optional_timeout "$seconds" "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@"
+    return $?
+  fi
+  if [ -n "${INVOKER_HEADLESS_CLIENT_BIN:-}" ]; then
+    run_with_optional_timeout "$seconds" "$INVOKER_HEADLESS_CLIENT_BIN" "$@"
+    return $?
+  fi
+  if [ -f "$REPO_ROOT/packages/app/dist/headless-client.js" ]; then
+    run_with_optional_timeout "$seconds" node "$REPO_ROOT/packages/app/dist/headless-client.js" "$@"
+    return $?
+  fi
+  run_with_optional_timeout "$seconds" invoker-ui --headless "$@"
+}
+
 headless_query() {
-  # shellcheck disable=SC2086
-  "$ELECTRON" "$MAIN" $SANDBOX_FLAG --headless "$@" 2>/dev/null
+  local seconds="${INVOKER_HEADLESS_QUERY_TIMEOUT_SECONDS:-60}"
+  local status=0
+  local stderr_file
+  stderr_file="$(mktemp)"
+  _headless_query_invoke "$seconds" "$@" 2>"$stderr_file" || status=$?
+  case "$status" in
+    0)
+      ;;
+    124)
+      echo "ERROR: headless_query timed out after ${seconds}s (query subprocess killed; owner may be crashed/unresponsive). Override with INVOKER_HEADLESS_QUERY_TIMEOUT_SECONDS=<seconds>, or =0 to disable. args: $*" >&2
+      ;;
+    127)
+      echo "ERROR: headless_query could not enforce a timeout (timeout/gtimeout/python3 all unavailable); query ran without a bound." >&2
+      ;;
+    *)
+      cat "$stderr_file" >&2
+      ;;
+  esac
+  rm -f "$stderr_file"
+  return "$status"
 }
 
 # Mutating command — delegates to the owner (standalone or IPC).
 headless_mutation() {
-  if [ "$STANDALONE_MODE" = "1" ]; then
-    "$RUNNER" --headless "$@"
+  local ipc_args=()
+  local headless_args=()
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-track|--do-not-track)
+        ipc_args+=(--no-track)
+        shift
+        ;;
+      --wait-for-approval)
+        ipc_args+=(--wait-for-approval)
+        shift
+        ;;
+      --timeout-ms)
+        if [ "$#" -lt 2 ]; then
+          echo "ERROR: --timeout-ms requires a value" >&2
+          return 2
+        fi
+        ipc_args+=(--timeout-ms "$2")
+        shift 2
+        ;;
+      --)
+        shift
+        headless_args+=("$@")
+        break
+        ;;
+      *)
+        headless_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [ "$STANDALONE_MODE" = "1" ] && [ "$FORCE_OWNER_IPC" != "1" ]; then
+    "$RUNNER" --headless "${ipc_args[@]}" "${headless_args[@]}"
     return $?
   fi
-  node "$IPC_HELPER" exec -- "$@"
+  INVOKER_HEADLESS_REQUIRE_EXISTING_OWNER=1 node "$IPC_HELPER" exec "${ipc_args[@]}" -- "${headless_args[@]}"
 }
 
 # Extract workflow IDs (label format) from a query.
@@ -87,26 +175,36 @@ run_with_optional_timeout() {
     return $?
   fi
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@"
+    timeout -k 5 "$seconds" "$@"
     return $?
   fi
   if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$seconds" "$@"
+    gtimeout -k 5 "$seconds" "$@"
     return $?
   fi
   if command -v python3 >/dev/null 2>&1; then
     python3 - "$seconds" "$@" <<'PY'
+import os
+import signal
 import subprocess
 import sys
 
 timeout = int(sys.argv[1])
 cmd = sys.argv[2:]
 
+proc = subprocess.Popen(cmd, start_new_session=True)
 try:
-    completed = subprocess.run(cmd, timeout=timeout, check=False)
-    sys.exit(completed.returncode)
+    sys.exit(proc.wait(timeout=timeout))
 except subprocess.TimeoutExpired:
     print(f"Timed out after {timeout}s: {' '.join(cmd)}", file=sys.stderr)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    except ProcessLookupError:
+        pass
     sys.exit(124)
 PY
     return $?
@@ -137,7 +235,7 @@ batch_dispatch() {
   shift 4
   local extra_batch_args=("$@")
 
-  if [ "$STANDALONE_MODE" = "1" ]; then
+  if [ "$STANDALONE_MODE" = "1" ] && [ "$FORCE_OWNER_IPC" != "1" ]; then
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       local wf_id args_json
@@ -198,8 +296,10 @@ for raw in output_jsonl.read_text(encoding="utf-8").splitlines():
     queued = (
         item.get("ok") is True
         and isinstance(response, dict)
-        and response.get("ok") is True
-        and response.get("intentId") not in (None, "")
+        and (
+            (response.get("ok") is True and response.get("intentId") not in (None, ""))
+            or response.get("workflowId") not in (None, "")
+        )
     )
     (log_dir / f"{workflow_id}.log").write_text(raw + "\n", encoding="utf-8")
     with result_file.open("a", encoding="utf-8") as handle:

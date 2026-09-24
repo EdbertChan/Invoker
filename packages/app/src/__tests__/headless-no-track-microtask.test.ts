@@ -60,6 +60,8 @@ describe('--no-track microtask dispatch (no deferRunnableTasks)', () => {
     deps.orchestrator.getExecutableReadyTasks = vi.fn(() => []);
     deps.orchestrator.getPersistedActiveTaskIds = vi.fn(() => new Set<string>());
     deps.orchestrator.startExecution = vi.fn(() => [task]);
+    deps.orchestrator.getStagedWorkflowIds = vi.fn(() => []);
+    deps.orchestrator.activateStagedWorkflows = vi.fn(() => []);
 
     await headlessStartReady(['--no-track'], deps);
     await flushMicrotasks();
@@ -92,6 +94,7 @@ describe('--no-track microtask dispatch (no deferRunnableTasks)', () => {
     await headlessRetryTask('wf-1/task-1', deps);
     await flushMicrotasks();
 
+    expect(deps.preemptTaskSubgraph).not.toHaveBeenCalled();
     expect(executeTasks).toHaveBeenCalledTimes(1);
     expect(executeTasks).toHaveBeenCalledWith([task]);
   });

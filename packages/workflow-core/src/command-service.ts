@@ -8,6 +8,7 @@
 import type { CommandEnvelope, CommandResult } from '@invoker/contracts';
 import { OrchestratorError } from './orchestrator.js';
 import type { Orchestrator, ExternalGatePolicyUpdate, TaskReplacementDef } from './orchestrator.js';
+import type { ExternalGatePolicy } from '@invoker/workflow-graph';
 import {
   applyInvalidation,
   buildOrchestratorOnlyInvalidationDeps,
@@ -192,26 +193,6 @@ export class CommandService {
     );
   }
 
-  /**
-   * @deprecated Step 13 (`docs/architecture/task-invalidation-roadmap.md`):
-   * `restartTask` was the overloaded "retry-or-recreate" verb the
-   * chart's "Naming inconsistency" section flagged. Use the explicit
-   * verb instead — `retryTask` to preserve branch/workspacePath
-   * lineage or `recreateTask` to discard it. This shim delegates to
-   * `recreateTask` (the conservative choice) so any unmigrated
-   * external caller gets the safer, more aggressive reset rather
-   * than the historical retry-class behavior.
-   */
-  async restartTask(
-    envelope: CommandEnvelope<{ taskId: string }>,
-  ): Promise<CommandResult<TaskState[]>> {
-    console.warn(
-      `[command-service] restartTask("${envelope.payload.taskId}") is deprecated (Step 13). ` +
-        'Routing to recreateTask. Use retryTask/recreateTask explicitly.',
-    );
-    return this.recreateTask(envelope);
-  }
-
   async selectExperiment(
     envelope: CommandEnvelope<{ taskId: string; experimentId: string }>,
   ): Promise<CommandResult<TaskState[]>> {
@@ -315,7 +296,7 @@ export class CommandService {
   async editTaskMergeMode(
     envelope: CommandEnvelope<{
       taskId: string;
-      mergeMode: 'manual' | 'automatic' | 'external_review';
+      mergeMode: 'manual' | 'automatic' | 'external_review' | 'no_op';
     }>,
   ): Promise<CommandResult<TaskState[]>> {
     return this.executeCommand<TaskState[]>(
@@ -443,12 +424,37 @@ export class CommandService {
     );
   }
 
+  async closeIdleTask(
+    envelope: CommandEnvelope<{ taskId: string }>,
+  ): Promise<CommandResult<TaskState>> {
+    return this.executeCommand<TaskState>(
+      'CLOSE_IDLE_TASK_FAILED',
+      () => this.orchestrator.closeIdleTask(envelope.payload.taskId),
+      this.workflowIdForTask(envelope.payload.taskId),
+    );
+  }
+
   async cancelWorkflow(
     envelope: CommandEnvelope<{ workflowId: string }>,
   ): Promise<CommandResult<CancelResult>> {
     return this.executeCommand<CancelResult>(
       'CANCEL_WORKFLOW_FAILED',
       () => this.orchestrator.cancelWorkflow(envelope.payload.workflowId),
+      envelope.payload.workflowId,
+    );
+  }
+
+  /**
+   * Cancel a workflow's own in-flight tasks as a preamble to rerunning it (recreate, retry,
+   * rebase-recreate, rebase-retry), without detaching downstream workflows gated on it via
+   * externalDependencies. Unlike cancelWorkflow, this workflow is expected to complete again shortly.
+   */
+  async preemptWorkflow(
+    envelope: CommandEnvelope<{ workflowId: string }>,
+  ): Promise<CommandResult<CancelResult>> {
+    return this.executeCommand<CancelResult>(
+      'PREEMPT_WORKFLOW_FAILED',
+      () => this.orchestrator.cancelWorkflow(envelope.payload.workflowId, { cascadeDependents: false }),
       envelope.payload.workflowId,
     );
   }
@@ -471,6 +477,30 @@ export class CommandService {
       () => this.orchestrator.detachWorkflow(
         envelope.payload.workflowId,
         envelope.payload.upstreamWorkflowId,
+      ),
+      undefined,
+    );
+  }
+
+  async attachWorkflow(
+    envelope: CommandEnvelope<{
+      workflowId: string;
+      upstreamWorkflowId: string;
+      taskId?: string;
+      gatePolicy?: ExternalGatePolicy;
+      force?: boolean;
+    }>,
+  ): Promise<CommandResult<void>> {
+    return this.executeCommand<void>(
+      'ATTACH_WORKFLOW_FAILED',
+      () => this.orchestrator.attachWorkflow(
+        envelope.payload.workflowId,
+        envelope.payload.upstreamWorkflowId,
+        {
+          taskId: envelope.payload.taskId,
+          gatePolicy: envelope.payload.gatePolicy,
+          force: envelope.payload.force,
+        },
       ),
       undefined,
     );

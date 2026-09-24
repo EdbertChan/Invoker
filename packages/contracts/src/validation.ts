@@ -206,6 +206,10 @@ function validateReviewGate(reviewGate: unknown): ValidationResult {
   return { valid: true };
 }
 
+export function isValidWorkResponseOutputs(value: unknown): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 export function validateWorkResponse(res: unknown): ValidationResult {
   if (!res || typeof res !== 'object' || Array.isArray(res)) {
     return { valid: false, error: 'WorkResponse must be an object' };
@@ -229,12 +233,12 @@ export function validateWorkResponse(res: unknown): ValidationResult {
     return { valid: false, error: 'executionGeneration is required and must be a non-negative integer' };
   }
 
-  const validStatuses = ['completed', 'review_ready', 'failed', 'needs_input', 'spawn_experiments', 'select_experiment'];
+  const validStatuses = ['completed', 'review_ready', 'failed', 'needs_input', 'stale', 'spawn_experiments', 'select_experiment'];
   if (!validStatuses.includes(r.status as string)) {
     return { valid: false, error: `status must be one of: ${validStatuses.join(', ')}` };
   }
 
-  if (!r.outputs || typeof r.outputs !== 'object' || Array.isArray(r.outputs)) {
+  if (!isValidWorkResponseOutputs(r.outputs)) {
     return { valid: false, error: 'outputs is required and must be an object' };
   }
 

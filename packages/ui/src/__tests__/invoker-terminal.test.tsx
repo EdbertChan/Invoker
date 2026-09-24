@@ -1,9 +1,19 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, type Mock } from 'vitest';
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { vi } from 'vitest';
 import { useState } from 'react';
 import { createMockInvoker, makePlanningSessionSummary, makeUITask, type MockInvoker } from './helpers/mock-invoker.js';
+import type { TerminalSessionDescriptor } from '@invoker/contracts';
 import type { TaskState, WorkflowMeta } from '../types.js';
+import type { GraphCameraCommand } from '../lib/graph-camera.js';
+import * as ReactFlowModule from '@xyflow/react';
+
+const workflowGraphSpy = vi.hoisted(() => ({
+  commands: [] as Array<GraphCameraCommand | null | undefined>,
+  reset() {
+    this.commands.length = 0;
+  },
+}));
 
 vi.mock('@xyflow/react', async () => {
   // Dynamic import is required because Vitest hoists mock factories before test imports.
@@ -11,22 +21,153 @@ vi.mock('@xyflow/react', async () => {
   return createReactFlowMock();
 });
 
+vi.mock('../components/WorkflowGraph.js', async () => {
+  const actual = await vi.importActual<typeof import('../components/WorkflowGraph.js')>('../components/WorkflowGraph.js');
+  return {
+    ...actual,
+    WorkflowGraph(props: Parameters<typeof actual.WorkflowGraph>[0]) {
+      workflowGraphSpy.commands.push(props.cameraCommand);
+      return actual.WorkflowGraph(props);
+    },
+  };
+});
+
+const xtermMock = vi.hoisted(() => {
+  type DataHandler = (data: string) => void;
+  type TerminalDimensions = { cols: number; rows: number };
+
+  const instances: MockTerminal[] = [];
+  const fitInstances: MockFitAddon[] = [];
+  const writeLog: string[] = [];
+  let nextProposedDimensions: TerminalDimensions | undefined = { cols: 80, rows: 24 };
+
+  class MockTerminal {
+    cols = 80;
+    rows = 24;
+    dataHandler: DataHandler | null = null;
+    loadAddon = vi.fn((addon: { activate?: (terminal: MockTerminal) => void }) => {
+      addon.activate?.(this);
+    });
+    open = vi.fn((host: HTMLElement) => {
+      const terminalElement = document.createElement('div');
+      terminalElement.className = 'xterm';
+      terminalElement.textContent = 'mock terminal';
+      host.appendChild(terminalElement);
+    });
+    write = vi.fn((data: string) => {
+      writeLog.push(data);
+    });
+    onData = vi.fn((cb: DataHandler) => {
+      this.dataHandler = cb;
+      return { dispose: vi.fn() };
+    });
+    focus = vi.fn();
+    refresh = vi.fn();
+    dispose = vi.fn();
+
+    constructor() {
+      instances.push(this);
+    }
+
+    emitData(data: string) {
+      this.dataHandler?.(data);
+    }
+  }
+
+  class MockFitAddon {
+    terminal: MockTerminal | null = null;
+    proposedDimensions = nextProposedDimensions;
+    activate = vi.fn((terminal: MockTerminal) => {
+      this.terminal = terminal;
+    });
+    proposeDimensions = vi.fn(() => this.proposedDimensions);
+    fit = vi.fn(() => {
+      if (!this.terminal || !this.proposedDimensions) return;
+      this.terminal.cols = this.proposedDimensions.cols;
+      this.terminal.rows = this.proposedDimensions.rows;
+    });
+
+    constructor() {
+      fitInstances.push(this);
+    }
+  }
+
+  return {
+    Terminal: MockTerminal,
+    FitAddon: MockFitAddon,
+    instances,
+    fitInstances,
+    writeLog,
+    setNextProposedDimensions: (dimensions: TerminalDimensions | undefined) => {
+      nextProposedDimensions = dimensions;
+    },
+    reset: () => {
+      instances.length = 0;
+      fitInstances.length = 0;
+      writeLog.length = 0;
+      nextProposedDimensions = { cols: 80, rows: 24 };
+    },
+  };
+});
+
+vi.mock('xterm', () => ({ Terminal: xtermMock.Terminal }));
+vi.mock('xterm-addon-fit', () => ({ FitAddon: xtermMock.FitAddon }));
+
+const fitViewMock = (ReactFlowModule as unknown as { __fitViewMock: Mock }).__fitViewMock;
+const setCenterMock = (ReactFlowModule as unknown as { __setCenterMock: Mock }).__setCenterMock;
+const setViewportMock = (ReactFlowModule as unknown as { __setViewportMock: Mock }).__setViewportMock;
+const getZoomMock = (ReactFlowModule as unknown as { __getZoomMock: Mock }).__getZoomMock;
+const getViewportMock = (ReactFlowModule as unknown as { __getViewportMock: Mock }).__getViewportMock;
+
 // Dynamic imports are required so modules see the hoisted @xyflow/react mock.
 const { App } = await import('../App.js');
-const { InvokerTerminal } = await import('../components/InvokerTerminal.js');
+const { InvokerTerminal, buildPlanningHarnessChoices } = await import('../components/InvokerTerminal.js');
 
 const COMPONENT_INPUT_HANDLER_BUDGET_MS = 16;
+
+async function flushFrames(count: number): Promise<void> {
+  for (let i = 0; i < count; i += 1) {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    requestAnimationFrame(() => resolve());
+    await promise;
+  }
+}
+
+async function settleCamera(): Promise<void> {
+  let stable = 0;
+  let prev = setCenterMock.mock.calls.length + fitViewMock.mock.calls.length;
+  for (let i = 0; i < 40 && stable < 4; i += 1) {
+    await flushFrames(1);
+    const total = setCenterMock.mock.calls.length + fitViewMock.mock.calls.length;
+    if (total === prev) {
+      stable += 1;
+    } else {
+      stable = 0;
+      prev = total;
+    }
+  }
+}
 
 describe('Invoker terminal (component)', () => {
   let mock: MockInvoker;
 
   beforeEach(() => {
+    xtermMock.reset();
     mock = createMockInvoker();
     mock.install();
+    fitViewMock.mockClear();
+    setCenterMock.mockClear();
+    setViewportMock.mockClear();
+    getZoomMock.mockReset();
+    getZoomMock.mockReturnValue(1);
+    getViewportMock.mockReset();
+    getViewportMock.mockReturnValue({ x: 0, y: 0, zoom: 1 });
+    workflowGraphSpy.reset();
   });
 
   afterEach(() => {
     mock.cleanup();
+    xtermMock.reset();
   });
 
   async function openPlanningTerminal() {
@@ -42,6 +183,41 @@ describe('Invoker terminal (component)', () => {
   function submitPlanningText(text: string) {
     fireEvent.change(screen.getByTestId('invoker-terminal-input'), { target: { value: text } });
     fireEvent.submit(screen.getByTestId('invoker-terminal-input').closest('form')!);
+  }
+
+  function makeRailPlanningSession(
+    id: string,
+    title: string,
+    status: 'still_discussing' | 'submitted' = 'still_discussing',
+    message = title,
+  ) {
+    return makePlanningSessionSummary({
+      id,
+      title,
+      status,
+      messages: [
+        {
+          id: 1,
+          role: 'user',
+          text: message,
+          createdAt: '2026-07-07T00:00:01.000Z',
+        },
+      ],
+      draftPlanAvailable: false,
+      draftPlanSummary: undefined,
+      draftPlanText: undefined,
+      updatedAt: '2026-07-07T00:00:01.000Z',
+    });
+  }
+
+  function getPlanningSessionRowByText(text: string): HTMLElement {
+    const rail = screen.getByTestId('planning-session-list');
+    const textElement = within(rail).getAllByText(text)[0];
+    const row = textElement?.closest('[data-testid="planning-session-row"]');
+    if (!(row instanceof HTMLElement)) {
+      throw new Error(`Missing planning session row for ${text}`);
+    }
+    return row;
   }
 
   function expectRailListScrollContract(list: HTMLElement) {
@@ -71,7 +247,7 @@ describe('Invoker terminal (component)', () => {
     expect(terminalShell?.className).not.toContain('border border-border');
     expect(terminalShell?.className).not.toContain('bg-card');
     expect(screen.getByTestId('invoker-terminal-input')).toBeEnabled();
-  });
+  }, 10_000);
 
   function lastPerfPayload(metric: string): Record<string, any> {
     const payload = vi.mocked(mock.api.reportUiPerf).mock.calls
@@ -134,16 +310,459 @@ describe('Invoker terminal (component)', () => {
       busy: false,
       value: '',
       selectedPresetKey: 'codex',
-      presetOptions: [{ key: 'codex', label: 'Codex' }],
+      presetOptions: [{ key: 'codex', label: 'Codex', tool: 'codex' }],
+      selectedConfirmationMode: 'require' as const,
       draftPlanAvailable: false,
       onValueChange: vi.fn(),
       onSubmit: vi.fn(),
       onSubmitDraft: vi.fn(),
       onPresetChange: vi.fn(),
+      onConfirmationModeChange: vi.fn(),
       onExpand: vi.fn(),
       ...overrides,
     };
   }
+
+  it('groups flat configured planning presets into harness and model choices', () => {
+    expect(buildPlanningHarnessChoices([
+      { key: 'codex', label: 'Codex', tool: 'codex' },
+      { key: 'omp+claude', label: 'Claude via OMP', tool: 'omp', model: 'claude' },
+      { key: 'omp+codex', label: 'Codex via OMP', tool: 'omp', model: 'codex' },
+      { key: 'omp', label: 'OMP', tool: 'omp' },
+    ])).toEqual([
+      {
+        tool: 'codex',
+        label: 'Codex',
+        directPreset: { key: 'codex', label: 'Codex', tool: 'codex' },
+        modelPresets: [],
+      },
+      {
+        tool: 'omp',
+        label: 'OMP',
+        directPreset: { key: 'omp', label: 'OMP', tool: 'omp' },
+        modelPresets: [
+          { key: 'omp+claude', label: 'Claude via OMP', tool: 'omp', model: 'claude' },
+          { key: 'omp+codex', label: 'Codex via OMP', tool: 'omp', model: 'codex' },
+        ],
+      },
+    ]);
+  });
+
+  it('renders separate harness and model selectors while emitting configured preset keys', () => {
+    const onPresetChange = vi.fn();
+    render(<InvokerTerminal
+      {...terminalProps({
+        selectedPresetKey: 'omp+claude',
+        presetOptions: [
+          { key: 'codex', label: 'Codex', tool: 'codex' },
+          { key: 'omp+claude', label: 'Claude via OMP', tool: 'omp', model: 'claude' },
+          { key: 'omp+codex', label: 'Codex via OMP', tool: 'omp', model: 'codex' },
+          { key: 'omp', label: 'OMP', tool: 'omp' },
+        ],
+        onPresetChange,
+      })}
+    />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options' }));
+
+    expect(screen.getByTestId('invoker-terminal-harness')).toHaveValue('omp');
+    const modelSelect = screen.getByTestId('invoker-terminal-model');
+    expect(modelSelect).toHaveValue('omp+claude');
+    expect(within(modelSelect).getByRole('option', { name: 'Default' })).toHaveValue('omp');
+    expect(within(modelSelect).getByRole('option', { name: 'Claude' })).toHaveValue('omp+claude');
+    expect(within(modelSelect).getByRole('option', { name: 'Codex' })).toHaveValue('omp+codex');
+
+    fireEvent.change(modelSelect, { target: { value: 'omp+codex' } });
+    expect(onPresetChange).toHaveBeenLastCalledWith('omp+codex');
+  });
+
+  it('hides the model selector for direct harness presets without configured models', () => {
+    render(<InvokerTerminal {...terminalProps()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options' }));
+
+    expect(screen.getByTestId('invoker-terminal-harness')).toHaveValue('codex');
+    expect(screen.queryByTestId('invoker-terminal-model')).not.toBeInTheDocument();
+  });
+
+  it('announces the turn error and only renders Retry when a handler is provided', () => {
+    const { rerender } = render(<InvokerTerminal
+      {...terminalProps({
+        turnError: 'Planner was interrupted before it could answer.',
+      })}
+    />);
+
+    const errorBar = screen.getByTestId('invoker-terminal-turn-error');
+    expect(errorBar).toHaveAttribute('role', 'alert');
+    expect(errorBar).toHaveTextContent('Planner was interrupted before it could answer.');
+    expect(screen.queryByTestId('invoker-terminal-retry-turn')).not.toBeInTheDocument();
+
+    const onRetryTurn = vi.fn();
+    rerender(<InvokerTerminal
+      {...terminalProps({
+        turnError: 'Planner was interrupted before it could answer.',
+        onRetryTurn,
+      })}
+    />);
+
+    fireEvent.click(screen.getByTestId('invoker-terminal-retry-turn'));
+    expect(onRetryTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a still-valid model when switching harnesses', () => {
+    const onPresetChange = vi.fn();
+    render(<InvokerTerminal
+      {...terminalProps({
+        selectedPresetKey: 'omp+claude',
+        presetOptions: [
+          { key: 'omp+claude', label: 'Claude via OMP', tool: 'omp', model: 'claude' },
+          { key: 'omp+codex', label: 'Codex via OMP', tool: 'omp', model: 'codex' },
+          { key: 'cursor+claude', label: 'Claude via Cursor', tool: 'cursor', model: 'claude' },
+          { key: 'cursor+codex', label: 'Codex via Cursor', tool: 'cursor', model: 'codex' },
+          { key: 'codex', label: 'Codex', tool: 'codex' },
+        ],
+        onPresetChange,
+      })}
+    />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options' }));
+    fireEvent.change(screen.getByTestId('invoker-terminal-harness'), { target: { value: 'cursor' } });
+    expect(onPresetChange).toHaveBeenLastCalledWith('cursor+claude');
+
+    fireEvent.change(screen.getByTestId('invoker-terminal-harness'), { target: { value: 'codex' } });
+    expect(onPresetChange).toHaveBeenLastCalledWith('codex');
+  });
+
+  it('shows the submitted-plan bar running state while the workflow is still running', () => {
+    render(<InvokerTerminal
+      {...terminalProps({
+        readOnly: true,
+        submittedPlanName: 'Submitted Plan',
+        workflowRunning: true,
+        onOpenGraph: vi.fn(),
+      })}
+    />);
+
+    const bar = screen.getByTestId('invoker-terminal-submitted-bar');
+    expect(within(bar).getByText(/Workflow running\.\.\./)).toBeInTheDocument();
+    expect(bar).toHaveTextContent('"Submitted Plan"');
+    expect(bar).not.toHaveTextContent('Plan ready');
+    expect(within(bar).getByTestId('invoker-terminal-open-graph')).toBeInTheDocument();
+  });
+
+  it('keeps the submitted-plan bar Plan ready content when the workflow is not running', () => {
+    render(<InvokerTerminal
+      {...terminalProps({
+        readOnly: true,
+        submittedPlanName: 'Submitted Plan',
+        workflowRunning: false,
+        onOpenGraph: vi.fn(),
+      })}
+    />);
+
+    const bar = screen.getByTestId('invoker-terminal-submitted-bar');
+    expect(bar).toHaveTextContent('Plan ready · "Submitted Plan" · review the graph, then Start ready work');
+    expect(bar).not.toHaveTextContent('Workflow running');
+    expect(within(bar).getByTestId('invoker-terminal-open-graph')).toBeInTheDocument();
+  });
+
+  function makePlanningTerminalSession(
+    overrides: Partial<TerminalSessionDescriptor> = {},
+  ): TerminalSessionDescriptor {
+    return {
+      sessionId: 'planning-terminal-1',
+      taskId: 'planning:chat-1',
+      kind: 'planning',
+      planningSessionId: 'chat-1',
+      status: 'running',
+      mode: 'spawn',
+      attached: false,
+      createdAt: '2026-07-07T00:00:01.000Z',
+      ...overrides,
+    };
+  }
+
+  function mockElementRect(width: number, height: number) {
+    return vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: width,
+      bottom: height,
+      width,
+      height,
+      toJSON: () => ({}),
+    } as DOMRect);
+  }
+
+  async function flushPlanningTerminalFit(): Promise<void> {
+    for (let index = 0; index < 4; index += 1) {
+      await act(async () => {
+        await new Promise<void>((resolve) => {
+          if (typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(() => resolve());
+            return;
+          }
+          window.setTimeout(resolve, 0);
+        });
+      });
+    }
+  }
+
+  async function waitRealMs(ms: number): Promise<void> {
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, ms));
+    });
+  }
+
+  it('does not mount planning tmux xterm or resize while inactive', async () => {
+    render(<InvokerTerminal
+      {...terminalProps({
+        mode: 'tmux',
+        terminalSession: makePlanningTerminalSession(),
+        terminalActive: false,
+      })}
+    />);
+
+    await act(async () => {});
+
+    expect(screen.getByTestId('invoker-terminal-tmux-pane')).toHaveAttribute('data-session-id', 'planning-terminal-1');
+    expect(screen.queryByText('mock terminal')).not.toBeInTheDocument();
+    expect(xtermMock.instances).toHaveLength(0);
+    expect(xtermMock.fitInstances).toHaveLength(0);
+    expect(mock.api.onTerminalOutput).not.toHaveBeenCalled();
+    expect(mock.api.planningTerminalResize).not.toHaveBeenCalled();
+  });
+
+  it('keeps the same xterm Terminal instance across a chat/tmux mode toggle', async () => {
+    const rectSpy = mockElementRect(640, 400);
+
+    try {
+      const props = terminalProps({
+        mode: 'tmux' as const,
+        terminalSession: makePlanningTerminalSession(),
+      });
+      const { rerender } = render(<InvokerTerminal {...props} />);
+      await flushPlanningTerminalFit();
+
+      expect(xtermMock.instances).toHaveLength(1);
+      const firstInstance = xtermMock.instances[0];
+
+      rerender(<InvokerTerminal {...props} mode="chat" />);
+      await flushPlanningTerminalFit();
+
+      expect(xtermMock.instances).toHaveLength(1);
+      expect(firstInstance?.dispose).not.toHaveBeenCalled();
+
+      rerender(<InvokerTerminal {...props} mode="tmux" />);
+      await flushPlanningTerminalFit();
+
+      expect(xtermMock.instances).toHaveLength(1);
+      expect(xtermMock.instances[0]).toBe(firstInstance);
+      expect(firstInstance?.dispose).not.toHaveBeenCalled();
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('skips planning tmux fit and resize when proposed dimensions are tiny', async () => {
+    const rectSpy = mockElementRect(640, 400);
+    xtermMock.setNextProposedDimensions({ cols: 19, rows: 4 });
+
+    try {
+      render(<InvokerTerminal
+        {...terminalProps({
+          mode: 'tmux',
+          terminalSession: makePlanningTerminalSession(),
+        })}
+      />);
+
+      await flushPlanningTerminalFit();
+
+      expect(xtermMock.fitInstances).toHaveLength(1);
+      expect(xtermMock.fitInstances[0]?.proposeDimensions).toHaveBeenCalled();
+      expect(xtermMock.fitInstances[0]?.fit).not.toHaveBeenCalled();
+      expect(mock.api.planningTerminalResize).not.toHaveBeenCalled();
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('skips planning tmux fit and resize when proposed dimensions are not finite', async () => {
+    const rectSpy = mockElementRect(640, 400);
+    xtermMock.setNextProposedDimensions({ cols: Number.NaN, rows: 24 });
+
+    try {
+      render(<InvokerTerminal
+        {...terminalProps({
+          mode: 'tmux',
+          terminalSession: makePlanningTerminalSession(),
+        })}
+      />);
+
+      await flushPlanningTerminalFit();
+
+      expect(xtermMock.fitInstances[0]?.proposeDimensions).toHaveBeenCalled();
+      expect(xtermMock.fitInstances[0]?.fit).not.toHaveBeenCalled();
+      expect(mock.api.planningTerminalResize).not.toHaveBeenCalled();
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('sends planning tmux resize when proposed dimensions are sane', async () => {
+    const rectSpy = mockElementRect(640, 400);
+    xtermMock.setNextProposedDimensions({ cols: 100, rows: 30 });
+
+    try {
+      render(<InvokerTerminal
+        {...terminalProps({
+          mode: 'tmux',
+          terminalSession: makePlanningTerminalSession(),
+        })}
+      />);
+
+      await flushPlanningTerminalFit();
+
+      expect(xtermMock.fitInstances[0]?.proposeDimensions).toHaveBeenCalled();
+      expect(xtermMock.fitInstances[0]?.fit).toHaveBeenCalled();
+      expect(mock.api.planningTerminalResize).toHaveBeenCalledTimes(1);
+      expect(mock.api.planningTerminalResize).toHaveBeenCalledWith('planning-terminal-1', 100, 30);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('suppresses duplicate planning tmux resize dimensions', async () => {
+    const rectSpy = mockElementRect(640, 400);
+    xtermMock.setNextProposedDimensions({ cols: 100, rows: 30 });
+
+    try {
+      render(<InvokerTerminal
+        {...terminalProps({
+          mode: 'tmux',
+          terminalSession: makePlanningTerminalSession(),
+        })}
+      />);
+
+      await flushPlanningTerminalFit();
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+      await flushPlanningTerminalFit();
+
+      expect(xtermMock.fitInstances[0]?.fit.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(mock.api.planningTerminalResize).toHaveBeenCalledTimes(1);
+      expect(mock.api.planningTerminalResize).toHaveBeenCalledWith('planning-terminal-1', 100, 30);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('never retries a planning tmux resize the main process failed to apply', async () => {
+    const rectSpy = mockElementRect(640, 400);
+    xtermMock.setNextProposedDimensions({ cols: 100, rows: 30 });
+    vi.mocked(mock.api.planningTerminalResize).mockResolvedValueOnce({ ok: false, reason: 'session-not-found' });
+
+    try {
+      render(<InvokerTerminal
+        {...terminalProps({
+          mode: 'tmux',
+          terminalSession: makePlanningTerminalSession(),
+        })}
+      />);
+
+      await flushPlanningTerminalFit();
+      expect(mock.api.planningTerminalResize).toHaveBeenCalledTimes(1);
+
+      // The container's real size never changed, but nothing else has
+      // caused the renderer to distinguish "size we tried to send" from
+      // "size the PTY actually confirmed" — a window focus event re-fits
+      // to the same 100x30 and should retry, since the PTY never got it.
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+      await flushPlanningTerminalFit();
+
+      // This is the bug: the renderer treats its own failed attempt as
+      // success and never resends the same dimensions, so the PTY is
+      // left running at its stale/default size indefinitely.
+      expect(mock.api.planningTerminalResize).toHaveBeenCalledTimes(2);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('retries a resize the main process falsely reported as applied, using a readback check', async () => {
+    const rectSpy = mockElementRect(640, 400);
+    xtermMock.setNextProposedDimensions({ cols: 100, rows: 30 });
+
+    let appliedSizeCalls = 0;
+    vi.mocked(mock.api.planningTerminalAppliedSize).mockImplementation(async () => {
+      appliedSizeCalls += 1;
+      // First readback proves the "successful" resize never actually
+      // stuck; second readback (after the forced retry) shows it caught up.
+      return appliedSizeCalls === 1 ? { cols: 80, rows: 24 } : { cols: 100, rows: 30 };
+    });
+
+    try {
+      render(<InvokerTerminal
+        {...terminalProps({
+          mode: 'tmux',
+          terminalSession: makePlanningTerminalSession(),
+        })}
+      />);
+
+      await flushPlanningTerminalFit();
+      expect(mock.api.planningTerminalResize).toHaveBeenCalledTimes(1);
+
+      // The main process claimed { ok: true } for that first resize, but a
+      // readback a moment later shows the PTY never actually adopted it —
+      // the reconcile loop must force a resend rather than trust the lie.
+      await waitRealMs(700);
+
+      expect(mock.api.planningTerminalAppliedSize).toHaveBeenCalledWith('planning-terminal-1');
+      expect(mock.api.planningTerminalResize).toHaveBeenCalledTimes(2);
+
+      // Once the readback confirms the retry actually stuck, the loop must
+      // stop — no further resize calls should appear after another round.
+      const callsAfterRetry = mock.api.planningTerminalResize.mock.calls.length;
+      await waitRealMs(700);
+      expect(mock.api.planningTerminalResize.mock.calls.length).toBe(callsAfterRetry);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('gives up after a bounded number of reconcile attempts against a persistently wrong size', async () => {
+    const rectSpy = mockElementRect(640, 400);
+    xtermMock.setNextProposedDimensions({ cols: 100, rows: 30 });
+
+    // The main process always claims success, but the readback never
+    // matches — this must not retry forever.
+    vi.mocked(mock.api.planningTerminalAppliedSize).mockResolvedValue({ cols: 80, rows: 24 });
+
+    try {
+      render(<InvokerTerminal
+        {...terminalProps({
+          mode: 'tmux',
+          terminalSession: makePlanningTerminalSession(),
+        })}
+      />);
+
+      await flushPlanningTerminalFit();
+      await waitRealMs(4500);
+
+      const totalResizeCalls = mock.api.planningTerminalResize.mock.calls.length;
+      expect(totalResizeCalls).toBeGreaterThan(1);
+
+      await waitRealMs(700);
+      expect(mock.api.planningTerminalResize.mock.calls.length).toBe(totalResizeCalls);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  }, 12000);
 
   it('generates a planning reply from plain language', async () => {
     render(<App />);
@@ -152,7 +771,7 @@ describe('Invoker terminal (component)', () => {
     submitPlanningText('hello');
 
     await waitFor(() => {
-      expect(mock.api.planningChatSend).toHaveBeenCalledWith({ message: 'hello', presetKey: 'codex' });
+      expect(vi.mocked(mock.api.planningChatSend)).toHaveBeenCalledWith({ turnId: expect.any(String), message: 'hello', presetKey: 'codex', confirmationMode: 'require' });
       expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent('I can help draft that.');
     });
     expect(screen.queryByText(/Unknown command/)).not.toBeInTheDocument();
@@ -228,17 +847,34 @@ describe('Invoker terminal (component)', () => {
       expect(panel).toHaveTextContent('Planning stopped. Try again when ready.');
     });
 
+    const firstTurnId = vi.mocked(mock.api.planningChatSend).mock.calls[0][0].turnId;
+    expect(typeof firstTurnId).toBe('string');
+
     submitPlanningText('try again');
 
     await waitFor(() => {
       expect(mock.api.planningChatSend).toHaveBeenCalledTimes(2);
-      expect(screen.queryByTestId('invoker-terminal-planner-stream')).not.toBeInTheDocument();
+      const secondTurnId = vi.mocked(mock.api.planningChatSend).mock.calls[1][0].turnId;
+      // A plain resend after failure is a new turn, not the dedicated Retry
+      // action (which reuses activeTurnId) — it must mint a fresh turnId.
+      expect(typeof secondTurnId).toBe('string');
+      expect(secondTurnId).not.toBe(firstTurnId);
+      expect(mock.api.planningChatSend).toHaveBeenLastCalledWith({
+        turnId: secondTurnId,
+        sessionId: 'session-1',
+        message: 'try again',
+        presetKey: 'codex',
+        confirmationMode: 'require',
+      });
+      const panel = screen.getByTestId('invoker-terminal-planner-stream');
+      expect(panel).toHaveAttribute('data-state', 'working');
+      expect(panel).toHaveTextContent('Working…');
     });
 
     await act(async () => {
       resolveSecondSend?.({
         ok: true,
-        sessionId: 'session-2',
+        sessionId: 'session-1',
         reply: 'Recovered.',
         draftPlanAvailable: false,
       });
@@ -271,11 +907,112 @@ describe('Invoker terminal (component)', () => {
     const secondPanel = await screen.findByTestId('invoker-terminal-planner-stream');
     expect(secondPanel).toHaveTextContent('Drafting your plan…');
 
-    const sessionButtons = within(screen.getByTestId('planning-session-list')).getAllByRole('button');
-    fireEvent.click(sessionButtons[1]);
+    fireEvent.click(within(screen.getByTestId('planning-session-list')).getByRole('button', { name: /first session request/i }));
 
     const firstPanel = await screen.findByTestId('invoker-terminal-planner-stream');
     expect(firstPanel).toHaveTextContent('Drafting your plan…');
+  });
+
+  it('replays planning tmux output when switching sessions back without duplicating live output', async () => {
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makePlanningSessionSummary({
+          id: 'plan-alpha',
+          title: 'Alpha tmux session',
+          status: 'still_discussing',
+          draftPlanAvailable: false,
+          terminalMode: 'tmux',
+          terminalSessionId: 'term-alpha',
+          terminalStatus: 'running',
+          terminalOutputSnapshot: '',
+        }),
+        makePlanningSessionSummary({
+          id: 'plan-beta',
+          title: 'Beta tmux session',
+          status: 'still_discussing',
+          draftPlanAvailable: false,
+          terminalMode: 'tmux',
+          terminalSessionId: 'term-beta',
+          terminalStatus: 'running',
+          terminalOutputSnapshot: '',
+        }),
+      ],
+    })) as any;
+
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-home'));
+    await waitFor(() => expect(mock.api.onTerminalOutput).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId('invoker-terminal-tmux-pane')).toHaveAttribute('data-session-id', 'term-alpha');
+    });
+
+    await act(async () => {
+      mock.fireTerminalOutput({
+        sessionId: 'term-alpha',
+        taskId: 'planning:plan-alpha',
+        kind: 'planning',
+        planningSessionId: 'plan-alpha',
+        data: 'ALPHA_TMUX_VISIBLE\n',
+      });
+    });
+    expect(xtermMock.writeLog.filter((entry) => entry === 'ALPHA_TMUX_VISIBLE\n')).toHaveLength(1);
+
+    fireEvent.click(within(screen.getByTestId('planning-session-list')).getByRole('button', { name: /Beta tmux session/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId('invoker-terminal-tmux-pane')).toHaveAttribute('data-session-id', 'term-beta');
+    });
+    await act(async () => {
+      mock.fireTerminalOutput({
+        sessionId: 'term-beta',
+        taskId: 'planning:plan-beta',
+        kind: 'planning',
+        planningSessionId: 'plan-beta',
+        data: 'BETA_TMUX_VISIBLE\n',
+      });
+    });
+    expect(xtermMock.writeLog.filter((entry) => entry === 'BETA_TMUX_VISIBLE\n')).toHaveLength(1);
+
+    fireEvent.click(within(screen.getByTestId('planning-session-list')).getByRole('button', { name: /Alpha tmux session/ }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('invoker-terminal-tmux-pane')).toHaveAttribute('data-session-id', 'term-alpha');
+      expect(xtermMock.writeLog.filter((entry) => entry === 'ALPHA_TMUX_VISIBLE\n')).toHaveLength(2);
+    });
+  });
+
+  it('does not trust an unconfirmed terminal status as live, and reattaches for real when asked', async () => {
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makePlanningSessionSummary({
+          id: 'plan-ambiguous',
+          title: 'Ambiguous tmux session',
+          status: 'still_discussing',
+          draftPlanAvailable: false,
+          terminalMode: 'tmux',
+          terminalSessionId: 'term-ambiguous',
+          terminalOutputSnapshot: 'stale snapshot from before restart',
+        }),
+      ],
+    })) as any;
+
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-home'));
+
+    expect(await screen.findByTestId('invoker-terminal-tmux-placeholder')).toBeInTheDocument();
+    expect(screen.queryByTestId('invoker-terminal-tmux-pane')).not.toBeInTheDocument();
+    expect(mock.api.planningTerminalOpen).not.toHaveBeenCalled();
+
+    fireEvent.click(within(screen.getByTestId('invoker-terminal-mode-toggle')).getByRole('tab', { name: 'Tmux' }));
+
+    await waitFor(() => expect(mock.api.planningTerminalOpen).toHaveBeenCalledWith('plan-ambiguous'));
+    await waitFor(() => {
+      expect(screen.getByTestId('invoker-terminal-tmux-pane')).toHaveAttribute(
+        'data-session-id',
+        'mock-planning-terminal-plan-ambiguous',
+      );
+    });
   });
 
   it('renders chat role labels and fenced YAML in a mono code panel', async () => {
@@ -334,11 +1071,11 @@ describe('Invoker terminal (component)', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
 
     await waitFor(() => {
-      expect(mock.api.planningChatSend).toHaveBeenCalledWith({ message: 'hello', presetKey: 'codex' });
+      expect(vi.mocked(mock.api.planningChatSend)).toHaveBeenCalledWith({ turnId: expect.any(String), message: 'hello', presetKey: 'codex', confirmationMode: 'require' });
     });
   });
 
-  it('shows the wait cursor only while a planning request is busy', async () => {
+  it('never shows the wait cursor while a planning request is busy', async () => {
     let resolveSend: ((value: any) => void) | null = null;
     mock.api.planningChatSend = vi.fn(() => {
       return new Promise((resolve) => {
@@ -353,8 +1090,8 @@ describe('Invoker terminal (component)', () => {
 
     const input = screen.getByTestId('invoker-terminal-input');
     await waitFor(() => expect(input).toBeDisabled());
-    expect(input).toHaveClass('disabled:cursor-wait');
-    expect(input).not.toHaveClass('disabled:cursor-not-allowed');
+    expect(input).toHaveClass('disabled:cursor-not-allowed');
+    expect(input).not.toHaveClass('disabled:cursor-wait');
 
     await act(async () => {
       resolveSend?.({ ok: true, sessionId: 'session-1', reply: 'Done.', draftPlanAvailable: false });
@@ -368,12 +1105,14 @@ describe('Invoker terminal (component)', () => {
       busy: false,
       value: '',
       selectedPresetKey: 'codex',
-      presetOptions: [{ key: 'codex', label: 'Codex' }],
+      presetOptions: [{ key: 'codex', label: 'Codex', tool: 'codex' }],
+      selectedConfirmationMode: 'require' as const,
       draftPlanAvailable: false,
       onValueChange: vi.fn(),
       onSubmit: vi.fn(),
       onSubmitDraft: vi.fn(),
       onPresetChange: vi.fn(),
+      onConfirmationModeChange: vi.fn(),
       onExpand: vi.fn(),
     };
     const { rerender } = render(<InvokerTerminal {...props} />);
@@ -451,12 +1190,14 @@ describe('Invoker terminal (component)', () => {
           busy={false}
           value={value}
           selectedPresetKey="codex"
-          presetOptions={[{ key: 'codex', label: 'Codex' }]}
+          presetOptions={[{ key: 'codex', label: 'Codex', tool: 'codex' }]}
+          selectedConfirmationMode="require"
           draftPlanAvailable={false}
           onValueChange={setValue}
           onSubmit={vi.fn()}
           onSubmitDraft={vi.fn()}
           onPresetChange={vi.fn()}
+          onConfirmationModeChange={vi.fn()}
           onExpand={vi.fn()}
         />
       );
@@ -508,10 +1249,9 @@ describe('Invoker terminal (component)', () => {
     });
     fireEvent.click(screen.getByTestId('workflow-node-wf-chat-0'));
 
-    await waitFor(() => {
-      expect(screen.getByTestId('rf__node-wf-chat-0/message-00')).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByTestId('rf__node-wf-chat-0/message-00'));
+    const promptTaskNode = await screen.findByTestId('rf__node-wf-chat-0/message-00');
+    expect(promptTaskNode).toBeInTheDocument();
+    fireEvent.click(promptTaskNode);
 
     await waitFor(() => {
       expect(screen.getByTestId('prompt-command-display')).toBeInTheDocument();
@@ -554,7 +1294,7 @@ describe('Invoker terminal (component)', () => {
       lagMs: expect.any(Number),
     }));
     expect(payload.transcriptSizeBytes).toBeGreaterThan(10_000);
-  });
+  }, 10_000);
 
   it('hydrates restored planning chats and keeps the restored session editable', async () => {
     mock.api.planningChatList = vi.fn(async () => ({
@@ -603,9 +1343,11 @@ describe('Invoker terminal (component)', () => {
 
     await waitFor(() => {
       expect(mock.api.planningChatSend).toHaveBeenCalledWith({
+        turnId: expect.any(String),
         sessionId: 'saved-pressure-chat',
         message: 'continue the restored session',
         presetKey: 'codex',
+        confirmationMode: 'require',
       });
     });
   });
@@ -669,6 +1411,141 @@ describe('Invoker terminal (component)', () => {
     expect(screen.getByTestId('planning-session-rail')).toHaveTextContent('2 chats');
   });
 
+  it('deletes a saved planning chat from its row trash button', async () => {
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makeRailPlanningSession('delete-saved-chat', 'Delete saved chat'),
+        makeRailPlanningSession('keep-saved-chat', 'Keep saved chat'),
+      ],
+    }));
+
+    render(<App />);
+    await openPlanningTerminal();
+
+    const rail = screen.getByTestId('planning-session-list');
+    await waitFor(() => expect(within(rail).getAllByText('Delete saved chat').length).toBeGreaterThan(0));
+
+    fireEvent.click(within(getPlanningSessionRowByText('Delete saved chat')).getByRole('button', { name: 'Delete planning chat' }));
+
+    await waitFor(() => {
+      expect(within(rail).queryByText('Delete saved chat')).not.toBeInTheDocument();
+    });
+    expect(within(rail).getAllByText('Keep saved chat').length).toBeGreaterThan(0);
+    expect(mock.api.planningChatDelete).toHaveBeenCalledWith({ sessionId: 'delete-saved-chat' });
+  });
+
+  it('deletes a local planning chat without calling planningChatDelete', async () => {
+    mock.api.planningChatSend = vi.fn(() => new Promise(() => {}) as any) as any;
+
+    render(<App />);
+    await openPlanningTerminal();
+
+    submitPlanningText('local unsaved planning chat');
+    await waitFor(() => expect(mock.api.planningChatSend).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+    fireEvent.click(within(getPlanningSessionRowByText('local unsaved planning chat')).getByRole('button', { name: 'Delete planning chat' }));
+
+    await waitFor(() => {
+      expect(within(screen.getByTestId('planning-session-list')).queryByText('local unsaved planning chat')).not.toBeInTheDocument();
+    });
+    expect(mock.api.planningChatDelete).not.toHaveBeenCalled();
+  });
+
+  it('disables Clear submitted when there are no submitted planning chats', async () => {
+    render(<App />);
+    await openPlanningTerminal();
+
+    const clearButton = screen.getByRole('button', { name: 'Clear submitted' });
+    expect(clearButton).toBeDisabled();
+
+    fireEvent.click(clearButton);
+    expect(mock.api.planningChatDeleteSubmitted).not.toHaveBeenCalled();
+  });
+
+  it('clears all submitted planning chats after confirmation', async () => {
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makeRailPlanningSession('active-chat', 'Active chat'),
+        makeRailPlanningSession('submitted-chat-1', 'Submitted one', 'submitted'),
+        makeRailPlanningSession('submitted-chat-2', 'Submitted two', 'submitted'),
+      ],
+    }));
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    try {
+      render(<App />);
+      await openPlanningTerminal();
+
+      const rail = screen.getByTestId('planning-session-list');
+      await waitFor(() => expect(within(rail).getAllByText('Submitted one').length).toBeGreaterThan(0));
+      const clearButton = screen.getByRole('button', { name: 'Clear submitted' });
+      expect(clearButton).toBeEnabled();
+
+      fireEvent.click(clearButton);
+
+      await waitFor(() => {
+        expect(within(rail).queryByText('Submitted one')).not.toBeInTheDocument();
+        expect(within(rail).queryByText('Submitted two')).not.toBeInTheDocument();
+      });
+      expect(within(rail).getAllByText('Active chat').length).toBeGreaterThan(0);
+      expect(screen.getByTestId('planning-session-rail')).toHaveTextContent('1 chat');
+      expect(screen.getByRole('button', { name: 'Clear submitted' })).toBeDisabled();
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(mock.api.planningChatDeleteSubmitted).toHaveBeenCalledTimes(1);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('recreates a fresh empty chat after deleting the last planning chat', async () => {
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makeRailPlanningSession('only-saved-chat', 'Only saved chat'),
+      ],
+    }));
+
+    render(<App />);
+    await openPlanningTerminal();
+
+    await waitFor(() => expect(screen.getByTestId('planning-session-list')).toHaveTextContent('Only saved chat'));
+    fireEvent.click(within(getPlanningSessionRowByText('Only saved chat')).getByRole('button', { name: 'Delete planning chat' }));
+
+    await waitFor(() => {
+      expect(within(screen.getByTestId('planning-session-list')).queryByText('Only saved chat')).not.toBeInTheDocument();
+      expect(screen.getByText('What do you want to build?')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('planning-session-rail')).toHaveTextContent('1 chat');
+    expect(screen.getByTestId('invoker-terminal-input')).toBeEnabled();
+    expect(mock.api.planningChatDelete).toHaveBeenCalledWith({ sessionId: 'only-saved-chat' });
+  });
+
+  it('hides planning chat trash buttons and disables Clear submitted in read-only mode', async () => {
+    mock.setRuntimeStatus({
+      ownerMode: false,
+      readOnly: true,
+      mode: 'read-only',
+    });
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makeRailPlanningSession('readonly-active-chat', 'Readonly active chat'),
+        makeRailPlanningSession('readonly-submitted-chat', 'Readonly submitted chat', 'submitted'),
+      ],
+    }));
+    mock.install();
+
+    render(<App />);
+    await openPlanningTerminal();
+
+    await waitFor(() => expect(screen.getByTestId('invoker-terminal-input')).toBeDisabled());
+    expect(screen.queryByRole('button', { name: 'Delete planning chat' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clear submitted' })).toBeDisabled();
+  });
+
   it('continues the same planning session', async () => {
     render(<App />);
     await openPlanningTerminal();
@@ -682,26 +1559,191 @@ describe('Invoker terminal (component)', () => {
 
     await waitFor(() => {
       expect(mock.api.planningChatSend).toHaveBeenLastCalledWith({
+        turnId: expect.any(String),
         sessionId: 'session-1',
         message: 'make the plan more detailed',
         presetKey: 'codex',
+        confirmationMode: 'require',
       });
     });
+  });
+
+  it('shows a lost-session error instead of starting a fresh chat for local transcript continuation', async () => {
+    mock.api.planningChatSend = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        error: 'planner failed before creating a server session',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        sessionId: 'session-2',
+        reply: 'What do you want to build?',
+        draftPlanAvailable: false,
+      }) as any;
+
+    render(<App />);
+    await openPlanningTerminal();
+
+    submitPlanningText('draft a plan that fails before a session exists');
+    await waitFor(() => {
+      expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent('planner failed before creating a server session');
+    });
+
+    submitPlanningText('continue without losing context');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent(
+        'This planning chat lost its server session. Start a new chat to continue planning.',
+      );
+    });
+    expect(mock.api.planningChatSend).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('invoker-terminal-transcript')).not.toHaveTextContent('What do you want to build?');
   });
 
   it('passes the selected planning preset', async () => {
     render(<App />);
     await openPlanningTerminal();
 
-    fireEvent.change(screen.getByTestId('invoker-terminal-harness'), { target: { value: 'omp+claude' } });
+    fireEvent.change(screen.getByTestId('invoker-terminal-harness'), { target: { value: 'omp' } });
+    await waitFor(() => expect(screen.getByTestId('invoker-terminal-model')).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId('invoker-terminal-model'), { target: { value: 'omp+claude' } });
     submitPlanningText('draft a plan');
 
     await waitFor(() => {
-      expect(mock.api.planningChatSend).toHaveBeenCalledWith({ message: 'draft a plan', presetKey: 'omp+claude' });
+      expect(vi.mocked(mock.api.planningChatSend)).toHaveBeenCalledWith({ turnId: expect.any(String), message: 'draft a plan', presetKey: 'omp+claude', confirmationMode: 'require' });
     });
   });
 
-  it('reviews a draft before explicitly creating the workflow', async () => {
+  it('sends typed submit as a draft request before a draft is ready', async () => {
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makePlanningSessionSummary({
+          id: 'session-1',
+          title: 'No draft chat',
+          status: 'still_discussing',
+          messages: [
+            {
+              id: 1,
+              role: 'user',
+              text: 'I need a plan.',
+              createdAt: '2026-07-07T00:00:01.000Z',
+            },
+            {
+              id: 2,
+              role: 'assistant',
+              text: 'What should the plan include?',
+              createdAt: '2026-07-07T00:00:02.000Z',
+            },
+          ],
+          draftPlanAvailable: false,
+          draftPlanSummary: undefined,
+          draftPlanText: undefined,
+        }),
+      ],
+    }));
+
+    render(<App />);
+    await openPlanningTerminal();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent('What should the plan include?');
+    });
+
+    submitPlanningText('submit');
+
+    await waitFor(() => {
+      expect(mock.api.planningChatSend).toHaveBeenCalledWith({
+        turnId: expect.any(String),
+        sessionId: 'session-1',
+        message: 'submit',
+        presetKey: 'codex',
+        confirmationMode: 'require',
+      });
+    });
+    expect(mock.api.planningChatSubmit).not.toHaveBeenCalled();
+    expect(mock.api.startReady).not.toHaveBeenCalled();
+  });
+
+  it('does not offer auto-submit in conversational planning', async () => {
+    render(<App />);
+    await openPlanningTerminal();
+
+    expect(screen.queryByRole('option', { name: 'Auto-submit' })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Ask first' })).toBeInTheDocument();
+  });
+
+  it('shows the bound repo and short commit sha in the planning context sidebar', async () => {
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makePlanningSessionSummary({
+          id: 'repo-bound-session',
+          title: 'Repo bound chat',
+          status: 'still_discussing',
+          draftPlanAvailable: false,
+          draftPlanSummary: undefined,
+          repoUrl: 'https://github.com/Neko-Catpital-Labs/Invoker.git',
+          baseBranch: 'main',
+          baseCommit: 'a1b2c3d4e5f6',
+        }),
+      ],
+    })) as any;
+
+    render(<App />);
+    await openPlanningTerminal();
+    fireEvent.click(screen.getByTestId('planning-context-toggle'));
+
+    const repoStatus = await screen.findByTestId('planning-repo-status');
+    expect(repoStatus).toHaveTextContent('Neko-Catpital-Labs/Invoker @ a1b2c3d');
+  });
+
+  it('shows "No repository bound yet" when the planning session has no repo bound', async () => {
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makePlanningSessionSummary({
+          id: 'no-repo-session',
+          title: 'No repo chat',
+          status: 'still_discussing',
+          draftPlanAvailable: false,
+          draftPlanSummary: undefined,
+          repoUrl: undefined,
+          baseBranch: undefined,
+          baseCommit: undefined,
+        }),
+      ],
+    })) as any;
+
+    render(<App />);
+    await openPlanningTerminal();
+    fireEvent.click(screen.getByTestId('planning-context-toggle'));
+
+    const repoStatus = await screen.findByTestId('planning-repo-status');
+    expect(repoStatus).toHaveTextContent('No repository bound yet');
+  });
+
+  it('shows a locked-draft note in the sidebar while reviewing a draft', async () => {
+    mock.api.planningChatSend = vi.fn(async () => ({
+      ok: true,
+      sessionId: 'session-1',
+      reply: 'Here is the plan.',
+      draftPlanAvailable: true,
+      draftPlanSummary: { name: 'Mock Plan', taskCount: 2, steps: ['First', 'Second'] },
+      draftPlanText: 'name: Mock Plan\ntasks: []\n',
+    })) as any;
+    render(<App />);
+    await openPlanningTerminal();
+
+    submitPlanningText('draft the full plan');
+
+    expect(await screen.findByTestId('planning-draft-locked-note')).toHaveTextContent(
+      'This draft is locked — critique in chat, or ask Invoker to re-draft, to change it.',
+    );
+  });
+
+  it('submits a draft without starting staged work', async () => {
     mock.api.planningChatSend = vi.fn(async () => ({
       ok: true,
       sessionId: 'session-1',
@@ -714,27 +1756,21 @@ describe('Invoker terminal (component)', () => {
 
     submitPlanningText('draft the full plan');
 
-    await waitFor(() => {
-      expect(screen.getByTestId('invoker-terminal-ready-bar')).toHaveTextContent('Draft ready · Mock Plan · 2 tasks');
-    });
+    await screen.findByTestId('planning-create-workflow');
+    expect(screen.queryByTestId('invoker-terminal-ready-bar')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Review draft' }));
-
-    await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Plan graph' })).toBeInTheDocument();
-      expect(screen.getByTestId('planning-create-workflow')).toBeInTheDocument();
-    });
     expect(mock.api.planningChatSubmit).not.toHaveBeenCalled();
-    expect(mock.api.start).not.toHaveBeenCalled();
+    expect(mock.api.startReady).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByTestId('planning-create-workflow'));
+    submitPlanningText('submit');
     await waitFor(() => {
       expect(mock.api.planningChatSubmit).toHaveBeenCalledWith({ sessionId: 'session-1' });
       expect(mock.api.refreshTaskGraph).toHaveBeenCalled();
     });
+    expect(mock.api.startReady).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('sidebar-home'));
     expect(screen.getByRole('heading', { name: 'Planning chat' })).toBeInTheDocument();
-    expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent('Plan "Mock Plan" submitted to Invoker. Review it, then use Start ready work.');
+    expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent('Plan "Mock Plan" submitted to Invoker. Review the graph, then Start ready work.');
     expect(screen.queryByRole('heading', { name: 'Plan graph' })).not.toBeInTheDocument();
     expect(screen.queryByTestId('invoker-terminal-ready-bar')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Submit to Invoker' })).not.toBeInTheDocument();
@@ -753,7 +1789,7 @@ describe('Invoker terminal (component)', () => {
         workflowCount: 2,
         steps: ['Workers Surface Contracts', 'Workers Surface UI'],
         taskGroups: [
-          { workflow: 'Workers Surface Contracts', tasks: ['Define contracts', 'Verify contracts'] },
+          { workflow: 'Workers Surface Contracts', tasks: ['Review claim: Define `contracts`\nReview lane: behavior\n\nFiles:\n- `src/a.ts`\n- `src/b.ts`', 'Verify contracts'] },
           { workflow: 'Workers Surface UI', tasks: ['Build UI', 'Verify UI'] },
         ],
       },
@@ -771,22 +1807,25 @@ describe('Invoker terminal (component)', () => {
 
     submitPlanningText('draft the Workers Surface plan');
 
-    await waitFor(() => {
-      expect(screen.getByTestId('invoker-terminal-ready-bar')).toHaveTextContent('Draft ready · Workers Surface · 2 workflows · 4 tasks');
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Review draft' }));
     await screen.findByTestId('planning-create-workflow');
+    expect(screen.queryByTestId('invoker-terminal-ready-bar')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('draft-task-group')).toHaveLength(2);
+    const multilineDescription = screen.getAllByTestId('draft-step-summary')[0];
+    expect(within(multilineDescription).getByText('contracts', { selector: 'code' })).toBeVisible();
+    expect(within(multilineDescription).getByRole('list')).toBeVisible();
+    expect(within(multilineDescription).getAllByRole('listitem')).toHaveLength(2);
+    expect(multilineDescription).toHaveTextContent('Review claim: Define contracts Review lane: behavior Files: src/a.ts src/b.ts');
     fireEvent.click(screen.getByTestId('planning-create-workflow'));
 
     await waitFor(() => {
       expect(mock.api.planningChatSubmit).toHaveBeenCalledWith({ sessionId: 'session-1' });
       expect(mock.api.refreshTaskGraph).toHaveBeenCalled();
     });
+    expect(mock.api.startReady).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('sidebar-home'));
     expect(screen.getByRole('heading', { name: 'Planning chat' })).toBeInTheDocument();
     expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent(
-      'Plan "Workers Surface" submitted as 2 stacked workflows. Review them, then use Start ready work.',
+      'Plan "Workers Surface" submitted as 2 stacked workflows. Review the graph, then Start ready work.',
     );
     expect(screen.queryByRole('heading', { name: 'Plan graph' })).not.toBeInTheDocument();
     expect(screen.queryByTestId('invoker-terminal-ready-bar')).not.toBeInTheDocument();
@@ -811,10 +1850,9 @@ describe('Invoker terminal (component)', () => {
     await openPlanningTerminal();
 
     submitPlanningText('draft the full plan');
-    await screen.findByTestId('invoker-terminal-ready-bar');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Review draft' }));
-    fireEvent.click(await screen.findByTestId('planning-create-workflow'));
+    await screen.findByTestId('planning-create-workflow');
+    expect(screen.queryByTestId('invoker-terminal-ready-bar')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('planning-create-workflow'));
 
     expect(screen.getByTestId('planning-create-workflow')).toBeInTheDocument();
     expect(mock.api.refreshTaskGraph).not.toHaveBeenCalled();
@@ -825,9 +1863,10 @@ describe('Invoker terminal (component)', () => {
       expect(mock.api.planningChatSubmit).toHaveBeenCalledTimes(2);
       expect(mock.api.refreshTaskGraph).toHaveBeenCalled();
     });
+    expect(mock.api.startReady).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('sidebar-home'));
     expect(screen.getByRole('heading', { name: 'Planning chat' })).toBeInTheDocument();
-    expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent('Plan "Selected lists scroll" submitted to Invoker. Review it, then use Start ready work.');
+    expect(screen.getByTestId('invoker-terminal-transcript')).toHaveTextContent('Plan "Selected lists scroll" submitted to Invoker. Review the graph, then Start ready work.');
     expect(screen.queryByRole('heading', { name: 'Plan graph' })).not.toBeInTheDocument();
     expect(screen.queryByTestId('invoker-terminal-ready-bar')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Submit to Invoker' })).not.toBeInTheDocument();
@@ -871,9 +1910,9 @@ describe('Invoker terminal (component)', () => {
     await openPlanningTerminal();
 
     submitPlanningText('draft the full plan');
-    await screen.findByTestId('invoker-terminal-ready-bar');
-    fireEvent.click(screen.getByRole('button', { name: 'Review draft' }));
-    fireEvent.click(await screen.findByTestId('planning-create-workflow'));
+    await screen.findByTestId('planning-create-workflow');
+    expect(screen.queryByTestId('invoker-terminal-ready-bar')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('planning-create-workflow'));
     await waitFor(() => expect(mock.api.planningChatSubmit).toHaveBeenCalledWith({ sessionId: 'session-1' }));
 
     fireEvent.click(screen.getByTestId('sidebar-home'));
@@ -883,6 +1922,98 @@ describe('Invoker terminal (component)', () => {
     expect(input).toHaveClass('disabled:cursor-not-allowed');
     expect(input).not.toHaveClass('disabled:cursor-wait');
     expect(screen.getAllByText(/submitted/i).length).toBeGreaterThan(0);
+  });
+
+  it('shows a running workflow dot only for submitted planning sessions whose workflow is still running', async () => {
+    const workflows: WorkflowMeta[] = [
+      { id: 'wf-running', name: 'Running workflow', status: 'running' },
+      { id: 'wf-completed', name: 'Completed workflow', status: 'completed' },
+    ];
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makePlanningSessionSummary({
+          id: 'submitted-running-chat',
+          title: 'Submitted running chat',
+          status: 'submitted',
+          draftPlanAvailable: false,
+          draftPlanSummary: undefined,
+          draftPlanText: undefined,
+          submittedWorkflowId: 'wf-running',
+          submittedPlanName: 'Running workflow plan',
+        }),
+        makePlanningSessionSummary({
+          id: 'submitted-completed-chat',
+          title: 'Submitted completed chat',
+          status: 'submitted',
+          draftPlanAvailable: false,
+          draftPlanSummary: undefined,
+          draftPlanText: undefined,
+          submittedWorkflowId: 'wf-completed',
+          submittedPlanName: 'Completed workflow plan',
+        }),
+      ],
+    })) as any;
+    mock.setTasks([], workflows);
+
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-home'));
+
+    const runningRow = getPlanningSessionRowByText('Submitted running chat');
+    const completedRow = getPlanningSessionRowByText('Submitted completed chat');
+
+    expect(within(runningRow).getByLabelText('Workflow running')).toHaveClass('bg-primary');
+    expect(within(completedRow).queryByLabelText('Workflow running')).not.toBeInTheDocument();
+  });
+
+  it('opens the graph from a submitted planning chat by restoring the saved viewport instead of fitting', async () => {
+    const savedViewport = { x: -444, y: 156, zoom: 0.71 };
+    const workflows: WorkflowMeta[] = [{ id: 'wf-submitted', name: 'Submitted workflow', status: 'running' }];
+    mock.api.planningChatList = vi.fn(async () => ({
+      ok: true,
+      sessions: [
+        makePlanningSessionSummary({
+          id: 'submitted-chat',
+          title: 'Submitted viewport chat',
+          status: 'submitted',
+          draftPlanAvailable: false,
+          draftPlanSummary: undefined,
+          draftPlanText: undefined,
+          submittedWorkflowId: 'wf-submitted',
+          submittedPlanName: 'Submitted viewport plan',
+        }),
+      ],
+    })) as any;
+    mock.setTasks([], workflows);
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+    await screen.findByTestId('workflow-node-wf-submitted');
+    await settleCamera();
+    getViewportMock.mockReturnValue(savedViewport);
+
+    fireEvent.click(screen.getByTestId('sidebar-home'));
+    await waitFor(() => expect(screen.getByTestId('invoker-terminal-submitted-bar')).toHaveTextContent('Submitted viewport plan'));
+
+    fitViewMock.mockClear();
+    setCenterMock.mockClear();
+    setViewportMock.mockClear();
+    workflowGraphSpy.reset();
+
+    fireEvent.click(screen.getByTestId('invoker-terminal-open-graph'));
+
+    await waitFor(() => expect(screen.getByTestId('workflow-node-wf-submitted')).toBeInTheDocument());
+    await waitFor(() => expect(setViewportMock).toHaveBeenCalledWith(savedViewport, { duration: 0 }));
+    await flushFrames(4);
+
+    expect(fitViewMock).not.toHaveBeenCalled();
+    expect(setCenterMock).not.toHaveBeenCalled();
+    expect(workflowGraphSpy.commands.some((command) => (
+      command?.kind === 'fitInitial'
+      && command.scope === 'workflow'
+      && command.reason === 'planning-open-graph'
+    ))).toBe(false);
   });
 
   it('opens the expanded planning chat and Escape closes it without clearing transcript', async () => {
@@ -1104,6 +2235,21 @@ describe('Invoker terminal (component)', () => {
     expect(within(sendButton).getByTestId('invoker-terminal-send-icon')).toBeInTheDocument();
   });
 
+  it('explains when the whole window is read-only instead of blaming the session', () => {
+    render(<InvokerTerminal {...terminalProps({ readOnly: true, readOnlyReason: 'window' })} />);
+
+    expect(screen.getByTestId('invoker-terminal-input')).toHaveAttribute('placeholder', 'This window is read-only.');
+  });
+
+  it('swaps the send icon for a pending spinner while a turn is running', () => {
+    render(<InvokerTerminal {...terminalProps({ busy: true })} />);
+
+    const sendButton = screen.getByRole('button', { name: 'Send' });
+    expect(sendButton).toBeDisabled();
+    expect(within(sendButton).getByTestId('invoker-terminal-send-spinner')).toBeInTheDocument();
+    expect(within(sendButton).queryByTestId('invoker-terminal-send-icon')).not.toBeInTheDocument();
+  });
+
   it('uses the amber send-button styling in the enabled state', () => {
     render(<InvokerTerminal {...terminalProps({ value: 'draft a plan' })} />);
 
@@ -1122,5 +2268,117 @@ describe('Invoker terminal (component)', () => {
 
     rerender(<InvokerTerminal {...terminalProps({ readOnly: true, value: 'draft a plan' })} />);
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+  });
+});
+
+function submitContextWorkflow(id: string, name = id): WorkflowMeta {
+  return {
+    id,
+    name,
+    status: 'pending',
+  };
+}
+
+describe('Invoker terminal submit context (component)', () => {
+  let mock: MockInvoker;
+
+  beforeEach(() => {
+    mock = createMockInvoker(
+      [makeUITask({ id: 'task-a', workflowId: 'workflow-a', description: 'Initial task' })],
+      [submitContextWorkflow('workflow-a', 'Initial Plan')],
+    );
+    mock.install();
+  });
+
+  afterEach(() => {
+    mock.cleanup();
+    vi.restoreAllMocks();
+  });
+
+  function stubSubmitStyleRefresh() {
+    const nextTasks = [
+      makeUITask({ id: 'task-a', workflowId: 'workflow-a', description: 'Initial task' }),
+      makeUITask({ id: 'task-b', workflowId: 'workflow-b', description: 'Submitted planning task' }),
+    ];
+    const nextWorkflows = [
+      submitContextWorkflow('workflow-a', 'Initial Plan'),
+      submitContextWorkflow('workflow-b', 'Submitted Plan'),
+    ];
+    vi.mocked(mock.api.refreshTaskGraph).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          queueMicrotask(() => {
+            mock.fireGraphEvent({
+              type: 'snapshot',
+              tasks: nextTasks,
+              workflows: nextWorkflows,
+              reason: 'submit-style-refresh',
+              streamSequence: 1,
+            });
+            resolve();
+          });
+        }),
+    );
+  }
+
+  it('preserves a cleared graph selection when submit-style refresh adds a workflow', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+
+    expect(await screen.findByTestId('workflow-node-workflow-a')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId('selected-workflow-mini-dag')).toBeInTheDocument();
+    });
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      fireEvent.click(await screen.findByTestId('rf__node-task-a'));
+      await waitFor(() => {
+        expect(
+          screen
+            .getByTestId('selected-workflow-mini-dag')
+            .querySelector('[data-keyboard-region="taskGraph"]'),
+        ).toHaveAttribute('data-keyboard-active', 'true');
+      });
+      await flushFrames(2);
+
+      fireEvent.keyDown(document, { key: 'Escape' });
+      await flushFrames(2);
+
+      if (screen.queryByTestId('selected-workflow-mini-dag') === null) break;
+    }
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('selected-workflow-mini-dag')).not.toBeInTheDocument();
+    });
+
+    stubSubmitStyleRefresh();
+    fireEvent.click(screen.getByTestId('rail-refresh'));
+
+    expect(await screen.findByTestId('workflow-node-workflow-b')).toBeInTheDocument();
+    expect(screen.queryByTestId('selected-workflow-mini-dag')).not.toBeInTheDocument();
+    expect(screen.getByTestId('workflow-node-workflow-a').className).not.toContain('ring-2');
+    expect(screen.getByTestId('workflow-node-workflow-b').className).not.toContain('ring-2');
+    expect(mock.api.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps an existing workflow selection stable across submit-style refresh', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+
+    expect(await screen.findByTestId('workflow-node-workflow-a')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('workflow-node-workflow-a'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('selected-workflow-mini-dag')).toBeInTheDocument();
+    });
+
+    stubSubmitStyleRefresh();
+    fireEvent.click(screen.getByTestId('rail-refresh'));
+
+    expect(await screen.findByTestId('workflow-node-workflow-b')).toBeInTheDocument();
+    expect(screen.getByTestId('selected-workflow-mini-dag')).toHaveTextContent('Initial Plan task DAG');
+    expect(screen.getByTestId('workflow-node-workflow-a').className).toContain('ring-2');
+    expect(screen.getByTestId('workflow-node-workflow-b').className).not.toContain('ring-2');
+    expect(mock.api.start).not.toHaveBeenCalled();
   });
 });

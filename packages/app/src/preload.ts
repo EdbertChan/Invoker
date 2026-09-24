@@ -17,7 +17,10 @@ import type { InvokerAPI } from '@invoker/contracts';
 
 const api: Record<string, unknown> = {};
 const bootstrapStartedAt = Date.now();
-const bootstrapState = ipcRenderer.sendSync('invoker:get-bootstrap-state-sync') as
+const bootstrapState = ipcRenderer.sendSync(
+  'invoker:get-bootstrap-state-sync',
+  process.env.NODE_ENV === 'test' ? { light: true } : undefined,
+) as
   | { tasks?: unknown[]; workflows?: unknown[]; runtimeStatus?: unknown; appStartedAtEpochMs?: number }
   | undefined;
 const bootstrapDurationMs = Date.now() - bootstrapStartedAt;
@@ -110,6 +113,14 @@ for (const channel of Object.keys(IpcEventChannels)) {
 
 contextBridge.exposeInMainWorld('invoker', api as InvokerAPI);
 contextBridge.exposeInMainWorld('__INVOKER_BOOTSTRAP__', bootstrapState ?? { tasks: [], workflows: [] });
+contextBridge.exposeInMainWorld(
+  '__INVOKER_TRACE_RENDERER_TASK_GRAPH__',
+  process.env.INVOKER_TRACE_RENDERER_TASK_GRAPH === '1',
+);
+contextBridge.exposeInMainWorld(
+  '__INVOKER_TRACE_RENDERER_WORKFLOW_EVENTS__',
+  process.env.INVOKER_TRACE_RENDERER_WORKFLOW_EVENTS === '1',
+);
 
 setTimeout(() => {
   ipcRenderer.invoke('invoker:report-ui-perf', 'preload_bootstrap_sync', {

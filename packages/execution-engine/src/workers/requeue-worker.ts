@@ -1,21 +1,26 @@
 import type { Logger } from '@invoker/contracts';
 import type { WorkflowMutationPriority } from '@invoker/data-store';
 import { Channels, type MessageBus, type Unsubscribe } from '@invoker/transport';
-import type { TaskState } from '@invoker/workflow-core';
+import { FailureClassifier, type TaskState } from '@invoker/workflow-core';
 
 import type { AutoFixRecoveryStore } from '../auto-fix-recovery.js';
-import { isLivenessFailureTask } from '../auto-fix-gating.js';
 import type { WorkflowLifecycleEvent, RecoveryWorkerWakeupHint } from '../lifecycle-events.js';
 import {
   createRequeueAttemptLedger,
   requeueLedgerKeyFromTask,
   type RequeueAttemptLedger,
 } from '../requeue-attempt-ledger.js';
+import {
+  checkRequeueRetryCap,
+  recordRequeueRetryConsumed,
+  recordRequeueRetryPending,
+  recordRequeueRetryUnacknowledged,
+} from '../requeue-retry-cap.js';
 import { createWorkerRuntime, type WorkerRuntime, type WorkerTick } from '../worker-runtime.js';
 import type { WorkerRuntimeDependencies } from '../worker-runtime-dependencies.js';
 import type { WorkerRegistry } from '../worker-registry.js';
 
-export const REQUEUE_WORKER_KIND = 'requeue';
+export const REQUEUE_WORKER_KIND = 'heartbeat-requeue';
 
 export const REQUEUE_COMMAND_CHANNEL = 'invoker:requeue';
 export const REQUEUE_ESCALATE_CHANNEL = 'invoker:requeue-escalate';
@@ -108,7 +113,7 @@ export function listRequeueScanCandidates(store: AutoFixRecoveryStore): RequeueC
   const candidates: RequeueCandidate[] = [];
   for (const workflow of store.listWorkflows()) {
     for (const task of store.loadTasks(workflow.id)) {
-      if (task.status !== 'failed' || !isLivenessFailureTask(task)) continue;
+      if (task.status !== 'failed' || !FailureClassifier.isRequeueableFailureTask(task)) continue;
       const workflowId = workflowIdForTask(task);
       if (workflowId) candidates.push({ taskId: task.id, workflowId });
     }
@@ -142,15 +147,42 @@ export function createRequeueRecoveryTick(options: RequeueWorkerPolicyOptions): 
     for (const candidate of candidates) {
       if (handled.has(candidate.taskId)) continue;
       const latest = loadLatestTask(candidate, options.store);
-      // Re-check authoritative state: only a task still parked as a liveness
-      // stall is actionable (a requeue/escalation already applied would have
-      // cleared the class or moved it out of `failed`).
-      if (!latest || latest.status !== 'failed' || !isLivenessFailureTask(latest)) continue;
+      if (!latest || latest.status !== 'failed' || !FailureClassifier.isRequeueableFailureTask(latest)) continue;
       const workflowId = workflowIdForTask(latest);
       if (!workflowId) continue;
       handled.add(candidate.taskId);
 
       const key = requeueLedgerKeyFromTask(latest);
+      const retryCap = checkRequeueRetryCap(options.store, latest.id, budget);
+      if (!retryCap.allowed) {
+        if (options.ledger.hasEscalated(key)) continue;
+        const prompt = buildStallEscalationPrompt(retryCap.consumed, retryCap.budget);
+        const intentId = options.submitter.submit(
+          workflowId,
+          'normal',
+          REQUEUE_ESCALATE_CHANNEL,
+          buildRequeueEscalateMutationArgs(latest.id, prompt),
+        );
+        options.ledger.markEscalated(key);
+        options.store.logEvent?.(latest.id, 'recovery.worker.submit', {
+          worker: REQUEUE_WORKER_KIND,
+          phase: 'requeue-escalate',
+          workflowId,
+          intentId,
+          channel: REQUEUE_ESCALATE_CHANNEL,
+          attempts: retryCap.consumed,
+          budget: retryCap.budget,
+        });
+        options.logger.info(`[worker:${REQUEUE_WORKER_KIND}] escalated stalled task to needs_input`, {
+          module: 'requeue-worker',
+          taskId: latest.id,
+          workflowId,
+          attempts: retryCap.consumed,
+          budget: retryCap.budget,
+        });
+        continue;
+      }
+
       const decision = options.ledger.decide(key, budget, backoffMs, nowMs);
 
       if (decision.kind === 'backoff') {
@@ -194,12 +226,23 @@ export function createRequeueRecoveryTick(options: RequeueWorkerPolicyOptions): 
         continue;
       }
 
-      const intentId = options.submitter.submit(
+      recordRequeueRetryPending(options.store, latest.id, { workflowId });
+      let intentId: number;
+      try {
+        intentId = options.submitter.submit(
+          workflowId,
+          'normal',
+          REQUEUE_COMMAND_CHANNEL,
+          buildRequeueMutationArgs(latest.id),
+        );
+      } catch (error) {
+        options.ledger.refund(key);
+        recordRequeueRetryUnacknowledged(options.store, latest.id, error, { workflowId });
+        throw error;
+      }
+      recordRequeueRetryConsumed(options.store, latest.id, {
         workflowId,
-        'normal',
-        REQUEUE_COMMAND_CHANNEL,
-        buildRequeueMutationArgs(latest.id),
-      );
+      });
       options.store.logEvent?.(latest.id, 'recovery.worker.submit', {
         worker: REQUEUE_WORKER_KIND,
         phase: 'requeue',
@@ -282,6 +325,7 @@ export function createRequeueWorker(options: RequeueWorkerOptions): WorkerRuntim
     start,
     wake: runtime.wake,
     tick: runtime.tick,
+    run: runtime.run,
     stop,
     isRunning: runtime.isRunning,
   };
@@ -292,7 +336,7 @@ export function registerRequeueWorker(
 ): WorkerRegistry<WorkerRuntimeDependencies> {
   registry.register({
     kind: REQUEUE_WORKER_KIND,
-    note: 'Re-runs liveness-stalled tasks (requeue) with bounded budget/backoff; escalates to needs_input.',
+    note: 'Re-runs heartbeat-stalled tasks with bounded budget/backoff; escalates to needs_input.',
     factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
       createRequeueWorker({
         logger: deps.logger,

@@ -25,7 +25,8 @@ import type { Executor, ExecutorHandle, TerminalSpec } from '@invoker/execution-
 export type EmbeddedTerminalBackendName = 'bash' | 'pty';
 export type EmbeddedTerminalSessionKind = 'task' | 'planning';
 
-const MAX_OUTPUT_SNAPSHOT_CHARS = 64 * 1024;
+export const MAX_OUTPUT_SNAPSHOT_CHARS = 64 * 1024;
+const MAX_DISPLAY_BRIDGE_CHARS = 8 * 1024;
 
 export interface PtyForkOptionsLike {
   name: string;
@@ -36,6 +37,8 @@ export interface PtyForkOptionsLike {
 }
 
 export interface PtyLike {
+  readonly cols: number;
+  readonly rows: number;
   onData(listener: (data: string) => void): { dispose: () => void };
   onExit(listener: (event: { exitCode: number }) => void): { dispose: () => void };
   write(data: string): void;
@@ -61,6 +64,8 @@ export interface SpawnedTerminalProcess {
   write(data: string): void;
   resize(cols: number, rows: number): void;
   close(): void;
+  /** Authoritative applied size, read back from the real process. Null when the backend has no TTY (e.g. pipe-backed). */
+  getAppliedSize(): { cols: number; rows: number } | null;
 }
 
 export interface EmbeddedTerminalBackend {
@@ -102,6 +107,8 @@ export interface OpenSessionOptions {
   planningSessionId?: string;
   spec: TerminalSpec;
   cwd: string;
+  /** Initial display-only content to seed the terminal snapshot before process output. */
+  outputSnapshot?: string;
   /** When provided, the session attaches to the running executor rather than spawning a child. */
   attach?: AttachContext;
 }
@@ -213,6 +220,10 @@ class BashTerminalBackend implements EmbeddedTerminalBackend {
       resize() {
         // Pipe-backed child processes are not TTYs; resize is a no-op.
       },
+      getAppliedSize() {
+        // Pipes have no real terminal size to read back.
+        return null;
+      },
       close() {
         try {
           if (!child.killed) child.kill();
@@ -243,8 +254,8 @@ class PtyTerminalBackend implements EmbeddedTerminalBackend {
     const args = opts.spec.command ? opts.spec.args ?? [] : [];
     const pty = this.spawnFn(command, args, {
       name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
+      cols: opts.spec.cols ?? 80,
+      rows: opts.spec.rows ?? 24,
       cwd: opts.cwd,
       env: { ...process.env, TERM: process.env.TERM ?? 'xterm-256color' },
     });
@@ -257,6 +268,9 @@ class PtyTerminalBackend implements EmbeddedTerminalBackend {
       },
       resize(cols: number, rows: number) {
         pty.resize(cols, rows);
+      },
+      getAppliedSize() {
+        return { cols: pty.cols, rows: pty.rows };
       },
       close() {
         try {
@@ -318,7 +332,7 @@ export class EmbeddedTerminalManager extends EventEmitter {
       createdAt,
       updatedAt: createdAt,
       status: 'running' as const,
-      outputSnapshot: '',
+      outputSnapshot: opts.outputSnapshot ?? buildDisplayBridgeSnapshot(opts.spec),
     };
 
     if (opts.attach) {
@@ -391,7 +405,7 @@ export class EmbeddedTerminalManager extends EventEmitter {
       createdAt: seed.createdAt,
       updatedAt: new Date().toISOString(),
       status: 'running' as const,
-      outputSnapshot: seed.outputSnapshot,
+      outputSnapshot: buildRestoredOutputSnapshot(seed.spec, seed.outputSnapshot),
     });
   }
 
@@ -444,6 +458,12 @@ export class EmbeddedTerminalManager extends EventEmitter {
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  getAppliedSize(sessionId: string): { cols: number; rows: number } | null {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.mode === 'attached') return null;
+    return state.process.getAppliedSize();
   }
 
   close(sessionId: string): { ok: boolean; reason?: string } {
@@ -551,6 +571,10 @@ export class EmbeddedTerminalManager extends EventEmitter {
       resize() {
         // Resize before the backend returns a process handle is ignored.
       },
+      getAppliedSize() {
+        // No process handle yet, so there is no real size to read back.
+        return null;
+      },
       close() {
         // There is no process handle to close yet.
       },
@@ -651,9 +675,84 @@ export class EmbeddedTerminalManager extends EventEmitter {
   }
 }
 
+const ESCAPE_LOOKBACK_CHARS = 512;
+
+/**
+ * Finds where a CSI (ESC [ ... final-byte) or OSC (ESC ] ... BEL|ST)
+ * sequence starting at `escapeIndex` ends. Returns null if no terminator is
+ * found within `searchLimit`.
+ */
+function findEscapeSequenceEnd(snapshot: string, escapeIndex: number, searchLimit: number): number | null {
+  const introducer = snapshot[escapeIndex + 1];
+  if (introducer === '[') {
+    for (let i = escapeIndex + 2; i < searchLimit; i++) {
+      const code = snapshot.charCodeAt(i);
+      if (code >= 0x40 && code <= 0x7e) return i;
+    }
+    return null;
+  }
+  if (introducer === ']') {
+    for (let i = escapeIndex + 2; i < searchLimit; i++) {
+      const code = snapshot.charCodeAt(i);
+      if (code === 0x07) return i;
+      if (code === 0x1b && snapshot[i + 1] === '\\') return i + 1;
+    }
+    return null;
+  }
+  if (introducer === undefined) return null;
+  return escapeIndex + 1;
+}
+
+/**
+ * Moves `naiveCutIndex` back to the start of any escape sequence it would
+ * otherwise cut in half, so a truncated snapshot never begins with a
+ * dangling escape-sequence fragment. Falls back to `naiveCutIndex` (this
+ * function's only caller's prior behavior) when no escape start is found
+ * within ESCAPE_LOOKBACK_CHARS.
+ */
+function findSafeTrimStart(snapshot: string, naiveCutIndex: number): number {
+  const lookbackFloor = Math.max(0, naiveCutIndex - ESCAPE_LOOKBACK_CHARS);
+  const escapeIndex = snapshot.lastIndexOf('\x1b', naiveCutIndex - 1);
+  if (escapeIndex === -1 || escapeIndex < lookbackFloor) return naiveCutIndex;
+
+  const searchLimit = Math.min(snapshot.length, escapeIndex + ESCAPE_LOOKBACK_CHARS);
+  const terminatorIndex = findEscapeSequenceEnd(snapshot, escapeIndex, searchLimit);
+  const cutIsInsideSequence = terminatorIndex === null || terminatorIndex >= naiveCutIndex;
+  return cutIsInsideSequence ? escapeIndex : naiveCutIndex;
+}
+
+/**
+ * Trims `text` to at most `maxChars`, backing the cut point up to the start
+ * of any ANSI/VT escape sequence it would otherwise slice through. Shared
+ * by any code path that trims raw PTY-originated text to a length budget --
+ * blindly slicing such text by character count risks leaving a dangling
+ * escape-sequence fragment that a terminal renders as garbled literal text.
+ */
+export function trimPreservingEscapeSequences(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const naiveCutIndex = text.length - maxChars;
+  return text.slice(findSafeTrimStart(text, naiveCutIndex));
+}
+
 function trimOutputSnapshot(snapshot: string): string {
-  if (snapshot.length <= MAX_OUTPUT_SNAPSHOT_CHARS) return snapshot;
-  return snapshot.slice(snapshot.length - MAX_OUTPUT_SNAPSHOT_CHARS);
+  return trimPreservingEscapeSequences(snapshot, MAX_OUTPUT_SNAPSHOT_CHARS);
+}
+
+function buildDisplayBridgeSnapshot(spec: TerminalSpec): string {
+  const bridge = formatDisplayBridgeText(spec.displayOnlyBridgeText);
+  return bridge ?? '';
+}
+
+function buildRestoredOutputSnapshot(spec: TerminalSpec, outputSnapshot: string): string {
+  const bridge = formatDisplayBridgeText(spec.displayOnlyBridgeText);
+  if (!bridge || outputSnapshot.startsWith(bridge)) return trimOutputSnapshot(outputSnapshot);
+  return trimOutputSnapshot(bridge + outputSnapshot);
+}
+
+function formatDisplayBridgeText(bridgeText: string | undefined): string | undefined {
+  if (!bridgeText) return undefined;
+  const bounded = bridgeText.slice(0, MAX_DISPLAY_BRIDGE_CHARS);
+  return bounded.endsWith('\n') ? bounded : `${bounded}\n`;
 }
 
 function resolveBackend(options: EmbeddedTerminalManagerOptions): EmbeddedTerminalBackend {

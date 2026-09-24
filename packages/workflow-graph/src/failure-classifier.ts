@@ -1,0 +1,158 @@
+import type { AgentFailureClass, FailureClass, SshInfraFailureClass, WorkFailureClass } from './types.js';
+
+/**
+ * Single source of truth for categorizing task failures from their error text.
+ *
+ * Failure categorization used to be scattered: the requeue worker keyed off
+ * `failureClass`, the infra-repair worker re-matched `execution.error`
+ * substrings, and auto-fix gating had its own error-string checks. This class
+ * centralizes the error-string → {@link FailureClass} mapping and the shared
+ * predicates so producers (failure finalize) and consumers (workers, gating)
+ * agree on one taxonomy.
+ *
+ * Note: review-gate CI infra is deliberately NOT handled here. It needs an
+ * async CI-log fetch and the log is not in `execution.error`, so it stays in
+ * `ci-failure-infra-classifier.ts`.
+ */
+export const SSH_INFRA_FAILURE_CLASSES: readonly SshInfraFailureClass[] = [
+  'ssh-env-invalid-export',
+  'ssh-worktree-missing',
+  'ssh-invalid-reference',
+  'ssh-repo-mirror-corrupt',
+  'ssh-worktree-corrupt',
+  'ssh-oauth-session-expired',
+  'ssh-disk-full',
+];
+
+const agentQuotaRefusalPattern = new RegExp([
+  'usage limit',
+  'rate[ _-]limit(?:_error|_exceeded)',
+  'rate limit exceeded',
+  'exceeded your (?:[\\w-]+ )?rate limit',
+  'too many requests',
+  'quota exceeded',
+  'exceeded your quota',
+  'hit your session limit',
+].join('|'), 'i');
+
+export class FailureClassifier {
+  static classifyAgentQuotaRefusal(agentOutput: string | undefined): AgentFailureClass | undefined {
+    if (typeof agentOutput !== 'string') return undefined;
+    return agentOutput
+      .split('\n')
+      .filter((line) => !/^[^\t]*\t(?:pass|fail|skipping|pending|cancelled|neutral|timed_out)\t/i.test(line))
+      .some((line) => agentQuotaRefusalPattern.test(line))
+      ? 'agent-usage-limit'
+      : undefined;
+  }
+
+  /**
+   * Map a failed task's `execution.error` to a persisted infra failure class,
+   * or `undefined` when the text does not match a known machine-owned bucket.
+   * Matches are narrow and exact by design — an unknown failure is a code
+   * failure, not an infra failure.
+   */
+  static classifyError(errorText: string | undefined): FailureClass | undefined {
+    if (typeof errorText !== 'string') return undefined;
+    if (errorText.includes('.invoker/env.sh') && errorText.includes('not a valid identifier')) {
+      return 'ssh-env-invalid-export';
+    }
+    if (errorText.includes('.invoker/worktrees/') && errorText.includes('No such file or directory')) {
+      return 'ssh-worktree-missing';
+    }
+    if (
+      errorText.includes('fatal: invalid reference:')
+      || errorText.includes('Cannot apply a fix because this task has no saved workspace.')
+    ) {
+      return 'ssh-invalid-reference';
+    }
+    if (
+      errorText.includes('phase=bootstrap_clone_fetch')
+      && errorText.includes('fatal: not a git repository (or any of the parent directories): .git')
+    ) {
+      return 'ssh-repo-mirror-corrupt';
+    }
+    if (
+      errorText.includes('fatal: not a git repository')
+      && (
+        errorText.includes('/.git/worktrees/')
+        || errorText.includes('remote commit or push failed (code')
+      )
+    ) {
+      return 'ssh-worktree-corrupt';
+    }
+    if (errorText.includes('Failed to authenticate: OAuth session expired and could not be refreshed')) {
+      return 'ssh-oauth-session-expired';
+    }
+    if (errorText.includes('No space left on device')) {
+      return 'ssh-disk-full';
+    }
+    if (this.isTransientTransportError(errorText)) {
+      return 'ssh-transport-transient';
+    }
+    return undefined;
+  }
+
+  static classifyWorkFailure(errorText: string | undefined): WorkFailureClass | undefined {
+    if (typeof errorText !== 'string') return undefined;
+    if (errorText.includes('ERR_MODULE_NOT_FOUND') && errorText.includes("Cannot find package '")) {
+      return 'dependency-missing';
+    }
+    if (errorText.includes('pr-worker-safe-push: stale-head:')) {
+      return 'branch-head-moved';
+    }
+    if (errorText.includes('required by the merge/gate step was not found on the remote')) {
+      return 'branch-missing-on-remote';
+    }
+    return undefined;
+  }
+
+  static isTransientTransportError(text: unknown): boolean {
+    if (typeof text !== 'string') return false;
+    const lower = text.toLowerCase();
+    return lower.includes('exit=255')
+      || lower.includes('exit 255')
+      || lower.includes('ssh transport failed')
+      || lower.includes('connection timed out')
+      || lower.includes('operation timed out')
+      || lower.includes('connection reset')
+      || lower.includes('broken pipe')
+      || lower.includes('banner exchange')
+      || lower.includes('kex_exchange_identification')
+      || lower.includes('remote session terminated unexpectedly');
+  }
+
+  /** True when the failure was a liveness stall (owned by the requeue worker). */
+  static isLiveness(failureClass: FailureClass | undefined): boolean {
+    return failureClass === 'liveness_stall';
+  }
+
+  static isRequeueableFailureTask(task: { execution: { failureClass?: FailureClass } }): boolean {
+    return task.execution.failureClass === 'liveness_stall'
+      || task.execution.failureClass === 'ssh-transport-transient';
+  }
+
+  /** True when the failure is a machine-owned SSH infra bucket (owned by infra-repair). */
+  static isSshInfra(failureClass: FailureClass | undefined): failureClass is SshInfraFailureClass {
+    return failureClass !== undefined
+      && (SSH_INFRA_FAILURE_CLASSES as readonly string[]).includes(failureClass);
+  }
+
+  /**
+   * True when the error text is an operator-initiated cancellation/termination
+   * rather than a genuine failure, so auto-fix should not engage.
+   */
+  static isCancellation(errorText: unknown): boolean {
+    if (typeof errorText !== 'string') return false;
+    return errorText.startsWith('Cancelled by user') || errorText.startsWith('Cancelled:')
+      || errorText.startsWith('Terminated by user') || errorText.startsWith('Terminated:');
+  }
+
+  static isUsageLimit(failureClass: FailureClass | undefined): boolean {
+    return failureClass === 'agent-usage-limit';
+  }
+
+  static isSpendGate(failureClass: FailureClass | undefined): boolean {
+    return failureClass === 'agent-spend-gate';
+  }
+}

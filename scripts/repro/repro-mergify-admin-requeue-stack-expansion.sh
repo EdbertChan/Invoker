@@ -13,17 +13,15 @@ cat > "$TMP/bin/gh" <<'PY'
 #!/usr/bin/env python3
 import json
 import sys
+from pathlib import Path
+
+sys.path.insert(0, "scripts")
+from mergify_admin_requeue_model import load_mergify_rules
 
 HEAD = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-REQUIRED = [
-    "build-artifacts",
-    "quality / Dependency Cruise",
-    "PR Body",
-    "quality / TypeScript Types",
-    "required-fast / Guardrails",
-    "required-fast / Submit Workflow Chain",
-    "UI Vitest",
-]
+# Loaded from .mergify.yml, not hardcoded: a hardcoded copy silently drifts
+# out of sync whenever the real required-check set changes.
+_, _, REQUIRED = load_mergify_rules(Path(".mergify.yml"))
 REPO = "Neko-Catpital-Labs/Invoker"
 
 
@@ -76,11 +74,11 @@ def pr(number):
 
 
 args = sys.argv[1:]
-if args[:2] == ["pr", "list"]:
-    if "--label" not in args or "admin-bypass" not in args:
-        print(f"expected admin-bypass label seed, got: {args}", file=sys.stderr)
-        raise SystemExit(2)
+if args[:2] == ["pr", "list"] and "--label" in args and "admin-bypass" in args:
     print(json.dumps([pr(101)]))
+    raise SystemExit(0)
+if args[:2] == ["pr", "list"] and "--label" not in args:
+    print(json.dumps([pr(100), pr(101)]))
     raise SystemExit(0)
 
 if args[:2] == ["api", "graphql"]:

@@ -10,14 +10,19 @@ type SnapshotTaskStates = Extract<TaskGraphEvent, { type: 'snapshot' }>['tasks']
 
 export interface TaskGraphEventPublisher {
   publishDelta(delta: TaskDelta, workflowRollups: readonly WorkflowRollupPatch[]): void;
-  publishSnapshot(reason: string, tasks: TaskState[], workflows: WorkflowMeta[], forced?: boolean): void;
+  publishSnapshot(
+    reason: string,
+    tasks: TaskState[],
+    workflows: WorkflowMeta[],
+    streamSequence: number,
+    forced?: boolean,
+  ): void;
 }
 
 export interface CreateTaskGraphEventPublisherOptions {
   getMainWindow: () => BrowserWindow | null;
   isUiInteractive: () => boolean;
   stampDelta: (delta: TaskDelta) => TaskDelta;
-  getStreamSequence: () => number;
   onLargeBatch?: (stats: { batchSize: number; remaining: number }) => void;
   onEvent?: (event: TaskGraphEvent) => void;
 }
@@ -55,13 +60,17 @@ export function createTaskGraphEventPublisher(
     mainWindow.webContents.send('invoker:task-graph-event-batch', batch);
   };
 
-  const publishEvent = (event: TaskGraphEvent): void => {
+  const publishEvent = (event: TaskGraphEvent, publishOptions?: { immediate?: boolean }): void => {
     options.onEvent?.(event);
     const mainWindow = options.getMainWindow();
     if (!mainWindow || mainWindow.isDestroyed() || !options.isUiInteractive()) {
       return;
     }
     pendingEvents.push(event);
+    if (publishOptions?.immediate) {
+      flush();
+      return;
+    }
     if (flushTimer) {
       return;
     }
@@ -71,19 +80,26 @@ export function createTaskGraphEventPublisher(
 
   return {
     publishDelta(delta: TaskDelta, workflowRollups: readonly WorkflowRollupPatch[]): void {
+      const stampedDelta = options.stampDelta(delta);
       publishEvent({
         type: 'delta',
-        delta: options.stampDelta(delta),
+        delta: stampedDelta,
         workflowRollups: [...workflowRollups],
-      });
+      }, { immediate: stampedDelta.type === 'updated' && stampedDelta.changes.status !== undefined });
     },
-    publishSnapshot(reason: string, tasks: TaskState[], workflows: WorkflowMeta[], forced?: boolean): void {
+    publishSnapshot(
+      reason: string,
+      tasks: TaskState[],
+      workflows: WorkflowMeta[],
+      streamSequence: number,
+      forced?: boolean,
+    ): void {
       publishEvent({
         type: 'snapshot',
         tasks: tasks as SnapshotTaskStates,
         workflows,
         reason,
-        streamSequence: options.getStreamSequence(),
+        streamSequence,
         ...(forced ? { forced: true } : {}),
       });
     },

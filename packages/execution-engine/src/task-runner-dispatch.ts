@@ -13,7 +13,7 @@
 import type { TaskState, RunnerKind } from '@invoker/workflow-core';
 import type { WorkRequest } from '@invoker/contracts';
 
-import type { Executor, ExecutorHandle } from './executor.js';
+import { ExecutorStartup, StartupCancelledError, type Executor, type ExecutorHandle } from './executor.js';
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
 import {
   PRE_START_HEARTBEAT_INTERVAL_MS,
@@ -88,6 +88,11 @@ export async function dispatchExecutor(
     request.inputs.executionAgent = resolvedExecution.executionAgent;
     request.inputs.executionModel = resolvedExecution.executionModel;
     const startTimeoutMs = getExecutorStartTimeoutMs();
+    const startup = new ExecutorStartup(
+      Date.now() + startTimeoutMs,
+      new StartupCancelledError('timeout', `Executor startup timed out after ${startTimeoutMs}ms (${executor.type})`),
+      () => !host.isLaunchStale(task.id, attemptId, startGeneration),
+    );
     const preStartHeartbeatTimer = setInterval(() => {
       const now = new Date();
       host.renewPoolSelectionLease(poolSelectionForStart);
@@ -100,10 +105,21 @@ export async function dispatchExecutor(
     let preStartTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
       handle = await Promise.race<ExecutorHandle>([
-        executor.start(request),
+        executor.start(request, startup).then(async (started) => {
+          try {
+            if (startup.signal.aborted || Date.now() >= startup.deadlineMs) startup.check();
+          } catch (error) {
+            try { await selectedExecutor.executor.kill(started); } catch (killError) {
+              host.logger.warn('[TaskRunner] failed to kill expired startup handle', { killError });
+            }
+            throw error;
+          }
+          return started;
+        }),
         new Promise<ExecutorHandle>((_resolve, reject) => {
           preStartTimeout = setTimeout(() => {
-            reject(new Error(`Executor startup timed out after ${startTimeoutMs}ms (${executor.type})`));
+            startup.cancel();
+            reject(startup.signal.reason);
           }, startTimeoutMs);
         }),
       ]);
@@ -119,6 +135,7 @@ export async function dispatchExecutor(
       }
       break;
     } catch (err) {
+      startup.cancel(err);
       const meta = err as StartupFailureMetadata;
       if (
         executor.type === 'ssh'
@@ -283,6 +300,9 @@ export async function dispatchExecutor(
     return undefined;
   }
   bench('markTaskRunningAfterLaunch.accepted');
+  if (dispatchOpts) {
+    dispatchOpts.launchOutbox.acceptDispatch(dispatchOpts.dispatchId);
+  }
 
   // Persist execution metadata immediately at task start — all fields explicit
   {
@@ -324,7 +344,13 @@ export async function dispatchExecutor(
         containerId: handle.containerId ?? undefined,
       },
     };
-    host.persistence.updateTask(task.id, changes);
+    try {
+      host.persistence.updateTask(task.id, changes);
+    } catch (err) {
+      host.releasePoolSelectionLease(host.pendingPoolSelections.get(task.id));
+      host.pendingPoolSelections.delete(task.id);
+      throw err;
+    }
     // Mirror branch + workspacePath onto the attempt row so reconciliation
     // and post-mortem flows can recover provenance from the attempt without
     // joining back to the task. Pairs with the early `onBranchResolved`
@@ -367,8 +393,12 @@ export async function dispatchExecutor(
     taskId: task.id,
     poolId: poolSelection?.poolId,
     poolMemberKey: poolSelection?.memberKey,
-    leaseResourceKey: poolSelection?.leaseResourceKey,
-    leaseHolderId: poolSelection?.leaseHolderId,
+    // Prefer the handle's own lease (claimed inside executor.start(), e.g. a
+    // worktree slot) over poolSelection's (claimed before start(), SSH-only
+    // today) — both feed the same generic heartbeat-renewal/finalize-release
+    // path below, so either executor type gets crash-safe leases for free.
+    leaseResourceKey: activeHandle.leaseResourceKey ?? poolSelection?.leaseResourceKey,
+    leaseHolderId: activeHandle.leaseHolderId ?? poolSelection?.leaseHolderId,
   });
   host.logger.info(
     `[TaskRunner] active execution registered task=${task.id} attempt=${attemptId} ` +

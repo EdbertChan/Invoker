@@ -12,16 +12,30 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import type { ConversationRepository } from '@invoker/data-store';
+import type { ConversationRepository, PlanningDraft } from '@invoker/data-store';
 import { formatCodexPlannerStdout } from '@invoker/execution-engine';
-import type { LogFn } from '../surface.js';
+import type { HarnessSessionDriver } from '@invoker/execution-engine';
 import {
+  buildPlanningHandoffInstructions,
+  formatPlanningHostedTurn,
+  isDraftingAuthorized,
+  planningHostContext,
+  summarizePlanText,
+  type PlanningHostSurface,
+} from '@invoker/planning-core';
+import type { LogFn } from '../surface.js';
+import { createPlanningDraftDoctor } from './planning-draft-doctor.js';
+import type { PlanningDraftDoctor, PlanningDraftDoctorResult } from './planning-draft-doctor.js';
+import {
+  buildTrackedChangesRevertedNotice,
   buildUnverifiedNotice,
   captureRepoState,
   looksLikeCompletionClaim,
   repoStateUnchanged,
+  restoreTrackedChanges,
+  trackedFilesChanged,
 } from './agent-turn-verification.js';
 
 // ── Types ───────────────────────────────────────────────────
@@ -32,6 +46,12 @@ export interface ConversationMessage {
 }
 
 export type ConversationMode = 'agent' | 'plan';
+
+/** Written by an agent-mode turn to request planning permission instead of drafting YAML itself. */
+export interface PlanIntentSignal {
+  wantsPlan: true;
+  reason?: string;
+}
 
 export type PlanningCommandBuilder = (opts: {
   tool: string;
@@ -54,6 +74,10 @@ const EMPTY_PLANNER_STDERR_TAIL_LIMIT = 500;
 
 export const DEFAULT_PLANNER_RETRY_LIMIT = 2;
 export const DEFAULT_PLANNER_RETRY_BASE_DELAY_MS = 500;
+/** Replace-draft budget (#8533): leave a prior good draft intact after this many repairs. */
+export const DEFAULT_PLAN_DOCTOR_REPAIR_LIMIT = 2;
+/** First-LGTM budget: keep doctor→repair until pass (or this cap / planning timeout). */
+export const DEFAULT_FIRST_DRAFT_PLAN_DOCTOR_REPAIR_LIMIT = 10;
 
 // Shared with slack-surface.ts so both planner spawn paths surface the same
 // actionable error when the CLI exits 0 but writes nothing to stdout. The
@@ -101,10 +125,14 @@ export interface PlanConversationConfig {
   planningCommandBuilder?: PlanningCommandBuilder;
   /** Root directory for codebase exploration. */
   workingDir?: string;
+  plannerScratchRoot?: string;
   /** Subprocess timeout in milliseconds. Default: 300000 (5 minutes). */
   timeoutMs?: number;
   /** Slack thread timestamp. Required for persistence. */
   threadTs?: string;
+  /** Slack channel id this thread belongs to. Persisted alongside threadTs so a
+   * restored conversation can never be recovered into the wrong channel. */
+  channelId?: string;
   /** Repository for persisting conversation state across restarts. */
   conversationRepo?: ConversationRepository;
   /** Default branch name (e.g. "master"). Used when plan YAML omits baseBranch. */
@@ -118,8 +146,22 @@ export interface PlanConversationConfig {
   preferStackedWorkflows?: boolean;
   /** Optional callback for raw stdout chunks emitted by the planner subprocess. */
   onRawPlannerOutput?: RawPlannerOutputHandler;
+  /** When set, turns call `driver.start`/`driver.append` instead of spawning a fresh CLI with the full history baked into the prompt. */
+  harnessSessionDriver?: HarnessSessionDriver;
+  /** Restores an existing harness session id (e.g. after a Slack restart) instead of starting fresh. */
+  harnessSessionId?: string;
+  /** Fired whenever a new harness session id is established, so callers can persist it. */
+  onHarnessSessionId?: (sessionId: string) => void;
   /** Opt in to a scoping-first planning conversation before YAML drafting. Default: false. */
   conversationalPlanning?: boolean;
+  planningSurface?: PlanningHostSurface;
+  /**
+   * With `conversationalPlanning`, treat drafting as already authorized from the
+   * first turn instead of requiring explicit draft intent in the message text.
+   * For single-shot goal→plan callers that have no prior scoping turns to draw
+   * authorization from. Default: false.
+   */
+  draftingPreauthorized?: boolean;
   /** Logging callback. Defaults to console.log/console.error. */
   log?: LogFn;
   /**
@@ -134,6 +176,17 @@ export interface PlanConversationConfig {
    * attempt 2, 1000ms before attempt 3, and so on).
    */
   plannerRetryBaseDelayMs?: number;
+  /** Full skill-doctor script used to gate the exact draft before review. */
+  planDoctorScriptPath?: string;
+  /** Test/host injection for the full draft doctor. Takes precedence over planDoctorScriptPath. */
+  draftDoctor?: PlanningDraftDoctor;
+  /** Maximum planner repair turns after doctor rejection when replacing a prior good draft. Default: 2. */
+  planDoctorRepairLimit?: number;
+  /**
+   * Maximum planner repair turns for a first draft (no prior good YAML).
+   * Default: 10. Explicit `planDoctorRepairLimit` overrides both budgets when set.
+   */
+  firstDraftPlanDoctorRepairLimit?: number;
 }
 
 // ── Confirmation Detection ──────────────────────────────────
@@ -181,50 +234,31 @@ export function isNegation(text: string): boolean {
   return NEGATION_PATTERNS.some((re) => re.test(trimmed));
 }
 
-function isExplicitDraftRequest(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  return [
-    /\bdraft\b.*\b(yaml\s+)?plan\b/,
-    /\b(generate|write|create|produce)\b.*\b(yaml\s+)?plan\b/,
-    /\b(yaml\s+)?plan\b.*\b(draft|yaml)\b/,
-    /\bgo ahead\b.*\bdraft\b/,
-    /\bdraft it\b/,
-  ].some((re) => re.test(normalized));
-}
-
-function previousAssistantAskedToDraft(messages: ConversationMessage[]): boolean {
-  for (let i = messages.length - 2; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role !== 'assistant') continue;
-    return /\bdraft\b/i.test(msg.content)
-      && /\b(plan|yaml)\b/i.test(msg.content)
-      && msg.content.includes('?');
-  }
-  return false;
-}
-
 function isDraftingAuthorizedForPrompt(messages: ConversationMessage[]): boolean {
   const latest = messages[messages.length - 1];
   if (!latest || latest.role !== 'user') return false;
-  if (isExplicitDraftRequest(latest.content)) return true;
-  return isConfirmation(latest.content) && previousAssistantAskedToDraft(messages);
+  return isDraftingAuthorized(latest.content, messages.slice(0, -1));
 }
 
 // ── System Prompt ───────────────────────────────────────────
 
 export const SLACK_LOCAL_REPRO_POLICY = `Execution boundary:
-- Inside your worktree you are unrestricted. Read, grep, edit, build, and run tests freely. Reproducing a bug locally is always allowed and never needs permission.
+- Inside your worktree you are unrestricted for exploration: read, grep, build, run tests, and write new repro artifacts freely. Reproducing a bug locally is always allowed and never needs permission. Tracked-file edits are not kept in pre-approval sessions.
 - Never run anything that changes state outside your worktree: \`git push\`, \`gh pr create\`/\`edit\`/\`merge\`, \`gh\` label writes, \`mergify stack push\`, \`scripts/safe-stack-push.mjs\`, or \`scripts/land-stack.mjs --execute\`.
 - If the request needs any of those, stop and hand off: describe the change, post the plan, and ask the user to confirm. Do not perform it yourself and do not offer a manual workaround for it.`;
 
-function buildAgentSystemPrompt(): string {
+function buildAgentSystemPrompt(intentSignalFilePath?: string): string {
+  const planIntentGuidance = intentSignalFilePath
+    ? `- Do NOT generate or submit Invoker YAML yourself. If — and only if — the user's latest message is itself asking you to draft a plan, convert this work into an Invoker submission, or execute/submit what was just discussed, write \`{"wantsPlan": true}\` to \`${intentSignalFilePath}\` using your file-writing tool. The Slack host will then ask the user to confirm via Approve/No buttons. Do not write that file speculatively, or for a message that isn't itself a plan/execution ask — a false positive interrupts the conversation with an unwanted confirmation prompt.
+- If you are not confident the user wants a plan, do not write that file. Instead tell the user in your reply to type \`/plan <request>\` in this thread to start planning explicitly.`
+    : `- Do NOT generate or submit Invoker YAML yourself. If the user asks for a plan or to act on this work, tell them to type \`/plan <request>\` in this thread to start planning explicitly.`;
   return `You are a normal coding agent running in a git worktree for a Slack thread.
 
 Default behavior:
 - Treat the thread like an ordinary OMP/Codex coding session.
-- Answer questions, run local commands, inspect files, edit code, and run focused verification when useful.
-- Do NOT generate Invoker YAML in this thread. If the user asks for an Invoker plan, tell them to ask in this same thread with \`plan: <request>\`, \`plan <request>\`, or \`<request> via Invoker\` — plan drafts from an agent thread cannot be submitted.
-- Do NOT submit or start an Invoker workflow. Do NOT invoke \`invoker-cli\`, \`invoker_submit_plan\`, \`invoker_validate_plan\`, \`submit-plan.sh\`, or the \`plan-to-invoker\` skill's Harness handoff mode to do so. Agent threads reject \`submit\`; only a \`plan:\` thread can be submitted.
+- Answer questions, run local commands, inspect files, and run focused verification when useful.
+- This pre-approval session cannot modify tracked files: any tracked-file edit is reverted after the turn. Write repro artifacts as new files instead, and route code changes through a plan.
+${planIntentGuidance}
 - Keep Slack replies short and concrete: changed files, verification, and any remaining risk. Return only the final user-facing message; never include chain-of-thought, reasoning traces, tool output, or raw planner JSONL.
 - To share a generated file (screenshot, diagram, report), write it inside your worktree and link it by absolute path as a markdown link, e.g. \`[chart](/abs/path/in/worktree/chart.png)\`. Files linked that way are uploaded to the thread. Files written outside your worktree cannot be shared, so do not put artifacts in /tmp.
 
@@ -267,17 +301,40 @@ workflows:
 When submitted, Invoker creates one workflow per child in listed order. Each downstream workflow is based on the previous workflow's feature branch and waits on the previous merge gate.`;
 }
 
+const TASK_FRESHNESS_PROMPT = `
+Typed task freshness (optional):
+Add a task-level \`freshness\` object only when the user's request contains an explicit freshness assumption. Freshness belongs in YAML as structured data; never encode it only in a task description or prompt, and never infer it from generated prose.
+
+Use this shape:
+\`\`\`yaml
+freshness:
+  watchPaths: [packages/example/src/index.ts] # files whose changes invalidate this task
+  pathPreconditions:
+    - path: packages/example/src/index.ts
+      expected: present # or absent; only explicit assumptions
+  guardedBehaviorIds: [example-behavior-id] # named guarded behaviors whose changes invalidate this task
+\`\`\`
+
+Rules for \`freshness\`:
+- It is optional. If the user makes no explicit assumption about files, paths, or guarded behaviors, omit \`freshness\` entirely.
+- \`watchPaths\` names exact normalized repo-relative paths to watch; do not use absolute paths, \`./\`, \`../\`, globs, or prose descriptions.
+- \`pathPreconditions\` records only explicit path assumptions. Each entry has an exact normalized repo-relative \`path\` and \`expected: present\` or \`expected: absent\`; do not invent a precondition because a file is mentioned as an implementation target.
+- \`guardedBehaviorIds\` contains exact named behavior IDs from the repository or the user's request, not natural-language summaries.
+- Synonyms and ordering do not change the object: “watch changes to X” and “invalidate if X changes” both become the same \`watchPaths: [X]\`; “X must exist” becomes \`pathPreconditions: [{ path: X, expected: present }]\`; “X must be gone” becomes \`expected: absent\`. Reorder fields or entries as needed, while preserving the same structured meaning.
+`;
+
 export interface BuildPlanSystemPromptOptions {
   conversationalPlanning?: boolean;
   draftingAuthorized?: boolean;
   preferStackedWorkflows?: boolean;
   planFilePath?: string;
+  planningSurface?: PlanningHostSurface;
 }
 
 function buildDirectPlanSystemPrompt(
   defaultBranch: string,
   repoUrl?: string,
-  preferStackedWorkflows = false,
+  preferStackedWorkflows = true,
   planFilePath?: string,
 ): string {
   const repoUrlLine = repoUrl
@@ -286,25 +343,25 @@ function buildDirectPlanSystemPrompt(
   const stackedWorkflowSection = preferStackedWorkflows
     ? `\n${buildStackedWorkflowPrompt(repoUrlLine, defaultBranch)}\n`
     : '';
-  const outputInstruction = planFilePath
-    ? `This is the delivery rule stated at the top. Write the COMPLETE YAML plan to the file at \`${planFilePath}\`, and reply in chat with only a one-or-two-sentence summary. Never paste the YAML into chat.`
-    : 'When ready, output the plan inside a \`\`\`yaml code block.';
-  const deliveryDirective = planFilePath
-    ? `HOW TO DELIVER THE PLAN (read first): write the COMPLETE YAML plan to the file at \`${planFilePath}\` using your file-writing tool, then reply in chat with ONLY a short summary — one or two sentences. NEVER paste the YAML plan into your chat reply; Invoker reads it from the file and shows the user a per-task summary. Every YAML block below is the format for that file, not for your chat reply. A pasted plan gets cut off at your output limit, which is the exact problem the file avoids.\n\n`
-    : '';
+  const handoffInstructions = buildPlanningHandoffInstructions({
+    planFilePath,
+    reviewInstruction: 'After the YAML exists, the Slack orchestrator reads that exact YAML, renders the ordered steps in its review card, and owns the approval flow.',
+    shortReplyInstruction: 'Then reply in chat with only a one-or-two-sentence summary. Never paste the YAML into chat.',
+    submissionInstruction: 'Only the Slack orchestrator may submit the plan after approval from its review flow. This rule overrides the plan-to-invoker skill\'s Harness handoff mode in this Slack thread.',
+  });
   const repoUrlDirective = repoUrl
     ? ''
     : 'NO REPO CONFIGURED (read first): this thread has no target repository configured — not via a `[repo:]` tag and not via a default. Before drafting any YAML, ask the user which repository this plan targets (a `[repo:<alias>]` tag, or a full git clone URL) and wait for their reply. Never invent, guess, or copy the `repoUrl` placeholder shown below literally into a plan.\n\n';
   return `You are an assistant for the Invoker orchestrator. The user explicitly requested an Invoker plan.
 
-${repoUrlDirective}${deliveryDirective}Generate a YAML task plan as described below. Answer simple follow-up questions directly only when they are about the plan being drafted.
+${repoUrlDirective}Generate a YAML task plan as described below. Answer simple follow-up questions directly only when they are about the plan being drafted.
 
 A plan has this structure:
 \`\`\`yaml
 name: "Plan Name"
 ${repoUrlLine}
 onFinish: pull_request  # "pull_request" (default), "merge", or "none"
-mergeMode: external_review  # "external_review" = GitHub-backed review gate for reviewable implementation work; "manual" (default) = verification-only, no review; "automatic" = merge without review
+mergeMode: external_review  # default for pull_request plans; "manual" = verification-only, no review; "automatic" = merge without review
 baseBranch: ${defaultBranch}        # base git branch
 featureBranch: plan/my-feature  # auto-generated from plan name if omitted
 tasks:
@@ -321,6 +378,7 @@ tasks:
     requiresManualApproval: false
 
 \`\`\`
+${TASK_FRESHNESS_PROMPT}
 ${stackedWorkflowSection}
 Rules:
 1. Explore the codebase first (list directories, read key files). Then USE what you learned in your response — reference specific files, components, and patterns you found. Do NOT give generic responses that ignore the code you read.
@@ -341,13 +399,9 @@ Rules:
    - If Invoker config auto-routes heavyweight commands, keep discovered test/build commands as normal command tasks unless the task must name a specific remote target
    - NEVER invent test file names. Verify the test file exists before referencing it in a command.
 7. Use meaningful task IDs (kebab-case).
-8. ${outputInstruction}
+8. ${handoffInstructions}
 9. Always include \`dependencies\` (even if empty array).
-10. After generating a plan, include a short post-plan summary that tells the user they can confirm execution. The confirmation instruction MUST be exactly this standalone line:
-Reply \`submit\` to submit it.
-Do NOT place that line inline in a sentence.
-11. NEVER submit, validate, or execute this plan yourself. Do NOT invoke \`invoker-cli\` (with any flags), \`invoker_submit_plan\`, \`invoker_validate_plan\`, \`submit-plan.sh\`, or the \`plan-to-invoker\` skill's Harness handoff mode. This rule overrides that skill's handoff instructions in this Slack thread. The Slack orchestrator validates and executes the plan after the user replies \`submit\` and approves it. If the user instead says \`execute\`, \`run it\`, \`yes\`, or \`go\` before submitting, remind them to reply with \`submit\`; never run it yourself.
-12. Choose \`mergeMode\` deliberately. For reviewable implementation plans, set \`mergeMode: external_review\` so changes land through the canonical GitHub-backed review gate. Keep \`mergeMode: manual\` (the default) for verification-only plans that should not open a review, and use \`mergeMode: automatic\` only when the user explicitly wants changes merged without review.`;
+10. Choose \`mergeMode\` deliberately. \`pull_request\` plans default to \`mergeMode: external_review\` so changes land through the canonical GitHub-backed review gate. Use \`mergeMode: manual\` for verification-only plans that should not open a review, and use \`mergeMode: automatic\` only when the user explicitly wants changes merged without review.`;
 }
 
 function buildConversationalPlanSystemPrompt(
@@ -356,12 +410,21 @@ function buildConversationalPlanSystemPrompt(
   options: BuildPlanSystemPromptOptions,
 ): string {
   const draftingAuthorized = options.draftingAuthorized ?? false;
+  if (!options.planningSurface) {
+    throw new Error('Conversational planning requires an explicit planningSurface.');
+  }
+  const hostContext = planningHostContext(options.planningSurface);
+  const handoffInstructions = buildPlanningHandoffInstructions({
+    planFilePath: options.planFilePath,
+    reviewInstruction: options.planningSurface === 'in_app'
+      ? 'After the YAML exists, the in-app planner reads that exact YAML, renders the ordered steps in its review panel, and owns the approval step.'
+      : 'After the YAML exists, the Slack planner reads that exact YAML, renders the ordered steps in its Approve/Cancel review card, and owns the approval step.',
+    shortReplyInstruction: 'Then reply in chat with only a one-or-two-sentence summary. Never paste the YAML into chat.',
+    submissionInstruction: 'Only the current planning host may submit the plan after the draft is approved in its review flow. Never run `invoker-cli`, `invoker_submit_plan`, `scripts/headless-ipc.js`, or any other submission command yourself. This rule overrides the plan-to-invoker skill\'s Harness handoff mode in this session.',
+  });
   const draftingInstructions = draftingAuthorized
     ? `
-The user has explicitly approved drafting. You may now produce the YAML task plan.
-
-Use the authorized drafting contract below:
-${buildDirectPlanSystemPrompt(defaultBranch, repoUrl, options.preferStackedWorkflows ?? false, options.planFilePath)}`
+The user has explicitly approved drafting. Produce the full Invoker YAML task plan now, using the plan shape from \`skills/plan-to-invoker/SKILL.md\` if you need the exact schema. Never include \`autoFix\` or \`autoFixRetries\` anywhere in plan YAML; retries are configured only in \`~/.invoker/config.json\`. The planning host will run the full plan doctor and will not present the draft until every check passes. ${handoffInstructions}`
     : `
 Drafting is not authorized yet. Do NOT output a \`\`\`yaml code block, do NOT write a draft plan file, and do NOT tell the user the plan can be executed.
 
@@ -374,7 +437,11 @@ Before drafting is authorized:
 
   return `You are an assistant for the Invoker orchestrator in conversational planning mode.
 
+${hostContext}
+
 This session is a planning conversation before any task plan exists. Your job is to help scope the work clearly before drafting.
+
+${TASK_FRESHNESS_PROMPT}
 
 For simple, self-contained requests (counting lines of code, checking versions, running a quick command, answering questions about the codebase), answer directly without drafting a plan.
 
@@ -399,7 +466,7 @@ export function buildPlanSystemPrompt(
   return buildDirectPlanSystemPrompt(
     defaultBranch,
     repoUrl,
-    resolvedOptions.preferStackedWorkflows ?? false,
+    resolvedOptions.preferStackedWorkflows ?? true,
     resolvedOptions.planFilePath,
   );
 }
@@ -431,6 +498,21 @@ export function isDangerousCommand(cmd: string): boolean {
 // ── Constants ───────────────────────────────────────────────
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const SUBMIT_INSTRUCTION_LINE = 'Reply `submit` to submit it.';
+
+function removeStandaloneSubmitInstruction(message: string): string {
+  const lines = message.split(/\r?\n/);
+  const filtered = lines.filter((line) => line.trim() !== SUBMIT_INSTRUCTION_LINE);
+  if (filtered.length === lines.length) return message;
+  return filtered.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
+/** Repeated on every resumed continuity-harness plan-mode turn — see buildTurnPrompt. */
+function buildPlanDraftReminder(planFilePath: string | null): string {
+  return planFilePath
+    ? `Reminder: when the final YAML plan is ready, write the COMPLETE YAML to \`${planFilePath}\` using your file-writing tool, then reply with only a short summary. Never paste the YAML into chat.`
+    : 'Reminder: when the final YAML plan is ready, output the COMPLETE YAML inside a ```yaml code block, then keep the rest of your reply short.';
+}
 
 // ── PlanConversation ────────────────────────────────────────
 
@@ -444,20 +526,45 @@ export class PlanConversation {
   private _submittedPlanText: string | null = null;
   private _planSubmitted = false;
   readonly workingDir?: string;
+  private plannerScratchRoot?: string;
+  private planDraftDirUnavailable = false;
   private timeoutMs: number;
   private threadTs?: string;
+  private channelId?: string;
   private conversationRepo?: ConversationRepository;
   private defaultBranch?: string;
   private repoUrl?: string;
   private experimentalPlanner?: boolean;
   private preferStackedWorkflows?: boolean;
   private conversationalPlanning: boolean;
+  private planningSurface?: PlanningHostSurface;
+  private draftingPreauthorized: boolean;
   private log: LogFn;
   private onRawPlannerOutput?: RawPlannerOutputHandler;
   private plannerRetryLimit: number;
   private plannerRetryBaseDelayMs: number;
+  private draftDoctor?: PlanningDraftDoctor;
+  private planDoctorRepairLimit: number;
+  private firstDraftPlanDoctorRepairLimit: number;
+  private planDoctorRepairLimitConfigured: boolean;
+  // Serializes turns on this conversation. Without this, two concurrent
+  // sendMessage calls (e.g. two Slack events for the same thread arriving
+  // close together) can interleave their per-turn side-channel files
+  // (plan-drafts, plan-intent): one turn's resetPlanDraftFile/
+  // resetPlanIntentSignalFile can wipe a file the other turn already wrote
+  // but hasn't read back yet.
+  private turnInFlight = false;
+  private turnQueue: Array<() => void> = [];
   private _initialized = false;
   private _lastTurnReasoning: string[] = [];
+  private _lastTurnDraftPlanText: string | null = null;
+  private _lastTurnDraftFromSidecarFile = false;
+  private _lastTurnPlanIntentSignal: PlanIntentSignal | null = null;
+  private lastKnownGoodPlanText: string | null = null;
+  private _approvedPlanningDraft: PlanningDraft | null = null;
+  private harnessSessionDriver?: HarnessSessionDriver;
+  private _harnessSessionId?: string;
+  private onHarnessSessionId?: (sessionId: string) => void;
 
   constructor(config: PlanConversationConfig) {
     this.cursorCommand = config.cursorCommand ?? 'agent';
@@ -466,20 +573,38 @@ export class PlanConversation {
     this.mode = config.mode ?? 'plan';
     this.planningCommandBuilder = config.planningCommandBuilder;
     this.workingDir = config.workingDir;
+    this.plannerScratchRoot = config.plannerScratchRoot;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.threadTs = config.threadTs;
+    this.channelId = config.channelId;
     this.conversationRepo = config.conversationRepo;
     this.defaultBranch = config.defaultBranch;
     this.repoUrl = config.repoUrl;
     this.experimentalPlanner = config.experimentalPlanner;
-    this.preferStackedWorkflows = config.preferStackedWorkflows;
+    this.preferStackedWorkflows = config.preferStackedWorkflows ?? true;
     this.conversationalPlanning = config.conversationalPlanning ?? false;
+    this.planningSurface = config.planningSurface;
+    if (this.conversationalPlanning && !this.planningSurface) {
+      throw new Error('Conversational planning requires an explicit planningSurface.');
+    }
+    this.draftingPreauthorized = config.draftingPreauthorized ?? false;
     this.onRawPlannerOutput = config.onRawPlannerOutput;
     this.plannerRetryLimit = Math.max(0, config.plannerRetryLimit ?? DEFAULT_PLANNER_RETRY_LIMIT);
     this.plannerRetryBaseDelayMs = Math.max(0, config.plannerRetryBaseDelayMs ?? DEFAULT_PLANNER_RETRY_BASE_DELAY_MS);
+    this.draftDoctor = config.draftDoctor
+      ?? (config.planDoctorScriptPath ? createPlanningDraftDoctor(config.planDoctorScriptPath) : undefined);
+    this.planDoctorRepairLimitConfigured = config.planDoctorRepairLimit !== undefined;
+    this.planDoctorRepairLimit = Math.max(0, config.planDoctorRepairLimit ?? DEFAULT_PLAN_DOCTOR_REPAIR_LIMIT);
+    this.firstDraftPlanDoctorRepairLimit = Math.max(
+      0,
+      config.firstDraftPlanDoctorRepairLimit ?? DEFAULT_FIRST_DRAFT_PLAN_DOCTOR_REPAIR_LIMIT,
+    );
     this.log = config.log ?? ((src, lvl, msg) => {
       (lvl === 'error' ? console.error : console.log)(`[${src}] ${msg}`);
     });
+    this.harnessSessionDriver = config.harnessSessionDriver;
+    this._harnessSessionId = config.harnessSessionId;
+    this.onHarnessSessionId = config.onHarnessSessionId;
   }
 
   /**
@@ -501,18 +626,20 @@ export class PlanConversation {
     try {
       const saved = this.conversationRepo.loadConversation(this.threadTs);
       if (!saved) return;
+      if (this.channelId !== undefined && saved.channelId !== this.channelId) {
+        this.log('plan-conversation', 'warn',
+          `[TRACE] init() refusing to load mismatched channel (threadTs=${this.threadTs}, expected=${this.channelId}, found=${saved.channelId || '(empty)'})`);
+        return;
+      }
 
       this.messages = saved.messages.map((m) => ({
         role: m.role as 'user' | 'assistant',
-        content: typeof m.content === 'string'
-          ? m.content
-          : (m.content as any[])
-              .filter((b: any) => b.type === 'text')
-              .map((b: any) => b.text)
-              .join(''),
+        content: this.normalizeRecoveredMessageContent(m.content),
       })).filter((m) => m.content.length > 0);
       this._planSubmitted = saved.planSubmitted;
       this.mode = saved.mode ?? this.mode;
+      this._approvedPlanningDraft = this.conversationRepo.planningDrafts.getCurrent(this.threadTs) ?? null;
+      this.lastKnownGoodPlanText = this._approvedPlanningDraft?.planText ?? null;
 
       this.log('plan-conversation', 'info', `Restored conversation ${this.threadTs}: ${saved.messages.length} messages`);
     } catch (err) {
@@ -520,12 +647,43 @@ export class PlanConversation {
     }
   }
 
+  private normalizeRecoveredMessageContent(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content
+        .filter((b: any) => b.type === 'text')
+        .map((b: any) => b.text)
+        .join('');
+    }
+    return JSON.stringify(content) ?? '';
+  }
+
   /**
    * Send a user message to the planner and return its reply. Pure conversation:
    * drafting a plan never auto-submits it — submission is an explicit step
    * driven by the surface (the `submit` verb), so a stray "yes" can't ship a plan.
+   *
+   * Turns on this conversation are serialized: a call queued while another is
+   * in flight waits for it to fully finish (including reading back its own
+   * per-turn side-channel files) before starting.
    */
   async sendMessage(userMessage: string): Promise<string> {
+    if (this.turnInFlight) {
+      await new Promise<void>((resolve) => this.turnQueue.push(resolve));
+    }
+    this.turnInFlight = true;
+    // No `await` here on purpose: chaining via .finally() keeps this call's
+    // returned promise settling in lockstep with sendMessageLocked's own
+    // promise, with no added microtask tick before the planner subprocess is
+    // spawned — callers/tests that synchronize on "the process was spawned"
+    // via a single microtask wait stay correct.
+    return this.sendMessageLocked(userMessage).finally(() => {
+      this.turnInFlight = false;
+      this.turnQueue.shift()?.();
+    });
+  }
+
+  private async sendMessageLocked(userMessage: string): Promise<string> {
     const t0 = Date.now();
     const turn = this.messages.filter(m => m.role === 'user').length + 1;
     this.log('plan-conversation', 'info', `[TRACE] sendMessage() start (threadTs=${this.threadTs}, initialized=${this._initialized}, msgCount=${this.messages.length}, turn=${turn})`);
@@ -534,39 +692,250 @@ export class PlanConversation {
     const tInit = Date.now();
 
     this.resetPlanDraftFile();
+    this.resetPlanIntentSignalFile();
     this.messages.push({ role: 'user', content: userMessage });
 
-    const prompt = this.buildCursorPrompt();
+    const prompt = this.buildTurnPrompt();
     const tPrompt = Date.now();
     this.log('plan-conversation', 'info', `[CONV] Turn ${turn}: promptLen=${prompt.length}, historyMsgs=${this.messages.length - 1}, promptPreview="${prompt.slice(0, 500).replace(/\n/g, '\\n')}"`);
 
     const repoStateBefore = this.mode === 'agent'
       ? await captureRepoState(this.workingDir)
       : null;
-    const response = await this.spawnPlanner(prompt);
+    const response = await this.spawnPlanner(prompt, turn);
     const tCursor = Date.now();
     const formatted = formatCodexPlannerStdout(response);
     let message = formatted.message;
     const repoStateAfter = this.mode === 'agent'
       ? await captureRepoState(this.workingDir)
       : null;
-    if (looksLikeCompletionClaim(message) && repoStateUnchanged(repoStateBefore, repoStateAfter)) {
+    if (this.mode === 'agent' && trackedFilesChanged(repoStateBefore, repoStateAfter)) {
+      restoreTrackedChanges(this.workingDir);
+      message = `${message}\n\n${buildTrackedChangesRevertedNotice()}`;
+    } else if (looksLikeCompletionClaim(message) && repoStateUnchanged(repoStateBefore, repoStateAfter)) {
       message = `${message}\n\n${buildUnverifiedNotice()}`;
     }
-    this._lastTurnReasoning = formatted.reasoning;
-    this.log('plan-conversation', 'info', `[CONV] Turn ${turn}: responseLen=${response.length}, messageLen=${message.length}, reasoningParts=${formatted.reasoning.length}, responsePreview="${message.slice(0, 500).replace(/\n/g, '\\n')}"`);
+    const fileDraft = this.readPlanDraftFile();
+    const inlineDraft = extractYamlPlan(message);
+    const sidecarDraftSelected = Boolean(fileDraft && summarizePlanText(fileDraft));
+    let nextDraft = sidecarDraftSelected ? fileDraft : inlineDraft;
+    let finalFormatted = formatted;
+    if (nextDraft && this.draftDoctor) {
+      const gated = await this.gateDraftForReview(nextDraft, message, formatted, turn);
+      nextDraft = gated.planText;
+      message = gated.message;
+      finalFormatted = gated.formatted;
+    }
+    if (nextDraft && this.draftDoctor && this.conversationRepo && this.threadTs) {
+      try {
+        this._approvedPlanningDraft = this.conversationRepo.planningDrafts.createCurrent(
+          this.threadTs,
+          nextDraft,
+        );
+        nextDraft = this._approvedPlanningDraft.planText;
+      } catch (error) {
+        this.log(
+          'plan-conversation',
+          'error',
+          `Failed to persist approved planning draft ${this.threadTs}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        nextDraft = null;
+        message = 'Draft not shown: the approved plan could not be persisted.\n\nNothing was submitted.';
+      }
+    }
+    this._lastTurnDraftPlanText = nextDraft;
+    this._lastTurnDraftFromSidecarFile = sidecarDraftSelected && Boolean(nextDraft);
+    if (nextDraft) this.lastKnownGoodPlanText = nextDraft;
+    this._lastTurnPlanIntentSignal = this.mode === 'agent' ? this.readPlanIntentSignalFile() : null;
+    if (!nextDraft) {
+      message = removeStandaloneSubmitInstruction(message);
+    }
+    this._lastTurnReasoning = finalFormatted.reasoning;
+    this.log('plan-conversation', 'info', `[CONV] Turn ${turn}: responseLen=${response.length}, messageLen=${message.length}, reasoningParts=${finalFormatted.reasoning.length}, responsePreview="${message.slice(0, 500).replace(/\n/g, '\\n')}"`);
 
     this.messages.push({ role: 'assistant', content: message });
     this.saveState();
     const tSave = Date.now();
 
     this.log('plan-conversation', 'info', `[PERF] sendMessage: init=${tInit - t0}ms, buildPrompt=${tPrompt - tInit}ms, cursor=${tCursor - tPrompt}ms, saveState=${tSave - tCursor}ms, total=${tSave - t0}ms`);
-    return message;
+    return nextDraft ? redactEmbeddedPlanFence(message) : message;
+  }
+
+  private resolvePlanDoctorRepairLimit(isFirstDraft: boolean): number {
+    if (this.planDoctorRepairLimitConfigured) return this.planDoctorRepairLimit;
+    return isFirstDraft ? this.firstDraftPlanDoctorRepairLimit : this.planDoctorRepairLimit;
+  }
+
+  /** Wrap repair/user turns for hosted Slack/in-app sessions the same way. */
+  private formatPlannerTurn(prompt: string): string {
+    if (!this.planningSurface) return prompt;
+    return formatPlanningHostedTurn(this.planningSurface, prompt);
+  }
+
+  private async gateDraftForReview(
+    initialPlanText: string,
+    initialMessage: string,
+    initialFormatted: ReturnType<typeof formatCodexPlannerStdout>,
+    turn: number,
+  ): Promise<{ planText: string | null; message: string; formatted: ReturnType<typeof formatCodexPlannerStdout> }> {
+    const startedAt = Date.now();
+    const isFirstDraft = !(this._approvedPlanningDraft || this.lastKnownGoodPlanText);
+    const repairLimit = this.resolvePlanDoctorRepairLimit(isFirstDraft);
+    let planText = initialPlanText;
+    let message = initialMessage;
+    let formatted = initialFormatted;
+    let lastResult: PlanningDraftDoctorResult = { ok: false, diagnostics: ['skill-doctor did not run'] };
+    let candidateNumber = 0;
+    let repairsAttempted = 0;
+
+    while (true) {
+      candidateNumber += 1;
+      try {
+        lastResult = await this.draftDoctor!(planText);
+      } catch (error) {
+        lastResult = {
+          ok: false,
+          infrastructureError: true,
+          diagnostics: [`skill-doctor could not run: ${error instanceof Error ? error.message : String(error)}`],
+        };
+      }
+      if (lastResult.ok) {
+        this.log('plan-conversation', 'info', `[PLAN_DOCTOR] Candidate ${candidateNumber} passed (turn=${turn})`);
+        return { planText, message, formatted };
+      }
+
+      this.log(
+        'plan-conversation',
+        'warn',
+        `[PLAN_DOCTOR] Candidate ${candidateNumber} rejected (turn=${turn}, infrastructure=${lastResult.infrastructureError === true}, firstDraft=${isFirstDraft}): ${lastResult.diagnostics.join(' | ')}`,
+      );
+      this.resetPlanDraftFile();
+
+      const timedOut = Date.now() - startedAt >= this.timeoutMs;
+      if (lastResult.infrastructureError || repairsAttempted >= repairLimit || timedOut) break;
+
+      repairsAttempted += 1;
+      const repairPrompt = this.formatPlannerTurn(
+        this.buildDoctorRepairPrompt(planText, lastResult.diagnostics, candidateNumber),
+      );
+      const repairResponse = await this.spawnPlanner(repairPrompt, turn);
+      formatted = formatCodexPlannerStdout(repairResponse);
+      message = formatted.message;
+      const fileDraft = this.readPlanDraftFile();
+      const inlineDraft = extractYamlPlan(message);
+      const repairedDraft = fileDraft && summarizePlanText(fileDraft) ? fileDraft : inlineDraft;
+      if (!repairedDraft) {
+        lastResult = { ok: false, diagnostics: ['Planner repair turn did not produce a complete YAML candidate.'] };
+        break;
+      }
+      // An echoed copy of the rejected fence is not progress — require a real rewrite.
+      if (repairedDraft.trim() === planText.trim()) {
+        lastResult = {
+          ok: false,
+          diagnostics: ['Planner repair turn echoed the rejected candidate without changes.'],
+        };
+        break;
+      }
+      planText = repairedDraft;
+    }
+
+    this.resetPlanDraftFile();
+    const heading = lastResult.infrastructureError
+      ? 'Draft not shown: plan validation is unavailable.'
+      : `Draft not shown: the plan doctor rejected it. (${repairsAttempted} repair turn${repairsAttempted === 1 ? '' : 's'} attempted)`;
+    const diagnostics = lastResult.diagnostics.slice(0, 8).map((line) => `- ${line}`).join('\n');
+    return {
+      planText: null,
+      message: `${heading}\n\nNothing was submitted.\n\n${diagnostics}`,
+      formatted,
+    };
+  }
+
+  private buildDoctorRepairPrompt(planText: string, diagnostics: string[], repairNumber: number): string {
+    const path = this.planDraftFilePath();
+    const destination = path
+      ? `Write the complete corrected YAML to \`${path}\` and reply with only a one-or-two-sentence summary.`
+      : 'Return the complete corrected YAML in a ```yaml fenced block.';
+    return [
+      `The host rejected candidate ${repairNumber}; it cannot be shown or submitted.`,
+      'Repair the YAML itself. Do not remove requirements merely to silence the doctor.',
+      'Correct every doctor diagnostic below; the host will run the full doctor again against the replacement.',
+      destination,
+      '',
+      'Doctor diagnostics:',
+      ...diagnostics.slice(0, 40).map((line) => `- ${line}`),
+      '',
+      'Rejected candidate:',
+      '```yaml',
+      planText.trim(),
+      '```',
+    ].join('\n');
+  }
+
+  async runPlanConversion(): Promise<string> {
+    const previousMode = this.mode;
+    const previousConversationalPlanning = this.conversationalPlanning;
+    this.mode = 'plan';
+    this.conversationalPlanning = false;
+    try {
+      return await this.sendMessage(
+        'Convert the established conversation scope into an Invoker YAML plan now. '
+        + 'If the scope is still incomplete, ask the specific clarification instead of emitting YAML.',
+      );
+    } finally {
+      this.mode = previousMode;
+      this.conversationalPlanning = previousConversationalPlanning;
+      this.saveState();
+    }
   }
 
   /** Reasoning summaries from the most recent planner turn (Codex JSONL), if any. */
   get lastTurnReasoning(): string[] {
     return this._lastTurnReasoning;
+  }
+
+  get lastTurnDraftPlanText(): string | null {
+    return this._lastTurnDraftPlanText;
+  }
+
+  get approvedPlanningDraft(): PlanningDraft | null {
+    return this._approvedPlanningDraft;
+  }
+
+  get draftDoctorEnabled(): boolean {
+    return Boolean(this.draftDoctor);
+  }
+
+  markApprovedPlanningDraftSubmitted(): void {
+    if (!this._approvedPlanningDraft || !this.conversationRepo) return;
+    this.conversationRepo.planningDrafts.markSubmitted(this._approvedPlanningDraft.id);
+    this._approvedPlanningDraft = this.conversationRepo.planningDrafts.get(
+      this._approvedPlanningDraft.id,
+    ) ?? this._approvedPlanningDraft;
+  }
+
+  discardApprovedPlanningDraft(): void {
+    if (this._approvedPlanningDraft && this.conversationRepo) {
+      this.conversationRepo.planningDrafts.supersede(this._approvedPlanningDraft.id);
+    }
+    this._approvedPlanningDraft = null;
+    this._lastTurnDraftPlanText = null;
+    this.lastKnownGoodPlanText = null;
+  }
+
+  /**
+   * Whether this turn's draft came from the dedicated plan-draft sidecar file
+   * (a deliberate planner act), rather than YAML embedded in the chat reply.
+   */
+  get lastTurnDraftFromSidecarFile(): boolean {
+    return this._lastTurnDraftFromSidecarFile;
+  }
+
+  /** The plan-intent signal the model wrote this turn (agent mode only), if any. */
+  get lastTurnPlanIntentSignal(): PlanIntentSignal | null {
+    return this._lastTurnPlanIntentSignal;
   }
 
   /** Returns the raw plan text that was submitted via confirmation, or null. */
@@ -583,9 +952,23 @@ export class PlanConversation {
     return this.mode;
   }
 
+  /** Current harness session id, if a session driver has established one. */
+  get harnessSessionId(): string | undefined {
+    return this._harnessSessionId;
+  }
+
   /** Returns the last complete YAML plan drafted in this conversation, or null. */
   getDraftedPlan(): string | null {
-    return this.readPlanDraftFile() ?? this.extractLastPlanFromMessages();
+    // Only sendMessage may promote a candidate after its configured doctor
+    // passes. Re-reading the sidecar here would bypass that review gate.
+    if (this.draftDoctor) {
+      return this._lastTurnDraftPlanText
+        ?? this._approvedPlanningDraft?.planText
+        ?? this.lastKnownGoodPlanText;
+    }
+    const fileDraft = this.readPlanDraftFile();
+    if (fileDraft && summarizePlanText(fileDraft)) return fileDraft;
+    return this._lastTurnDraftPlanText ?? this.extractLastPlanFromMessages() ?? this.lastKnownGoodPlanText;
   }
 
   // The planner writes the full YAML plan here so its chat reply can stay a
@@ -593,9 +976,16 @@ export class PlanConversation {
   // its output limit. Gated on workingDir + threadTs; without both, planning
   // falls back to inline extraction unchanged. `.invoker/` is gitignored.
   planDraftFilePath(): string | null {
-    if (!this.workingDir || !this.threadTs) return null;
+    if (this.planDraftDirUnavailable) return null;
+    return this.plannerScratchFilePath('plan-drafts', 'yaml');
+  }
+
+  private plannerScratchFilePath(folder: string, extension: string): string | null {
+    if (!this.threadTs) return null;
+    const root = this.plannerScratchRoot ?? (this.workingDir ? join(this.workingDir, '.invoker') : undefined);
+    if (!root) return null;
     const safeId = this.threadTs.replace(/[^a-zA-Z0-9._-]/g, '_');
-    return join(this.workingDir, '.invoker', 'plan-drafts', `${safeId}.yaml`);
+    return join(root, folder, `${safeId}.${extension}`);
   }
 
   private readPlanDraftFile(): string | null {
@@ -615,6 +1005,7 @@ export class PlanConversation {
   // write is required each turn (getDraftedPlan must never return a stale plan)
   // and the planner's write into it succeeds.
   private resetPlanDraftFile(): void {
+    this.planDraftDirUnavailable = false;
     const path = this.planDraftFilePath();
     if (!path) return;
     try {
@@ -622,6 +1013,43 @@ export class PlanConversation {
       mkdirSync(dirname(path), { recursive: true });
     } catch (err) {
       this.log('plan-conversation', 'error', `Failed to reset plan draft file ${path}: ${err}`);
+      this.planDraftDirUnavailable = true;
+    }
+  }
+
+  // An agent-mode turn writes this file when it judges the user's latest
+  // message is itself a plan/submission ask, instead of drafting YAML itself.
+  // Same shape as planDraftFilePath: gated on workingDir + threadTs, reset
+  // every turn so a stale signal from turn N can't leak into turn N+1.
+  // `.invoker/` is gitignored.
+  planIntentSignalFilePath(): string | null {
+    return this.plannerScratchFilePath('plan-intent', 'json');
+  }
+
+  private readPlanIntentSignalFile(): PlanIntentSignal | null {
+    const path = this.planIntentSignalFilePath();
+    if (!path) return null;
+    try {
+      if (!existsSync(path)) return null;
+      const content = readFileSync(path, 'utf8').trim();
+      if (!content) return null;
+      const parsed = JSON.parse(content) as { wantsPlan?: unknown; reason?: unknown };
+      if (parsed.wantsPlan !== true) return null;
+      return { wantsPlan: true, reason: typeof parsed.reason === 'string' ? parsed.reason : undefined };
+    } catch (err) {
+      this.log('plan-conversation', 'error', `Failed to read plan intent signal file ${path}: ${err}`);
+      return null;
+    }
+  }
+
+  private resetPlanIntentSignalFile(): void {
+    const path = this.planIntentSignalFilePath();
+    if (!path) return;
+    try {
+      rmSync(path, { force: true });
+      mkdirSync(dirname(path), { recursive: true });
+    } catch (err) {
+      this.log('plan-conversation', 'error', `Failed to reset plan intent signal file ${path}: ${err}`);
     }
   }
 
@@ -635,12 +1063,35 @@ export class PlanConversation {
     this.messages = [];
     this._submittedPlanText = null;
     this._planSubmitted = false;
+    this._lastTurnDraftPlanText = null;
+    this._lastTurnDraftFromSidecarFile = false;
+    this._lastTurnPlanIntentSignal = null;
+    this.lastKnownGoodPlanText = null;
+    this._approvedPlanningDraft = null;
     if (this.conversationRepo && this.threadTs) {
       this.conversationRepo.deleteConversation(this.threadTs);
     }
   }
 
   // ── Prompt Construction ────────────────────────────────
+
+  /** Latest message only when resuming a continuity-supporting session; otherwise the full history prompt. */
+  private buildTurnPrompt(): string {
+    if (this.harnessSessionDriver?.supportsSessionContinuity && this._harnessSessionId) {
+      const latestMessage = this.messages[this.messages.length - 1]?.content ?? '';
+      if (!this.conversationalPlanning || !this.planningSurface) return latestMessage;
+      const hosted = formatPlanningHostedTurn(this.planningSurface, latestMessage);
+      // Turn 1 gets the plan-draft-file instruction via the full system prompt
+      // (buildCursorPrompt, below). A resumed continuity-harness turn skips
+      // that system prompt entirely, so on a long conversation the model can
+      // drift back to pasting YAML inline instead of writing the sidecar
+      // file — repeat the instruction here so it doesn't decay out of view.
+      return this.mode === 'plan'
+        ? `${hosted}\n\n${buildPlanDraftReminder(this.planDraftFilePath())}`
+        : hosted;
+    }
+    return this.buildCursorPrompt();
+  }
 
   /**
    * Build the full prompt for Cursor, including system instructions
@@ -650,11 +1101,13 @@ export class PlanConversation {
     const systemPrompt = this.mode === 'plan'
       ? buildPlanSystemPrompt(this.defaultBranch ?? 'main', this.repoUrl, {
           conversationalPlanning: this.conversationalPlanning,
-          draftingAuthorized: this.conversationalPlanning && isDraftingAuthorizedForPrompt(this.messages),
+          draftingAuthorized: this.conversationalPlanning
+            && (this.draftingPreauthorized || isDraftingAuthorizedForPrompt(this.messages)),
           preferStackedWorkflows: this.preferStackedWorkflows,
           planFilePath: this.planDraftFilePath() ?? undefined,
+          planningSurface: this.planningSurface,
         })
-      : buildAgentSystemPrompt();
+      : buildAgentSystemPrompt(this.planIntentSignalFilePath() ?? undefined);
     const parts: string[] = [systemPrompt];
 
     if (this.messages.length > 1) {
@@ -689,11 +1142,56 @@ export class PlanConversation {
 
   // ── Planner CLI Subprocess ─────────────────────────────
 
-  async spawnPlanner(prompt: string): Promise<string> {
+  async spawnPlanner(prompt: string, turn?: number): Promise<string> {
+    if (this.harnessSessionDriver) {
+      return this.spawnPlannerWithDriver(prompt, this.harnessSessionDriver, turn);
+    }
+
+    const requiresRegisteredBuilder = this.tool === 'omp' || this.tool === 'codex';
+    if (requiresRegisteredBuilder && !this.planningCommandBuilder) {
+      throw new Error(`Planner command builder is required for selected tool "${this.tool}"`);
+    }
     const { command, args } = this.planningCommandBuilder
       ? this.planningCommandBuilder({ tool: this.tool ?? 'cursor', model: this.model, prompt })
       : defaultPlanningCommand(this.cursorCommand, { model: this.model, prompt });
+    if (requiresRegisteredBuilder && this.planningCommandBuilder && basename(command) !== this.tool) {
+      throw new Error(`Planner command mismatch: selected tool "${this.tool}" resolved to "${command}"`);
+    }
     const plannerLabel = this.tool ?? command;
+    return this.runSpawnWithRetry(prompt, command, args, plannerLabel);
+  }
+
+  private async spawnPlannerWithDriver(prompt: string, driver: HarnessSessionDriver, turn?: number): Promise<string> {
+    const priorSessionId = this._harnessSessionId;
+    const startedNewSession = !priorSessionId;
+    const built = priorSessionId
+      ? driver.append(priorSessionId, prompt, { model: this.model })
+      : driver.start(prompt, { model: this.model });
+    const reply = await this.runSpawnWithRetry(prompt, built.command, built.args, driver.harness);
+    const resolvedSessionId = driver.resolveSessionId?.(reply, built, { startedNewSession }) ?? built.sessionId;
+    if (resolvedSessionId !== built.sessionId) {
+      this.log(
+        'plan-conversation',
+        'info',
+        `[TRACE] planner_session_id_promoted planner=${driver.harness} turn=${turn ?? 'unknown'} source=stdout provisionalSessionId=${built.sessionId} resolvedSessionId=${resolvedSessionId}`,
+      );
+    }
+    this.setHarnessSessionId(resolvedSessionId);
+    return reply;
+  }
+
+  private setHarnessSessionId(sessionId: string): void {
+    if (!sessionId || this._harnessSessionId === sessionId) return;
+    this._harnessSessionId = sessionId;
+    this.onHarnessSessionId?.(sessionId);
+  }
+
+  private async runSpawnWithRetry(
+    prompt: string,
+    command: string,
+    args: string[],
+    plannerLabel: string,
+  ): Promise<string> {
     const totalAttempts = this.plannerRetryLimit + 1;
     let lastStderrTail = '';
 
@@ -743,7 +1241,7 @@ export class PlanConversation {
       let stdoutChunks = 0;
       let stderrChunks = 0;
 
-      this.log('plan-conversation', 'info', `[PERF] cursor_spawn: pid=${child.pid ?? 'none'}, cmd="${command} ${args.slice(0, -1).join(' ')} <prompt>", promptLen=${prompt.length}, cwd=${this.workingDir ?? process.cwd()}, attempt=${attemptNumber}/${totalAttempts}`);
+      this.log('plan-conversation', 'info', `[PERF] cursor_spawn: pid=${child.pid ?? 'none'}, tool=${plannerLabel}, model=${this.model ?? 'default'}, cmd="${command} ${args.slice(0, -1).join(' ')} <prompt>", promptLen=${prompt.length}, cwd=${this.workingDir ?? process.cwd()}, attempt=${attemptNumber}/${totalAttempts}`);
 
       child.stdout?.on('data', (chunk: Buffer) => {
         const chunkStr = chunk.toString();
@@ -822,7 +1320,7 @@ export class PlanConversation {
         messages,
         null,
         this._planSubmitted,
-        undefined,
+        this.channelId,
         undefined,
         this.mode,
       );
@@ -861,20 +1359,6 @@ function validateExtractedPlanTasks(tasks: unknown, ownerLabel: string): boolean
   }
 
   return true;
-}
-
-function stripPlannerOnlyFields(plan: Record<string, any>): void {
-  delete plan.autoFix;
-  delete plan.autoFixRetries;
-  for (const task of Array.isArray(plan.tasks) ? plan.tasks : []) {
-    if (!isExtractedPlanRecord(task)) continue;
-    delete task.autoFix;
-    delete task.autoFixRetries;
-  }
-  for (const workflow of Array.isArray(plan.workflows) ? plan.workflows : []) {
-    if (!isExtractedPlanRecord(workflow)) continue;
-    stripPlannerOnlyFields(workflow);
-  }
 }
 
 // ── YAML Extraction ─────────────────────────────────────────
@@ -933,10 +1417,33 @@ export function extractYamlPlan(text: string): string | null {
       return null;
     }
 
-    stripPlannerOnlyFields(plan);
     return stringifyYaml(plan);
   } catch (err) {
     console.warn(`extractYamlPlan: YAML parse error: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
+}
+
+const PLAN_DRAFT_PLACEHOLDER = '_(Plan drafted — see the review card for the full plan.)_';
+
+/**
+ * Once a turn's plan draft is captured (lastTurnDraftPlanText), the raw
+ * ```yaml fence in the reply text is redundant: the review-card flow reads
+ * the draft from lastTurnDraftPlanText directly (see
+ * preparePlanningReview's extractDraftPlanText in slack-surface.ts), not by
+ * re-parsing this text. Leaving the fence in means Slack posts the entire
+ * plan as chunked chat text in addition to the review card.
+ */
+export function redactEmbeddedPlanFence(text: string): string {
+  const fenceStart = text.lastIndexOf('```yaml\n');
+  if (fenceStart === -1) return text;
+  const contentStart = fenceStart + '```yaml\n'.length;
+  const rest = text.slice(contentStart);
+  const closeMatch = rest.match(/^```\s*$/m);
+  const fenceEnd = closeMatch && closeMatch.index !== undefined
+    ? contentStart + closeMatch.index + closeMatch[0].length
+    : text.length;
+  const before = text.slice(0, fenceStart).trimEnd();
+  const after = text.slice(fenceEnd).trimStart();
+  return [before, PLAN_DRAFT_PLACEHOLDER, after].filter(Boolean).join('\n\n');
 }

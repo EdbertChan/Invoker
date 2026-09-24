@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { delegationTimeoutMs, tryDelegateExec, tryDelegateRun, tryDelegateResume } from '../headless.js';
+import {
+  delegationTimeoutMs,
+  resolveDelegationTimeoutMs,
+  tryDelegateExec,
+  tryDelegateRun,
+  tryDelegateResume,
+} from '../headless.js';
+import { runHeadlessClientCommand } from '../headless-client.js';
 import { LocalBus } from '@invoker/transport';
 import type { MessageBus } from '@invoker/transport';
 import type { HeadlessTargetLookup } from '../headless-command-classification.js';
@@ -78,6 +85,10 @@ describe('headless→owner delegation', () => {
       expect(delegationTimeoutMs(['rebase-retry', 'wf-123/task-1'], targetLookup)).toBe(5_000);
     });
 
+    it('uses 60s timeout for retry-task even though its target is a bare taskId', async () => {
+      await expect(resolveDelegationTimeoutMs(['retry-task', 'task-abc123'])).resolves.toBe(60_000);
+    });
+
     it('keeps non-matching workflow ids at the default timeout', () => {
       expect(delegationTimeoutMs(['restart', 'not-a-workflow-id'], targetLookup)).toBe(5_000);
     });
@@ -86,14 +97,82 @@ describe('headless→owner delegation', () => {
       expect(delegationTimeoutMs(['approve', 'wf-123/task-1'], targetLookup)).toBe(5_000);
     });
 
-    it('uses 60s timeout for global start-ready', () => {
-      expect(delegationTimeoutMs(['start-ready'], targetLookup)).toBe(60_000);
-      expect(delegationTimeoutMs(['start-ready', '--recreate-failed-and-pending'], targetLookup)).toBe(60_000);
-      expect(delegationTimeoutMs(['start-ready', '--recreate-all'], targetLookup)).toBe(300_000);
+    it.each([
+      ['default', []],
+      ['failed recreate', ['--recreate-failed']],
+      ['failed and pending recreate', ['--recreate-failed-and-pending']],
+      ['failed, pending, and running recreate', ['--recreate-failed-pending-and-running']],
+      ['failed fresh-base', ['--fresh-base-failed']],
+      ['failed and pending fresh-base', ['--fresh-base-failed-and-pending']],
+      ['failed, pending, and running fresh-base', ['--fresh-base-failed-pending-and-running']],
+    ])('uses 60s timeout for global start-ready %s scope', async (_label, flags) => {
+      const args = ['start-ready', ...flags];
+
+      expect(delegationTimeoutMs(args, targetLookup)).toBe(60_000);
+      await expect(resolveDelegationTimeoutMs(args)).resolves.toBe(60_000);
+    });
+
+    it('keeps the broader timeout for global start-ready recreate-all', async () => {
+      const args = ['start-ready', '--recreate-all'];
+
+      expect(delegationTimeoutMs(args, targetLookup)).toBe(300_000);
+      await expect(resolveDelegationTimeoutMs(args)).resolves.toBe(300_000);
     });
   });
 
   describe('successful delegation when owner is present', () => {
+    it.each([
+      {
+        label: 'delete',
+        argv: ['delete', 'wf-1', '--no-track'],
+        channel: 'headless.exec',
+        expectedPayload: { args: ['delete', 'wf-1'], noTrack: true, waitForApproval: false },
+      },
+      {
+        label: 'run',
+        argv: ['run', '/path/to/plan.yaml', '--no-track'],
+        channel: 'headless.run',
+        expectedPayload: { planPath: expect.stringContaining('plan.yaml') },
+      },
+      {
+        label: 'resume',
+        argv: ['resume', 'wf-1', '--no-track'],
+        channel: 'headless.resume',
+        expectedPayload: { workflowId: 'wf-1' },
+      },
+      {
+        label: 'generic mutation',
+        argv: ['approve', 'wf-1/task-1', '--no-track'],
+        channel: 'headless.exec',
+        expectedPayload: { args: ['approve', 'wf-1/task-1'], noTrack: true, waitForApproval: false },
+      },
+    ])('routes standalone-enabled $label to a compatible owner before local fallback', async ({ argv, channel, expectedPayload }) => {
+      const savedStandalone = process.env.INVOKER_HEADLESS_STANDALONE;
+      process.env.INVOKER_HEADLESS_STANDALONE = '1';
+      try {
+        const ownerHandler = vi.fn(async () => ({ ok: true }));
+        messageBus.onRequest('headless.owner-ping', async () => ({ ok: true, ownerId: 'owner-standalone-route', mode: 'standalone' }));
+        messageBus.onRequest(channel, ownerHandler);
+        const ensureStandaloneOwner = vi.fn(async () => {});
+        const runElectronHeadless = vi.fn(async () => 23);
+
+        const exitCode = await runHeadlessClientCommand(argv, {
+          messageBus,
+          ensureStandaloneOwner,
+          runElectronHeadless,
+        });
+
+        expect(exitCode).toBe(0);
+        expect(ownerHandler).toHaveBeenCalledTimes(1);
+        expect(ownerHandler).toHaveBeenCalledWith(expect.objectContaining(expectedPayload));
+        expect(ensureStandaloneOwner).not.toHaveBeenCalled();
+        expect(runElectronHeadless).not.toHaveBeenCalled();
+      } finally {
+        if (savedStandalone === undefined) delete process.env.INVOKER_HEADLESS_STANDALONE;
+        else process.env.INVOKER_HEADLESS_STANDALONE = savedStandalone;
+      }
+    });
+
     it('delegates mutation command to owner via RPC', async () => {
       // Simulate owner process registering a handler
       const ownerHandler = vi.fn(async (_req: { args: string[] }) => {

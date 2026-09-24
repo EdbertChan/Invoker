@@ -3,23 +3,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkerActionRecord, WorkerActionWrite, WorkflowMutationPriority } from '@invoker/data-store';
 import type { TaskState } from '@invoker/workflow-core';
 
-import { parseFixWithAgentMutationArgs } from '../auto-fix-intents.js';
 import {
   autoFixAttemptLedgerKeyFromLifecycleEvent,
   createAutoFixAttemptLedger,
 } from '../auto-fix-attempt-ledger.js';
 import type { ReviewGateCiFailedLifecycleEvent } from '../lifecycle-events.js';
 import {
-  CI_FAILURE_WORKER_KIND,
   ciFailureActionKey,
-  createCiFailureTick,
-} from '../workers/ci-failure-worker.js';
+  queueReviewGateCiRepair,
+  SPAWN_REVIEW_GATE_CI_REPAIR_CHANNEL,
+} from '../review-gate-ci-repair.js';
 import { maybePublishReviewGateCiFailure } from '../task-runner-review-gate.js';
 import {
   DEFAULT_PR_STATUS_WORKER_INTERVAL_MS,
   createPrStatusWorker,
 } from '../workers/pr-status-worker.js';
-
 
 const logger = {
   info: vi.fn(),
@@ -110,16 +108,10 @@ function toRecord(write: WorkerActionWrite): WorkerActionRecord {
   };
 }
 
-function makeHarness(task = makeTask()) {
+function makeRepairHarness(task = makeTask()) {
   const tasks = new Map<string, TaskState>([[task.id, task]]);
   const actions = new Map<string, WorkerActionRecord>();
-  const submit = vi.fn((workflowId: string, priority: WorkflowMutationPriority, channel: string, args: unknown[]) => {
-    expect(workflowId).toBe('wf-1');
-    expect(priority).toBe('normal');
-    expect(channel).toBe('invoker:fix-with-agent');
-    expect(args).toBeDefined();
-    return 42;
-  });
+  const submit = vi.fn((_workflowId: string, _priority: WorkflowMutationPriority, _channel: string, _args: unknown[]) => 42);
   const store = {
     loadTasks: vi.fn((workflowId: string) => workflowId === 'wf-1' ? Array.from(tasks.values()) : []),
     loadTask: vi.fn((taskId: string) => tasks.get(taskId)),
@@ -137,7 +129,7 @@ function makeHarness(task = makeTask()) {
   return { actions, store, submit, attemptLedger };
 }
 
-describe('PR status and CI failure workers', () => {
+describe('PR status worker', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
@@ -160,135 +152,60 @@ describe('PR status and CI failure workers', () => {
     await worker.stop();
   });
 
-  it('queues a head-SHA guarded CI repair intent and records its dedupe action', async () => {
-    const event = makeEvent({
-      failedChecks: [
-        { name: 'unit', conclusion: 'FAILURE', detailsUrl: 'https://github.com/owner/repo/actions/1' },
-        { name: 'lint', conclusion: 'FAILURE', detailsUrl: 'https://github.com/owner/repo/actions/2' },
-      ],
-    });
-    const sameChecksDifferentOrder = makeEvent({
-      failedChecks: [...event.failedChecks].reverse(),
-    });
-    const harness = makeHarness();
-    const tick = createCiFailureTick({
-      store: harness.store,
-      submitter: { submit: harness.submit },
-      logger,
-      attemptLedger: harness.attemptLedger,
-      defaultAutoFixRetries: 2,
-      getAutoFixAgent: () => 'codex',
-      getAutoFixExecutionModel: () => 'openai/gpt-5.2',
-      drainEvents: () => [event],
-    });
-
-    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1, signal: new AbortController().signal });
-
-    expect(ciFailureActionKey(sameChecksDifferentOrder)).toBe(ciFailureActionKey(event));
-    expect(harness.submit).toHaveBeenCalledTimes(1);
-    const [, , , args] = harness.submit.mock.calls[0];
-    const parsed = parseFixWithAgentMutationArgs(args);
-    expect(parsed).toMatchObject({
-      taskId: 'wf-1/merge',
-      agentName: 'codex',
-      context: {
-        autoFix: true,
-        executionModel: 'openai/gpt-5.2',
-        reviewGateContext: {
-          reviewId: '123',
-          generation: 2,
-          selectedAttemptId: 'attempt-1',
-          headSha: 'sha-1',
-        },
-      },
-    });
-    expect(harness.actions.get(`${CI_FAILURE_WORKER_KIND}:${ciFailureActionKey(event)}`)).toMatchObject({
-      workerKind: CI_FAILURE_WORKER_KIND,
-      actionType: 'fix-ci-failure',
-      status: 'queued',
-      intentId: '42',
-      externalKey: ciFailureActionKey(event),
-    });
-  });
-
-  it('queues CI repair while the in-memory retry budget allows it', async () => {
+  it('records failed CI repair submission without burning the in-memory retry budget', async () => {
     const event = makeEvent();
-    const harness = makeHarness();
-    const tick = createCiFailureTick({
-      store: harness.store,
-      submitter: { submit: harness.submit },
-      logger,
-      attemptLedger: harness.attemptLedger,
-      defaultAutoFixRetries: 2,
-      drainEvents: () => [event],
-    });
-
-    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1, signal: new AbortController().signal });
-
-    expect(harness.submit).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips CI repair once the in-memory retry budget is exhausted', async () => {
-    const event = makeEvent();
-    const harness = makeHarness();
-    harness.attemptLedger.consume(autoFixAttemptLedgerKeyFromLifecycleEvent(event), 1);
-    const tick = createCiFailureTick({
+    const harness = makeRepairHarness();
+    harness.submit
+      .mockImplementationOnce(() => {
+        throw new Error('submit blew up');
+      })
+      .mockImplementation(() => 42);
+    const policy = {
       store: harness.store,
       submitter: { submit: harness.submit },
       logger,
       attemptLedger: harness.attemptLedger,
       defaultAutoFixRetries: 1,
-      drainEvents: () => [event],
+    };
+    const actionKey = `ci-failure:${ciFailureActionKey(event)}`;
+
+    await expect(queueReviewGateCiRepair(policy, event)).resolves.toMatchObject({
+      decision: 'failed',
+      reason: 'submit-failed',
     });
 
-    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1, signal: new AbortController().signal });
-
-    expect(harness.submit).not.toHaveBeenCalled();
-    expect(harness.actions.get(`${CI_FAILURE_WORKER_KIND}:${ciFailureActionKey(event)}`)).toMatchObject({
-      status: 'skipped',
+    expect(harness.submit).toHaveBeenCalledTimes(1);
+    expect(harness.actions.get(actionKey)).toMatchObject({
+      status: 'failed',
+      summary: 'Failed to queue CI repair workflow',
       payload: expect.objectContaining({
-        reason: 'worker-retry-budget-exhausted',
+        reason: 'submit-failed',
+        error: 'submit blew up',
+        channel: SPAWN_REVIEW_GATE_CI_REPAIR_CHANNEL,
+        workerRetryBudget: 1,
+      }),
+    });
+    expect(harness.attemptLedger.get(autoFixAttemptLedgerKeyFromLifecycleEvent(event))).toBe(0);
+
+    await expect(queueReviewGateCiRepair(policy, event)).resolves.toMatchObject({
+      decision: 'queued',
+      reason: 'queued',
+      intentId: 42,
+    });
+
+    expect(harness.submit).toHaveBeenCalledTimes(2);
+    expect(harness.actions.get(actionKey)).toMatchObject({
+      status: 'queued',
+      summary: 'Queued CI repair workflow',
+      attemptCount: 1,
+      intentId: '42',
+      payload: expect.objectContaining({
+        channel: SPAWN_REVIEW_GATE_CI_REPAIR_CHANNEL,
         workerRetryBudget: 1,
       }),
     });
   });
 
-  it('rejects stale CI failure events when the PR head changed before submit', async () => {
-    const event = makeEvent();
-    const task = makeTask({
-      execution: {
-        reviewGate: {
-          activeGeneration: 2,
-          completion: { required: 'all', status: 'approved' },
-          artifacts: [{
-            id: 'pr-123',
-            providerId: '123',
-            required: true,
-            status: 'open',
-            generation: 2,
-            headSha: 'sha-2',
-          }],
-        },
-      },
-    });
-    const harness = makeHarness(task);
-    const tick = createCiFailureTick({
-      store: harness.store,
-      submitter: { submit: harness.submit },
-      logger,
-      defaultAutoFixRetries: 2,
-      attemptLedger: harness.attemptLedger,
-      drainEvents: () => [event],
-    });
-
-    await tick({ identity: { kind: CI_FAILURE_WORKER_KIND, instanceId: 'test' }, reason: 'wake', tickNumber: 1, signal: new AbortController().signal });
-
-    expect(harness.submit).not.toHaveBeenCalled();
-    // Stale events are routine scan noise: logged, but NOT recorded as a durable
-    // decision row. Only meaningful skips (e.g. retry-budget-exhausted) persist.
-    expect(harness.actions.get(`${CI_FAILURE_WORKER_KIND}:${ciFailureActionKey(event)}`)).toBeUndefined();
-    expect(harness.store.upsertWorkerAction).not.toHaveBeenCalled();
-  });
   it('does not publish a CI repair intent for pending checks or merge-conflict-only polls', async () => {
     const publish = vi.fn();
     const host = {

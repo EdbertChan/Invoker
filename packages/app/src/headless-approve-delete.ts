@@ -8,7 +8,7 @@
  */
 
 import { makeEnvelope } from '@invoker/contracts';
-import type { TaskState } from '@invoker/workflow-core';
+import type { TaskState, ExternalGatePolicy } from '@invoker/workflow-core';
 import { TaskRunner } from '@invoker/execution-engine';
 import { approveTask } from './workflow-actions.js';
 import { openExternalTerminalForTask } from './open-terminal-for-task.js';
@@ -23,6 +23,8 @@ import {
   trackHeadlessWorkflow,
   withRestoredTaskUnlessDeleteAllWon,
   preemptWorkflowExecution,
+  isRaceLostForeignKeyConstraintFailure,
+  dispatchHeadlessRunnableTasks,
 } from './headless-shared.js';
 
 function buildHeadlessApproveAction(
@@ -59,7 +61,7 @@ export async function headlessApprove(taskId: string, deps: HeadlessDeps): Promi
     const approveTaskAction = buildHeadlessApproveAction(deps, te);
     const beforeStatus = deps.orchestrator.getWorkflowStatus(restored.workflowId);
     const { started } = await approveTaskAction(taskId);
-    await finalizeMutationWithGlobalTopup({
+    const { topup } = await finalizeMutationWithGlobalTopup({
       orchestrator: deps.orchestrator,
       taskExecutor: te,
       logger: deps.logger,
@@ -68,6 +70,7 @@ export async function headlessApprove(taskId: string, deps: HeadlessDeps): Promi
       mutationTiming: deps.mutationTiming,
       scopedTaskIds: [taskId],
     });
+    await dispatchHeadlessRunnableTasks(deps, te, topup, 'headless.approve');
     process.stdout.write(`Approved task: ${taskId}\n`);
     if (deps.noTrack) {
       process.stdout.write('[headless] --no-track enabled: approve accepted; exiting without tracking.\n');
@@ -92,11 +95,13 @@ export async function headlessApprove(taskId: string, deps: HeadlessDeps): Promi
     const hasRunningWork = workflowTasks.some(
       (task) => task.status === 'running' || task.status === 'fixing_with_ai',
     );
+    const hasQueuedTopup = topup.some((task) => task.status !== 'running');
     const resumedWork =
       hasRunningWork
       || afterStatus.running > beforeStatus.running
       || afterStatus.pending < beforeStatus.pending
-      || readyTasks.length > 0;
+      || readyTasks.length > 0
+      || hasQueuedTopup;
     if (!resumedWork) {
       return;
     }
@@ -306,6 +311,17 @@ export async function headlessDeleteTask(taskId: string, deps: HeadlessDeps): Pr
   });
 }
 
+export async function headlessCloseTask(taskId: string, deps: Pick<HeadlessDeps, 'commandService' | 'orchestrator' | 'persistence'>): Promise<void> {
+  if (!taskId) throw new Error('Missing taskId. Usage: --headless close-task <taskId>');
+  await withRestoredTaskUnlessDeleteAllWon(taskId, deps, 'close-task', async (restored) => {
+    taskId = restored.resolvedTaskId;
+    const envelope = makeEnvelope('close-task', 'headless', 'task', { taskId });
+    const result = await deps.commandService.closeIdleTask(envelope);
+    if (!result.ok) throw new Error(result.error.message);
+    process.stdout.write(`Closed task: ${taskId}\n`);
+  });
+}
+
 export async function headlessDeleteWorkflow(workflowId: string, deps: HeadlessDeps): Promise<void> {
   if (!workflowId) throw new Error('Missing workflowId. Usage: --headless delete-workflow <workflowId>');
   // Preempt running tasks (kill processes + cancel) — matches owner-mode bridge contract
@@ -315,7 +331,9 @@ export async function headlessDeleteWorkflow(workflowId: string, deps: HeadlessD
   // Serialized via CommandService: DB delete + memory clear + scheduler cleanup + removal deltas
   const envelope = makeEnvelope('delete-workflow', 'headless', 'workflow', { workflowId });
   const result = await deps.commandService.deleteWorkflow(envelope);
-  if (!result.ok) throw new Error(result.error.message);
+  if (!result.ok && !isRaceLostForeignKeyConstraintFailure(result.error.message, workflowId, deps)) {
+    throw new Error(result.error.message);
+  }
   process.stdout.write(`Deleted workflow: ${workflowId}\n`);
 }
 
@@ -340,5 +358,40 @@ export async function headlessDetachWorkflow(
   process.stdout.write(
     `Detached workflow ${workflowId} from upstream workflow ${upstreamWorkflowId}. ` +
       `Active dependency removed; detached lineage remains visible.\n`,
+  );
+}
+
+export async function headlessAttachWorkflow(
+  workflowId: string,
+  upstreamWorkflowId: string,
+  flags: string[],
+  deps: Pick<HeadlessDeps, 'commandService'>,
+): Promise<void> {
+  if (!workflowId || !upstreamWorkflowId) {
+    throw new Error(
+      'Missing arguments. Usage: --headless attach-workflow <workflowId> <upstreamWorkflowId> '
+      + '[--gate-policy completed|review_ready|ci_failed] [--task-id <taskId>] [--force]',
+    );
+  }
+  const gatePolicyIndex = flags.indexOf('--gate-policy');
+  const taskIdIndex = flags.indexOf('--task-id');
+  const rawGatePolicy = gatePolicyIndex >= 0 ? flags[gatePolicyIndex + 1] : undefined;
+  const validGatePolicies: readonly ExternalGatePolicy[] = ['completed', 'review_ready', 'ci_failed'];
+  if (rawGatePolicy !== undefined && !validGatePolicies.includes(rawGatePolicy as ExternalGatePolicy)) {
+    throw new Error(`Invalid --gate-policy "${rawGatePolicy}"; expected one of ${validGatePolicies.join(', ')}`);
+  }
+  const gatePolicy = rawGatePolicy as ExternalGatePolicy | undefined;
+  const envelope = makeEnvelope('attach-workflow', 'headless', 'workflow', {
+    workflowId,
+    upstreamWorkflowId,
+    ...(gatePolicy !== undefined ? { gatePolicy } : {}),
+    ...(taskIdIndex >= 0 ? { taskId: flags[taskIdIndex + 1] } : {}),
+    ...(flags.includes('--force') ? { force: true } : {}),
+  });
+  const result = await deps.commandService.attachWorkflow(envelope);
+  if (!result.ok) throw new Error(result.error.message);
+  process.stdout.write(
+    `Attached workflow ${workflowId} to upstream workflow ${upstreamWorkflowId}. `
+    + `Dependency added; any previously detached lineage for this upstream was cleared.\n`,
   );
 }

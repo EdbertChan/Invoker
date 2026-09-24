@@ -1,6 +1,6 @@
 import type { SQLiteAdapter, Workflow, WorkerActionWrite } from '@invoker/data-store';
-import type { TaskState } from '@invoker/workflow-core';
-import { AUTO_STARTED_OWNER_WORKER_KINDS } from './worker-control.js';
+import { BUILT_IN_LOCAL_EXECUTION_POOL_ID, type TaskState } from '@invoker/workflow-core';
+import { ALWAYS_AUTO_STARTED_OWNER_WORKER_KINDS, PR_MAINTENANCE_AUTO_STARTED_WORKER_KINDS } from './worker-control.js';
 import {
   buildRecoveryWorkerAuditPayload,
   recoveryWorkerEventType,
@@ -14,13 +14,18 @@ const DEFAULT_ACTIONS_PER_KIND = 80;
 
 const ACTION_WORKER_KINDS = [
   'autofix',
-  ...AUTO_STARTED_OWNER_WORKER_KINDS,
+  ...ALWAYS_AUTO_STARTED_OWNER_WORKER_KINDS,
+  ...PR_MAINTENANCE_AUTO_STARTED_WORKER_KINDS,
 ] as const;
 
 export interface MainProcessHitchFixtureOptions {
   taskCount?: number;
   eventsPerTask?: number;
   actionsPerKind?: number;
+  /** Defaults to completed so dbPoll does not keep syncing a perpetual running workflow. */
+  workflowStatus?: Workflow['status'];
+  /** Defaults to completed so the hitch fixture is inert unless a test opts in. */
+  taskStatus?: TaskState['status'];
 }
 
 export interface MainProcessHitchFixtureResult {
@@ -30,25 +35,27 @@ export interface MainProcessHitchFixtureResult {
   workerActionCount: number;
 }
 
-function makeWorkflow(id: string, name: string): Workflow {
+function makeWorkflow(id: string, name: string, status: Workflow['status']): Workflow {
   return {
     id,
     name,
-    status: 'running',
+    status,
     createdAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-01T00:00:00.000Z',
   };
 }
 
-function makeTask(id: string): TaskState {
+function makeTask(id: string, status: TaskState['status']): TaskState {
   return {
     id,
     description: `Task ${id}`,
-    status: 'pending',
+    status,
     dependencies: [],
     createdAt: new Date('2026-07-01T00:00:00.000Z'),
-    config: {},
-    execution: {},
+    config: { runnerKind: 'worktree', poolId: BUILT_IN_LOCAL_EXECUTION_POOL_ID },
+    execution: status === 'completed'
+      ? { exitCode: 0, completedAt: new Date('2026-07-01T00:00:01.000Z') }
+      : {},
     taskStateVersion: 1,
   };
 }
@@ -60,15 +67,17 @@ export function seedMainProcessHitchFixture(
   const taskCount = options.taskCount ?? DEFAULT_TASK_COUNT;
   const eventsPerTask = options.eventsPerTask ?? DEFAULT_EVENTS_PER_TASK;
   const actionsPerKind = options.actionsPerKind ?? DEFAULT_ACTIONS_PER_KIND;
+  const workflowStatus = options.workflowStatus ?? 'completed';
+  const taskStatus = options.taskStatus ?? 'completed';
   const workflowId = MAIN_PROCESS_HITCH_FIXTURE_WORKFLOW_ID;
   let workerActionCount = 0;
 
   persistence.runInTransaction(() => {
-    persistence.saveWorkflow(makeWorkflow(workflowId, 'Main-process hitch fixture'));
+    persistence.saveWorkflow(makeWorkflow(workflowId, 'Main-process hitch fixture', workflowStatus));
 
     for (let t = 0; t < taskCount; t += 1) {
       const taskId = `${workflowId}/t${t}`;
-      persistence.saveTask(workflowId, makeTask(taskId));
+      persistence.saveTask(workflowId, makeTask(taskId, taskStatus));
       for (let e = 0; e < eventsPerTask; e += 1) {
         const action = e % 4 === 0 ? 'wakeup'
           : e % 4 === 1 ? 'scan'

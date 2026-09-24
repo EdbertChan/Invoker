@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { Orchestrator } from '../orchestrator.js';
+import { Orchestrator, isAttemptLeaseActive } from '../orchestrator.js';
 import { InMemoryPersistence, InMemoryBus } from './helpers/cross-workflow-cascade-helpers.js';
+import { createAttempt } from '@invoker/workflow-graph';
+import { ATTEMPT_LEASE_MS } from '@invoker/contracts';
 
 function makeOrchestratorWith(persistence: InMemoryPersistence, maxConcurrency: number): Orchestrator {
   return new Orchestrator({ persistence, messageBus: new InMemoryBus(), maxConcurrency });
@@ -85,5 +87,41 @@ describe('zombie running task consumes a concurrency slot', () => {
     const started = orchestrator.startExecution();
     expect(started.map((t) => t.id)).toContain(waitingId);
     expect(orchestrator.getQueueStatus({ refresh: true }).runningCount).toBeLessThanOrEqual(1);
+  });
+
+  it('isAttemptLeaseActive: true for a running attempt with no leaseExpiresAt and a recent heartbeat, false once the heartbeat goes stale', () => {
+    const now = Date.now();
+    const attempt = createAttempt('task-1', {
+      status: 'running',
+      lastHeartbeatAt: new Date(now),
+    });
+
+    expect(isAttemptLeaseActive(attempt, now)).toBe(true);
+    expect(isAttemptLeaseActive(attempt, now + ATTEMPT_LEASE_MS + 1)).toBe(false);
+  });
+});
+
+describe('isAttemptLeaseActive', () => {
+  it('returns true for a running attempt with no leaseExpiresAt and a recent heartbeat', () => {
+    const now = Date.now();
+    const attempt = createAttempt('task-a', {
+      status: 'running',
+      lastHeartbeatAt: new Date(now - 1000),
+      leaseExpiresAt: undefined,
+    });
+
+    expect(isAttemptLeaseActive(attempt, now)).toBe(true);
+  });
+
+  it('returns false once now passes lastHeartbeatAt + ATTEMPT_LEASE_MS', () => {
+    const heartbeatAt = new Date(0);
+    const attempt = createAttempt('task-a', {
+      status: 'running',
+      lastHeartbeatAt: heartbeatAt,
+      leaseExpiresAt: undefined,
+    });
+
+    expect(isAttemptLeaseActive(attempt, heartbeatAt.getTime() + ATTEMPT_LEASE_MS)).toBe(true);
+    expect(isAttemptLeaseActive(attempt, heartbeatAt.getTime() + ATTEMPT_LEASE_MS + 1)).toBe(false);
   });
 });

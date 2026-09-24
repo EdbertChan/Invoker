@@ -22,6 +22,11 @@ import type { CommandService, Orchestrator, ExternalGatePolicyUpdate, TaskState 
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { TaskRunner } from '@invoker/execution-engine';
 import {
+  parseSpawnRepairWorkflowMutationArgs,
+  submitRepairWorkflowFromCiFailure,
+  type RepairWorkflowSpawnResult,
+} from '@invoker/execution-engine';
+import {
   approveTask as sharedApproveTask,
   rejectTask as sharedRejectTask,
   provideInput as sharedProvideInput,
@@ -35,6 +40,7 @@ import {
   editTaskPrompt as sharedEditTaskPrompt,
   editTaskType as sharedEditTaskType,
   editTaskAgent as sharedEditTaskAgent,
+  editTaskModel as sharedEditTaskModel,
   setTaskExternalGatePolicies as sharedSetTaskExternalGatePolicies,
   setWorkflowExternalGatePolicies as sharedSetWorkflowExternalGatePolicies,
   setWorkflowMergeMode as sharedSetWorkflowMergeMode,
@@ -95,6 +101,11 @@ export interface ResolveConflictMutationResult extends MutationResult {
   autoApproved: boolean;
 }
 
+export interface SpawnRepairWorkflowMutationResult extends MutationResult {
+  detail: RepairWorkflowSpawnResult;
+  workflowId?: string;
+}
+
 type DispatchScope = {
   scopedWorkflowId?: string;
   scopedTaskIds?: string[];
@@ -110,6 +121,10 @@ export interface WorkflowMutationFacadeDeps {
   taskExecutor: TaskRunner;
   dispatchMode?: 'await' | 'fire-and-forget';
   autoApproveAIFixes?: boolean;
+  allowGraphMutation?: boolean;
+  defaultAutoFixRetries?: number;
+  getAutoFixAgent?: () => string | undefined;
+  getAutoFixExecutionModel?: () => string | undefined;
   /** Optional pre-kill hook for active task executions. */
   killRunningTask?: (taskId: string) => Promise<void>;
 }
@@ -121,7 +136,11 @@ export interface WorkflowMutationFacadeDeps {
  * lifecycle shared by all entrypoints.
  */
 export class WorkflowMutationFacade {
-  constructor(private readonly deps: WorkflowMutationFacadeDeps) {}
+  private readonly deps: WorkflowMutationFacadeDeps;
+
+  constructor(deps: WorkflowMutationFacadeDeps) {
+    this.deps = deps;
+  }
 
   // ── Task-scoped mutations ────────────────────────────────
 
@@ -247,6 +266,14 @@ export class WorkflowMutationFacade {
     return this.finalizeWithTopup(started, 'facade.edit-task-agent', { scopedTaskIds: [taskId] });
   }
 
+  async editTaskModel(taskId: string, executionModel: string | null): Promise<MutationResult> {
+    await this.closeReviewForTask(taskId);
+    const started = sharedEditTaskModel(taskId, executionModel, {
+      orchestrator: this.deps.orchestrator,
+    });
+    return this.finalizeWithTopup(started, 'facade.edit-task-model', { scopedTaskIds: [taskId] });
+  }
+
   async setTaskExternalGatePolicies(
     taskId: string,
     updates: ExternalGatePolicyUpdate[],
@@ -328,6 +355,39 @@ export class WorkflowMutationFacade {
     await this.closeReviewForWorkflow(workflowId);
     const started = await sharedRebaseRecreate(target, this.actionDeps());
     return this.finalizeWithTopup(started, 'facade.rebase-recreate', { scopedWorkflowId: workflowId });
+  }
+
+  async spawnRepairWorkflow(payloadArg: unknown): Promise<SpawnRepairWorkflowMutationResult> {
+    const payload = parseSpawnRepairWorkflowMutationArgs([payloadArg]);
+    const detail = submitRepairWorkflowFromCiFailure({
+      store: this.deps.persistence,
+      orchestrator: this.deps.orchestrator,
+      logger: this.deps.logger,
+      allowGraphMutation: this.deps.allowGraphMutation,
+      defaultAutoFixRetries: this.deps.defaultAutoFixRetries,
+      getAutoFixAgent: this.deps.getAutoFixAgent,
+      getAutoFixExecutionModel: this.deps.getAutoFixExecutionModel,
+    }, payload);
+    if (detail.decision !== 'spawned' || !detail.workflowId) {
+      return {
+        detail,
+        started: [],
+        runnable: [],
+        topup: [],
+      };
+    }
+    const { runnable, topup } = await this.dispatchWithTopup(
+      detail.started,
+      'facade.spawn-repair-workflow',
+      { scopedWorkflowId: detail.workflowId },
+    );
+    return {
+      detail,
+      workflowId: detail.workflowId,
+      started: detail.started,
+      runnable,
+      topup,
+    };
   }
 
   async cancelWorkflow(workflowId: string): Promise<CancelMutationResult> {

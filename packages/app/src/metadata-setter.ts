@@ -1,5 +1,5 @@
 import type { CommandService, TaskStateChanges } from '@invoker/workflow-core';
-import { normalizeRunnerKind } from '@invoker/workflow-core';
+import { normalizeRunnerKind, normalizeWorkflowBaseBranch } from '@invoker/workflow-core';
 import type { SQLiteAdapter, Workflow } from '@invoker/data-store';
 import type { Orchestrator } from '@invoker/workflow-core';
 
@@ -163,7 +163,10 @@ function validateWorkflowValue(fieldPath: string, value: unknown, raw: boolean):
     return { onFinish: enumValue<'none' | 'merge' | 'pull_request'>(path, value, ['none', 'merge', 'pull_request']) ?? undefined };
   }
   if (path === 'mergeMode') {
-    return { mergeMode: enumValue<'manual' | 'automatic' | 'external_review'>(path, value, ['manual', 'automatic', 'external_review']) ?? undefined };
+    return { mergeMode: enumValue<'manual' | 'automatic' | 'external_review' | 'no_op'>(path, value, ['manual', 'automatic', 'external_review', 'no_op']) ?? undefined };
+  }
+  if (path === 'baseBranch') {
+    return { baseBranch: normalizeWorkflowBaseBranch(value == null ? null : String(value)) };
   }
   if (path === 'externalDependencies' || path === 'externalDependencyChanges') {
     if (value !== null && !Array.isArray(value)) throw new Error(`Field "${fieldPath}" must be an array or null.`);

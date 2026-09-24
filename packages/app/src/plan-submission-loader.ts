@@ -1,0 +1,117 @@
+import type { InAppPlanningRepoBinding, Logger } from '@invoker/contracts';
+import { PINNED_WORKFLOW_BASE_BRANCH, type PlanDefinition } from '@invoker/workflow-core';
+import {
+  registerBuiltinAgents,
+  assertPlanExecutionAgentsRegistered,
+  type AgentRegistry,
+} from '@invoker/execution-engine';
+import { backupPlan } from './plan-backup.js';
+
+export interface PlanSubmissionLoadResult {
+  planName: string;
+  workflowId: string;
+  workflowIds?: string[];
+  workflowCount?: number;
+}
+
+export interface PlanSubmissionLoadDeps {
+  persistence: {
+    loadWorkflow?(workflowId: string): { id: string; featureBranch?: string; staged?: boolean } | undefined;
+    listWorkflows(): Array<{ id: string; featureBranch?: string; staged?: boolean }>;
+    updateWorkflow(workflowId: string, changes: { staged: boolean }): void;
+  };
+  orchestrator: { loadPlan(plan: PlanDefinition, opts: { allowGraphMutation?: boolean; staged?: boolean }): string };
+  allowGraphMutation?: boolean;
+  logger?: Logger;
+  executionAgentRegistry?: AgentRegistry;
+}
+
+export interface PlanSubmissionLoadOptions {
+  logLabel?: string;
+  preserveTaskHandles?: boolean;
+  repositoryBinding?: InAppPlanningRepoBinding;
+  taskHandles?: { clear(): void };
+  staged?: boolean;
+  submittedBy?: 'worker' | 'human';
+}
+
+export async function loadPlanSubmissionBundle(
+  planText: string,
+  deps: PlanSubmissionLoadDeps,
+  options?: PlanSubmissionLoadOptions,
+): Promise<PlanSubmissionLoadResult> {
+  const {
+    applyConfiguredPlanDefaults,
+    applyWorkerSubmittedTaskPriorityDefault,
+    parsePlanSubmissionBundle,
+  } = await import('./plan-parser.js');
+  const submission = parsePlanSubmissionBundle(planText);
+  const loadedWorkflowIds: string[] = [];
+  let upstream: { workflowId: string; featureBranch: string } | undefined;
+
+  if (options?.logLabel) {
+    deps.logger?.info(
+      `${options.logLabel}: loading "${submission.name}" (${submission.plans.length} workflow${submission.plans.length === 1 ? '' : 's'})`,
+      { module: 'ipc' },
+    );
+  }
+  if (options?.taskHandles && !options.preserveTaskHandles) {
+    options.taskHandles.clear();
+  }
+
+  const execRegistry = deps.executionAgentRegistry ?? registerBuiltinAgents();
+  for (const parsedPlan of submission.plans) {
+    assertPlanExecutionAgentsRegistered(parsedPlan, execRegistry);
+  }
+
+  for (const parsedPlan of submission.plans) {
+    const resolvedPlan = parsedPlan.repoUrl === '.' && options?.repositoryBinding
+      ? { ...parsedPlan, repoUrl: options.repositoryBinding.repoUrl }
+      : parsedPlan;
+    let plan = applyConfiguredPlanDefaults(resolvedPlan);
+    if (options?.submittedBy === 'worker') {
+      plan = applyWorkerSubmittedTaskPriorityDefault(plan);
+    }
+    if (!submission.isStack) {
+      plan = { ...plan, baseBranch: PINNED_WORKFLOW_BASE_BRANCH };
+    }
+    if (upstream) {
+      plan = {
+        ...plan,
+        baseBranch: upstream.featureBranch,
+        externalDependencies: [
+          ...(plan.externalDependencies ?? []),
+          {
+            workflowId: upstream.workflowId,
+            taskId: '__merge__',
+            requiredStatus: 'completed',
+            gatePolicy: 'review_ready',
+          } as const,
+        ],
+      };
+    }
+    backupPlan(plan, undefined, deps.logger);
+    const loadedWorkflowId = deps.orchestrator.loadPlan(plan, { allowGraphMutation: deps.allowGraphMutation, staged: options?.staged });
+    const workflow = deps.persistence.loadWorkflow?.(loadedWorkflowId)
+      ?? deps.persistence.listWorkflows().find((candidate) => candidate.id === loadedWorkflowId);
+    if (!workflow) {
+      throw new Error('Loaded plan did not create a workflow.');
+    }
+    if (options?.staged && workflow.staged !== true) {
+      deps.persistence.updateWorkflow(workflow.id, { staged: true });
+    }
+    loadedWorkflowIds.push(workflow.id);
+    upstream = { workflowId: workflow.id, featureBranch: workflow.featureBranch ?? plan.featureBranch ?? plan.baseBranch ?? 'main' };
+  }
+
+  const workflowId = loadedWorkflowIds[loadedWorkflowIds.length - 1];
+  if (!workflowId) {
+    throw new Error('Loaded plan did not create a workflow.');
+  }
+  return {
+    planName: submission.name,
+    workflowId,
+    workflowIds: loadedWorkflowIds,
+    workflowCount: loadedWorkflowIds.length,
+  };
+}

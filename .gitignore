@@ -5,6 +5,7 @@ dist/
 .env*
 .DS_Store
 coverage/
+.playwright-artifacts/
 .claude/worktrees/
 *.tsbuildinfo
 tsup.config.bundled_*.mjs
@@ -44,3 +45,13 @@ local-builds/
 
 # Local pipeline secrets/config
 config/nightly-usage.env
+__pycache__/
+
+# Bazel
+/bazel-*
+/.bazelrc.user
+user.bazelrc
+
+# PR Body diff metadata (scripts/fetch-pr-diff-metadata.sh)
+/changed-files.txt
+/pr.diff

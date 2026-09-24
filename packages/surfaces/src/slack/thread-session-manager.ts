@@ -14,8 +14,9 @@
  */
 
 import { PlanConversation } from './plan-conversation.js';
-import type { ConversationMode, PlanningCommandBuilder } from './plan-conversation.js';
-import type { ConversationRepository } from '@invoker/data-store';
+import type { ConversationMode, PlanIntentSignal, PlanningCommandBuilder } from './plan-conversation.js';
+import type { ConversationRepository, PlanningDraft } from '@invoker/data-store';
+import type { HarnessSessionDriver } from '@invoker/execution-engine';
 import type { LogFn } from '../surface.js';
 
 // ── Types ───────────────────────────────────────────────────────
@@ -101,6 +102,34 @@ export class SessionHandle {
     return this.conversation.sendMessage(message);
   }
 
+  async runPlanConversion(): Promise<string> {
+    if (this.disposed) {
+      throw new Error(`Session ${this.id} has been disposed`);
+    }
+    this.metadata.lastAccessedAt = new Date();
+    return this.conversation.runPlanConversion();
+  }
+
+  get history() {
+    return this.conversation.history;
+  }
+
+  get lastTurnDraftPlanText(): string | null {
+    return this.conversation.lastTurnDraftPlanText;
+  }
+
+  get approvedPlanningDraft(): PlanningDraft | null {
+    return this.conversation.approvedPlanningDraft;
+  }
+
+  get draftDoctorEnabled(): boolean {
+    return this.conversation.draftDoctorEnabled;
+  }
+
+  get lastTurnPlanIntentSignal(): PlanIntentSignal | null {
+    return this.conversation.lastTurnPlanIntentSignal;
+  }
+
   /**
    * Get the raw plan text submitted via confirmation.
    */
@@ -119,6 +148,12 @@ export class SessionHandle {
   get conversationMode(): ConversationMode {
     return this.conversation.conversationMode;
   }
+
+  /** Current harness session id, if a session driver has established one. */
+  get harnessSessionId(): string | undefined {
+    return this.conversation.harnessSessionId;
+  }
+
   /** Returns the last complete YAML plan drafted in this conversation, or null. */
   getDraftedPlan(): string | null {
     return this.conversation.getDraftedPlan();
@@ -181,6 +216,10 @@ export interface SessionManagerConfig {
   plannerRetryBaseDelayMs?: number;
   /** Opt in to scoping-first conversational planning before YAML drafting. Default: false. */
   conversationalPlanning?: boolean;
+  /** Canonical full skill-doctor script used before exposing review drafts. */
+  planDoctorScriptPath?: string;
+  /** Fired whenever a session establishes or updates its harness session id, so callers can persist it. */
+  onHarnessSessionId?: (id: SessionIdentifier, sessionId: string) => void;
 }
 
 export interface SessionMetrics {
@@ -189,6 +228,16 @@ export interface SessionMetrics {
   submitted: number;
   active: number;
 }
+
+type SessionOptions = {
+  tool?: string;
+  model?: string;
+  workingDir?: string;
+  mode?: ConversationMode;
+  repoUrl?: string;
+  harnessSessionDriver?: HarnessSessionDriver;
+  harnessSessionId?: string;
+};
 
 const defaultLog: LogFn = (component, level, message) => {
   const prefix = `[${component}]`;
@@ -222,6 +271,8 @@ export class SessionManager {
   private readonly plannerRetryLimit?: number;
   private readonly plannerRetryBaseDelayMs?: number;
   private readonly conversationalPlanning: boolean;
+  private readonly planDoctorScriptPath?: string;
+  private readonly onHarnessSessionId?: (id: SessionIdentifier, sessionId: string) => void;
 
   constructor(config: SessionManagerConfig) {
     this.cursorCommand = config.cursorCommand ?? 'agent';
@@ -240,6 +291,8 @@ export class SessionManager {
     this.plannerRetryLimit = config.plannerRetryLimit;
     this.plannerRetryBaseDelayMs = config.plannerRetryBaseDelayMs;
     this.conversationalPlanning = config.conversationalPlanning ?? false;
+    this.planDoctorScriptPath = config.planDoctorScriptPath;
+    this.onHarnessSessionId = config.onHarnessSessionId;
   }
 
   /**
@@ -275,7 +328,7 @@ export class SessionManager {
   async getOrCreateSession(
     id: SessionIdentifier,
     userId: string,
-    opts?: { tool?: string; model?: string; workingDir?: string; mode?: ConversationMode; repoUrl?: string },
+    opts?: SessionOptions,
   ): Promise<SessionHandle | null> {
     const key = id.toString();
 
@@ -305,13 +358,13 @@ export class SessionManager {
 
     if (!loaded) {
       this.log('session-manager', 'info', `No persisted conversation for ${id.threadTs}`);
-    } else if (loaded.channelId !== id.channelId && loaded.channelId !== '') {
-      this.log('session-manager', 'warn', `Channel mismatch for ${id.threadTs}: expected=${id.channelId}, found=${loaded.channelId}`);
+    } else if (loaded.channelId !== id.channelId) {
+      this.log('session-manager', 'warn', `Channel mismatch for ${id.threadTs}: expected=${id.channelId}, found=${loaded.channelId || '(empty)'}`);
     }
 
     let handle: SessionHandle;
 
-    if (loaded && (loaded.channelId === id.channelId || loaded.channelId === '')) {
+    if (loaded && loaded.channelId === id.channelId) {
       // Recover existing session
       this.log('session-manager', 'info', `Recovering session ${key} from database`);
 
@@ -324,6 +377,7 @@ export class SessionManager {
         planningCommandBuilder: this.planningCommandBuilder,
         workingDir: opts?.workingDir ?? this.workingDir,
         threadTs: id.threadTs,
+        channelId: id.channelId,
         conversationRepo: this.conversationRepo,
         defaultBranch: this.defaultBranch,
         repoUrl: opts?.repoUrl ?? this.repoUrl,
@@ -332,6 +386,11 @@ export class SessionManager {
         plannerRetryLimit: this.plannerRetryLimit,
         plannerRetryBaseDelayMs: this.plannerRetryBaseDelayMs,
         conversationalPlanning: this.conversationalPlanning,
+        planningSurface: 'slack',
+        planDoctorScriptPath: this.planDoctorScriptPath,
+        harnessSessionDriver: opts?.harnessSessionDriver,
+        harnessSessionId: opts?.harnessSessionId,
+        onHarnessSessionId: this.onHarnessSessionId ? (sessionId) => this.onHarnessSessionId!(id, sessionId) : undefined,
       });
       await conversation.init(); // Load state from database
       this.log('session-manager', 'info', `[TRACE] Recovery init() done (threadTs=${id.threadTs})`);
@@ -358,6 +417,7 @@ export class SessionManager {
         planningCommandBuilder: this.planningCommandBuilder,
         workingDir: opts?.workingDir ?? this.workingDir,
         threadTs: id.threadTs,
+        channelId: id.channelId,
         conversationRepo: this.conversationRepo,
         defaultBranch: this.defaultBranch,
         repoUrl: opts?.repoUrl ?? this.repoUrl,
@@ -366,6 +426,11 @@ export class SessionManager {
         plannerRetryLimit: this.plannerRetryLimit,
         plannerRetryBaseDelayMs: this.plannerRetryBaseDelayMs,
         conversationalPlanning: this.conversationalPlanning,
+        planningSurface: 'slack',
+        planDoctorScriptPath: this.planDoctorScriptPath,
+        harnessSessionDriver: opts?.harnessSessionDriver,
+        harnessSessionId: opts?.harnessSessionId,
+        onHarnessSessionId: this.onHarnessSessionId ? (sessionId) => this.onHarnessSessionId!(id, sessionId) : undefined,
       });
       // Don't call init() for new sessions — nothing to load
 
@@ -466,14 +531,14 @@ export class SessionManager {
    * Look up an existing session without creating a new persisted conversation.
    * Rehydrates an active persisted conversation after memory eviction.
    */
-  async getSession(id: SessionIdentifier, userId: string): Promise<SessionHandle | null> {
+  async getSession(id: SessionIdentifier, userId: string, opts?: SessionOptions): Promise<SessionHandle | null> {
     const existing = this.sessions.get(id.toString());
     if (existing) return existing;
     const persisted = this.conversationRepo.loadConversation(id.threadTs);
-    if (!persisted || persisted.planSubmitted || (persisted.channelId && persisted.channelId !== id.channelId)) {
+    if (!persisted || persisted.planSubmitted || persisted.channelId !== id.channelId) {
       return null;
     }
-    return this.getOrCreateSession(id, userId);
+    return this.getOrCreateSession(id, userId, opts);
   }
 
   findSession(id: SessionIdentifier): SessionHandle | null {

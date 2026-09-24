@@ -1,14 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { parsePlan, parsePlanSubmissionBundle, PlanParseError, detectDefaultBranch, applyPlanDefinitionDefaults, applyConfiguredPlanDefaults } from '../plan-parser.js';
+import { parsePlan, parsePlanFile, parsePlanSubmissionBundle, parsePlanSubmissionBundleFile, PlanParseError, detectDefaultBranch, applyPlanDefinitionDefaults, applyConfiguredPlanDefaults, assertNoDuplicateTaskIds, assertRepoUrlCloneable, assertRemoteRepoUrlCloneable } from '../plan-parser.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import * as childProcess from 'node:child_process';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
-  return { ...actual, execSync: vi.fn(actual.execSync) };
+  return { ...actual, execFile: vi.fn(actual.execFile), execSync: vi.fn(actual.execSync) };
 });
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 
 const isolatedConfigPath = join(tmpdir(), `invoker-plan-parser-config-${process.pid}.json`);
 
@@ -18,7 +19,7 @@ beforeEach(() => {
 });
 
 describe('applyPlanDefinitionDefaults', () => {
-  it('fills baseBranch, featureBranch, onFinish when omitted (minimal yaml.load shape)', () => {
+  it('pins the workflow baseBranch to master when omitted', () => {
     const plan = applyPlanDefinitionDefaults({
       name: 'My Plan',
       repoUrl: 'git@github.com:test/repo.git',
@@ -26,32 +27,30 @@ describe('applyPlanDefinitionDefaults', () => {
     });
     expect(plan.onFinish).toBe('pull_request');
     expect(plan.featureBranch).toBe('plan/my-plan');
-    expect(plan.baseBranch).toBeDefined();
-    expect(typeof plan.baseBranch).toBe('string');
+    expect(plan.baseBranch).toBe('master');
   });
 
-  it('preserves explicit baseBranch, featureBranch, and onFinish', () => {
+  it('preserves explicit workflow baseBranch values for stacked workflows', () => {
     const plan = applyPlanDefinitionDefaults({
       name: 'X',
-      baseBranch: 'develop',
+      baseBranch: 'upstream/develop',
       featureBranch: 'feat/x',
       onFinish: 'merge',
       tasks: [{ id: 'a', description: 'd', command: 'echo' }],
     });
-    expect(plan.baseBranch).toBe('develop');
+    expect(plan.baseBranch).toBe('upstream/develop');
     expect(plan.featureBranch).toBe('feat/x');
     expect(plan.onFinish).toBe('merge');
   });
 
-  it('treats empty or whitespace baseBranch like omitted (YAML `baseBranch:`)', () => {
+  it('pins blank baseBranch values to master too', () => {
     const empty = applyPlanDefinitionDefaults({
       name: 'Remote PR Plan',
       repoUrl: 'git@github.com:test/repo.git',
       baseBranch: '',
       tasks: [{ id: 'a', description: 'd', command: 'echo' }],
     });
-    expect(empty.baseBranch).toBeDefined();
-    expect(empty.baseBranch!.length).toBeGreaterThan(0);
+    expect(empty.baseBranch).toBe('master');
 
     const spaces = applyPlanDefinitionDefaults({
       name: 'Remote PR Plan',
@@ -59,11 +58,132 @@ describe('applyPlanDefinitionDefaults', () => {
       baseBranch: '   ',
       tasks: [{ id: 'a', description: 'd', command: 'echo' }],
     });
-    expect(spaces.baseBranch).toEqual(empty.baseBranch);
+    expect(spaces.baseBranch).toBe('master');
   });
 });
 
 describe('parsePlan', () => {
+  it('rejects a bare repo name before the workflow is created', async () => {
+    const planPath = join(tmpdir(), `invoker-invalid-repo-${process.pid}.yaml`);
+    writeFileSync(planPath, `
+name: Bare Repo
+repoUrl: invoker
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+`);
+
+    await expect(parsePlanFile(planPath)).rejects.toThrow(
+      'repoUrl "invoker" is not a valid git repository',
+    );
+  });
+
+  it('accepts a remote during plan file validation without synchronously probing the network', async () => {
+    const planPath = join(tmpdir(), `invoker-unreachable-repo-${process.pid}.yaml`);
+    writeFileSync(planPath, `
+name: Unreachable Repo
+repoUrl: https://example.invalid/repo.git
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+`);
+    const execFileSyncSpy = vi.spyOn(childProcess, 'execFileSync').mockImplementation(() => {
+      throw new Error('unreachable');
+    });
+
+    await expect(parsePlanFile(planPath)).resolves.toMatchObject({
+      repoUrl: 'https://example.invalid/repo.git',
+    });
+    expect(execFileSyncSpy).not.toHaveBeenCalled();
+    execFileSyncSpy.mockRestore();
+  });
+
+  it('survives a single transient failure of the async remote clone probe', async () => {
+    // Matches the real incident: a momentary git/network blip made
+    // the one-shot probe permanently wedge a PR's
+    // repair claim, because the caller's own error-recovery path also
+    // depends on the same infra and silently swallowed its own failure.
+    const execFileSpy = vi.spyOn(childProcess, 'execFile');
+    execFileSpy.mockImplementationOnce(((_file, _args, _options, callback) => {
+      const err = new Error('git ls-remote failed');
+      (err as { stderr?: Buffer }).stderr = Buffer.from('fatal: unable to access: transient network error');
+      callback?.(err, '', '');
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as typeof childProcess.execFile);
+    execFileSpy.mockImplementationOnce(((_file, _args, _options, callback) => {
+      callback?.(null, '', '');
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as typeof childProcess.execFile);
+
+    await expect(assertRemoteRepoUrlCloneable('https://github.com/example/repo.git')).resolves.toBeUndefined();
+    expect(execFileSpy).toHaveBeenCalledTimes(2);
+    execFileSpy.mockRestore();
+  });
+
+  it('allows an async remote clone probe the same 30-second network budget as remote doctor', async () => {
+    const execFileSpy = vi.spyOn(childProcess, 'execFile').mockImplementation(((_file, _args, _options, callback) => {
+      callback?.(null, '', '');
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as typeof childProcess.execFile);
+
+    await expect(assertRemoteRepoUrlCloneable('https://github.com/example/repo.git')).resolves.toBeUndefined();
+    expect(execFileSpy).toHaveBeenCalledWith(
+      'git',
+      ['ls-remote', '--exit-code', '--', 'https://github.com/example/repo.git', 'HEAD'],
+      expect.objectContaining({ timeout: 30_000 }),
+      expect.any(Function),
+    );
+    execFileSpy.mockRestore();
+  });
+
+  it('does not run the remote probe from the synchronous repoUrl check', () => {
+    const execFileSyncSpy = vi.spyOn(childProcess, 'execFileSync').mockReturnValue(Buffer.from(''));
+    expect(() => assertRepoUrlCloneable('https://github.com/example/repo.git')).not.toThrow();
+    expect(execFileSyncSpy).not.toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining(['ls-remote']),
+      expect.objectContaining({ timeout: 30_000 }),
+    );
+    execFileSyncSpy.mockRestore();
+  });
+
+  it('surfaces the real git error after all async retry attempts are exhausted', async () => {
+    const execFileSpy = vi.spyOn(childProcess, 'execFile').mockImplementation(((_file, _args, _options, callback) => {
+      const err = new Error('git ls-remote failed');
+      (err as { stderr?: Buffer }).stderr = Buffer.from('fatal: could not resolve host: github.com');
+      callback?.(err, '', '');
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as typeof childProcess.execFile);
+
+    await expect(assertRemoteRepoUrlCloneable('https://github.com/example/repo.git')).rejects.toThrow(
+      'fatal: could not resolve host: github.com',
+    );
+    execFileSpy.mockRestore();
+  });
+
+  it('accepts a file:// checkout URL for the local workspace', async () => {
+    vi.restoreAllMocks();
+    const { pathToFileURL } = await import('node:url');
+    const repoRoot = childProcess.execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+    }).trim();
+    const planPath = join(tmpdir(), `invoker-file-url-repo-${process.pid}.yaml`);
+    writeFileSync(planPath, `
+name: File URL Repo
+repoUrl: ${pathToFileURL(repoRoot).href}
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+`);
+
+    const plan = await parsePlanFile(planPath);
+    expect(plan.repoUrl).toBe(pathToFileURL(repoRoot).href);
+    expect(plan.tasks).toHaveLength(1);
+  });
+
   it('rejects plan without repoUrl', () => {
     const yaml = `
 name: No Repo Plan
@@ -73,7 +193,156 @@ tasks:
     command: echo "Hello"
 `;
     expect(() => parsePlan(yaml)).toThrow(PlanParseError);
-    expect(() => parsePlan(yaml)).toThrow('must have a "repoUrl" field');
+    expect(() => parsePlan(yaml)).toThrow('must have either a "repoUrl" field');
+  });
+
+  it('parses a scratch: true plan with no repoUrl, defaulting onFinish/mergeMode', () => {
+    const yaml = `
+name: Scratch Plan
+scratch: true
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+`;
+    const plan = parsePlan(yaml);
+    expect(plan.scratch).toBe(true);
+    expect(plan.repoUrl).toBeUndefined();
+    expect(plan.onFinish).toBe('none');
+    expect(plan.mergeMode).toBe('no_op');
+  });
+
+  it('rejects a plan that sets both scratch: true and repoUrl', () => {
+    const yaml = `
+name: Conflicting Plan
+scratch: true
+repoUrl: git@github.com:test/repo.git
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+`;
+    expect(() => parsePlan(yaml)).toThrow(PlanParseError);
+    expect(() => parsePlan(yaml)).toThrow('cannot set both "scratch: true" and "repoUrl"');
+  });
+
+  it('rejects a scratch plan with a mergeMode other than no_op', () => {
+    const yaml = `
+name: Bad Merge Mode Scratch Plan
+scratch: true
+mergeMode: manual
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+`;
+    expect(() => parsePlan(yaml)).toThrow(PlanParseError);
+    expect(() => parsePlan(yaml)).toThrow('mergeMode: "no_op"');
+  });
+
+  it('rejects the incident plan that pairs onFinish none with external review', () => {
+    const yaml = `
+name: Hidden Publication Incident
+repoUrl: git@github.com:test/repo.git
+baseBranch: master
+onFinish: none
+mergeMode: external_review
+tasks:
+  - id: reflect
+    description: Apply one accepted reflection item
+    command: echo "reflect"
+`;
+    expect(() => parsePlan(yaml)).toThrow(PlanParseError);
+    expect(() => parsePlan(yaml)).toThrow(/external_review.*onFinish: none/);
+  });
+
+  it('rejects a scratch plan task that sets poolId', () => {
+    const yaml = `
+name: Bad Scratch Pool Plan
+scratch: true
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+    poolId: some-pool
+`;
+    expect(() => parsePlan(yaml)).toThrow(PlanParseError);
+    expect(() => parsePlan(yaml)).toThrow(/dockerImage.*poolId/);
+  });
+
+  it('parses and deterministically normalizes task freshness', () => {
+    const plan = parsePlan(`
+name: Freshness Plan
+repoUrl: git@github.com:test/repo.git
+tasks:
+  - id: work
+    description: Do work
+    command: echo ok
+    freshness:
+      watchPaths: [" packages/z.ts ", packages/a.ts, packages/a.ts]
+      pathPreconditions:
+        - path: generated/output.json
+          expected: absent
+        - path: packages/a.ts
+          expected: present
+      guardedBehaviorIds: [z_guard, a-guard, a-guard]
+`);
+
+    expect(plan.tasks[0].freshness).toEqual({
+      watchPaths: ['packages/a.ts', 'packages/z.ts'],
+      pathPreconditions: [
+        { path: 'generated/output.json', expected: 'absent' },
+        { path: 'packages/a.ts', expected: 'present' },
+      ],
+      guardedBehaviorIds: ['a-guard', 'z_guard'],
+    });
+  });
+
+  it('keeps omitted task freshness omitted', () => {
+    const plan = parsePlan(`
+name: Legacy Plan
+repoUrl: git@github.com:test/repo.git
+tasks:
+  - id: work
+    description: Do work
+    command: echo ok
+`);
+
+    expect(plan.tasks[0]).not.toHaveProperty('freshness');
+  });
+
+  it.each([
+    ['unknown field', 'freshness: { unknown: true }', /unsupported field "unknown"/],
+    ['absolute watch path', 'freshness: { watchPaths: ["/tmp/out"] }', /repo-relative path/],
+    ['invalid expectation', 'freshness: { pathPreconditions: [{ path: out.txt, expected: maybe }] }', /present.*absent/],
+    ['invalid behavior id', 'freshness: { guardedBehaviorIds: ["bad id"] }', /identifier/],
+  ])('rejects invalid task freshness: %s', (_label, freshnessYaml, expected) => {
+    const yaml = `
+name: Bad Freshness Plan
+repoUrl: git@github.com:test/repo.git
+tasks:
+  - id: work
+    description: Do work
+    command: echo ok
+    ${freshnessYaml}
+`;
+
+    expect(() => parsePlan(yaml)).toThrow(PlanParseError);
+    expect(() => parsePlan(yaml)).toThrow(expected);
+  });
+
+  it('does not require repoUrl to be cloneable when scratch: true is set', async () => {
+    const planPath = join(tmpdir(), `invoker-scratch-plan-${process.pid}.yaml`);
+    writeFileSync(planPath, `
+name: Scratch File Plan
+scratch: true
+tasks:
+  - id: greet
+    description: Say hello
+    command: echo "Hello"
+`);
+    const plan = await parsePlanFile(planPath);
+    expect(plan.scratch).toBe(true);
   });
 
   it('rejects blank intermediateRepoUrl', () => {
@@ -194,6 +463,39 @@ workflows:
     expect(bundle.plans[1].tasks.map((task) => task.id)).toEqual([
       'build-workers-ui',
       'verify-workers-ui',
+    ]);
+  });
+
+  it('parses ci_failed externalDependencies on stack and workflow levels', () => {
+    const yaml = `
+name: CI Repair Stack
+repoUrl: git@github.com:test/repo.git
+externalDependencies:
+  - workflowId: wf-stack
+    taskId: __merge__
+    gatePolicy: ci_failed
+workflows:
+  - name: Inherited Repair
+    tasks:
+      - id: inherited
+        description: Inherits stack dependency
+  - name: Workflow Repair
+    externalDependencies:
+      - workflowId: wf-workflow
+        taskId: __merge__
+        gatePolicy: ci_failed
+    tasks:
+      - id: workflow
+        description: Adds workflow dependency
+`;
+    const bundle = parsePlanSubmissionBundle(yaml);
+
+    expect(bundle.plans[0].externalDependencies).toEqual([
+      { workflowId: 'wf-stack', taskId: '__merge__', requiredStatus: 'completed', gatePolicy: 'ci_failed' },
+    ]);
+    expect(bundle.plans[1].externalDependencies).toEqual([
+      { workflowId: 'wf-stack', taskId: '__merge__', requiredStatus: 'completed', gatePolicy: 'ci_failed' },
+      { workflowId: 'wf-workflow', taskId: '__merge__', requiredStatus: 'completed', gatePolicy: 'ci_failed' },
     ]);
   });
 
@@ -333,6 +635,25 @@ tasks:
     ]);
   });
 
+  it('parses externalDependencies.gatePolicy ci_failed', () => {
+    const yaml = `
+name: External Dependency CI Failed
+repoUrl: git@github.com:test/repo.git
+externalDependencies:
+  - workflowId: wf-123
+    taskId: __merge__
+    gatePolicy: ci_failed
+tasks:
+  - id: gated
+    description: Start repair after upstream PR gate is parked
+    command: echo "go"
+`;
+    const plan = parsePlan(yaml);
+    expect(plan.externalDependencies).toEqual([
+      { workflowId: 'wf-123', taskId: '__merge__', requiredStatus: 'completed', gatePolicy: 'ci_failed' },
+    ]);
+  });
+
   it('parses top-level externalDependencies onto the workflow only', () => {
     const yaml = `
 name: Workflow Chain Step
@@ -394,7 +715,7 @@ tasks:
     command: echo "go"
 `;
     expect(() => parsePlan(yaml)).toThrow(PlanParseError);
-    expect(() => parsePlan(yaml)).toThrow('"gatePolicy" must be "completed" or "review_ready"');
+    expect(() => parsePlan(yaml)).toThrow('"gatePolicy" must be "completed", "review_ready", or "ci_failed"');
   });
 
   it('rejects invalid externalDependencies.requiredStatus', () => {
@@ -428,7 +749,7 @@ tasks:
     command: echo "go"
 `;
     expect(() => parsePlan(yaml)).toThrow(PlanParseError);
-    expect(() => parsePlan(yaml)).toThrow('"gatePolicy" must be "completed" or "review_ready"');
+    expect(() => parsePlan(yaml)).toThrow('"gatePolicy" must be "completed", "review_ready", or "ci_failed"');
   });
 
   it('rejects deprecated "approved" gatePolicy value', () => {
@@ -514,6 +835,15 @@ tasks:
 `;
     expect(() => parsePlan(yaml)).toThrow(PlanParseError);
     expect(() => parsePlan(yaml)).toThrow('Duplicate task id "build"');
+  });
+
+  it('assertNoDuplicateTaskIds throws for a duplicate task id', () => {
+    expect(() => assertNoDuplicateTaskIds([{ id: 'build' }, { id: 'build' }])).toThrow(PlanParseError);
+    expect(() => assertNoDuplicateTaskIds([{ id: 'build' }, { id: 'build' }])).toThrow('Duplicate task id "build"');
+  });
+
+  it('assertNoDuplicateTaskIds does not throw for unique task ids', () => {
+    expect(() => assertNoDuplicateTaskIds([{ id: 'build' }, { id: 'test' }])).not.toThrow();
   });
 
   it('rejects non-object task entries with a parse error', () => {
@@ -773,12 +1103,12 @@ tasks:
   });
 
   describe('onFinish parsing', () => {
-    it('parses plan with onFinish: merge', () => {
+    it('parses plan with onFinish: merge and preserves explicit baseBranch', () => {
       const yaml = `
 name: Merge Plan
 repoUrl: git@github.com:test/repo.git
 onFinish: merge
-baseBranch: develop
+baseBranch: upstream/develop
 featureBranch: feat/x
 tasks:
   - id: build
@@ -786,7 +1116,7 @@ tasks:
 `;
       const plan = parsePlan(yaml);
       expect(plan.onFinish).toBe('merge');
-      expect(plan.baseBranch).toBe('develop');
+      expect(plan.baseBranch).toBe('upstream/develop');
       expect(plan.featureBranch).toBe('feat/x');
     });
 
@@ -814,23 +1144,12 @@ tasks:
 `;
       const plan = parsePlan(yaml);
       expect(plan.onFinish).toBe('pull_request');
-      // Auto-generates featureBranch from plan name
       expect(plan.featureBranch).toBe('plan/simple-plan');
     });
 
-    it('auto-detects baseBranch when omitted', async () => {
-      // Mock loadConfig to return empty config so local ~/.invoker/config.json
-      // doesn't short-circuit the remote branch detection.
+    it('pins baseBranch to master when omitted', async () => {
       const configMod = await import('../config.js');
       const loadConfigSpy = vi.spyOn(configMod, 'loadConfig').mockReturnValue({});
-
-      const mockExecSync = vi.mocked(execSync);
-      mockExecSync.mockImplementation(((cmd: string) => {
-        if (typeof cmd === 'string' && cmd.includes('ls-remote')) {
-          return 'ref: refs/heads/develop\tHEAD\nabc123\tHEAD\n';
-        }
-        throw new Error('unexpected');
-      }) as any);
 
       const yaml = `
 name: No Base Branch
@@ -842,24 +1161,51 @@ tasks:
     description: Build the project
 `;
       const plan = parsePlan(yaml);
-      expect(plan.baseBranch).toBe('develop');
-      mockExecSync.mockRestore();
+      expect(plan.baseBranch).toBe('master');
       loadConfigSpy.mockRestore();
     });
 
-    it('explicit baseBranch overrides auto-detection', () => {
+    it('preserves an explicit baseBranch override', () => {
       const yaml = `
 name: Explicit Base
 repoUrl: git@github.com:test/repo.git
 onFinish: merge
-baseBranch: release
+baseBranch: origin/release
 featureBranch: feat/x
 tasks:
   - id: build
     description: Build the project
 `;
       const plan = parsePlan(yaml);
-      expect(plan.baseBranch).toBe('release');
+      expect(plan.baseBranch).toBe('origin/release');
+    });
+
+    it('preserves stacked workflow baseBranch with externalDependencies', () => {
+      const yaml = `
+name: Stacked Child
+repoUrl: git@github.com:test/repo.git
+onFinish: pull_request
+baseBranch: plan/upstream-step
+featureBranch: plan/downstream-step
+externalDependencies:
+  - workflowId: wf-upstream
+    taskId: "__merge__"
+    requiredStatus: completed
+    gatePolicy: review_ready
+tasks:
+  - id: build
+    description: Build the project
+`;
+      const plan = parsePlan(yaml);
+      expect(plan.baseBranch).toBe('plan/upstream-step');
+      expect(plan.externalDependencies).toEqual([
+        {
+          workflowId: 'wf-upstream',
+          taskId: '__merge__',
+          requiredStatus: 'completed',
+          gatePolicy: 'review_ready',
+        },
+      ]);
     });
 
     it('rejects invalid onFinish value', () => {
@@ -872,6 +1218,7 @@ tasks:
     description: Build the project
 `;
       expect(() => parsePlan(yaml)).toThrow(PlanParseError);
+      expect(() => parsePlan(yaml)).toThrow(/onFinish/);
     });
 
     it('auto-generates featureBranch when onFinish is merge without explicit branch', () => {
@@ -1018,6 +1365,71 @@ tasks:
     ].join('\n');
     const result = parsePlan(yaml);
     expect(result.visualProof).toBeUndefined();
+  });
+});
+
+describe('parsePlanSubmissionBundleFile', () => {
+  it('parses a stacked workflow bundle from disk and validates every workflow repoUrl', async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), 'invoker-plan-bundle-repo-'));
+    execFileSync('git', ['init', '-q', repoDir]);
+    const planPath = join(tmpdir(), `invoker-plan-bundle-${process.pid}.yaml`);
+    writeFileSync(planPath, `
+name: Stack
+repoUrl: ${repoDir}
+workflows:
+  - name: First
+    tasks:
+      - id: a
+        description: A
+        command: echo hi
+  - name: Second
+    tasks:
+      - id: b
+        description: B
+        command: echo hi
+`);
+
+    const bundle = await parsePlanSubmissionBundleFile(planPath);
+
+    expect(bundle.isStack).toBe(true);
+    expect(bundle.plans.map((plan) => plan.name)).toEqual(['First', 'Second']);
+  });
+
+  it('parses a single-plan file the same as parsePlanFile', async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), 'invoker-plan-bundle-single-repo-'));
+    execFileSync('git', ['init', '-q', repoDir]);
+    const planPath = join(tmpdir(), `invoker-plan-bundle-single-${process.pid}.yaml`);
+    writeFileSync(planPath, `
+name: Single
+repoUrl: ${repoDir}
+tasks:
+  - id: a
+    description: A
+    command: echo hi
+`);
+
+    const bundle = await parsePlanSubmissionBundleFile(planPath);
+
+    expect(bundle.isStack).toBe(false);
+    expect(bundle.plans).toHaveLength(1);
+    expect(bundle.plans[0].name).toBe('Single');
+  });
+
+  it('rejects a stacked bundle when a workflow repoUrl is not cloneable', async () => {
+    const planPath = join(tmpdir(), `invoker-plan-bundle-bad-${process.pid}.yaml`);
+    writeFileSync(planPath, `
+name: Stack
+repoUrl: invoker
+workflows:
+  - name: First
+    tasks:
+      - id: a
+        description: A
+`);
+
+    await expect(parsePlanSubmissionBundleFile(planPath)).rejects.toThrow(
+      'repoUrl "invoker" is not a valid git repository',
+    );
   });
 });
 

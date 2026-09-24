@@ -1,15 +1,13 @@
-import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
-import { promisify } from 'node:util';
 import { _electron as electron, type Page } from '@playwright/test';
 import { resolveRepoRoot } from '@invoker/contracts';
 import { stringify as yamlStringify } from 'yaml';
 
 import { registerTrackedBrowserUserDataDir } from './fixtures/browser-process-registry.js';
 import {
+  closeElectronApp,
   E2E_REPO_URL,
-  TEST_PLAN,
   expect,
   loadPlan,
   startPlan,
@@ -21,10 +19,18 @@ import {
   numberOrZero,
   uiPerfPayloadsSince,
 } from './fixtures/ui-perf.js';
+import {
+  cleanupStandaloneOwnersForTestDir,
+  ensureHeadlessTestConfig,
+  expectDelegated,
+  headlessTestEnv,
+  parseJsonStdout,
+  parseWorkflowId,
+  runHeadlessClient,
+} from './fixtures/headless-client.js';
 
 test.use({ guiOwnerMode: process.env.INVOKER_E2E_GUI_OWNER_MODE ?? 'daemon' });
 
-const execFileAsync = promisify(execFile);
 const repoRoot = resolveRepoRoot(__dirname);
 const RESPONSIVE_INTERACTION_TIMEOUT_MS = 15000;
 const MAX_INSPECTOR_TOGGLE_MS = 5000;
@@ -32,6 +38,7 @@ const HEADLESS_DELEGATED_WORKFLOW_COUNT = 8;
 const MAX_RETRY_BURST_WALL_MS = 120000;
 const MAX_RENDERER_EVENT_LOOP_LAG_MS = 1000;
 const MAX_RENDERER_LONG_TASK_MS = 1500;
+const STANDALONE_OWNER_IDLE_GRACE_MS = 15000;
 
 const HEADLESS_HERD_BUDGETS = {
   maxInspectorToggleMs: MAX_INSPECTOR_TOGGLE_MS,
@@ -42,51 +49,19 @@ const HEADLESS_HERD_BUDGETS = {
   maxRendererLongTaskMs: MAX_RENDERER_LONG_TASK_MS,
 };
 
-async function ensureHeadlessTestConfig(testDir: string): Promise<void> {
-  await writeFile(path.join(testDir, 'e2e-config.json'), JSON.stringify({ autoFixRetries: 0 }), 'utf8');
-}
-
-function headlessTestEnv(testDir: string): NodeJS.ProcessEnv {
-  const configPath = path.join(testDir, 'e2e-config.json');
-  const ipcSocketPath = path.join(testDir, 'ipc-transport.sock');
-  return {
-    ...process.env,
-    NODE_ENV: 'test',
-    INVOKER_TEST_WORKFLOW_IDS: '1',
-    TZ: 'UTC',
-    INVOKER_DB_DIR: testDir,
-    INVOKER_IPC_SOCKET: ipcSocketPath,
-    INVOKER_REPO_CONFIG_PATH: configPath,
-  };
-}
-
-async function runHeadlessClient(testDir: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  await ensureHeadlessTestConfig(testDir);
-  const clientPath = path.join(repoRoot, 'packages', 'app', 'dist', 'headless-client.js');
-  return await execFileAsync('node', [clientPath, ...args], {
-    cwd: repoRoot,
-    env: headlessTestEnv(testDir),
-    maxBuffer: 10 * 1024 * 1024,
-  });
-}
-
-function parseWorkflowId(stdout: string): string {
-  const delegated = stdout.match(/Delegated to owner — workflow: (wf-[^\s]+)/);
-  if (delegated?.[1]) return delegated[1];
-  const direct = stdout.match(/Workflow ID: (wf-[^\s]+)/);
-  if (direct?.[1]) return direct[1];
-  throw new Error(`No workflow id found in stdout:\n${stdout}`);
-}
-
-function expectDelegated(stdout: string): void {
-  expect(stdout).toContain('Delegated to owner');
-}
-
-function parseJsonStdout(stdout: string): Record<string, unknown> {
-  const line = stdout.split(/\r?\n/).map((entry) => entry.trim()).find((entry) => entry.startsWith('{'));
-  if (!line) throw new Error(`No JSON object found in stdout:\n${stdout}`);
-  return JSON.parse(line) as Record<string, unknown>;
-}
+const HEADLESS_HERD_UI_PLAN = {
+  name: 'Headless Herd UI Seed',
+  repoUrl: E2E_REPO_URL,
+  onFinish: 'none' as const,
+  tasks: [
+    {
+      id: 'herd-ui-root',
+      description: 'Herd UI seed',
+      command: 'echo herd-ui-root',
+      dependencies: [],
+    },
+  ],
+};
 
 async function measureInspectorToggleResponsive(page: Page, timeoutMs: number, label: string): Promise<number> {
   const sidebarToggle = page.getByTestId('sidebar-collapse-toggle');
@@ -116,11 +91,19 @@ async function measureInspectorToggleResponsive(page: Page, timeoutMs: number, l
   return Date.now() - startedAt;
 }
 
+async function settleHeadlessHerdWorkflows(page: Page): Promise<void> {
+  await page.waitForTimeout(STANDALONE_OWNER_IDLE_GRACE_MS);
+}
+
 test.describe('Headless thundering herd', () => {
+  test.afterEach(async ({ testDir }) => {
+    await cleanupStandaloneOwnersForTestDir(testDir);
+  });
+
   test('burst headless restarts do not spawn headless electron herds or freeze the UI', async ({ page, testDir }) => {
-    await loadPlan(page, TEST_PLAN);
+    await loadPlan(page, HEADLESS_HERD_UI_PLAN);
     await startPlan(page);
-    await page.locator('.react-flow__node[data-testid$="task-alpha"]').waitFor({ state: 'visible', timeout: 10000 });
+    await page.locator('.react-flow__node[data-testid$="herd-ui-root"]').waitFor({ state: 'visible', timeout: 10000 });
 
     // Discover the active workflow through the renderer bridge API
     // (listWorkflows) rather than reaching into task config internals.
@@ -138,7 +121,7 @@ test.describe('Headless thundering herd', () => {
         {
           id: 'burst-root',
           description: 'Burst root',
-          command: 'sleep 1 && echo burst-root',
+          command: 'echo burst-root',
           dependencies: [],
         },
       ],
@@ -214,6 +197,8 @@ test.describe('Headless thundering herd', () => {
     expect(maxPayloadNumber(perfPayloads, 'renderer_event_loop_lag', 'lagMs'), evidenceMessage).toBeLessThanOrEqual(MAX_RENDERER_EVENT_LOOP_LAG_MS);
     expect(maxPayloadNumber(perfPayloads, 'renderer_long_task', 'durationMs'), evidenceMessage).toBeLessThanOrEqual(MAX_RENDERER_LONG_TASK_MS);
     expect(delegatedPerf.ownerMode, evidenceMessage).toBe('standalone');
+
+    await settleHeadlessHerdWorkflows(page);
   });
 
   test('standalone owner serves delegated headless commands from isolated test paths', async ({ testDir }) => {
@@ -272,7 +257,7 @@ test.describe('Headless thundering herd', () => {
       expect(Array.isArray(queueStatus.running)).toBe(true);
       expect(Array.isArray(queueStatus.queued)).toBe(true);
     } finally {
-      await ownerApp.close().catch(() => undefined);
+      await closeElectronApp(ownerApp);
     }
   });
 });

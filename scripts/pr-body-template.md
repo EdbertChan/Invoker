@@ -29,6 +29,8 @@ Explain why this work is split here instead of bundled elsewhere.
 
 List what this slice explicitly does not change.
 
+For a `refactor` Review Lane, include: `No behavior change.` (or an equivalent accepted unchanged-behavior claim).
+
 ## Architecture
 
 Only keep this section if the change affects component interactions, control flow, or data flow.
@@ -61,6 +63,8 @@ graph TD
 ## Visual Proof
 
 Required when the diff changes UI-impacting files. Include before/after screenshots or a video link.
+
+Manually inspected: state exactly what you saw when you opened the image or video yourself, not just that it was captured.
 
 ## Revert Plan
 

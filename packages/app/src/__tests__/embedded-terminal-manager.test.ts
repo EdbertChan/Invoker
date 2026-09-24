@@ -26,7 +26,10 @@ import {
   type PtyLike,
   type PtySpawnFn,
 } from '../embedded-terminal-manager.js';
-import { resolveTaskTerminalSpec } from '../open-terminal-for-task.js';
+import {
+  resolveTaskTerminalSpec,
+  shouldAttachEmbeddedTerminalToLiveExecutor,
+} from '../open-terminal-for-task.js';
 import {
   ExecutorRegistry,
   WorktreeExecutor,
@@ -60,12 +63,16 @@ function createFakeChild() {
   return ee;
 }
 
-function createFakePty() {
-  const ee = new EventEmitter() as EventEmitter & PtyLike & {
+function createFakePty(initialSize: { cols: number; rows: number } = { cols: 80, rows: 24 }) {
+  const ee = new EventEmitter() as EventEmitter & Omit<PtyLike, 'cols' | 'rows'> & {
+    cols: number;
+    rows: number;
     __written: string[];
     __resized: Array<{ cols: number; rows: number }>;
     killed: boolean;
   };
+  ee.cols = initialSize.cols;
+  ee.rows = initialSize.rows;
   ee.__written = [];
   ee.__resized = [];
   ee.killed = false;
@@ -82,6 +89,8 @@ function createFakePty() {
   };
   ee.resize = (cols: number, rows: number) => {
     ee.__resized.push({ cols, rows });
+    ee.cols = cols;
+    ee.rows = rows;
   };
   ee.kill = () => {
     ee.killed = true;
@@ -257,6 +266,62 @@ describe('EmbeddedTerminalManager', () => {
     expect(reused.outputSnapshot).toBe(firstFrame);
   });
 
+  it('seeds display bridge text before synchronous backend output', () => {
+    const spawned = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      close: vi.fn(),
+    };
+    const backend: EmbeddedTerminalBackend = {
+      name: 'pty',
+      spawn: vi.fn((opts) => {
+        opts.emitOutput('backend-output\n');
+        return spawned;
+      }),
+    };
+    const mgr = new EmbeddedTerminalManager({ backend });
+
+    const session = mgr.openOrReuse({
+      taskId: 'task-bridge',
+      spec: {
+        cwd: '/tmp/wt',
+        displayOnlyBridgeText: 'Context: resume task-bridge',
+      },
+      cwd: '/tmp/wt',
+    });
+
+    expect(session.outputSnapshot).toBe('Context: resume task-bridge\nbackend-output\n');
+    expect(mgr.getPersistenceRecord(session.sessionId)?.outputSnapshot)
+      .toBe('Context: resume task-bridge\nbackend-output\n');
+  });
+
+  it('keeps display bridge text out of terminal target identity', () => {
+    const spawned = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      close: vi.fn(),
+    };
+    const backend: EmbeddedTerminalBackend = {
+      name: 'bash',
+      spawn: vi.fn(() => spawned),
+    };
+    const mgr = new EmbeddedTerminalManager({ backend });
+
+    const first = mgr.openOrReuse({
+      taskId: 'task-same-target',
+      spec: { cwd: '/tmp/wt', displayOnlyBridgeText: 'First bridge' },
+      cwd: '/tmp/wt',
+    });
+    const second = mgr.openOrReuse({
+      taskId: 'task-same-target',
+      spec: { cwd: '/tmp/wt', displayOnlyBridgeText: 'Updated bridge' },
+      cwd: '/tmp/wt',
+    });
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(backend.spawn).toHaveBeenCalledTimes(1);
+  });
+
   it('opens a distinct session when the same task resolves to a different terminal target', () => {
     const child1 = createFakeChild();
     const child2 = createFakeChild();
@@ -366,6 +431,34 @@ describe('EmbeddedTerminalManager', () => {
     const snapshot = mgr.get(session.sessionId)?.outputSnapshot;
     expect(snapshot).toHaveLength(maxSnapshotChars);
     expect(snapshot).toBe(`${'a'.repeat(maxSnapshotChars - 'tail'.length)}tail`);
+  });
+
+  it('bounds restored spawn session snapshots to the most recent 64 KiB', () => {
+    const maxSnapshotChars = 64 * 1024;
+    const spawned = {
+      write: vi.fn(),
+      resize: vi.fn(),
+      close: vi.fn(),
+    };
+    const backend: EmbeddedTerminalBackend = {
+      name: 'pty',
+      spawn: vi.fn(() => spawned),
+    };
+    const mgr = new EmbeddedTerminalManager({ backend });
+
+    const session = mgr.restoreSpawnSession({
+      sessionId: 'restored-large-snapshot',
+      taskId: 'task-restored-large-snapshot',
+      targetKey: 'target-restored-large-snapshot',
+      spec: { command: 'bash', args: ['-l'] },
+      cwd: '/tmp/restored',
+      createdAt: '2026-07-07T00:00:00.000Z',
+      outputSnapshot: `${'a'.repeat(maxSnapshotChars)}tail`,
+    });
+
+    expect(session.outputSnapshot).toHaveLength(maxSnapshotChars);
+    expect(session.outputSnapshot).toBe(`${'a'.repeat(maxSnapshotChars - 'tail'.length)}tail`);
+    expect(mgr.get(session.sessionId)?.outputSnapshot).toBe(session.outputSnapshot);
   });
 
   it('emits session-updated on open, output, and natural exit', () => {
@@ -538,6 +631,85 @@ describe('EmbeddedTerminalManager', () => {
     );
     expect(res.ok).toBe(true);
     expect(pty.__resized).toEqual([{ cols: 120, rows: 40 }]);
+  });
+
+  it('threads TerminalSpec cols/rows into the PTY spawn call instead of the hardcoded 80x24 default', () => {
+    const pty = createFakePty({ cols: 160, rows: 50 });
+    const ptySpawnFn = vi.fn(() => pty) as unknown as PtySpawnFn;
+    const mgr = new EmbeddedTerminalManager({
+      backend: createPtyTerminalBackend({ spawnFn: ptySpawnFn }),
+    });
+
+    mgr.openOrReuse({
+      taskId: 't',
+      spec: { command: 'claude', cwd: '/tmp', cols: 160, rows: 50 },
+      cwd: '/tmp',
+    });
+
+    expect(ptySpawnFn).toHaveBeenCalledWith(
+      'claude',
+      [],
+      expect.objectContaining({ cols: 160, rows: 50 }),
+    );
+  });
+
+  it('falls back to 80x24 when a TerminalSpec omits cols/rows, unchanged from today', () => {
+    const pty = createFakePty();
+    const ptySpawnFn = vi.fn(() => pty) as unknown as PtySpawnFn;
+    const mgr = new EmbeddedTerminalManager({
+      backend: createPtyTerminalBackend({ spawnFn: ptySpawnFn }),
+    });
+
+    mgr.openOrReuse({ taskId: 't', spec: { command: 'claude', cwd: '/tmp' }, cwd: '/tmp' });
+
+    expect(ptySpawnFn).toHaveBeenCalledWith(
+      'claude',
+      [],
+      expect.objectContaining({ cols: 80, rows: 24 }),
+    );
+  });
+
+  it('getAppliedSize reads the PTY back directly, exposing a resize that silently did not stick', () => {
+    const pty = createFakePty({ cols: 80, rows: 24 });
+    // Simulate a real-world dropped resize: the call is recorded but the
+    // underlying winsize never actually changes.
+    pty.resize = (cols: number, rows: number) => {
+      pty.__resized.push({ cols, rows });
+    };
+    const ptySpawnFn = vi.fn(() => pty) as unknown as PtySpawnFn;
+    const mgr = new EmbeddedTerminalManager({
+      backend: createPtyTerminalBackend({ spawnFn: ptySpawnFn }),
+    });
+    const session = mgr.openOrReuse({ taskId: 't', spec: { cwd: '/tmp' }, cwd: '/tmp' });
+
+    const res = mgr.resize(session.sessionId, 120, 40);
+
+    expect(res.ok).toBe(true);
+    expect(mgr.getAppliedSize(session.sessionId)).toEqual({ cols: 80, rows: 24 });
+  });
+
+  it('getAppliedSize reflects a resize that actually applied', () => {
+    const pty = createFakePty({ cols: 80, rows: 24 });
+    const ptySpawnFn = vi.fn(() => pty) as unknown as PtySpawnFn;
+    const mgr = new EmbeddedTerminalManager({
+      backend: createPtyTerminalBackend({ spawnFn: ptySpawnFn }),
+    });
+    const session = mgr.openOrReuse({ taskId: 't', spec: { cwd: '/tmp' }, cwd: '/tmp' });
+
+    mgr.resize(session.sessionId, 120, 40);
+
+    expect(mgr.getAppliedSize(session.sessionId)).toEqual({ cols: 120, rows: 40 });
+  });
+
+  it('getAppliedSize returns null for the pipe-backed bash backend, which has no real TTY size', () => {
+    const child = createFakeChild();
+    const bashSpawnFn = vi.fn(() => child) as unknown as BashSpawnFn;
+    const mgr = new EmbeddedTerminalManager({
+      backend: createBashTerminalBackend({ spawnFn: bashSpawnFn }),
+    });
+    const session = mgr.openOrReuse({ taskId: 't', spec: { cwd: '/tmp' }, cwd: '/tmp' });
+
+    expect(mgr.getAppliedSize(session.sessionId)).toBeNull();
   });
 
   it('emits exit and removes session when the bash child exits', () => {
@@ -831,6 +1003,82 @@ describe('GUI open-terminal embedded route', () => {
         allowRunning: true,
       });
       expect(allowed.ok).toBe(true);
+    } finally {
+      try { rmSync(wtBase, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  it('opens running command tasks as isolated shell sessions instead of attaching stdin', () => {
+    const wtBase = join(tmpdir(), `embedded-wt-${randomUUID()}`);
+    const workspacePath = join(wtBase, 'task-workspace');
+    mkdirSync(workspacePath, { recursive: true });
+    try {
+      const registry = new ExecutorRegistry();
+      registry.register('worktree', new WorktreeExecutor({
+        cacheDir: join(tmpdir(), `cache-${randomUUID()}`),
+        worktreeBaseDir: wtBase,
+      }));
+      const persistence = {
+        getTaskStatus: vi.fn(() => 'running'),
+        getRunnerKind: vi.fn(() => 'worktree'),
+        getAgentSessionId: vi.fn(() => null),
+        getContainerId: vi.fn(() => null),
+        getWorkspacePath: vi.fn(() => workspacePath),
+        getBranch: vi.fn(() => null),
+      };
+      const resolved = resolveTaskTerminalSpec({
+        taskId: 'task-cat',
+        persistence: persistence as never,
+        executorRegistry: registry,
+        repoRoot: '/repo',
+        allowRunning: true,
+      });
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) return;
+
+      const commandChild = createFakeChild();
+      const bashSpawnFn = vi.fn(() => commandChild) as unknown as BashSpawnFn;
+      const liveExecutor = {
+        type: 'worktree',
+        onOutput: vi.fn(() => () => {}),
+        sendInput: vi.fn(),
+      };
+      const liveHandle = {
+        handle: { executionId: 'exec-cat', taskId: 'task-cat', workspacePath },
+        executor: liveExecutor as unknown as Executor,
+      };
+      const attachToLiveExecutor = shouldAttachEmbeddedTerminalToLiveExecutor(
+        resolved.meta,
+        liveHandle,
+      );
+      const mgr = new EmbeddedTerminalManager({
+        backend: createBashTerminalBackend({ spawnFn: bashSpawnFn }),
+      });
+
+      const session = mgr.openOrReuse({
+        taskId: 'task-cat',
+        spec: resolved.spec,
+        cwd: resolved.cwd,
+        attach: attachToLiveExecutor ? liveHandle : undefined,
+      });
+      const writeResult = mgr.write(session.sessionId, 'printf desktop-smoke\n');
+
+      expect(attachToLiveExecutor).toBe(false);
+      expect(session.mode).toBe('spawn');
+      expect(session.attached).toBe(false);
+      expect(bashSpawnFn).toHaveBeenCalledTimes(1);
+      expect(commandChild.__written).toEqual(['printf desktop-smoke\n']);
+      expect(liveExecutor.sendInput).not.toHaveBeenCalled();
+      expect(writeResult.ok).toBe(true);
+
+      expect(shouldAttachEmbeddedTerminalToLiveExecutor(
+        { ...resolved.meta, agentSessionId: 'agent-session-1' },
+        liveHandle,
+      )).toBe(true);
+      expect(shouldAttachEmbeddedTerminalToLiveExecutor(
+        resolved.meta,
+        { ...liveHandle, handle: { ...liveHandle.handle, agentSessionId: 'agent-session-2' } },
+      )).toBe(true);
     } finally {
       try { rmSync(wtBase, { recursive: true, force: true }); } catch { /* ignore */ }
     }

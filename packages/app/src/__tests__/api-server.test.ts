@@ -137,6 +137,7 @@ function createMocks() {
       logEvent: vi.fn(),
       getEvents: vi.fn(() => [{ taskId: 'task-1', eventType: 'started', timestamp: '2024-01-01' }]),
       getTaskOutput: vi.fn(() => 'hello world output'),
+      queryTasksByFilter: vi.fn(() => [makeTask()]),
     },
     executorRegistry: {},
     commandService: {
@@ -380,6 +381,48 @@ describe('GET /api/workflows', () => {
   });
 });
 
+describe('GET /api/search task filters', () => {
+  it('returns filtered task summaries with pagination', async () => {
+    const filter = encodeURIComponent(JSON.stringify({ op: 'eq', key: 'status', value: 'running' }));
+    const res = await request(port, 'GET', `/api/search?type=tasks&filter=${filter}&limit=7&offset=2`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([expect.objectContaining({ kind: 'task', id: 'task-1', title: 'test task' })]);
+    expect(mocks.persistence.queryTasksByFilter).toHaveBeenCalledWith({ op: 'eq', key: 'status', value: 'running' }, { limit: 7, offset: 2 });
+  });
+
+  it('rejects an invalid filter before reading tasks', async () => {
+    const filter = encodeURIComponent(JSON.stringify({ op: 'eq', key: 'nope', value: 'x' }));
+    const res = await request(port, 'GET', `/api/search?type=tasks&filter=${filter}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('filter');
+    expect(mocks.persistence.queryTasksByFilter).not.toHaveBeenCalled();
+  });
+
+  it('keeps plain q search on the existing path', async () => {
+    mocks.persistence.searchWorkflowsAndTasks = vi.fn(() => []);
+    const res = await request(port, 'GET', '/api/search?type=tasks&q=test');
+    expect(res.status).toBe(200);
+    expect(mocks.persistence.searchWorkflowsAndTasks).toHaveBeenCalledWith('test', { type: 'tasks', limit: 20, offset: 0 });
+    expect(mocks.persistence.queryTasksByFilter).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-numeric limit before reading tasks', async () => {
+    const filter = encodeURIComponent(JSON.stringify({ op: 'eq', key: 'status', value: 'running' }));
+    const res = await request(port, 'GET', `/api/search?type=tasks&filter=${filter}&limit=abc`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('limit');
+    expect(mocks.persistence.queryTasksByFilter).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-numeric offset before reading tasks', async () => {
+    const filter = encodeURIComponent(JSON.stringify({ op: 'eq', key: 'status', value: 'running' }));
+    const res = await request(port, 'GET', `/api/search?type=tasks&filter=${filter}&offset=abc`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('offset');
+    expect(mocks.persistence.queryTasksByFilter).not.toHaveBeenCalled();
+  });
+});
+
 describe('GET /api/workflows/:id/review-gate', () => {
   it('returns 404 when workflow is missing', async () => {
     mocks.persistence.loadWorkflow.mockReturnValue(undefined);
@@ -597,25 +640,25 @@ describe('workflow HTTP mutation boundary', () => {
   });
 });
 
-describe('POST /api/tasks/:id/restart', () => {
-  it('restarts task via facade retryTask', async () => {
-    const res = await request(port, 'POST', '/api/tasks/task-1/restart');
+describe('POST /api/tasks/:id/retry', () => {
+  it('retries task via facade retryTask', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/retry');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.action).toBe('restarted');
+    expect(res.body.action).toBe('retried');
     expect(mocks.orchestrator.retryTask).toHaveBeenCalledWith('task-1');
   });
 
   it('returns 400 on error', async () => {
     mocks.orchestrator.retryTask.mockImplementation(() => {
-      throw new Error('task not restartable');
+      throw new Error('task not retriable');
     });
-    const res = await request(port, 'POST', '/api/tasks/task-1/restart');
+    const res = await request(port, 'POST', '/api/tasks/task-1/retry');
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('task not restartable');
+    expect(res.body.error).toBe('task not retriable');
   });
 
-  it('tops up globally ready tasks after scoped restart launch', async () => {
+  it('tops up globally ready tasks after scoped retry launch', async () => {
     const scoped = makeTask({
       id: 'task-1',
       status: 'running',
@@ -630,7 +673,7 @@ describe('POST /api/tasks/:id/restart', () => {
     mocks.orchestrator.retryTask.mockReturnValue([scoped]);
     mocks.orchestrator.startExecution.mockReturnValue([topup]);
 
-    const res = await request(port, 'POST', '/api/tasks/task-1/restart');
+    const res = await request(port, 'POST', '/api/tasks/task-1/retry');
     expect(res.status).toBe(200);
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
     expect(mocks.taskExecutor.executeTasks).not.toHaveBeenCalled();
@@ -650,9 +693,18 @@ describe('POST /api/tasks/:id/restart', () => {
     mocks.orchestrator.retryTask.mockReturnValue([scoped]);
     mocks.orchestrator.startExecution.mockReturnValue([duplicate]);
 
-    const res = await request(port, 'POST', '/api/tasks/task-1/restart');
+    const res = await request(port, 'POST', '/api/tasks/task-1/retry');
     expect(res.status).toBe(200);
     expect(mocks.taskExecutor.executeTasks).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/tasks/:id/restart', () => {
+  it('returns 404 and does not route to retryTask', async () => {
+    const res = await request(port, 'POST', '/api/tasks/task-1/restart');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Not found');
+    expect(mocks.orchestrator.retryTask).not.toHaveBeenCalled();
   });
 });
 
@@ -997,23 +1049,23 @@ describe('POST /api/tasks/:id/gate-policy', () => {
   });
 });
 
-describe('POST /api/workflows/:id/restart', () => {
-  it('restarts workflow via facade recreateWorkflow', async () => {
+describe('POST /api/workflows/:id/recreate', () => {
+  it('recreates workflow via facade recreateWorkflow', async () => {
     mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
-    const res = await request(port, 'POST', '/api/workflows/wf-1/restart');
+    const res = await request(port, 'POST', '/api/workflows/wf-1/recreate');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.action).toBe('restarted');
+    expect(res.body.action).toBe('recreated');
     expect(mocks.persistence.loadWorkflow).toHaveBeenCalledWith('wf-1');
     expect(mocks.persistence.updateWorkflow).toHaveBeenCalled();
   });
 
-  it('handles concurrent restart requests independently', async () => {
+  it('handles concurrent recreate requests independently', async () => {
     mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
 
     const [r1, r2] = await Promise.all([
-      request(port, 'POST', '/api/workflows/wf-1/restart'),
-      request(port, 'POST', '/api/workflows/wf-1/restart'),
+      request(port, 'POST', '/api/workflows/wf-1/recreate'),
+      request(port, 'POST', '/api/workflows/wf-1/recreate'),
     ]);
 
     expect(r1.status).toBe(200);
@@ -1027,12 +1079,12 @@ describe('POST /api/workflows/:id/restart', () => {
 
   it('returns 404 when workflow not found', async () => {
     mocks.persistence.loadWorkflow.mockReturnValue(undefined);
-    const res = await request(port, 'POST', '/api/workflows/missing/restart');
+    const res = await request(port, 'POST', '/api/workflows/missing/recreate');
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('not found');
   });
 
-  it('tops up globally ready tasks after workflow restart launch', async () => {
+  it('tops up globally ready tasks after workflow recreate launch', async () => {
     const scoped = makeTask({
       id: 'wf-1/task-1',
       config: { workflowId: 'wf-1' },
@@ -1046,11 +1098,22 @@ describe('POST /api/workflows/:id/restart', () => {
     mocks.orchestrator.recreateWorkflow = vi.fn(() => [scoped]);
     mocks.orchestrator.startExecution.mockReturnValue([topup]);
 
-    const res = await request(port, 'POST', '/api/workflows/wf-1/restart');
+    const res = await request(port, 'POST', '/api/workflows/wf-1/recreate');
     expect(res.status).toBe(200);
     expect(res.body.tasksStarted).toBe(1);
     expect(mocks.orchestrator.startExecution).toHaveBeenCalled();
     expect(mocks.taskExecutor.executeTasks).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/workflows/:id/restart', () => {
+  it('returns 404 and does not route to recreateWorkflow', async () => {
+    mocks.orchestrator.recreateWorkflow = vi.fn(() => [makeTask()]);
+    const res = await request(port, 'POST', '/api/workflows/wf-1/restart');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Not found');
+    expect(mocks.orchestrator.recreateWorkflow).not.toHaveBeenCalled();
+    expect(mocks.persistence.updateWorkflow).not.toHaveBeenCalled();
   });
 });
 
@@ -1339,5 +1402,72 @@ describe('Unknown routes', () => {
     const res = await request(port, 'DELETE', '/api/health');
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('Not found');
+  });
+});
+
+describe('API port selection by runtime profile', () => {
+  const envKeys = ['INVOKER_API_PORT', 'INVOKER_RUNTIME_KIND', 'INVOKER_SOURCE_ROOT'] as const;
+  let saved: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    saved = {};
+    for (const key of envKeys) saved[key] = process.env[key];
+  });
+
+  afterEach(() => {
+    for (const key of envKeys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  function startIsolated() {
+    const localMocks = createMocks();
+    return startApiServer({
+      orchestrator: localMocks.orchestrator as any,
+      persistence: localMocks.persistence as any,
+      executorRegistry: localMocks.executorRegistry as any,
+      mutations: buildFacade(localMocks),
+      deleteWorkflow: localMocks.deleteWorkflow,
+      detachWorkflow: localMocks.detachWorkflow,
+    });
+  }
+
+  it('packaged case retains the existing production port when no override is set', async () => {
+    delete process.env.INVOKER_API_PORT;
+    delete process.env.INVOKER_RUNTIME_KIND;
+    delete process.env.INVOKER_SOURCE_ROOT;
+    const localApi = startIsolated();
+    try {
+      expect(localApi.port).toBe(4100);
+    } finally {
+      await localApi.close();
+    }
+  });
+
+  it('source case derives a port disjoint from the production default', async () => {
+    delete process.env.INVOKER_API_PORT;
+    process.env.INVOKER_RUNTIME_KIND = 'source-development';
+    process.env.INVOKER_SOURCE_ROOT = '/tmp/invoker-api-server-test-source-root';
+    const localApi = startIsolated();
+    try {
+      expect(localApi.port).not.toBe(4100);
+      expect(localApi.port).toBeGreaterThanOrEqual(41000);
+      expect(localApi.port).toBeLessThan(41900);
+    } finally {
+      await localApi.close();
+    }
+  });
+
+  it('an explicit synthetic override wins over the selected profile', async () => {
+    process.env.INVOKER_API_PORT = '0';
+    process.env.INVOKER_RUNTIME_KIND = 'source-development';
+    process.env.INVOKER_SOURCE_ROOT = '/tmp/invoker-api-server-test-source-root';
+    const localApi = startIsolated();
+    try {
+      expect(localApi.port).toBe(0);
+    } finally {
+      await localApi.close();
+    }
   });
 });

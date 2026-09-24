@@ -50,6 +50,23 @@ export function wireCompletion(
             `executionId=${handle.executionId} activeExecutions=${host.activeExecutions.size}`,
         );
         let newlyStarted: TaskState[] = [];
+        const quarantinePoolMemberForFailure = (failureResponse: WorkResponse): void => {
+          if (failureResponse.status !== 'failed' || !activeExecution?.poolMemberKey) return;
+          try {
+            const finalized = host.orchestrator.getTask(task.id);
+            if (
+              finalized?.execution.failureClass === 'ssh-oauth-session-expired'
+              || finalized?.execution.failureClass === 'ssh-transport-transient'
+            ) {
+              host.recordPoolMemberTransportFailure(
+                activeExecution.poolMemberKey,
+                new Error(failureResponse.outputs.error ?? finalized.execution.failureClass),
+              );
+            }
+          } catch (err) {
+            host.logger.error(`[TaskRunner] pool member quarantine failed for task=${task.id}`, { err });
+          }
+        };
         try {
           try {
             traceExecution(
@@ -95,8 +112,11 @@ export function wireCompletion(
             } catch (callbackErr) {
               host.logger.error(`[TaskRunner] completion callback observer failed for task=${task.id}`, { err: callbackErr });
             }
+            quarantinePoolMemberForFailure(errResponse);
             return;
           }
+
+          quarantinePoolMemberForFailure(normalizedResponse);
 
           try {
             host.callbacks.onComplete?.(task.id, normalizedResponse);
@@ -116,11 +136,11 @@ export function wireCompletion(
       };
 
       await host.runSerializedCompletion(work);
+      if (dispatchOpts) {
+        dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
+      }
       resolvePromise();
     });
   });
-  if (dispatchOpts) {
-    dispatchOpts.launchOutbox.completeDispatch(dispatchOpts.dispatchId);
-  }
   return completionPromise;
 }

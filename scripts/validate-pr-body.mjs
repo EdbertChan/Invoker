@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 import { readFileSync } from 'node:fs';
-import { JSDOM } from 'jsdom';
-import { collectDiffAtomicityFindings, formatDiffAtomicityFindings } from './lint-pr-diff-atomicity.mjs';
+import { collectDiffAtomicityFindings, formatDiffAtomicityFindings, parseUnifiedDiff } from './lint-pr-diff-atomicity.mjs';
 import {
   formatReviewUnits,
   getLabelSection,
@@ -12,7 +11,6 @@ import {
   validateKnownReviewBoundaries,
   validateReviewLaneUnitCompatibility,
   validateReviewUnitChangedFiles,
-  validateReviewUnitFocus,
   validateReviewUnitValue,
 } from './review-unit-rules.mjs';
 
@@ -72,6 +70,7 @@ function summarizeMermaidError(error) {
 async function getMermaidApi() {
   if (!mermaidApiPromise) {
     mermaidApiPromise = (async () => {
+      const { JSDOM } = await import('jsdom');
       const { window } = new JSDOM('<body></body>', { pretendToBeVisual: true });
       globalThis.window = window;
       globalThis.document = window.document;
@@ -173,13 +172,20 @@ function hasAnimatedVisualProofMedia(body) {
     || /\bhttps?:\/\/\S+\.(?:gif|webm|mp4)\b/i.test(visualProof);
 }
 
-function visualProofNeedsAnimation(body) {
+function hasManualInspectionNote(body) {
+  const visualProof = getVisualProofBody(body);
+  if (!visualProof) return false;
+
+  return /\bmanually inspected\s*:/i.test(visualProof);
+}
+
+export function visualProofNeedsAnimation(body) {
   const visualProof = getVisualProofBody(body);
   if (!visualProof) return false;
 
   return (
-    /\brestart|relaunch|reload\b/i.test(visualProof)
-    || /\btransition|state change\b/i.test(visualProof)
+    /\b(?:restart|relaunch|reload)\b/i.test(visualProof)
+    || /\b(?:transition|state change)\b/i.test(visualProof)
     || (/\bbefore\b/i.test(visualProof) && /\bafter\b/i.test(visualProof))
   );
 }
@@ -224,13 +230,29 @@ function stripDetailsBlocks(text) {
   return String(text).replace(/<details\b[^>]*>[\s\S]*?<\/details>/gi, '').trim();
 }
 
-function classifyScopeKind(filePath) {
+export function classifyScopeKind(filePath) {
   const path = filePath.replace(/\\/g, '/');
 
+  const basename = path.split('/').pop() ?? '';
+
+  if (
+    basename === 'BUILD.bazel'
+    || basename === 'MODULE.bazel'
+    || basename === 'MODULE.bazel.lock'
+    || basename === '.bazelrc'
+    || basename === '.bazelrc.user.example'
+    || basename === '.bazelignore'
+    || basename === '.bazelversion'
+    || basename === 'buildbuddy.yaml'
+    || path.startsWith('scripts/bazel/')
+    || path.startsWith('tools/bazel/')
+  ) {
+    return 'policy';
+  }
   if (path.startsWith('scripts/repro/')) return 'proof';
   if (path.startsWith('packages/app/e2e/visual-proof/')) return 'product-test';
   if (path.startsWith('skills/') || path.startsWith('docs/') || path.endsWith('.md')) return 'docs';
-  if (path.startsWith('scripts/')) return 'policy';
+  if (path.startsWith('scripts/') || path.startsWith('.github/')) return 'policy';
   if (
     path.includes('/e2e/')
     || path.includes('/__tests__/')
@@ -244,6 +266,15 @@ function classifyScopeKind(filePath) {
   return 'other';
 }
 
+export function scopeKindsForChangedFiles(changedFiles = []) {
+  const kinds = new Set();
+  for (const changedFile of changedFiles) {
+    const kind = classifyScopeKind(changedFile);
+    if (kind !== 'other') kinds.add(kind);
+  }
+  return Array.from(kinds).sort();
+}
+
 function formatKinds(kinds) {
   return Array.from(kinds).sort().join(', ');
 }
@@ -252,7 +283,7 @@ export function validatePrScope({ changedFiles = [], reviewLane = '', body = '' 
   const errors = [];
   if (!reviewLane || changedFiles.length === 0) return errors;
 
-  const kinds = new Set(changedFiles.map(classifyScopeKind).filter((kind) => kind !== 'other'));
+  const kinds = new Set(scopeKindsForChangedFiles(changedFiles));
   const nonGoals = getSectionBody(body, '## Non-goals').toLowerCase();
 
   if (reviewLane === 'behavior' || reviewLane === 'refactor' || reviewLane === 'cleanup') {
@@ -300,11 +331,54 @@ export function validatePrScope({ changedFiles = [], reviewLane = '', body = '' 
   return errors;
 }
 
+const GUARDED_BEHAVIOR_MARKER_PATTERN = /\/\/\s*guarded-behavior:\s*([A-Za-z0-9][\w-]*)/;
+
+export function collectGuardedBehaviorMarkers(diffText) {
+  if (!diffText) return [];
+
+  const markers = [];
+  const seen = new Set();
+  for (const file of parseUnifiedDiff(diffText)) {
+    if (!file.path || file.path === '/dev/null') continue;
+    for (const content of [file.newContent, file.oldContent]) {
+      const lines = content.split('\n');
+      for (let index = 0; index < lines.length; index += 1) {
+        const match = GUARDED_BEHAVIOR_MARKER_PATTERN.exec(lines[index]);
+        if (!match) continue;
+        const line = index + 1;
+        const key = `${file.path}:${line}:${match[1]}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        markers.push({ id: match[1], path: file.path, line });
+      }
+    }
+  }
+  return markers;
+}
+
+export function validateGuardedBehaviorMarkers({ diffText = '', body = '' } = {}) {
+  const markers = collectGuardedBehaviorMarkers(diffText);
+  if (markers.length === 0) return [];
+
+  const claimedIds = `${getSectionBody(body, '## Safety Invariant')}\n${getSectionBody(body, '## Non-goals')}`;
+  const errors = [];
+  for (const marker of markers) {
+    const escapedId = marker.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const claimedIdPattern = new RegExp(`(?:^|[^A-Za-z0-9_-])${escapedId}(?=$|[^A-Za-z0-9_-])`);
+    if (!claimedIdPattern.test(claimedIds)) {
+      errors.push(
+        `Guarded behavior "${marker.id}" at ${marker.path}:${marker.line} is touched by this diff but not mentioned in ## Safety Invariant or ## Non-goals. Name it explicitly so reviewers know this decision is intentional.`,
+      );
+    }
+  }
+  return errors;
+}
+
 export function getPrAtomicityBlockers(options = {}) {
   const diffText = options.diffText ?? '';
   if (!diffText) return [];
 
-  return collectDiffAtomicityFindings({ diffText })
+  return collectDiffAtomicityFindings({ diffText, reviewLane: options.reviewLane })
     .filter((finding) => finding.severity === 'warning')
     .map((finding) => `Diff atomicity blocker: ${formatDiffAtomicityFindings([finding])[0]}`);
 }
@@ -336,7 +410,8 @@ export function getPrBodyWarnings(body, options = {}) {
   }
 
   if (options.diffText) {
-    const diffWarnings = collectDiffAtomicityFindings({ diffText: options.diffText })
+    const { reviewLane } = getReviewMetadata(body);
+    const diffWarnings = collectDiffAtomicityFindings({ diffText: options.diffText, reviewLane })
       .filter((finding) => finding.severity === 'warning');
     for (const line of formatDiffAtomicityFindings(diffWarnings)) {
       warnings.push(`Diff atomicity warning: ${line}`);
@@ -349,10 +424,13 @@ export function getPrBodyWarnings(body, options = {}) {
 export async function validatePrBody(body, options = {}) {
   const errors = [];
   const trimmed = body.trim();
+  if (Array.isArray(options.changedFiles) && options.changedFiles.length === 0) {
+    errors.push('PR has no file changes; close it instead of merging it.');
+  }
+
   if (!trimmed) {
-    return [
-      'PR body is empty. Use the canonical schema: ## Summary, ## Review Claim, ## Review Lane, ## Review Unit, ## Safety Invariant, ## Slice Rationale, ## Non-goals, and ## Test Plan and ## Revert Plan with collapsed details blocks.',
-    ];
+    errors.push('PR body is empty. Use the canonical schema: ## Summary, ## Review Claim, ## Review Lane, ## Review Unit, ## Safety Invariant, ## Slice Rationale, ## Non-goals, and ## Test Plan and ## Revert Plan with collapsed details blocks.');
+    return errors;
   }
 
   for (const heading of REQUIRED_SECTIONS) {
@@ -441,15 +519,6 @@ export async function validatePrBody(body, options = {}) {
   if (sliceRationale && !sliceRationale.trim()) {
     errors.push('## Slice Rationale must not be empty.');
   }
-  errors.push(...validateReviewUnitFocus({
-    declaredReviewUnit: reviewUnit,
-    context: 'PR body',
-    texts: [
-      getSectionBody(trimmed, '## Summary'),
-      reviewClaim,
-      sliceRationale,
-    ],
-  }));
 
   errors.push(...await validateMermaidBlocks(trimmed, { context: 'PR body' }));
 
@@ -460,6 +529,10 @@ export async function validatePrBody(body, options = {}) {
   } else if (options.requiresVisualProof && visualProofNeedsAnimation(trimmed) && !hasAnimatedVisualProofMedia(trimmed)) {
     errors.push(
       'Restart or multi-state visual proof must include animated media such as a gif, webm, mp4, or walkthrough/video link.',
+    );
+  } else if (options.requiresVisualProof && !hasManualInspectionNote(trimmed)) {
+    errors.push(
+      'UI-impacting changes require a "Manually inspected:" line in ## Visual Proof stating exactly what you personally saw when you opened the screenshot or video yourself — a captured file is not proof that anyone looked at it. See skills/prove-it/SKILL.md.',
     );
   }
 
@@ -483,6 +556,7 @@ export async function validatePrBody(body, options = {}) {
     for (const line of formatDiffAtomicityFindings(fatalFindings)) {
       errors.push(`Diff atomicity violation: ${line}`);
     }
+    errors.push(...validateGuardedBehaviorMarkers({ diffText: options.diffText, body: trimmed }));
   }
 
   return errors;

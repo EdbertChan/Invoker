@@ -55,6 +55,7 @@ const nodeTypes = {
   workflowNode: WorkflowFlowNode,
 };
 const WATCHDOG_RECOVERY_MISS_COUNT = 3;
+const EMPTY_GRAPH_CLEAR_DELAY_MS = 250;
 const PANE_PAN_DRAG_THRESHOLD_PX = 6;
 const PANE_PAN_IMMEDIATE_STEP = 0.65;
 
@@ -171,6 +172,10 @@ function clearViewportInlineTransform(viewportElement: HTMLElement | null): void
   viewportElement?.style.removeProperty('transform');
 }
 
+function viewportChanged(a: GraphCameraViewport, b: GraphCameraViewport): boolean {
+  return a.x !== b.x || a.y !== b.y || a.zoom !== b.zoom;
+}
+
 function schedulePanePanAnimation(pan: PanePan): void {
   if (pan.animationFrame !== 0) return;
 
@@ -225,6 +230,26 @@ function mergeMeasuredNodeState(
       ...(previous.height !== undefined ? { height: previous.height } : {}),
     };
   });
+}
+
+function applyWorkflowSelectionToNodes(
+  nodes: Node<WorkflowNodeData>[],
+  selectedWorkflowId: string | null,
+): Node<WorkflowNodeData>[] {
+  let changed = false;
+  const nextNodes = nodes.map((node) => {
+    const selected = selectedWorkflowId === node.id;
+    if (node.data.selected === selected) return node;
+    changed = true;
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        selected,
+      },
+    };
+  });
+  return changed ? nextNodes : nodes;
 }
 
 function workflowEdgeVisual(kind: WorkflowGraphEdge['kind']): {
@@ -312,6 +337,7 @@ function WorkflowGraphInner({
   const pendingPanePointerPanRef = useRef<PanePointerPan | null>(null);
   const paneMousePanRef = useRef<PanePan | null>(null);
   const pendingPaneMousePanRef = useRef<PanePan | null>(null);
+  const selectedWorkflowIdRef = useRef(selectedWorkflowId);
 
   const getViewportElement = useCallback(
     () => graphRootRef.current?.querySelector<HTMLElement>('.react-flow__viewport') ?? null,
@@ -383,7 +409,7 @@ function WorkflowGraphInner({
         zIndex: 2,
         data: {
           workflow: node.workflow,
-          selected: selectedWorkflowId === node.id,
+          selected: selectedWorkflowIdRef.current === node.id,
           dimmed,
           coreActivity: coreActivityByWorkflow?.get(node.id),
           onSelect: () => onSelectWorkflow(node.id),
@@ -392,8 +418,20 @@ function WorkflowGraphInner({
     });
     graphMetricsRef.current.objectsMs = performance.now() - startedAt;
     return nextNodes;
-  }, [coreActivityByWorkflow, graph.nodes, onSelectWorkflow, positions, selectedWorkflowId, statusFilters]);
+  }, [coreActivityByWorkflow, graph.nodes, onSelectWorkflow, positions, statusFilters]);
   const [rfNodes, setRfNodes] = useState<Node<WorkflowNodeData>[]>([]);
+
+  useEffect(() => {
+    if (selectedWorkflowIdRef.current === selectedWorkflowId) return;
+    selectedWorkflowIdRef.current = selectedWorkflowId;
+    setRfNodes((prev) => applyWorkflowSelectionToNodes(prev, selectedWorkflowId));
+    if (pendingGestureNodesRef.current) {
+      pendingGestureNodesRef.current = applyWorkflowSelectionToNodes(
+        pendingGestureNodesRef.current,
+        selectedWorkflowId,
+      );
+    }
+  }, [selectedWorkflowId]);
 
   useEffect(() => {
     if (nodes.length === 0) {
@@ -411,7 +449,7 @@ function WorkflowGraphInner({
         pendingGestureEdgesRef.current = null;
         setRfNodes([]);
         setRfEdges([]);
-      }, 1500);
+      }, EMPTY_GRAPH_CLEAR_DELAY_MS);
       return;
     }
     if (emptyGraphClearTimerRef.current) {
@@ -600,7 +638,11 @@ function WorkflowGraphInner({
     pan.visualViewport = { ...pan.targetViewport };
     snapshotViewportAfterMove(setViewport(pan.targetViewport, { duration: 0 }));
     onViewportSnapshot?.(pan.targetViewport);
-    clearViewportInlineTransform(pan.viewportElement);
+    if (pan.hasMoved && viewportChanged(pan.targetViewport, pan.startViewport)) {
+      clearViewportInlineTransform(pan.viewportElement);
+    } else {
+      applyViewportTransform(pan.viewportElement, pan.targetViewport);
+    }
   }, [onViewportSnapshot, setViewport, snapshotViewportAfterMove]);
 
   const onPanePointerMoveCapture = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {

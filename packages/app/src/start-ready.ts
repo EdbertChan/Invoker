@@ -1,7 +1,11 @@
 import type {
+  StartReadyExcludeSelector,
+  StartReadyFreshBasePreview,
+  StartReadyFreshBaseScope,
   StartReadyPreview,
   StartReadyRequest,
   StartReadyResult,
+  StartReadyWorkflowOutcome,
 } from '@invoker/contracts';
 import type { Orchestrator, TaskState } from '@invoker/workflow-core';
 
@@ -14,12 +18,19 @@ type StartReadyOrchestrator = Pick<
   | 'prepareTaskForNewAttempt'
   | 'recreateWorkflow'
   | 'startExecution'
+  | 'getWorkflowMergeMode'
+  | 'activateStagedWorkflows'
+  | 'getStagedWorkflowIds'
 >;
 
 type StartReadyRequestExt = StartReadyRequest & {
   recreateFailedAndPending?: boolean;
   recreateFailedPendingAndRunning?: boolean;
 };
+
+export interface StartReadyRunOptions {
+  freshBaseRecreateWorkflow?: (workflowId: string) => Promise<TaskState[]>;
+}
 
 type StartReadyPreviewExt = StartReadyPreview & {
   pendingWorkflowIds: string[];
@@ -31,6 +42,19 @@ type StartReadyPreviewExt = StartReadyPreview & {
     completedTasks: number;
   };
 };
+
+const SUPPORTED_EXCLUDE_SELECTORS = new Set(['mergeMode:no_op']);
+
+export function parseStartReadyExcludeSelector(raw: string): StartReadyExcludeSelector {
+  const trimmed = raw.trim();
+  if (!SUPPORTED_EXCLUDE_SELECTORS.has(trimmed)) {
+    throw new Error(
+      `Unsupported start-ready --exclude selector "${raw}". Expected one of: ${[...SUPPORTED_EXCLUDE_SELECTORS].join(', ')}`,
+    );
+  }
+  return { field: 'mergeMode', value: 'no_op' };
+}
+
 function collectRecoverableTasks(orchestrator: StartReadyOrchestrator): TaskState[] {
   const activeTaskIds = orchestrator.getPersistedActiveTaskIds();
   return orchestrator
@@ -91,6 +115,38 @@ function unionWorkflowIds(...groups: readonly (readonly string[])[]): string[] {
   return Array.from(ids);
 }
 
+
+function matchesExcludeSelector(
+  orchestrator: StartReadyOrchestrator,
+  workflowId: string,
+  selector: StartReadyExcludeSelector,
+): boolean {
+  if (selector.field === 'mergeMode' && selector.value === 'no_op') {
+    return orchestrator.getWorkflowMergeMode(workflowId) === 'no_op';
+  }
+  return false;
+}
+
+function partitionExcludedWorkflowIds(
+  orchestrator: StartReadyOrchestrator,
+  workflowIds: readonly string[],
+  exclude: readonly StartReadyExcludeSelector[] | undefined,
+): { selected: string[]; excluded: string[] } {
+  if (!exclude || exclude.length === 0) {
+    return { selected: [...workflowIds], excluded: [] };
+  }
+  const selected: string[] = [];
+  const excluded: string[] = [];
+  for (const workflowId of workflowIds) {
+    if (exclude.some((selector) => matchesExcludeSelector(orchestrator, workflowId, selector))) {
+      excluded.push(workflowId);
+    } else {
+      selected.push(workflowId);
+    }
+  }
+  return { selected, excluded };
+}
+
 function workflowIdsToRecreate(
   request: StartReadyRequestExt,
   preview: StartReadyPreviewExt,
@@ -119,9 +175,59 @@ function workflowIdsToRecreate(
   return [];
 }
 
+function workflowIdsForFreshBaseScope(
+  scope: StartReadyFreshBaseScope,
+  preview: StartReadyPreviewExt,
+): string[] {
+  switch (scope) {
+    case 'failed':
+      return [...preview.failedWorkflowIds];
+    case 'failed-and-pending':
+      return unionWorkflowIds(preview.failedWorkflowIds, preview.pendingWorkflowIds);
+    case 'failed-pending-and-running':
+      return unionWorkflowIds(
+        preview.failedWorkflowIds,
+        preview.pendingWorkflowIds,
+        preview.runningWorkflowIds,
+      );
+    case 'all':
+      return unionWorkflowIds(
+        preview.failedWorkflowIds,
+        preview.pendingWorkflowIds,
+        preview.runningWorkflowIds,
+        preview.completedWorkflowIds,
+      );
+  }
+}
+
+function collectFreshBasePreview(
+  scope: StartReadyFreshBaseScope,
+  preview: StartReadyPreviewExt,
+): StartReadyFreshBasePreview {
+  const includePending = scope === 'failed-and-pending'
+    || scope === 'failed-pending-and-running'
+    || scope === 'all';
+  const includeRunning = scope === 'failed-pending-and-running'
+    || scope === 'all';
+  const includeCompleted = scope === 'all';
+
+  return {
+    scope,
+    workflowIds: workflowIdsForFreshBaseScope(scope, preview),
+    failedWorkflowIds: [...preview.failedWorkflowIds],
+    pendingWorkflowIds: includePending ? [...preview.pendingWorkflowIds] : [],
+    runningWorkflowIds: includeRunning ? [...preview.runningWorkflowIds] : [],
+    completedWorkflowIds: includeCompleted ? [...preview.completedWorkflowIds] : [],
+  };
+}
+
+function formatStartReadyError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function collectStartReadyPreview(orchestrator: StartReadyOrchestrator): StartReadyPreview {
   const tasks = orchestrator.getAllTasks();
-  const readyTasks = orchestrator.getExecutableReadyTasks();
+  const readyTasks = orchestrator.getExecutableReadyTasks({ includeStaged: true });
   const recoverableTasks = collectRecoverableTasks(orchestrator);
   const failedTasks = tasks.filter((task) => task.status === 'failed');
   const pendingTasks = tasks.filter((task) => isPendingOrQueued(task));
@@ -151,29 +257,84 @@ export function collectStartReadyPreview(orchestrator: StartReadyOrchestrator): 
 export function runStartReady(
   orchestrator: StartReadyOrchestrator,
   request: StartReadyRequest = {},
-): StartReadyResult {
+  options: StartReadyRunOptions = {},
+): Promise<StartReadyResult> {
+  return runStartReadyAsync(orchestrator, request, options);
+}
+
+async function runStartReadyAsync(
+  orchestrator: StartReadyOrchestrator,
+  request: StartReadyRequest = {},
+  options: StartReadyRunOptions = {},
+): Promise<StartReadyResult> {
   const extendedRequest = request as StartReadyRequestExt;
   orchestrator.syncAllFromDb();
   const preview = collectStartReadyPreview(orchestrator) as StartReadyPreviewExt;
+  const freshBasePreview = request.freshBaseScope
+    ? collectFreshBasePreview(request.freshBaseScope, preview)
+    : undefined;
+  if (freshBasePreview) {
+    preview.freshBase = freshBasePreview;
+  }
+  const recreateCandidates = freshBasePreview
+    ? []
+    : workflowIdsToRecreate(extendedRequest, preview);
+  const { selected: selectedRecreateIds, excluded: excludedWorkflowIds } = partitionExcludedWorkflowIds(
+    orchestrator,
+    recreateCandidates,
+    extendedRequest.exclude,
+  );
+
   if (request.dryRun) {
     return {
       preview,
       started: [],
       recreatedWorkflowIds: [],
+      excludedWorkflowIds,
       dryRun: true,
     };
   }
 
   const started: TaskState[] = [];
   const recreatedWorkflowIds: string[] = [];
-  for (const workflowId of workflowIdsToRecreate(extendedRequest, preview)) {
-    started.push(...orchestrator.recreateWorkflow(workflowId));
-    recreatedWorkflowIds.push(workflowId);
+  const freshBaseRecreatedWorkflowIds: string[] = [];
+  const workflowOutcomes: StartReadyWorkflowOutcome[] = [];
+  orchestrator.activateStagedWorkflows(orchestrator.getStagedWorkflowIds());
+
+  if (freshBasePreview) {
+    if (freshBasePreview.workflowIds.length > 0 && !options.freshBaseRecreateWorkflow) {
+      throw new Error('Start Ready fresh-base scope requires freshBaseRecreateWorkflow.');
+    }
+    for (const workflowId of freshBasePreview.workflowIds) {
+      try {
+        const workflowStarted = await options.freshBaseRecreateWorkflow!(workflowId);
+        started.push(...workflowStarted);
+        freshBaseRecreatedWorkflowIds.push(workflowId);
+        workflowOutcomes.push({
+          ok: true,
+          workflowId,
+          mode: 'fresh-base-recreate',
+          startedTaskIds: workflowStarted.map((task) => task.id),
+        });
+      } catch (err) {
+        workflowOutcomes.push({
+          ok: false,
+          workflowId,
+          mode: 'fresh-base-recreate',
+          error: formatStartReadyError(err),
+        });
+      }
+    }
+  } else {
+    for (const workflowId of selectedRecreateIds) {
+      started.push(...orchestrator.recreateWorkflow(workflowId));
+      recreatedWorkflowIds.push(workflowId);
+    }
   }
 
   const recoverableTasks = collectRecoverableTasks(orchestrator);
   for (const task of recoverableTasks) {
-    orchestrator.prepareTaskForNewAttempt(task.id, 'start_ready_recovery');
+    orchestrator.prepareTaskForNewAttempt(task.id, 'start_ready_recovery', { alreadyRefreshed: true });
   }
 
   started.push(...orchestrator.startExecution());
@@ -182,6 +343,14 @@ export function runStartReady(
     preview,
     started: uniqueTasks(started),
     recreatedWorkflowIds,
+    excludedWorkflowIds,
+    ...(freshBasePreview
+      ? {
+          freshBaseRecreatedWorkflowIds,
+          workflowOutcomes,
+          partial: workflowOutcomes.some((outcome) => !outcome.ok),
+        }
+      : {}),
     dryRun: false,
   };
 }

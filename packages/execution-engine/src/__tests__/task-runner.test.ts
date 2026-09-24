@@ -1,58 +1,21 @@
-import { execSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, execSync } from 'node:child_process';
+import { readFileSync, existsSync, chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TaskRunner } from '../task-runner.js';
+import { dispatchExecutor } from '../task-runner-dispatch.js';
+import { TaskRunner, collectManagedWorkflowBranchesFromDb } from '../task-runner.js';
+import { assertCompletedDependencyHasBranch } from '../task-runner-prepare.js';
 import { collectDirectNonMergeTaskIds } from '../merge-runner.js';
 import { SshExecutor } from '../ssh-executor.js';
 import { WorktreeExecutor } from '../worktree-executor.js';
-import type { TaskState } from '@invoker/workflow-core';
+import { resolveTaskConfig, type TaskState } from '@invoker/workflow-core';
 import type { WorkResponse, Logger } from '@invoker/contracts';
 import { EventEmitter } from 'events';
 import { buildCanonicalPrBody, validateCanonicalPrBody } from '../pr-authoring.js';
 import type { PrAuthoringContext } from '../pr-authoring.js';
 import { registerBuiltinAgents } from '../agents/index.js';
-
-/**
- * Creates a mock executor that auto-completes on start().
- * For merge nodes (no command/prompt), this simulates the executor's
- * handleProcessExit(0) path which immediately completes.
- */
-function createAutoCompleteExecutor() {
-  let completeCallback: ((response: WorkResponse) => void) | undefined;
-  return {
-    type: 'worktree',
-    start: vi.fn().mockImplementation(async (request: any) => {
-      const handle = {
-        executionId: `exec-${request.actionId}`,
-        taskId: request.actionId,
-        workspacePath: '/tmp/mock-worktree',
-        branch: `experiment/${request.actionId}-mock`,
-      };
-      // Auto-complete after start (simulates no-command path)
-      setTimeout(() => {
-        if (completeCallback) {
-          completeCallback({
-            requestId: request.requestId,
-            actionId: request.actionId,
-            executionGeneration: request.executionGeneration,
-            status: 'completed',
-            outputs: { exitCode: 0 },
-          });
-        }
-      }, 0);
-      return handle;
-    }),
-    onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
-      completeCallback = cb;
-    }),
-    onOutput: vi.fn(),
-    onHeartbeat: vi.fn(),
-    kill: vi.fn(),
-    destroyAll: vi.fn(),
-  };
-}
+import { createAutoCompleteExecutor } from './helpers/task-runner-fixtures.js';
 
 function makeTask(overrides: {
   id?: string;
@@ -63,15 +26,18 @@ function makeTask(overrides: {
   config?: Partial<TaskState['config']>;
   execution?: Partial<TaskState['execution']>;
 } = {}): TaskState {
+  const inputConfig = overrides.config?.runnerKind === 'ssh' && !overrides.config.poolId
+    ? { ...overrides.config, poolId: 'ssh-fixture' }
+    : overrides.config;
   return {
     id: overrides.id ?? 'test',
     description: overrides.description ?? 'Test task',
     status: overrides.status ?? 'pending',
     dependencies: overrides.dependencies ?? [],
     createdAt: overrides.createdAt ?? new Date(),
-    config: { ...overrides.config },
+    config: resolveTaskConfig(inputConfig ?? {}),
     execution: { ...overrides.execution },
-  } as TaskState;
+  };
 }
 
 function createExecutorWithTasks(tasks: Map<string, TaskState>): TaskRunner {
@@ -867,6 +833,19 @@ describe('TaskRunner', () => {
       const ids = collectDirectNonMergeTaskIds(rootMerge, (id) => tasks.get(id));
       expect([...ids].sort()).toEqual(['b']);
     });
+
+    it('excludes a two-hop-removed ancestor reached through an intermediate direct dependency', () => {
+      const tasks = new Map<string, TaskState>();
+      tasks.set('leaf', makeTask({ id: 'leaf', dependencies: [] }));
+      tasks.set('mid', makeTask({ id: 'mid', dependencies: ['leaf'] }));
+      const merge = makeTask({
+        id: '__merge__wf-2',
+        dependencies: ['mid'],
+        config: { isMergeNode: true },
+      });
+      const ids = collectDirectNonMergeTaskIds(merge, (id) => tasks.get(id));
+      expect([...ids].sort()).toEqual(['mid']);
+    });
   });
 
   describe('collectUpstreamBranches', () => {
@@ -1095,6 +1074,121 @@ describe('TaskRunner', () => {
       expect(executor.collectUpstreamBranches(task)).toEqual(['experiment/wf-ext/gate-task-abc123']);
     });
   });
+  describe('WorkRequest upstreamBase', () => {
+    function createCapturingRunner(tasks: Map<string, TaskState>) {
+      let capturedRequest: WorkRequest | undefined;
+      const capturingExecutor = {
+        type: 'worktree',
+        start: async (req: WorkRequest) => {
+          capturedRequest = req;
+          return { executionId: 'exec-1', taskId: req.actionId };
+        },
+        onOutput: () => () => {},
+        onComplete: (_handle: unknown, cb: (response: WorkResponse) => void) => {
+          cb({ requestId: 'r', actionId: 'child-task', status: 'completed', outputs: { exitCode: 0 } });
+          return () => {};
+        },
+        onHeartbeat: () => () => {},
+      };
+
+      const runner = new TaskRunner({
+        orchestrator: {
+          getTask: (id: string) => tasks.get(id),
+          handleWorkerResponse: vi.fn(),
+        } as any,
+        persistence: { updateTask: vi.fn() } as any,
+        executorRegistry: {
+          getDefault: () => capturingExecutor,
+          get: () => capturingExecutor,
+          getAll: () => [capturingExecutor],
+        } as any,
+        cwd: '/tmp',
+      });
+
+      return {
+        runner,
+        getCapturedRequest: () => capturedRequest,
+      };
+    }
+
+    it('uses the only completed dependency branch and commit as upstreamBase', async () => {
+      const tasks = new Map<string, TaskState>();
+      tasks.set('dep-a', makeTask({
+        id: 'dep-a',
+        status: 'completed',
+        execution: {
+          branch: 'experiment/dep-a',
+          commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+      }));
+
+      const { runner, getCapturedRequest } = createCapturingRunner(tasks);
+      await runner.executeTask(makeTask({
+        id: 'child-task',
+        status: 'running',
+        dependencies: ['dep-a'],
+        config: { command: 'echo test' },
+      }));
+
+      expect(getCapturedRequest()?.inputs.upstreamBase).toEqual({
+        branch: 'experiment/dep-a',
+        commitHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      });
+    });
+
+    it('uses the first dependency in declared order when multiple commits exist', async () => {
+      const tasks = new Map<string, TaskState>();
+      tasks.set('dep-a', makeTask({
+        id: 'dep-a',
+        status: 'completed',
+        execution: {
+          branch: 'experiment/dep-a',
+          commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+      }));
+      tasks.set('dep-b', makeTask({
+        id: 'dep-b',
+        status: 'completed',
+        execution: {
+          branch: 'experiment/dep-b',
+          commit: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+      }));
+
+      const { runner, getCapturedRequest } = createCapturingRunner(tasks);
+      await runner.executeTask(makeTask({
+        id: 'child-task',
+        status: 'running',
+        dependencies: ['dep-b', 'dep-a'],
+        config: { command: 'echo test' },
+      }));
+
+      expect(getCapturedRequest()?.inputs.upstreamBase).toEqual({
+        branch: 'experiment/dep-b',
+        commitHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      });
+    });
+
+    it('leaves upstreamBase unset when only branch metadata exists', async () => {
+      const tasks = new Map<string, TaskState>();
+      tasks.set('dep-a', makeTask({
+        id: 'dep-a',
+        status: 'completed',
+        execution: { branch: 'experiment/dep-a' },
+      }));
+
+      const { runner, getCapturedRequest } = createCapturingRunner(tasks);
+      await runner.executeTask(makeTask({
+        id: 'child-task',
+        status: 'running',
+        dependencies: ['dep-a'],
+        config: { command: 'echo test' },
+      }));
+
+      expect(getCapturedRequest()?.inputs.upstreamBase).toBeUndefined();
+      expect(getCapturedRequest()?.inputs.upstreamBranches).toEqual(['experiment/dep-a']);
+    });
+  });
 
   describe('executeTask error handling', () => {
     it('sends failed WorkResponse when executor.start throws', async () => {
@@ -1121,6 +1215,9 @@ describe('TaskRunner', () => {
         persistence: { updateTask: vi.fn() } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        executionPoolsProvider: () => ({
+          'ssh-fixture': { members: [{ type: 'ssh', id: 'remote-1' }] },
+        }),
         callbacks: { onComplete },
       });
 
@@ -1300,17 +1397,20 @@ describe('TaskRunner', () => {
         persistence: { updateTask } as any,
         executorRegistry: registry as any,
         cwd: '/tmp',
+        executionPoolsProvider: () => ({
+          'ssh-fixture': { members: [{ type: 'ssh', id: 'remote-1' }] },
+        }),
       });
 
       const task = makeTask({
         id: 'failing-start',
         status: 'running',
-        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        config: { command: 'echo hi', runnerKind: 'ssh' },
       });
       await executor.executeTask(task);
 
       expect(updateTask).toHaveBeenCalledWith('failing-start', {
-        config: { runnerKind: 'ssh' },
+        config: { runnerKind: 'ssh', poolMemberId: 'remote-1' },
         execution: {
           workspacePath: '~/.invoker/worktrees/repo/task-1',
           branch: 'experiment/task-1-abc12345',
@@ -1363,13 +1463,16 @@ describe('TaskRunner', () => {
         executorRegistry: registry as any,
         cwd: '/tmp',
         callbacks: { onLaunchFailed },
+        executionPoolsProvider: () => ({
+          'ssh-fixture': { members: [{ type: 'ssh', id: 'remote-1' }] },
+        }),
       });
 
       // Task was launched with attempt-1 but orchestrator now shows attempt-2
       const task = makeTask({
         id: 'stale-1',
         status: 'running',
-        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        config: { command: 'echo hi', runnerKind: 'ssh' },
         execution: { selectedAttemptId: 'attempt-1', generation: 0 },
       });
       await runner.executeTask(task);
@@ -1425,7 +1528,7 @@ describe('TaskRunner', () => {
       const task = makeTask({
         id: 'stale-gen',
         status: 'running',
-        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        config: { command: 'echo hi', runnerKind: 'ssh' },
         execution: { generation: 1 },
       });
       await runner.executeTask(task);
@@ -1475,19 +1578,22 @@ describe('TaskRunner', () => {
         executorRegistry: registry as any,
         cwd: '/tmp',
         callbacks: { onLaunchFailed },
+        executionPoolsProvider: () => ({
+          'ssh-fixture': { members: [{ type: 'ssh', id: 'remote-1' }] },
+        }),
       });
 
       const task = makeTask({
         id: 'current-1',
         status: 'running',
-        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        config: { command: 'echo hi', runnerKind: 'ssh' },
         execution: { selectedAttemptId: 'attempt-1', generation: 0 },
       });
       await runner.executeTask(task);
 
       // Metadata SHOULD be persisted when lineage is current
       expect(updateTask).toHaveBeenCalledWith('current-1', {
-        config: { runnerKind: 'ssh' },
+        config: { runnerKind: 'ssh', poolMemberId: 'remote-1' },
         execution: {
           workspacePath: '/tmp/current-worktree',
           branch: 'experiment/current-branch',
@@ -1546,7 +1652,7 @@ describe('TaskRunner', () => {
       const task = makeTask({
         id: 'inner-stale',
         status: 'running',
-        config: { command: 'echo hi', runnerKind: 'ssh' as any },
+        config: { command: 'echo hi', runnerKind: 'ssh' },
         execution: { selectedAttemptId: 'attempt-old', generation: 0 },
       });
       await runner.executeTask(task);
@@ -1699,6 +1805,7 @@ describe('TaskRunner', () => {
       const completeCalls: number[] = [];
       const failCalls: Array<[number, unknown]> = [];
       const launchOutbox = {
+        acceptDispatch(_id: number) { return true; },
         completeDispatch(id: number) { completeCalls.push(id); return true; },
         failDispatch(id: number, err: unknown) { failCalls.push([id, err]); return true; },
       };
@@ -1787,6 +1894,56 @@ describe('TaskRunner', () => {
           }),
         }),
       );
+    });
+
+    it('assertCompletedDependencyHasBranch throws when a completed dep has no branch', () => {
+      const dep = makeTask({
+        id: 'dep-a',
+        status: 'completed',
+        config: { runnerKind: 'worktree' },
+      });
+
+      expect(() =>
+        assertCompletedDependencyHasBranch('child-task', 'dependency "dep-a"', dep),
+      ).toThrow('completed without branch metadata');
+    });
+
+    it('assertCompletedDependencyHasBranch does not throw when the dep is a scratch-mode task with no branch', () => {
+      // ScratchExecutor never sets a branch by design (no git worktree at
+      // all in scratch mode), so the guard must not apply to scratch deps.
+      const dep = makeTask({
+        id: 'dep-a',
+        status: 'completed',
+        config: { runnerKind: 'scratch' },
+      });
+
+      expect(() =>
+        assertCompletedDependencyHasBranch('child-task', 'dependency "dep-a"', dep),
+      ).not.toThrow();
+    });
+
+    it('assertCompletedDependencyHasBranch does not throw when the dep has a branch', () => {
+      const dep = makeTask({
+        id: 'dep-a',
+        status: 'completed',
+        config: { runnerKind: 'worktree' },
+        execution: { branch: 'experiment/dep-a' },
+      });
+
+      expect(() =>
+        assertCompletedDependencyHasBranch('child-task', 'dependency "dep-a"', dep),
+      ).not.toThrow();
+    });
+
+    it('assertCompletedDependencyHasBranch does not throw when the dep is undefined or not completed', () => {
+      expect(() =>
+        assertCompletedDependencyHasBranch('child-task', 'dependency "dep-a"', undefined),
+      ).not.toThrow();
+
+      const pendingDep = makeTask({ id: 'dep-a', status: 'pending', config: { runnerKind: 'worktree' } });
+      expect(() =>
+        assertCompletedDependencyHasBranch('child-task', 'dependency "dep-a"', pendingDep),
+      ).not.toThrow();
     });
 
     it('fails task when a completed external dependency has no branch metadata', async () => {
@@ -2305,7 +2462,7 @@ describe('TaskRunner', () => {
       expect(launchFailed).not.toHaveBeenCalled();
     });
 
-    it('fails a task when executor.start never resolves and keeps it in launching', async () => {
+    it('startup cancellation times out a compatible executor and disposes its late handle', async () => {
       vi.useFakeTimers();
       const previousTimeout = process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS;
       process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS = '100';
@@ -2331,9 +2488,10 @@ describe('TaskRunner', () => {
             selectedAttemptId: 'launch-hang-a1',
           },
         });
+        let resolveStart!: (handle: { executionId: string; taskId: string; workspacePath: string }) => void;
         const hangingExecutor = {
           type: 'worktree',
-          start: vi.fn(async () => await new Promise<never>(() => {})),
+          start: vi.fn(() => new Promise(resolve => { resolveStart = resolve; })),
           onOutput: vi.fn(),
           onComplete: vi.fn(),
           onHeartbeat: vi.fn(),
@@ -2394,6 +2552,11 @@ describe('TaskRunner', () => {
             }),
           }),
         );
+        const lateHandle = { executionId: 'late-start', taskId: task.id, workspacePath: '/tmp/late-start' };
+        resolveStart(lateHandle);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(hangingExecutor.kill).toHaveBeenCalledExactlyOnceWith(lateHandle);
+        expect(onComplete).toHaveBeenCalledTimes(1);
       } finally {
         if (previousTimeout === undefined) {
           delete process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS;
@@ -3009,7 +3172,7 @@ describe('TaskRunner', () => {
 
       // Default mergeMode is 'manual', so setTaskReviewReady is called with metadata
       expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ runnerKind: 'worktree' }),
+        config: expect.objectContaining({ runnerKind: 'merge' }),
         execution: expect.objectContaining({ branch: 'plan/feature', workspacePath: '/tmp/mock-wt' }),
       }), expect.objectContaining({ generation: 0 }));
     });
@@ -3315,6 +3478,34 @@ describe('TaskRunner', () => {
       expect(loadAttempts).toHaveBeenCalledWith('t1');
       expect(loadAttempts).toHaveBeenCalledWith('t2');
     });
+
+    it('collectManagedWorkflowBranchesFromDb dedupes managed branches from tasks and their attempts', () => {
+      const tasks = [
+        makeTask({ id: 't1', execution: { branch: 'experiment/t1-current' } }),
+        makeTask({ id: 't2', execution: { branch: 'feature/t2' } }),
+      ];
+      const loadAttempts = vi.fn((taskId: string) => {
+        if (taskId === 't1') {
+          return [
+            { id: 't1-old', nodeId: 't1', branch: 'experiment/t1-old' },
+            { id: 't1-dup', nodeId: 't1', branch: 'experiment/t1-current' },
+          ];
+        }
+        return [{ id: 't2-old', nodeId: 't2', branch: 'invoker/t2-old' }];
+      });
+
+      const branches = collectManagedWorkflowBranchesFromDb(tasks as any, loadAttempts as any);
+
+      expect(branches).toEqual(['experiment/t1-current', 'experiment/t1-old', 'invoker/t2-old']);
+    });
+
+    it('collectManagedWorkflowBranchesFromDb tolerates a missing loadAttempts callback', () => {
+      const tasks = [makeTask({ id: 't1', execution: { branch: 'experiment/t1' } })];
+
+      const branches = collectManagedWorkflowBranchesFromDb(tasks as any, undefined);
+
+      expect(branches).toEqual(['experiment/t1']);
+    });
   });
 
   describe('manual merge mode', () => {
@@ -3385,7 +3576,7 @@ describe('TaskRunner', () => {
 
       // Should call setTaskReviewReady with metadata instead of handleWorkerResponse
       expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ runnerKind: 'worktree' }),
+        config: expect.objectContaining({ runnerKind: 'merge' }),
         execution: expect.objectContaining({ branch: 'plan/feature', workspacePath: '/tmp/mock-wt' }),
       }), expect.objectContaining({ generation: 0 }));
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
@@ -3520,6 +3711,7 @@ describe('TaskRunner', () => {
         return '';
       };
       (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         gitCalls.push(args);
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         return '';
@@ -3572,7 +3764,7 @@ describe('TaskRunner', () => {
 
       // Should set task review-ready with PR metadata (not handleWorkerResponse)
       expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ runnerKind: 'worktree' }),
+        config: expect.objectContaining({ runnerKind: 'merge' }),
         execution: expect.objectContaining({
           branch: 'plan/feature',
           reviewUrl: 'https://github.com/owner/repo/pull/42',
@@ -3649,6 +3841,7 @@ describe('TaskRunner', () => {
       const gitCalls: Array<{ args: string[]; dir: string }> = [];
       (executor as any).execGitReadonly = async () => '';
       (executor as any).execGitIn = async (args: string[], dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         gitCalls.push({ args: [...args], dir });
         if (args[0] === 'checkout' && args[1] === 'plan/example') {
           currentBranchByDir.set(dir, 'plan/example');
@@ -3799,6 +3992,7 @@ console.log(JSON.stringify(out));
 
       const gitCalls: string[][] = [];
       (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         gitCalls.push([...args]);
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         if (args[0] === 'rev-parse' && args[1] === 'HEAD') return 'abc123';
@@ -3872,7 +4066,7 @@ console.log(JSON.stringify(out));
 
       // No featureBranch set → gateWorkspacePath is undefined
       expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ runnerKind: 'worktree' }),
+        config: expect.objectContaining({ runnerKind: 'merge' }),
         execution: expect.objectContaining({ workspacePath: undefined }),
       }), expect.objectContaining({ generation: 0 }));
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
@@ -3965,6 +4159,7 @@ console.log(JSON.stringify(out));
         return '';
       };
       (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         return '';
       };
@@ -3999,7 +4194,7 @@ console.log(JSON.stringify(out));
 
       // Should pass PR metadata through setTaskReviewReady
       expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ runnerKind: 'worktree' }),
+        config: expect.objectContaining({ runnerKind: 'merge' }),
         execution: expect.objectContaining({
           branch: 'plan/feature',
           reviewUrl: 'https://github.com/owner/repo/pull/55',
@@ -4023,6 +4218,230 @@ console.log(JSON.stringify(out));
         }),
       }), expect.objectContaining({ generation: 0 }));
       expect(orchestrator.handleWorkerResponse).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['Invoker', 'https://github.com/Neko-Catpital-Labs/Invoker.git'],
+      ['non-Invoker', 'https://github.com/EdbertChan/catstack'],
+    ])('completes an empty %s external_review branch without publishing a make-pr stack', async (_label, repoUrl) => {
+      const mergeTask = makeTask({
+        id: '__merge__wf-1',
+        status: 'running',
+        dependencies: ['t1'],
+        config: { isMergeNode: true, workflowId: 'wf-1' },
+      });
+      const allTasks = [
+        makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
+        mergeTask,
+      ];
+      const orchestrator = {
+        getTask: (id: string) => allTasks.find(t => t.id === id),
+        getAllTasks: () => allTasks,
+        handleWorkerResponse: vi.fn(() => []),
+        setTaskAwaitingApproval: vi.fn(),
+        setTaskReviewReady: vi.fn(),
+        autoStartExternallyUnblockedReadyTasks: vi.fn(() => []),
+      };
+      const persistence = {
+        loadWorkflow: () => ({
+          id: 'wf-1',
+          onFinish: 'none',
+          mergeMode: 'external_review',
+          baseBranch: 'master',
+          featureBranch: 'plan/empty',
+          name: 'Empty Workflow',
+          repoUrl,
+        }),
+        updateTask: vi.fn(),
+      };
+      const mergeGateProvider = {
+        createReview: vi.fn(),
+      };
+      const onComplete = vi.fn();
+      const executor = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: persistence as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+        cwd: '/tmp',
+        callbacks: { onComplete },
+        mergeGateProvider: mergeGateProvider as any,
+      });
+
+      const gitCalls: string[][] = [];
+      (executor as any).execGitReadonly = async () => '';
+      (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        gitCalls.push([...args]);
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return 'base-sha';
+        if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'refs/remotes/origin/master^{commit}') {
+          return 'origin-base-sha';
+        }
+        if (args[0] === 'diff' && args[1] === '--name-only') return '';
+        return '';
+      };
+      (executor as any).createMergeWorktree = vi.fn().mockResolvedValue('/tmp/mock-wt');
+      (executor as any).removeMergeWorktree = vi.fn();
+      (executor as any).publishReviewStackWithMakePrSkill = vi.fn();
+      (executor as any).authorPrBodyWithSkill = vi.fn();
+
+      await (executor as any).executeMergeNode(mergeTask);
+
+      expect(gitCalls).toContainEqual(['diff', '--name-only', 'refs/remotes/origin/master...plan/empty', '--']);
+      expect((executor as any).publishReviewStackWithMakePrSkill).not.toHaveBeenCalled();
+      expect((executor as any).authorPrBodyWithSkill).not.toHaveBeenCalled();
+      expect(mergeGateProvider.createReview).not.toHaveBeenCalled();
+      expect(orchestrator.setTaskReviewReady).not.toHaveBeenCalled();
+      expect(orchestrator.handleWorkerResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'completed',
+          outputs: expect.objectContaining({
+            exitCode: 0,
+            branch: 'plan/empty',
+          }),
+        }),
+      );
+      expect(onComplete).toHaveBeenCalledWith(
+        '__merge__wf-1',
+        expect.objectContaining({ status: 'completed' }),
+      );
+    });
+
+    it('publishes Invoker review stacks against master when workflow metadata says main', async () => {
+      const featureBranch = 'plan/planning-terminal-tmux-blank-repro';
+      const mergeTask = makeTask({
+        id: '__merge__wf-1',
+        status: 'running',
+        dependencies: ['t1'],
+        config: { isMergeNode: true, workflowId: 'wf-1' },
+      });
+      const allTasks = [
+        makeTask({ id: 't1', config: { workflowId: 'wf-1' }, status: 'completed', execution: { branch: 'experiment/t1' } }),
+        mergeTask,
+      ];
+      const orchestrator = {
+        getTask: (id: string) => allTasks.find(t => t.id === id),
+        getAllTasks: () => allTasks,
+        handleWorkerResponse: vi.fn(() => []),
+        setTaskAwaitingApproval: vi.fn(),
+        setTaskReviewReady: vi.fn(),
+        autoStartExternallyUnblockedReadyTasks: vi.fn(() => []),
+      };
+      const persistence = {
+        loadWorkflow: () => ({
+          id: 'wf-1',
+          onFinish: 'none',
+          mergeMode: 'external_review',
+          baseBranch: 'main',
+          featureBranch,
+          name: 'Planning Terminal Tmux Blank Repro',
+          repoUrl: 'https://github.com/Neko-Catpital-Labs/Invoker.git',
+          visualProof: true,
+        }),
+        updateTask: vi.fn(),
+      };
+      const mergeGateProvider = {
+        createReview: vi.fn(),
+      };
+      const executor = new TaskRunner({
+        orchestrator: orchestrator as any,
+        persistence: persistence as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+        cwd: '/tmp',
+        mergeGateProvider: mergeGateProvider as any,
+      });
+
+      const featureSha = 'feature-sha';
+      const gitCalls: string[][] = [];
+      (executor as any).execGitReadonly = async (args: string[]) => {
+        if (args[0] === 'rev-parse' && args[1] === '--verify') {
+          if (args[2] === 'refs/remotes/origin/master^{commit}') return 'origin-base-sha';
+          throw new Error(`missing ${args[2]}`);
+        }
+        if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
+        return '';
+      };
+      (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        gitCalls.push([...args]);
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return featureSha;
+        if (args[0] === 'rev-parse' && args[1] === '--verify') {
+          if (args[2] === `${featureBranch}^{commit}`) return featureSha;
+          if (args[2] === 'refs/remotes/origin/master^{commit}') return 'origin-base-sha';
+          if (args[2]?.includes('main')) throw new Error(`missing ${args[2]}`);
+          return 'task-sha';
+        }
+        if (args[0] === 'ls-remote') return `${featureSha}\trefs/heads/${featureBranch}`;
+        if (args[0] === 'diff' && args[1] === '--name-only') {
+          return 'packages/app/e2e/planning-terminal-tmux-blank-repro.spec.ts';
+        }
+        return '';
+      };
+      const createMergeWorktreeSpy = vi.fn().mockResolvedValue('/tmp/mock-wt');
+      (executor as any).createMergeWorktree = createMergeWorktreeSpy;
+      (executor as any).removeMergeWorktree = vi.fn();
+      (executor as any).runVisualProofCapture = vi.fn().mockResolvedValue('## Visual Proof');
+      (executor as any).publishReviewStackWithMakePrSkill = vi.fn().mockResolvedValue({
+        artifacts: [{
+          id: 'review-stack',
+          title: 'Planning Terminal Tmux Blank Repro',
+          url: 'https://github.com/owner/repo/pull/55',
+          providerId: 'owner/repo#55',
+          provider: 'github',
+          branch: featureBranch,
+          baseBranch: 'master',
+          required: true,
+          status: 'open',
+          generation: 0,
+        }],
+        sessionId: 'sess-review-stack',
+        agentName: 'codex',
+      });
+
+      await (executor as any).executeMergeNode(mergeTask);
+
+      expect(createMergeWorktreeSpy).toHaveBeenCalledWith(
+        'master',
+        expect.stringContaining('gate-__merge__wf-1'),
+        'https://github.com/Neko-Catpital-Labs/Invoker.git',
+      );
+      expect(gitCalls).toContainEqual([
+        'diff',
+        '--name-only',
+        `refs/remotes/origin/master...${featureBranch}`,
+        '--',
+      ]);
+      expect(gitCalls).not.toContainEqual([
+        'diff',
+        '--name-only',
+        `main...${featureBranch}`,
+        '--',
+      ]);
+      expect((executor as any).runVisualProofCapture).toHaveBeenCalledWith(
+        'master',
+        featureBranch,
+        'plan-planning-terminal-tmux-blank-repro',
+        'https://github.com/Neko-Catpital-Labs/Invoker.git',
+      );
+      expect((executor as any).publishReviewStackWithMakePrSkill).toHaveBeenCalledWith(
+        expect.objectContaining({
+          baseBranch: 'master',
+          featureBranch,
+          workflowSummary: expect.stringContaining('## Visual Proof'),
+        }),
+      );
+      expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith(
+        '__merge__wf-1',
+        expect.objectContaining({
+          execution: expect.objectContaining({
+            branch: featureBranch,
+            reviewGate: expect.objectContaining({
+              artifacts: [expect.objectContaining({
+                branch: featureBranch,
+                baseBranch: 'master',
+              })],
+            }),
+          }),
+        }),
+        expect.objectContaining({ generation: 0 }),
+      );
     });
 
     it('executeMergeNode anchors external_review gate worktrees on the origin-backed base branch', async () => {
@@ -4136,6 +4555,7 @@ console.log(JSON.stringify(out));
         return '';
       };
       (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         return '';
       };
@@ -4200,7 +4620,7 @@ console.log(JSON.stringify(out));
 
       // No featureBranch set → gateWorkspacePath is undefined
       expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith('__merge__wf-1', expect.objectContaining({
-        config: expect.objectContaining({ runnerKind: 'worktree' }),
+        config: expect.objectContaining({ runnerKind: 'merge' }),
         execution: expect.objectContaining({ workspacePath: undefined }),
       }), expect.objectContaining({ generation: 0 }));
     });
@@ -4356,6 +4776,7 @@ console.log(JSON.stringify(out));
         return '';
       };
       (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         return '';
       };
@@ -4510,6 +4931,7 @@ console.log(JSON.stringify(out));
         return '';
       };
       (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         return '';
       };
@@ -4613,6 +5035,7 @@ console.log(JSON.stringify(out));
         return '';
       };
       (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         return '';
       };
@@ -4699,6 +5122,7 @@ console.log(JSON.stringify(out));
         return '';
       };
       (executor as any).execGitIn = async (args: string[], _dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         return '';
       };
@@ -7081,4 +7505,185 @@ console.log(JSON.stringify(out));
     });
   });
 
+});
+
+
+describe('startup cancellation with real worktree dispatch', () => {
+  it('stops a timed-out shared-repo waiter before late workspace or agent creation and preserves a concurrent retry', async () => {
+    const dir = createTempWorkspace();
+    const source = join(dir, 'source');
+    mkdirSync(source);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: source, encoding: 'utf8' }).trim();
+    git('init');
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '--allow-empty', '-m', 'initial');
+    const leases = new Set<string>();
+    const executor = new WorktreeExecutor({
+      cacheDir: join(dir, 'cache'), worktreeBaseDir: join(dir, 'worktrees'),
+      provisionCommand: '', maxWorktrees: 2,
+      leasePersistence: {
+        claimExecutionResourceLease: ({ holderId }) => { leases.add(holderId); return true; },
+        releaseExecutionResourceLease: (_key, holderId) => { leases.delete(holderId); },
+      },
+    });
+    const pool = executor.getRepoPool();
+    let unblock!: () => void;
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const originalClone = (pool as any).ensureCloneUnqueued.bind(pool);
+    const clone = vi.spyOn(pool as any, 'ensureCloneUnqueued').mockImplementationOnce(async (repo: string) => {
+      await gate;
+      return originalClone(repo);
+    });
+    const starts: Promise<any>[] = [];
+    const originalStart = executor.start.bind(executor);
+    vi.spyOn(executor, 'start').mockImplementation((...args) => {
+      const start = originalStart(...args);
+      starts.push(start.catch(error => error));
+      return start;
+    });
+    const oldTask = makeTask({ id: 'expired', status: 'running', config: { runnerKind: 'worktree' }, execution: { selectedAttemptId: 'old', generation: 1 } });
+    let liveTask = oldTask;
+    const onSpawned = vi.fn();
+    const runner = new TaskRunner({
+      orchestrator: { getTask: () => liveTask, markTaskRunningAfterLaunch: () => true } as any,
+      persistence: { updateTask: vi.fn(), updateAttempt: vi.fn(), logEvent: vi.fn(), appendTaskOutput: vi.fn() } as any,
+      executorRegistry: { getDefault: () => executor, get: () => executor, getAll: () => [executor] } as any,
+      cwd: dir, logger: createMockLogger(), callbacks: { onSpawned },
+    });
+    const dispatch = (task: TaskState, attemptId: string, marker: string) => dispatchExecutor(runner, {
+      task, attemptId, bench: () => {},
+      request: { requestId: attemptId, attemptId, actionId: task.id, actionType: 'command', executionGeneration: task.execution.generation,
+        inputs: { repoUrl: source, command: `touch '${marker}'; sleep 30`, lifecycleTag: attemptId },
+        callbackUrl: '', timestamps: { createdAt: new Date().toISOString() } },
+    });
+    const previousTimeout = process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS;
+    // Short deterministic test deadline; this does not replay the historical ten-minute incident.
+    process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS = '200';
+    try {
+      const expired = dispatch(oldTask, 'old', join(dir, 'old-launched')).catch(error => error);
+      await vi.waitFor(() => expect(clone).toHaveBeenCalledTimes(1));
+      expect((await expired).message).toContain('Executor startup timed out after 200ms');
+      expect(onSpawned).not.toHaveBeenCalled();
+      expect(leases.size).toBe(0);
+      liveTask = makeTask({ id: 'expired', status: 'running', config: { runnerKind: 'worktree' }, execution: { selectedAttemptId: 'new', generation: 2 } });
+      process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS = '10000';
+      const retry = dispatch(liveTask, 'new', join(dir, 'new-launched'));
+      unblock();
+      const current = await retry;
+      await Promise.all(starts);
+      await vi.waitFor(() => expect(existsSync(join(dir, 'new-launched'))).toBe(true));
+      const branches = execFileSync('git', ['branch', '--list', '*old*'], { cwd: pool.getClonePath(source), encoding: 'utf8' }).trim();
+      expect.soft(branches, 'expired attempt created a late branch').toBe('');
+      expect.soft(existsSync(join(dir, 'old-launched')), 'expired attempt launched its child').toBe(false);
+      expect.soft([...leases], 'only the successful attempt may retain a lease').toEqual(['new']);
+      expect.soft((pool as any).activeWorktrees.values().next().value.size, 'only the successful attempt may retain a pool slot').toBe(1);
+      expect(onSpawned).toHaveBeenCalledTimes(1);
+      expect(current?.handle.leaseHolderId).toBe('new');
+    } finally {
+      unblock();
+      await Promise.all(starts);
+      await executor.destroyAll();
+      clone.mockRestore();
+      if (previousTimeout === undefined) delete process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS;
+      else process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS = previousTimeout;
+    }
+  }, 20000);
+});
+
+
+describe('startup cancellation during owned children', () => {
+  it.each(['git', 'provisioning'] as const)('stops the %s process group before unblocking can cause later mutations', async (stage) => {
+    const dir = createTempWorkspace();
+    const source = join(dir, 'source');
+    mkdirSync(source);
+    execFileSync('git', ['init', source]);
+    execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com', 'commit', '--allow-empty', '-m', 'initial'], { cwd: source });
+    const pidPath = join(dir, 'child-pid');
+    const gatePath = join(dir, 'unblock');
+    const latePath = join(dir, 'late-mutation');
+    const agentPath = join(dir, 'agent');
+    const provisionPath = join(dir, 'provision');
+    const agentScript = join(dir, 'fixture-agent');
+    writeFileSync(agentScript, `#!/bin/sh\ntouch '${agentPath}'\n`);
+    chmodSync(agentScript, 0o755);
+    const childScript = join(dir, 'blocked-child.cjs');
+    writeFileSync(childScript, `const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+setInterval(() => {
+  if (fs.existsSync(${JSON.stringify(gatePath)})) {
+    fs.writeFileSync(${JSON.stringify(latePath)}, 'late side effect');
+    process.exit(0);
+  }
+}, 10);`);
+    const blockedCommand = `exec '${process.execPath}' '${childScript}'`;
+    const leases = new Set<string>();
+    const executor = new WorktreeExecutor({
+      cacheDir: join(dir, 'cache'), worktreeBaseDir: join(dir, 'worktrees'),
+      claudeCommand: agentScript, secretsFile: join(dir, 'no-secrets'),
+      provisionCommand: `touch '${provisionPath}'; ${stage === 'provisioning' ? blockedCommand : 'true'}`,
+      leasePersistence: {
+        claimExecutionResourceLease: ({ holderId }) => { leases.add(holderId); return true; },
+        releaseExecutionResourceLease: (_key, holderId) => { leases.delete(holderId); },
+      },
+    });
+    const pool = executor.getRepoPool();
+    const clonePath = await pool.ensureCloneThroughRepoQueue(source);
+    if (stage === 'git') {
+      const hook = join(clonePath, '.git', 'hooks', 'post-checkout');
+      writeFileSync(hook, `#!/bin/sh\n${blockedCommand}\n`);
+      chmodSync(hook, 0o755);
+    }
+    const task = makeTask({ id: stage, status: 'running', config: { runnerKind: 'worktree' }, execution: { selectedAttemptId: 'owned', generation: 1 } });
+    const onSpawned = vi.fn();
+    const runner = new TaskRunner({
+      orchestrator: { getTask: () => task, markTaskRunningAfterLaunch: () => true } as any,
+      persistence: { updateTask: vi.fn(), updateAttempt: vi.fn(), logEvent: vi.fn(), appendTaskOutput: vi.fn() } as any,
+      executorRegistry: { getDefault: () => executor, get: () => executor, getAll: () => [executor] } as any,
+      cwd: dir, logger: createMockLogger(), callbacks: { onSpawned },
+    });
+    let settledStart: Promise<unknown> = Promise.resolve();
+    const originalStart = executor.start.bind(executor);
+    vi.spyOn(executor, 'start').mockImplementation((...args) => {
+      const start = originalStart(...args);
+      settledStart = start.catch(error => error);
+      return start;
+    });
+    const previousTimeout = process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS;
+    // Test-only deadline: advance the clock only after the real owned child is blocked.
+    process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS = '1000';
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    try {
+      const result = dispatchExecutor(runner, {
+        task, attemptId: 'owned', bench: () => {},
+        request: { requestId: 'owned', attemptId: 'owned', actionId: stage, actionType: 'ai_task',
+          inputs: { repoUrl: source, prompt: 'Harmless startup regression fixture' },
+          callbackUrl: '', timestamps: { createdAt: new Date().toISOString() } },
+      }).catch(error => error);
+      const waitStarted = performance.now();
+      while (!existsSync(pidPath) && performance.now() - waitStarted < 5000) {
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      expect(existsSync(pidPath), 'owned child must start before advancing the test clock').toBe(true);
+      const pid = Number(readFileSync(pidPath, 'utf8'));
+      await vi.advanceTimersByTimeAsync(1001);
+      expect((await result).message).toContain('Executor startup timed out after 1000ms');
+      await settledStart;
+      await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
+      writeFileSync(gatePath, 'unblocked after timeout');
+      expect(existsSync(latePath)).toBe(false);
+      expect(existsSync(agentPath)).toBe(false);
+      expect(existsSync(provisionPath)).toBe(stage === 'provisioning');
+      expect(onSpawned).not.toHaveBeenCalled();
+      expect([...leases]).toEqual([]);
+      expect([...((pool as any).activeWorktrees as Map<string, Set<string>>).values()].flatMap(paths => [...paths])).toEqual([]);
+      expect((executor as any).entries.size).toBe(0);
+      if (stage === 'provisioning') expect(existsSync((await settledStart as any).workspacePath)).toBe(true);
+    } finally {
+      writeFileSync(gatePath, 'cleanup');
+      await settledStart;
+      await executor.destroyAll();
+      vi.useRealTimers();
+      if (previousTimeout === undefined) delete process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS;
+      else process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS = previousTimeout;
+    }
+  }, 15000);
 });

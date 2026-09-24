@@ -111,13 +111,32 @@ describe('ResponseHandler (pure parser)', () => {
           outputs: {
             exitCode: 0,
             reviewGate,
+            workspacePath: '/tmp/gate-workspace',
           },
         }),
       );
       expect('type' in result).toBe(true);
       if (!('type' in result)) return;
       expect(result.type).toBe('review_ready');
+      expect(result.workspacePath).toBe('/tmp/gate-workspace');
       expect(result.reviewGate).toEqual(reviewGate);
+    });
+  });
+
+  describe('stale', () => {
+    it('parses deterministic stale completion without converting it to needs_input', () => {
+      const result = handler.parseResponse(makeResponse({
+        status: 'stale',
+        outputs: { exitCode: 1, error: 'path precondition failed', summary: 'replan required' },
+      }));
+
+      expect(result).toEqual({
+        type: 'stale',
+        taskId: 't1',
+        exitCode: 1,
+        error: 'path precondition failed',
+        summary: 'replan required',
+      });
     });
   });
 

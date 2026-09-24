@@ -10,21 +10,35 @@ import {
 import { registerBuiltinWorkers } from '../builtin-workers.js';
 import type { WorkerRuntimeDependencies } from '../worker-runtime-dependencies.js';
 import { createWorkerRegistry } from '../worker-registry.js';
-import { CI_FAILURE_WORKER_KIND } from '../workers/ci-failure-worker.js';
 import { AUTO_APPROVE_WORKER_KIND } from '../workers/auto-approve-worker.js';
 import {
-  CODERABBIT_ADDRESS_WORKER_KIND,
   PR_ADMIN_BYPASS_LAND_WORKER_KIND,
-  PR_CI_FAILURE_SCAN_WORKER_KIND,
-  PR_CONFLICT_REBASE_WORKER_KIND,
+  PR_AUTO_LABEL_WORKER_KIND,
+  PR_DUPLICATE_CLOSE_WORKER_KIND,
+  PR_JAILBREAK_LAND_WORKER_KIND,
+  PR_ORPHAN_REPAIR_WORKER_KIND,
 } from '../workers/pr-maintenance-workers.js';
 import { PR_STATUS_WORKER_KIND } from '../workers/pr-status-worker.js';
-import { PR_SUMMARY_REFRESH_WORKER_KIND } from '../workers/pr-summary-refresh-worker.js';
 import { DISK_HEADROOM_WORKER_KIND } from '../workers/disk-headroom-worker.js';
+import { CLAUDE_OAUTH_REFRESH_WORKER_KIND } from '../workers/claude-oauth-refresh-worker.js';
+import { INFRA_REPAIR_WORKER_KIND } from '../workers/infra-repair-worker.js';
+import { REAPER_WORKER_KIND } from '../workers/reaper-worker.js';
+import { DB_REAPER_WORKER_KIND } from '../workers/db-reaper-worker.js';
 import { REQUEUE_WORKER_KIND } from '../workers/requeue-worker.js';
-import { REVIEW_GATE_MERGE_CONFLICT_WORKER_KIND } from '../workers/review-gate-merge-conflict-worker.js';
 import { WORKFLOW_RESUME_WORKER_KIND } from '../workers/workflow-resume-worker.js';
 import { E2E_AUTOFIX_WORKER_KIND } from '../workers/e2e-autofix-worker.js';
+import { WORKER_SESSION_MINE_WORKER_KIND } from '../workers/worker-session-mine-worker.js';
+import { SESSION_TOKEN_PUSH_WORKER_KIND } from '../workers/session-token-push-worker.js';
+import { SLACK_BUG_SCAN_WORKER_KIND } from '../workers/slack-bug-scan-worker.js';
+import { IDLE_TASK_CLEANUP_WORKER_KIND } from '../workers/idle-task-cleanup-worker.js';
+import { CROSS_REPO_RESEARCH_WORKER_KIND } from '../workers/cross-repo-research-worker.js';
+import { CATSTACK_DEPLOY_WORKER_KIND } from '../workers/catstack-deploy-worker.js';
+import { SELF_DEPLOY_WORKER_KIND } from '../workers/self-deploy-worker.js';
+import { ADMIN_BYPASS_E2E_BABYSIT_WORKER_KIND } from '../workers/admin-bypass-e2e-babysit-worker.js';
+import { MERGIFY_QUEUE_RESEARCH_WORKER_KIND } from '../workers/mergify-queue-research-worker.js';
+import { SPEND_CIRCUIT_BREAKER_WORKER_KIND } from '../workers/spend-circuit-breaker-worker.js';
+import { WORKFLOW_CLEANUP_WORKER_KIND } from '../workers/workflow-cleanup-worker.js';
+import { AGENT_LOGIN_WATCH_WORKER_KIND } from '../workers/agent-login-watch-worker.js';
 
 const silentLogger = {
   debug: () => {},
@@ -75,31 +89,56 @@ describe('worker registry', () => {
       REQUEUE_WORKER_KIND,
       WORKFLOW_RESUME_WORKER_KIND,
       PR_STATUS_WORKER_KIND,
-      PR_SUMMARY_REFRESH_WORKER_KIND,
-      CI_FAILURE_WORKER_KIND,
-      REVIEW_GATE_MERGE_CONFLICT_WORKER_KIND,
+      INFRA_REPAIR_WORKER_KIND,
       DISK_HEADROOM_WORKER_KIND,
+      CLAUDE_OAUTH_REFRESH_WORKER_KIND,
+      REAPER_WORKER_KIND,
+      DB_REAPER_WORKER_KIND,
       AUTO_APPROVE_WORKER_KIND,
-      CODERABBIT_ADDRESS_WORKER_KIND,
-      PR_CONFLICT_REBASE_WORKER_KIND,
-      PR_CI_FAILURE_SCAN_WORKER_KIND,
       PR_ADMIN_BYPASS_LAND_WORKER_KIND,
+      PR_ORPHAN_REPAIR_WORKER_KIND,
+      PR_DUPLICATE_CLOSE_WORKER_KIND,
+      PR_JAILBREAK_LAND_WORKER_KIND,
+      PR_AUTO_LABEL_WORKER_KIND,
       E2E_AUTOFIX_WORKER_KIND,
+      WORKER_SESSION_MINE_WORKER_KIND,
+      SESSION_TOKEN_PUSH_WORKER_KIND,
+      SLACK_BUG_SCAN_WORKER_KIND,
+      IDLE_TASK_CLEANUP_WORKER_KIND,
+      CROSS_REPO_RESEARCH_WORKER_KIND,
+      CATSTACK_DEPLOY_WORKER_KIND,
+      SELF_DEPLOY_WORKER_KIND,
+      ADMIN_BYPASS_E2E_BABYSIT_WORKER_KIND,
+      MERGIFY_QUEUE_RESEARCH_WORKER_KIND,
+      SPEND_CIRCUIT_BREAKER_WORKER_KIND,
+      WORKFLOW_CLEANUP_WORKER_KIND,
+      AGENT_LOGIN_WATCH_WORKER_KIND,
     ]);
     expect(registry.get(AUTO_FIX_WORKER_KIND)).toBeDefined();
     expect(registry.get(REQUEUE_WORKER_KIND)).toBeDefined();
     expect(registry.get(WORKFLOW_RESUME_WORKER_KIND)).toBeDefined();
     expect(registry.get(PR_STATUS_WORKER_KIND)).toBeDefined();
-    expect(registry.get(PR_SUMMARY_REFRESH_WORKER_KIND)).toBeDefined();
-    expect(registry.get(CI_FAILURE_WORKER_KIND)).toBeDefined();
-    expect(registry.get(REVIEW_GATE_MERGE_CONFLICT_WORKER_KIND)).toBeDefined();
+    expect(registry.get(INFRA_REPAIR_WORKER_KIND)).toBeDefined();
     expect(registry.get(DISK_HEADROOM_WORKER_KIND)).toBeDefined();
+    expect(registry.get(CLAUDE_OAUTH_REFRESH_WORKER_KIND)).toBeDefined();
+    expect(registry.get(REAPER_WORKER_KIND)).toBeDefined();
     expect(registry.get(AUTO_APPROVE_WORKER_KIND)).toBeDefined();
-    expect(registry.get(CODERABBIT_ADDRESS_WORKER_KIND)).toBeDefined();
-    expect(registry.get(PR_CONFLICT_REBASE_WORKER_KIND)).toBeDefined();
-    expect(registry.get(PR_CI_FAILURE_SCAN_WORKER_KIND)).toBeDefined();
     expect(registry.get(PR_ADMIN_BYPASS_LAND_WORKER_KIND)).toBeDefined();
+    expect(registry.get(PR_ORPHAN_REPAIR_WORKER_KIND)).toBeDefined();
+    expect(registry.get(PR_DUPLICATE_CLOSE_WORKER_KIND)).toBeDefined();
+    expect(registry.get(PR_JAILBREAK_LAND_WORKER_KIND)).toBeDefined();
+    expect(registry.get(PR_AUTO_LABEL_WORKER_KIND)).toBeDefined();
     expect(registry.get(E2E_AUTOFIX_WORKER_KIND)).toBeDefined();
+    expect(registry.get(WORKER_SESSION_MINE_WORKER_KIND)).toBeDefined();
+    expect(registry.get(SESSION_TOKEN_PUSH_WORKER_KIND)).toBeDefined();
+    expect(registry.get(SLACK_BUG_SCAN_WORKER_KIND)).toBeDefined();
+    expect(registry.get(IDLE_TASK_CLEANUP_WORKER_KIND)).toBeDefined();
+    expect(registry.get(CROSS_REPO_RESEARCH_WORKER_KIND)).toBeDefined();
+    expect(registry.get(CATSTACK_DEPLOY_WORKER_KIND)).toBeDefined();
+    expect(registry.get(ADMIN_BYPASS_E2E_BABYSIT_WORKER_KIND)).toBeDefined();
+    expect(registry.get(MERGIFY_QUEUE_RESEARCH_WORKER_KIND)).toBeDefined();
+    expect(registry.get(SPEND_CIRCUIT_BREAKER_WORKER_KIND)).toBeDefined();
+    expect(registry.get(WORKFLOW_CLEANUP_WORKER_KIND)).toBeDefined();
   });
   it('returns nothing for an unknown kind', () => {
     const registry = registerAutoFixWorker(createWorkerRegistry<WorkerRuntimeDependencies>());
@@ -118,21 +157,20 @@ describe('worker registry', () => {
     expect(runtime.isRunning()).toBe(false);
   });
 
-
-  it('builds the PR status and CI-failure worker runtimes from the registered factories', () => {
+  it('builds the PR status and surviving PR-maintenance runtimes from the registered factories', () => {
     const registry = registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>());
 
     expect(registry.get(PR_STATUS_WORKER_KIND)?.factory(deps()).identity.kind).toBe(PR_STATUS_WORKER_KIND);
-    expect(registry.get(PR_SUMMARY_REFRESH_WORKER_KIND)?.factory(deps()).identity.kind)
-      .toBe(PR_SUMMARY_REFRESH_WORKER_KIND);
-    expect(registry.get(CI_FAILURE_WORKER_KIND)?.factory(deps()).identity.kind).toBe(CI_FAILURE_WORKER_KIND);
-    expect(registry.get(CODERABBIT_ADDRESS_WORKER_KIND)?.factory(deps()).identity.kind)
-      .toBe(CODERABBIT_ADDRESS_WORKER_KIND);
-    expect(registry.get(PR_CONFLICT_REBASE_WORKER_KIND)?.factory(deps()).identity.kind)
-      .toBe(PR_CONFLICT_REBASE_WORKER_KIND);
-    expect(registry.get(PR_CI_FAILURE_SCAN_WORKER_KIND)?.factory(deps()).identity.kind)
-      .toBe(PR_CI_FAILURE_SCAN_WORKER_KIND);
+    expect(registry.get(INFRA_REPAIR_WORKER_KIND)?.factory(deps()).identity.kind).toBe(INFRA_REPAIR_WORKER_KIND);
     expect(registry.get(PR_ADMIN_BYPASS_LAND_WORKER_KIND)?.factory(deps()).identity.kind)
       .toBe(PR_ADMIN_BYPASS_LAND_WORKER_KIND);
+    expect(registry.get(PR_ORPHAN_REPAIR_WORKER_KIND)?.factory(deps()).identity.kind)
+      .toBe(PR_ORPHAN_REPAIR_WORKER_KIND);
+    expect(registry.get(PR_DUPLICATE_CLOSE_WORKER_KIND)?.factory(deps()).identity.kind)
+      .toBe(PR_DUPLICATE_CLOSE_WORKER_KIND);
+    expect(registry.get(PR_JAILBREAK_LAND_WORKER_KIND)?.factory(deps()).identity.kind)
+      .toBe(PR_JAILBREAK_LAND_WORKER_KIND);
+    expect(registry.get(PR_AUTO_LABEL_WORKER_KIND)?.factory(deps()).identity.kind)
+      .toBe(PR_AUTO_LABEL_WORKER_KIND);
   });
 });

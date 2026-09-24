@@ -35,14 +35,15 @@
  *   and required ## Visual Proof for UI changes.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import aws4 from 'aws4';
 import { syncStackCommentsForPr } from './sync-stack-comments.mjs';
-import { getPrAtomicityBlockers, getPrBodyWarnings, validatePrBody } from './validate-pr-body.mjs';
+import { getPrAtomicityBlockers, getPrBodyWarnings, getReviewMetadata, validatePrBody } from './validate-pr-body.mjs';
 
 const DEFAULT_BASE_REMOTE = process.env.INVOKER_PARENT_REMOTE || 'origin';
 const HAS_EXPLICIT_NON_ORIGIN_BASE_REMOTE = Boolean(
@@ -205,22 +206,46 @@ function parseArgs() {
 }
 
 const TRUNK_BRANCHES = new Set(['main', 'master', 'develop']);
-const STACK_PR_TITLE_PATTERN = /^\[[^\[\]\r\n]{3,80}\]\([1-9]\d*[a-z]?\)(?:\s+\S.*)?$/;
+const REPAIR_PUBLICATION_MARKERS = join(homedir(), '.invoker', 'repair-publication-lineages.json');
+const REPAIR_PUBLICATION_ENV_KEYS = [
+  'INVOKER_REPAIR_PUBLICATION',
+  'INVOKER_REPAIR_TASK_CHAIN_ID',
+  'INVOKER_REPAIR_SESSION_COMMIT',
+];
+const STACK_PR_TITLE_PATTERN = /^\[[^\[\]\r\n]{3,80}\]\([1-9]\d*[a-z]?\)(?:\[REFACTOR: [^\[\]\r\n]{2,80}\])?(?:\s+\S.*)?$/;
+const REFACTOR_TAG_PATTERN = /\[REFACTOR: [^\[\]\r\n]{2,80}\]/;
 
 function isStackedPrContext(baseBranch, mergifyState) {
   return mergifyState.managed || !TRUNK_BRANCHES.has(baseBranch);
 }
 
-function assertValidStackPrTitle(title) {
-  if (STACK_PR_TITLE_PATTERN.test(title.trim())) return;
-
-  throw new Error(
-    [
-      'Stack PR titles must start with a shared idea and exactly one slice index.',
-      'Use: [Graph Blanking](1) Preserve selected graph while loading',
-      'Use lettered replacements when one published slice must split: [Graph Blanking](3a) Split follow-up slice',
-    ].join('\n'),
-  );
+function assertValidStackPrTitle(title, reviewLane) {
+  const trimmed = title.trim();
+  if (!STACK_PR_TITLE_PATTERN.test(trimmed)) {
+    throw new Error(
+      [
+        'Stack PR titles must start with a shared idea and exactly one slice index.',
+        'Use: [Graph Blanking](1) Preserve selected graph while loading',
+        'Use lettered replacements when one published slice must split: [Graph Blanking](3a) Split follow-up slice',
+        'Refactor-lane PRs add a technique tag right after the slice index: [Graph Blanking](2)[REFACTOR: Move Method] git primitives -> repair_body.py',
+      ].join('\n'),
+    );
+  }
+  const hasRefactorTag = REFACTOR_TAG_PATTERN.test(trimmed);
+  if (reviewLane === 'refactor' && !hasRefactorTag) {
+    throw new Error(
+      [
+        'Review Lane is "refactor" but the title has no [REFACTOR: <Technique>] tag.',
+        'Name the technique from the catalog in the review-compression skill file\'s Naming the Technique section.',
+        'Example: [Graph Blanking](2)[REFACTOR: Move Method] git primitives -> repair_body.py',
+      ].join('\n'),
+    );
+  }
+  if (reviewLane !== 'refactor' && hasRefactorTag) {
+    throw new Error(
+      `Title has a [REFACTOR: ...] tag but Review Lane is "${reviewLane || '(missing)'}", not refactor. Either set Review Lane to refactor or drop the tag.`,
+    );
+  }
 }
 
 async function assertValidPrBody(body, options = {}) {
@@ -237,7 +262,7 @@ async function assertValidPrBody(body, options = {}) {
         : '',
       '',
       'Start from scripts/pr-body-template.md and validate with:',
-      '  node scripts/validate-pr-body.mjs --body-file <file>',
+      '  node scripts/validate-pr-body-local.mjs --body-file <file> --base <base-branch>',
     ].join('\n'),
   );
 }
@@ -252,10 +277,10 @@ function printPrBodyWarnings(body, changedFiles = [], diffText = '') {
   }
 }
 
-function assertNoStackAtomicityBlockers(baseBranch, mergifyState, diffText) {
+function assertNoStackAtomicityBlockers(baseBranch, mergifyState, diffText, reviewLane) {
   if (!isStackedPrContext(baseBranch, mergifyState)) return;
 
-  const blockers = getPrAtomicityBlockers({ diffText });
+  const blockers = getPrAtomicityBlockers({ diffText, reviewLane });
   if (blockers.length === 0) return;
 
   throw new Error(
@@ -447,13 +472,130 @@ function gitExitStatus(args) {
   }
 }
 
+function printSiblingPrOverlaps(baseRef) {
+  const scriptPath = fileURLToPath(new URL('./check-sibling-prs.mjs', import.meta.url));
+  try {
+    const output = execFileSync(process.execPath, [scriptPath, '--base', baseRef], {
+      encoding: 'utf-8',
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (output) process.stdout.write(output);
+  } catch (error) {
+    const stderr = typeof error.stderr === 'string' ? error.stderr.trim() : '';
+    const reason = stderr ? stderr.split('\n')[0] : error.message;
+    console.log(`sibling-pr check could not run: ${reason}`);
+  }
+}
+
+function repairPublicationContext() {
+  const hasContext = REPAIR_PUBLICATION_ENV_KEYS.some((key) => process.env[key]?.trim());
+  if (!hasContext) return undefined;
+  return {
+    chainId: process.env.INVOKER_REPAIR_TASK_CHAIN_ID?.trim() || '',
+    sessionCommit: process.env.INVOKER_REPAIR_SESSION_COMMIT?.trim() || '',
+  };
+}
+
+function publicationLineageForBranch(branch) {
+  if (branch.startsWith('stack/')) return 'stack';
+  if (branch.startsWith('plan/')) return 'plan';
+  if (branch.startsWith('pr/')) return 'pr';
+  return branch.split('/')[0] || branch;
+}
+
+function loadRepairPublicationMarkers() {
+  try {
+    return JSON.parse(readFileSync(REPAIR_PUBLICATION_MARKERS, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function persistRepairPublicationMarkers(markers) {
+  mkdirSync(join(homedir(), '.invoker'), { recursive: true });
+  const tmp = `${REPAIR_PUBLICATION_MARKERS}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(markers, null, 2)}\n`);
+  renameSync(tmp, REPAIR_PUBLICATION_MARKERS);
+}
+
+function assertRepairPublicationIntegrity(currentBranch) {
+  const context = repairPublicationContext();
+  if (!context) return undefined;
+
+  if (!context.chainId) {
+    throw new Error('repair-publication-missing-task-chain: repair PR publication requires INVOKER_REPAIR_TASK_CHAIN_ID.');
+  }
+  if (!context.sessionCommit) {
+    throw new Error('repair-publication-missing-session-commit: repair PR publication requires the fix session recorded commit hash.');
+  }
+  const recordedCommit = gitTextOrEmpty(['rev-parse', '--verify', `${context.sessionCommit}^{commit}`]);
+  if (!recordedCommit) {
+    throw new Error(
+      `repair-publication-missing-session-commit: recorded fix session commit ${context.sessionCommit} is not present in this repository.`,
+    );
+  }
+  if (gitExitStatus(['merge-base', '--is-ancestor', recordedCommit, 'HEAD']) !== 0) {
+    throw new Error(
+      [
+        'repair-publication-unowned-diff: refusing to publish a repair PR whose head does not contain the recorded fix-session commit.',
+        `Recorded commit: ${recordedCommit}`,
+        `Current branch: ${currentBranch}`,
+        `Current head: ${resolveRev('HEAD')}`,
+      ].join('\n'),
+    );
+  }
+
+  const lineage = publicationLineageForBranch(currentBranch);
+  const markers = loadRepairPublicationMarkers();
+  const existing = markers[context.chainId];
+  if (existing && existing.lineage && existing.lineage !== lineage) {
+    throw new Error(
+      [
+        'repair-publication-duplicate-lineage: refusing a second published branch lineage for this repair task chain.',
+        `Task chain: ${context.chainId}`,
+        `Existing lineage: ${existing.lineage}`,
+        `Requested lineage: ${lineage}`,
+        `Existing branch: ${existing.branch ?? '(unknown)'}`,
+        `Requested branch: ${currentBranch}`,
+      ].join('\n'),
+    );
+  }
+
+  return {
+    chainId: context.chainId,
+    lineage,
+    branch: currentBranch,
+    recordedCommit,
+  };
+}
+
+function recordRepairPublicationLineage(publication) {
+  if (!publication) return;
+  const markers = loadRepairPublicationMarkers();
+  const existing = markers[publication.chainId];
+  if (existing && existing.lineage && existing.lineage !== publication.lineage) {
+    throw new Error(
+      `repair-publication-duplicate-lineage: marker changed during publication for ${publication.chainId} (${existing.lineage} != ${publication.lineage}).`,
+    );
+  }
+  markers[publication.chainId] = {
+    lineage: publication.lineage,
+    branch: publication.branch,
+    recordedCommit: publication.recordedCommit,
+    publishedAt: new Date().toISOString(),
+  };
+  persistRepairPublicationMarkers(markers);
+}
+
 export function isUiImpactingPath(filePath) {
   const path = filePath.replace(/\\/g, '/');
   if (path.startsWith('packages/ui/')) return true;
   if (path.startsWith('packages/app/src/window/')) return true;
+  if (path.startsWith('packages/app/src/web/')) return true;
   if (path === 'packages/app/src/main.ts') return true;
   if (path === 'packages/app/src/preload.ts') return true;
   if (path === 'packages/app/src/app-menu.ts') return true;
+  if (path === 'packages/app/src/task-graph-event-publisher.ts') return true;
   return false;
 }
 
@@ -461,28 +603,42 @@ export function getUiImpactingFiles(files) {
   return files.filter(isUiImpactingPath);
 }
 
-function changedFilesSinceBase(baseBranch) {
+export function resolveAtomicityBaseRef(baseBranch, mergifyState, stackParentBranch) {
+  if (mergifyState.managed && stackParentBranch) {
+    return `${DEFAULT_BASE_REMOTE}/${stackParentBranch}`;
+  }
+  return `${DEFAULT_BASE_REMOTE}/${baseBranch}`;
+}
+
+async function resolveStackedPrParentBranch(nwo, currentBranch, mergifyState, dryRun) {
+  if (!mergifyState.managed || dryRun) return '';
+  const prs = listPullRequestsForHead(nwo, currentBranch);
+  const openPr = prs.find((pr) => pr.state === 'open') ?? prs[0];
+  return openPr?.base?.ref ?? '';
+}
+
+export function changedFilesSinceBase(baseRef) {
   try {
-    const output = runGit(['diff', '--name-only', `${DEFAULT_BASE_REMOTE}/${baseBranch}...HEAD`]).trim();
+    const output = runGit(['diff', '--name-only', `${baseRef}...HEAD`]).trim();
     return output ? output.split('\n').filter(Boolean) : [];
   } catch {
     return [];
   }
 }
 
-function fullContextDiffSinceBase(baseBranch) {
+export function fullContextDiffSinceBase(baseRef) {
   try {
     return runGit([
       'diff',
       '--find-renames',
       '--unified=200000',
       '--diff-filter=ACMRTD',
-      `${DEFAULT_BASE_REMOTE}/${baseBranch}...HEAD`,
+      `${baseRef}...HEAD`,
       '--',
     ]);
   } catch (error) {
     throw new Error(
-      `Unable to compute diff atomicity context against ${DEFAULT_BASE_REMOTE}/${baseBranch}. Fetch the base ref and retry.\n${error.message}`,
+      `Unable to compute diff atomicity context against ${baseRef}. Fetch the base ref and retry.\n${error.message}`,
     );
   }
 }
@@ -619,6 +775,79 @@ function assertCleanPrBase(baseBranch) {
     ].join('\n'),
   );
 }
+function assertStackHeadForStackedBase(baseBranch, currentBranch, mergifyState) {
+  if (!isStackedPrContext(baseBranch, mergifyState)) return;
+  if (!baseBranch.startsWith('stack/')) return;
+  if (currentBranch.startsWith('stack/')) return;
+  const baseRef = TRUNK_BRANCHES.has(baseBranch) ? 'origin/master' : 'origin/<live-stack-base>';
+  throw new Error(
+    [
+      'Refusing to create/update PR: stacked publication requires a stack/ head branch.',
+      `Current branch: ${currentBranch}`,
+      `Requested base: ${baseBranch}`,
+      '',
+      'Recovery:',
+      `  git switch -c stack/<name> ${baseRef}`,
+      '  git cherry-pick <commit> [<commit> ...]',
+      '  publish through the supported stack flow in docs/pr-branching-workflow.md',
+    ].join('\n'),
+  );
+}
+
+function assertNotPlanBaseForMergifyStack(baseBranch, currentBranch, mergifyState) {
+  if (!baseBranch.startsWith('plan/')) return;
+  if (!mergifyState.managed && !currentBranch.startsWith('stack/')) return;
+  throw new Error(
+    [
+      'Refusing to create or update a Mergify stack PR with a plan/ base branch.',
+      `Current branch: ${currentBranch}`,
+      `Requested base: ${baseBranch}`,
+      '',
+      'Recovery:',
+      '  Rebuild the working branch from origin/master, or from the live upstream stack/ branch.',
+      '  Cherry-pick the intended commits, publish with mergify stack push, then update PR metadata.',
+      '',
+      'This restriction applies only to Mergify stacks. Non-Mergify workflows may use plan/ integration branches.',
+    ].join('\n'),
+  );
+}
+
+function assertOpenHelperBasePr(nwo, baseBranch, dryRun) {
+  if (!baseBranch.startsWith('pr/')) return;
+  if (dryRun) return;
+
+  const prs = listPullRequestsForHead(nwo, baseBranch);
+  if (prs.length === 0) return;
+  if (prs.length > 1) {
+    const choices = prs.map((pr) => `  - #${pr.number}: ${pr.html_url}`).join('\n');
+    throw new Error(
+      [
+        `Found multiple PRs for base branch "${baseBranch}" in ${nwo}.`,
+        'Refusing to guess. Resolve the duplicate helper-base PRs first.',
+        choices,
+      ].join('\n'),
+    );
+  }
+
+  const [pr] = prs;
+  // gh api (REST) reports state as lowercase "open"/"closed", unlike gh pr
+  // view's GraphQL-backed "OPEN"/"CLOSED" — normalize before comparing.
+  if (String(pr.state || '').toUpperCase() === 'OPEN') return;
+
+  const helperState = pr.merged_at ? 'merged helper PR' : 'closed helper PR';
+  throw new Error(
+    [
+      `Refusing to create/update PR: base branch "${baseBranch}" belongs to a stale helper PR.`,
+      `Found ${helperState} #${pr.number}: ${pr.html_url}`,
+      '',
+      'Recovery:',
+      '  git switch -c stack/<name> origin/<live-stack-base>',
+      '  git cherry-pick <commit> [<commit> ...]',
+      '  publish through the supported stack flow in docs/pr-branching-workflow.md',
+    ].join('\n'),
+  );
+}
+
 
 function getBranchMergeRef(branch) {
   return gitTextOrEmpty(['config', '--get', `branch.${branch}.merge`]);
@@ -655,6 +884,61 @@ function branchHasChangeId(baseRef) {
   }
 }
 
+function getHeadChangeId() {
+  const message = gitTextOrEmpty(['log', '-1', '--format=%B', 'HEAD']);
+  const match = message.match(/^Change-Id:\s*(\S+)/m);
+  return match ? match[1] : '';
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stackAuthorSegment(branch) {
+  const [root, author] = branch.split('/');
+  return root === 'stack' && author ? author : '';
+}
+
+function fetchStackHeadsPrefix(prefix) {
+  gitTextOrEmpty(['fetch', '--quiet', '--prune', 'origin', `+refs/heads/${prefix}/*:refs/remotes/origin/${prefix}/*`]);
+}
+
+function listRemoteTrackingRefTips(prefix) {
+  const out = gitTextOrEmpty(['for-each-ref', '--format=%(refname) %(objectname)', `refs/remotes/origin/${prefix}`]);
+  if (!out) return [];
+  return out.split('\n').filter(Boolean).map((line) => {
+    const [refname, sha] = line.split(' ');
+    return { refname: refname.replace(/^refs\/remotes\//, ''), sha };
+  });
+}
+
+function refCommitHasChangeId(sha, changeId) {
+  const message = gitTextOrEmpty(['log', '-1', '--format=%B', sha]);
+  return new RegExp(`^Change-Id:\\s*${escapeRegExp(changeId)}\\s*$`, 'm').test(message);
+}
+
+function findMergifyPublishedRef(branch, headSha, headChangeId) {
+  const prefixes = [];
+  const author = stackAuthorSegment(branch);
+  if (author) prefixes.push(`stack/${author}`);
+  prefixes.push('stack');
+
+  for (const prefix of prefixes) {
+    fetchStackHeadsPrefix(prefix);
+    const tips = listRemoteTrackingRefTips(prefix);
+
+    const shaMatch = tips.find((tip) => tip.sha === headSha);
+    if (shaMatch) return shaMatch.refname;
+
+    if (headChangeId) {
+      const changeIdMatch = tips.find((tip) => refCommitHasChangeId(tip.sha, headChangeId));
+      if (changeIdMatch) return changeIdMatch.refname;
+    }
+  }
+
+  return '';
+}
+
 
 function getMergifyBranchState(branch = getCurrentBranch()) {
   if (!branch || ['main', 'master', 'develop'].includes(branch)) {
@@ -687,6 +971,15 @@ function assertPublishedMergifyBranch(branch, trackedBaseRef) {
   const originBranchRef = `origin/${branch}`;
   if ((!publishedRef || publishedRef === trackedBaseRef) && gitTextOrEmpty(['rev-parse', '--verify', originBranchRef])) {
     publishedRef = originBranchRef;
+  }
+
+  if (!publishedRef || publishedRef === trackedBaseRef) {
+    const headSha = resolveRev('HEAD');
+    const headChangeId = getHeadChangeId();
+    const matchedRef = findMergifyPublishedRef(branch, headSha, headChangeId);
+    if (matchedRef) {
+      publishedRef = matchedRef;
+    }
   }
 
   if (!publishedRef) {
@@ -787,7 +1080,16 @@ async function updatePr(nwo, prNum, title, body, dryRun) {
 async function main() {
   const args = parseArgs();
 
+  const currentBranch = getCurrentBranch();
+  const repairPublication = assertRepairPublicationIntegrity(currentBranch);
+  const mergifyState = getMergifyBranchState(currentBranch);
+  assertNotPlanBaseForMergifyStack(args.base, currentBranch, mergifyState);
   assertCleanPrBase(args.base);
+  assertStackHeadForStackedBase(args.base, currentBranch, mergifyState);
+  let nwo = args.dryRun ? 'OWNER/REPO' : getRepoNwo();
+  if (args.base.startsWith('pr/')) {
+    assertOpenHelperBasePr(nwo, args.base, args.dryRun);
+  }
 
   let body = '';
   if (args.bodyFile) {
@@ -796,20 +1098,18 @@ async function main() {
     body = args.body;
   }
 
-  const changedFiles = changedFilesSinceBase(args.base);
-  const diffText = fullContextDiffSinceBase(args.base);
+  const stackParentBranch = await resolveStackedPrParentBranch(nwo, currentBranch, mergifyState, args.dryRun);
+  const atomicityBaseRef = resolveAtomicityBaseRef(args.base, mergifyState, stackParentBranch);
+  const changedFiles = changedFilesSinceBase(atomicityBaseRef);
+  const diffText = fullContextDiffSinceBase(atomicityBaseRef);
   assertBranchHasReviewableChanges(args.base, changedFiles);
   const uiImpactingFiles = getUiImpactingFiles(changedFiles);
   if (uiImpactingFiles.length > 0) {
     console.error(`UI-impacting files changed; requiring visual proof: ${uiImpactingFiles.join(', ')}`);
   }
 
-  await assertValidPrBody(body, { requiresVisualProof: uiImpactingFiles.length > 0, changedFiles, diffText });
-  printPrBodyWarnings(body, changedFiles, diffText);
   body = await injectImages(body, args.dryRun);
 
-  const currentBranch = getCurrentBranch();
-  const mergifyState = getMergifyBranchState(currentBranch);
   const requestedUpdatePath = Boolean(args.update || args.updateExisting);
   if (mergifyState.managed && !requestedUpdatePath) {
     throw new Error(
@@ -825,18 +1125,26 @@ async function main() {
   if (mergifyState.managed && requestedUpdatePath) {
     assertPublishedMergifyBranch(currentBranch, mergifyState.trackedBaseRef);
   }
-  assertNoStackAtomicityBlockers(args.base, mergifyState, diffText);
+  const reviewLane = getReviewMetadata(body).reviewLane;
+  assertNoStackAtomicityBlockers(args.base, mergifyState, diffText, reviewLane);
 
   if (isStackedPrContext(args.base, mergifyState)) {
-    assertValidStackPrTitle(args.title);
+    assertValidStackPrTitle(args.title, reviewLane);
   }
 
-  const nwo = args.dryRun ? 'OWNER/REPO' : getRepoNwo();
+  // Validate the final body after stack-specific publication gates and image
+  // injection, immediately before any push or GitHub PR mutation.
+  await assertValidPrBody(body, { requiresVisualProof: uiImpactingFiles.length > 0, changedFiles, diffText });
+  printPrBodyWarnings(body, changedFiles, diffText);
+  printSiblingPrOverlaps(atomicityBaseRef);
+
+  if (!nwo) {
+    nwo = args.dryRun ? 'OWNER/REPO' : getRepoNwo();
+  }
   let updatePrNumber = args.update;
   if (args.updateExisting) {
     updatePrNumber = resolveExistingPrNumber(nwo, currentBranch, args.dryRun);
   }
-
   if (!(mergifyState.managed && requestedUpdatePath)) {
     gitPush(args.dryRun);
   }
@@ -844,6 +1152,7 @@ async function main() {
   const pr = updatePrNumber
     ? await updatePr(nwo, updatePrNumber, args.title, body, args.dryRun)
     : await createPr(nwo, args.title, args.base, body, args.dryRun);
+  recordRepairPublicationLineage(repairPublication);
   if (isStackedPrContext(args.base, mergifyState)) {
     syncStackCommentsForPr(nwo, pr.number, { dryRun: args.dryRun });
   }

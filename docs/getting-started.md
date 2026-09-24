@@ -1,6 +1,22 @@
 # Getting started
 
-Install, configure, and run Invoker. For the product overview, see the [README](../README.md). Version history lives in [CHANGELOG.md](../CHANGELOG.md).
+## Develop alongside the packaged production owner
+
+Repository development commands automatically run inside a worktree-specific development profile. `pnpm dev`, `pnpm dev:hot`, `pnpm dev:cli`, `./run.sh`, and the app package's `start`/`dev` scripts derive the same profile from the checkout's real path before starting a process.
+
+The profile lives under `~/.invoker/dev/<profile-id>/` and owns its database, Electron user data, IPC socket, config, environment file, log, and API/web ports. Development also starts with autonomous workers and automatic workflow continuation disabled. The packaged npm application keeps using the production `~/.invoker` namespace.
+
+To reset a development instance, stop only that development process and remove its printed `INVOKER_DB_DIR`; never remove `~/.invoker` itself. Run `node scripts/with-invoker-development-profile.mjs --print-env` to inspect the exact paths without starting Invoker.
+
+The only source-side production exception is the deliberately narrow owner-service form:
+
+```sh
+node scripts/with-invoker-development-profile.mjs --production-owner-service -- invoker-cli owner serve
+```
+
+Every other source command fails closed if it inherits a production path. `pnpm run check:dev-isolation` inventories the supported launch doors and collision behavior.
+
+Install, configure, and run Invoker. For the product overview, see the [README](../README.md). Version history lives in [CHANGELOG.md](../CHANGELOG.md). Join the community on [Invoker Slack](https://join.slack.com/t/invoker-ai/shared_invite/zt-476imo738-VqNp_SDfI6DFZp80EGgscQ).
 
 ## Prerequisites
 
@@ -10,12 +26,36 @@ Install, configure, and run Invoker. For the product overview, see the [README](
 
 ## Installation
 
+**Recommended (packaged):** Node.js 26.x required. One command installs `invoker-cli` + `invoker-ui`, runs `doctor --fix`, installs skills + local MCP, and enables `pr-status` / `autofix` / `auto-approve`. It does not write Slack tokens or remote machines.
+
+```bash
+npx @neko-catpital-labs/invoker-cli@latest install
+```
+
+Expected output shape: [install-transcript.txt](install-transcript.txt) (from `invoker-cli install --demo`).
+
+Default Invoker owner is local (`invoker-cli mcp`). In Claude / Cursor / Codex / OMP chat, name a host or IP to use a remote Invoker — the agent probes SSH and retargets MCP only after a successful probe.
+
+**Need Node first?** Optional wrapper installs Node 26 when missing, then runs the same CLI install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Neko-Catpital-Labs/Invoker/master/scripts/bootstrap.sh | bash
+```
+
+**Source checkout** (contributors):
+
 ```bash
 git clone https://github.com/Neko-Catpital-Labs/Invoker.git invoker && cd invoker
 pnpm install
 bash scripts/setup-agent-skills.sh
 pnpm run build
 ```
+
+Every bundled skill carries a `category:` field in its `SKILL.md` frontmatter. By
+default `setup-agent-skills.sh` installs all of them; set `INVOKER_SKILL_CATEGORY`
+to install only one subset. Use `INVOKER_SKILL_CATEGORY=core` for the skills that
+submit and operate Invoker work, or `INVOKER_SKILL_CATEGORY=optimization` for the
+verification and review skills.
 
 Invoker does not provision machines for you. You are responsible for bringing your own local workstation, VM, container host, or remote machines and making sure the required tools are installed there before running workflows.
 
@@ -27,14 +67,16 @@ For packaged installs, the repo includes npm launchers, direct GitHub Release do
 
 The downloaded standalone CLI binary does not require Node after installation. It can run plans directly, or delegate to a running Invoker desktop owner when one is available. The npm package is a launcher that installs and runs that bundled binary as `invoker-cli`.
 
-Install with npm:
+Prefer the [npx install one-liner](#installation) above. Manual npm path:
 
 ```bash
 npm install -g @neko-catpital-labs/invoker-cli
 invoker-cli --version
-invoker-cli doctor
+invoker-cli install
 invoker-cli run plans/fixtures/hello-world.yaml --standalone
 ```
+
+`invoker-cli install` installs the first-party Invoker AI helper skills, registers the Invoker MCP server with Codex, Claude, Cursor, and OMP, and enables default workers (`pr-status`, `autofix`, `auto-approve`). It skips Slack/machines. Interactive `invoker-cli setup` still walks those when you want them.
 
 Or download the platform binary from GitHub Releases:
 
@@ -85,30 +127,30 @@ The macOS npm launcher uses the `.zip` app bundle asset so it does not need to m
 
 For a local maintainer build from the latest `master` commit, including Apple Silicon `.dmg` generation, the standalone `invoker-slack` binary, and unsigned-build quarantine removal, see [local-macos-release-build.md](local-macos-release-build.md) (`bash scripts/local-macos-release-build.sh`).
 
-For source-based packaged installs, the repo includes an installer script:
+For desktop binary packages only (no npm/skills), the repo includes an installer script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Neko-Catpital-Labs/Invoker/master/scripts/install.sh | bash
 ```
+
+For CLI + UI + skills/MCP in one step, use `npx @neko-catpital-labs/invoker-cli@latest install` (or the optional Node wrapper [`scripts/bootstrap.sh`](../scripts/bootstrap.sh)).
 
 Tagged releases are configured to publish:
 - standalone CLI binaries and `.tar.gz` archives for macOS and Linux on x64 and arm64
 - desktop `.dmg`, `.zip`, `.deb`, and `.AppImage`
 - `SHA256SUMS` covering release assets
 
-Packaged installs bundle the first-party Invoker AI helpers inside the app. Install helpers from System Setup or:
+Packaged installs bundle the first-party Invoker AI helpers inside the app. `invoker-cli install` already installs the helper skills and MCP server; run `invoker-cli setup` (or System Setup in the desktop app) only if you also want optional Slack and remote machine configuration.
 
-```bash
-invoker-ui --install-skills
-```
+Then, in Codex, Claude, Cursor, or OMP, ask in normal chat to plan and run durable work through Invoker. Install already installs `invoker-chat-submit` plus MCP review/submit/status tools, so the agent can prepare a review, wait for one approval, submit, and watch without a slash command.
 
-Then, in Codex, Claude, Cursor, or OMP, run:
+Explicit fallback:
 
 ```text
 /invoker-plan-to-invoker "help me plan <change>"
 ```
 
-The command plans first, writes `plans/invoker-handoff.md`, converts it to `plans/invoker-handoff.yaml`, validates, and submits with `invoker-cli run --live` or the Invoker MCP tool.
+Either path writes `plans/invoker-handoff.md`, converts it to `plans/invoker-handoff.yaml`, reviews via MCP, and submits live after one approval.
 
 Source checkouts can install the repo helpers with `bash scripts/setup-agent-skills.sh`.
 
@@ -138,7 +180,7 @@ Invoker reads user config from `~/.invoker/config.json`.
 If you want a repo-specific config file, point the app at it explicitly:
 
 ```bash
-INVOKER_REPO_CONFIG_PATH=$PWD/.invoker.local.json ./run.sh
+INVOKER_REPO_CONFIG_PATH=$PWD/.invoker.local.json invoker-ui
 ```
 
 The config loader does not automatically read `<repo>/.invoker.json`.
@@ -148,7 +190,7 @@ Minimal example:
 ```json
 {
   "maxConcurrency": 6,
-  "defaultExecutionAgent": "codex",
+  "defaultExecutionHarness": "codex",
   "autoFixRetries": 3,
   "autoFixAgent": "claude",
   "autoFixCi": false,
@@ -158,19 +200,29 @@ Minimal example:
       "user": "invoker",
       "sshKeyPath": "/home/you/.ssh/invoker_staging_a",
       "managedWorkspaces": true,
-      "remoteInvokerHome": "~/.invoker"
+      "remoteInvokerHome": "~/.invoker",
+      "provisionCommand": "bash scripts/provision-ssh-worker.sh ensure-repo-ready"
     },
     "staging-b": {
       "host": "203.0.113.11",
       "user": "invoker",
       "sshKeyPath": "/home/you/.ssh/invoker_staging_b",
       "managedWorkspaces": true,
-      "remoteInvokerHome": "~/.invoker"
+      "remoteInvokerHome": "~/.invoker",
+      "provisionCommand": "bash scripts/provision-ssh-worker.sh ensure-repo-ready"
+    }
+  },
+  "worktreeTargets": {
+    "local-default": {
+      "provisionCommand": "pnpm install --frozen-lockfile",
+      "maxConcurrentTasks": 2
     }
   }
 }
 ```
-Invoker does not run repo bootstrap automatically on managed SSH checkouts. If a repo needs setup such as `pnpm install` or `flutter pub get`, make the task command run that repo-owned step explicitly.
+Managed SSH checkouts only run repo bootstrap when the target defines `provisionCommand`. Local managed worktrees follow the same rule through `worktreeTargets`.
+
+SSH task payloads and remote auto-fix/conflict scripts source `<remoteInvokerHome>/env.sh` directly under non-login `bash -s`; they do **not** rely on user dotfiles at runtime. `scripts/provision-ssh-worker.sh` still installs the same env hook into `.bash_profile`, `.bash_login`, `.profile`, and `.bashrc` so interactive shells pick up the worker PATH too.
 
 `autoFixRetries` is a finite per-task cap. `3` means the worker keeps consumed attempts in process memory and can submit at most three auto-fix attempts for the same failed task lineage; `0` disables auto-fix workers.
 
@@ -205,15 +257,15 @@ For a guided first run, use [the first agent workflow tutorial](tutorial-first-a
 For day-to-day use, start the desktop app:
 
 ```bash
-./run.sh
+invoker-ui
 ```
 
 Or run a plan through the headless surface:
 
 ```bash
-./run.sh --headless --help
-./run.sh --headless query workflows
-./run.sh --headless run /path/to/plan.yaml
+invoker-ui --headless --help
+invoker-ui --headless query workflows
+invoker-ui --headless run /path/to/plan.yaml
 ```
 
 For app development with hot reload:
@@ -232,7 +284,7 @@ description: |
   Demonstrates a small AI implementation workflow with parallel code paths,
   an SSH-backed verification task, and a pull request review gate.
 repoUrl: git@github.com:your-org/your-repo.git
-baseBranch: main
+baseBranch: master
 onFinish: pull_request
 mergeMode: external_review
 tasks:
@@ -264,15 +316,15 @@ tasks:
     dependencies: [api, ui]
 ```
 
-If you need to turn a product or implementation plan into an Invoker workflow, install helpers from System Setup or `invoker-ui --install-skills`, then run `/invoker-plan-to-invoker "help me plan <change>"` in Codex, Claude, Cursor, or OMP. The command plans first, writes `plans/invoker-handoff.md`, converts it to `plans/invoker-handoff.yaml`, validates, and submits with `invoker-cli run --live` or the Invoker MCP tool.
+If you need to turn a product or implementation plan into an Invoker workflow, run `invoker-cli setup` (or System Setup in the desktop app) to install helpers. Prefer normal chat with the installed `invoker-chat-submit` skill and MCP tools; `/invoker-plan-to-invoker "help me plan <change>"` remains the explicit slash-command fallback.
 
 If you need to operate existing workflows or tasks, use the `invoker-ops` skill.
 
-Use `--output text|label|json|jsonl` on headless `query` commands. Use `./run.sh --headless retry-tasks --status pending|failed --parallel 8` for bulk safe retries. Inspect recovery ownership and decisions with `./run.sh --headless worker status --output text|json|jsonl`. Only **one** process should **write** the workflow database at a time; see [persistence-architecture-single-writer.md](persistence-architecture-single-writer.md).
+Use `--output text|label|json|jsonl` on headless `query` commands. Use `invoker-ui --headless retry-tasks --status pending|failed --parallel 8` for bulk safe retries. Inspect recovery ownership and decisions with `invoker-ui --headless worker status --output text|json|jsonl`. Only **one** process should **write** the workflow database at a time; see [persistence-architecture-single-writer.md](persistence-architecture-single-writer.md).
 
 ### Auto-fix worker (single shared engine)
 
-Auto-fix recovery runs through **one** shared worker engine in `@invoker/execution-engine`. Starting that worker — the Workers-tab off→on toggle — now runs a full scan immediately, submitting a fix-with-agent intent for every task that is already failed, so turning it on reconciles the current backlog at once. After that startup scan, failure lifecycle events wake it and its periodic scan covers missed wakeups. The manual dev door `./run.sh --headless worker autofix` runs the same engine for an explicit one-shot scan. `autoFixRetries` is enforced from a worker-local in-memory ledger before the worker submits another fix intent. A sweep-and-assert guard test fails the build if auto-fix is ever triggered outside this shared worker engine. See [architecture/recovery-lifecycle-workers.md](architecture/recovery-lifecycle-workers.md).
+Auto-fix recovery runs through **one** shared worker engine in `@invoker/execution-engine`. Starting that worker — the Workers-tab off→on toggle — now runs a full scan immediately, submitting a fix-with-agent intent for every task that is already failed, so turning it on reconciles the current backlog at once. After that startup scan, failure lifecycle events wake it and its periodic scan covers missed wakeups. The manual dev door `invoker-cli worker autofix` runs the same engine for an explicit one-shot scan. `autoFixRetries` is enforced from a worker-local in-memory ledger before the worker submits another fix intent. A sweep-and-assert guard test fails the build if auto-fix is ever triggered outside this shared worker engine. See [architecture/recovery-lifecycle-workers.md](architecture/recovery-lifecycle-workers.md).
 
 ## Architecture (at a glance)
 
@@ -294,7 +346,7 @@ Package boundaries and runtime invariants live in [ARCHITECTURE.md](../ARCHITECT
 
 ## Core concepts
 
-- **Plan** — YAML: tasks, `dependencies`, defaults like `baseBranch`.
+- **Plan** — YAML: tasks, `dependencies`, and workflow defaults. `baseBranch` defaults to `master`, but you can set an explicit ref like `origin/master` or `upstream/main`.
 - **Workflow** — Persisted instance; generation and DB are source of truth.
 - **Task / attempt** — DAG node plus immutable execution records; **selected attempt** drives downstream validity and staleness.
 - **Executors** — `worktree`, `docker`, `ssh` (isolated workspaces).
@@ -335,7 +387,7 @@ Layer rules: [ARCHITECTURE.md](../ARCHITECTURE.md). Agent/repo conventions: [CLA
 ## Troubleshooting
 
 - **DB conflicts** — Do not run two writers on the same DB; headless CLI mutations use a standalone owner, while GUI-started workflows stay owned by the desktop app process.
-- **`pnpm` or `git` not found from the desktop app** — On macOS this is often a Finder/GUI `PATH` issue. Launch Invoker from a terminal with `./run.sh`, or make the required binaries available to GUI-launched apps.
+- **`pnpm` or `git` not found from the desktop app** — On macOS this is often a Finder/GUI `PATH` issue. Launch Invoker from a terminal with `invoker-ui`, or make the required binaries available to GUI-launched apps.
 - **Missing bundled agent skills** — `bash scripts/setup-agent-skills.sh`
 - **Install failures** — Use Node 26 as per `engines`
 - **Obsidian (README / Mermaid)** — In **Source** mode the diagram stays plain text. Open **Reading view** (book icon in the header, or the *Toggle reading view* command). **Live Preview** usually renders Mermaid as well; if you see an empty box or a parse error, update Obsidian, try the default theme, and disable CSS snippets (some themes hide Mermaid).

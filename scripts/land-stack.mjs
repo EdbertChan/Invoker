@@ -36,8 +36,11 @@ import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { checkGuardedBehaviorApprovalForPr } from './guarded-behavior-approval.mjs';
+
 export const TRUNK_DEFAULT = 'master';
 export const STACK_PREFIX_DEFAULT = 'stack/';
+const ACTIVE_MERGIFY_QUEUE_STATUSES = new Set(['queued', 'waiting_for_merge']);
 
 export function analyzeStack({ prs, hasLocalCommit, trunk = TRUNK_DEFAULT, stackPrefix = STACK_PREFIX_DEFAULT }) {
   const checks = [];
@@ -136,7 +139,7 @@ export function analyzeCompleteOpenStack({ selectedPrs, allOpenPrs, trunk = TRUN
 }
 
 export function queueTargets(prs) {
-  return prs.filter((pr) => pr.state === 'OPEN');
+  return prs.filter((pr) => pr.state === 'OPEN' && !ACTIVE_MERGIFY_QUEUE_STATUSES.has(normalizeMergifyQueueStatus(pr.mergifyQueueStatus)));
 }
 
 export function short(sha) {
@@ -157,6 +160,69 @@ function listOpenPrs() {
   const out = gh(['pr', 'list', '--state', 'open', '--limit', '200', '--json',
     'number,headRefOid,headRefName,baseRefName,state']);
   return JSON.parse(out);
+}
+
+function normalizeMergifyQueueStatus(status) {
+  return String(status || 'none').trim().toLowerCase();
+}
+
+function extractFirstJsonObject(text) {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          const payload = JSON.parse(text.slice(start, i + 1));
+          return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null;
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function parseMergifyQueueStatus(comment) {
+  let author = '';
+  if (comment?.user && typeof comment.user === 'object') author = String(comment.user.login || '');
+  else if (comment?.author && typeof comment.author === 'object') author = String(comment.author.login || '');
+  else author = String(comment?.user || comment?.author || '');
+  if (author !== 'mergify[bot]' && author !== 'mergify') return null;
+  const body = String(comment?.body || '');
+  const marker = '-*- Mergify Payload -*-';
+  const markerIndex = body.indexOf(marker);
+  if (markerIndex === -1) return null;
+  const payload = extractFirstJsonObject(body.slice(markerIndex));
+  return normalizeMergifyQueueStatus(payload?.state || payload?.queue_state || payload?.event || payload?.action);
+}
+
+function fetchMergifyQueueStatus(prNumber) {
+  const out = gh(['pr', 'view', String(prNumber), '--json', 'comments']);
+  const comments = JSON.parse(out).comments;
+  if (!Array.isArray(comments)) return 'none';
+  const statuses = comments
+    .map((comment) => ({
+      status: parseMergifyQueueStatus(comment),
+      updatedAt: String(comment?.updated_at || comment?.updatedAt || comment?.created_at || comment?.createdAt || ''),
+    }))
+    .filter((event) => event.status);
+  statuses.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return statuses[0]?.status || 'none';
 }
 
 function addAdminBypassLabel(prNumber) {
@@ -284,10 +350,44 @@ function main() {
     return;
   }
 
+  try {
+    prData = prData.map((pr) => ({ ...pr, mergifyQueueStatus: fetchMergifyQueueStatus(pr.number) }));
+  } catch (e) {
+    console.error(`\nerror: failed to read Mergify queue status via gh: ${e.message}`);
+    process.exit(2);
+  }
+
   const targets = queueTargets(prData);
+  for (const pr of prData) {
+    const status = normalizeMergifyQueueStatus(pr.mergifyQueueStatus);
+    if (pr.state === 'OPEN' && ACTIVE_MERGIFY_QUEUE_STATUSES.has(status)) {
+      console.warn(`warning: PR #${pr.number} already has Mergify queue status '${status}'; not re-queueing it.`);
+    }
+  }
   if (targets.length === 0) {
     console.error('\nerror: no open PRs to queue.');
     process.exit(1);
+  }
+
+  for (const pr of targets) {
+    let approval;
+    try {
+      approval = checkGuardedBehaviorApprovalForPr({
+        prNumber: pr.number,
+        headSha: pr.headRefOid,
+        runGh: gh,
+      });
+    } catch (e) {
+      console.error(`\nerror: guarded-behavior approval check failed for PR #${pr.number}: ${e.message}`);
+      process.exit(2);
+    }
+    if (!approval.eligible) {
+      console.error(
+        `\nerror: refusing admin-bypass for guarded PR #${pr.number}: ${approval.reason}. `
+        + 'A non-bot reviewer must approve the current head SHA.',
+      );
+      process.exit(1);
+    }
   }
 
   console.log(`\nExecuting: adding 'admin-bypass' to ${targets.length} verified PR(s), bottom-to-top.`);

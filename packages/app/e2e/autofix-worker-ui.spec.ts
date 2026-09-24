@@ -8,7 +8,7 @@ import {
   E2E_REPO_URL,
 } from './fixtures/electron-app.js';
 
-test.use({ repoConfig: { autoFixRetries: 1, autoFixAgent: 'claude', autoApproveAIFixes: false } });
+test.use({ repoConfig: { autoFixRetries: 2, autoFixAgent: 'claude', autoApproveAIFixes: false } });
 
 const PLAN = {
   name: 'E2E Autofix Worker UI Plan',
@@ -21,10 +21,15 @@ const PLAN = {
 };
 
 test('worker-triggered autofix reaches approval UI with mocked Claude', async ({ page }) => {
+  // Bare-restart then escalate can exceed the default 120s Playwright budget on CI.
+  test.setTimeout(240_000);
+  await page.evaluate(async () => {
+    await window.invoker.startWorker('autofix');
+  });
   await loadPlan(page, PLAN);
   await startPlan(page);
   await waitForTaskStatus(page, 'task-pass', 'completed');
-  await waitForTaskStatus(page, 'task-fail', 'awaiting_approval', 30000);
+  await waitForTaskStatus(page, 'task-fail', 'awaiting_approval', 120_000);
 
   const scopedTaskId = await resolveTaskId(page, 'task-fail');
   await page.waitForFunction(

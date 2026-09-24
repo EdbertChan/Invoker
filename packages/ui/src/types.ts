@@ -2,8 +2,11 @@
  * UI type definitions.
  *
  * Re-declares the types from @invoker/core and @invoker/app to avoid
- * importing Electron dependencies into the renderer process.
+ * importing Electron dependencies into the renderer process. Complex leaf
+ * types shared with the runtime come from @invoker/workflow-graph (a pure
+ * types package that @invoker/contracts also imports from).
  */
+import type { FailureClass, ReviewGateState, TaskHeartbeatSource } from '@invoker/workflow-graph';
 
 // ── Task Status ─────────────────────────────────────────────
 
@@ -18,7 +21,9 @@ export type TaskStatus =
   | 'blocked'
   | 'review_ready'
   | 'awaiting_approval'
-  | 'stale';
+  | 'stale'
+  | 'queued'
+  | 'skipped';
 
 // ── Experiment Types ────────────────────────────────────────
 
@@ -35,12 +40,14 @@ export interface ExperimentResultEntry {
   readonly exitCode?: number;
 }
 
+export type ExternalGatePolicy = 'completed' | 'review_ready' | 'ci_failed';
+
 export interface ExternalDependency {
   readonly workflowId: string;
   /** Optional task selector within the external workflow. Omit to depend on that workflow's merge gate. */
   readonly taskId?: string;
   readonly requiredStatus: 'completed';
-  readonly gatePolicy?: 'completed' | 'review_ready';
+  readonly gatePolicy?: ExternalGatePolicy;
 }
 
 export interface ExternalDependencyChange {
@@ -59,14 +66,14 @@ export interface DetachedExternalDependency {
   readonly workflowId: string;
   readonly taskId?: string;
   readonly requiredStatus: 'completed';
-  readonly gatePolicy?: 'completed' | 'review_ready';
+  readonly gatePolicy?: ExternalGatePolicy;
   readonly detachedAt: string;
 }
 
 export interface ExternalGatePolicyUpdate {
   workflowId: string;
   taskId?: string;
-  gatePolicy: 'completed' | 'review_ready';
+  gatePolicy: ExternalGatePolicy;
 }
 
 // ── Task Config (plan-time / static fields) ────────────────
@@ -108,14 +115,22 @@ export interface TaskExecution {
   readonly inputPrompt?: string;
   readonly exitCode?: number;
   readonly error?: string;
+  readonly failureClass?: FailureClass;
+  readonly protocolErrorCode?: string;
+  readonly protocolErrorMessage?: string;
   readonly startedAt?: Date;
   readonly completedAt?: Date;
   readonly lastHeartbeatAt?: Date;
+  readonly remoteHeartbeatAt?: Date;
+  readonly heartbeatSource?: TaskHeartbeatSource;
   readonly launchStartedAt?: Date;
   readonly launchCompletedAt?: Date;
   readonly actionRequestId?: string;
   readonly branch?: string;
   readonly commit?: string;
+  readonly fixedIntegrationSha?: string;
+  readonly fixedIntegrationRecordedAt?: Date;
+  readonly fixedIntegrationSource?: string;
   readonly agentSessionId?: string;
   readonly lastAgentSessionId?: string;
   readonly agentName?: string;
@@ -127,15 +142,22 @@ export interface TaskExecution {
   readonly selectedExperiments?: readonly string[];
   readonly experimentResults?: readonly ExperimentResultEntry[];
   readonly pendingFixError?: string;
+  readonly fixSessionEntryStatus?: TaskStatus;
   readonly isFixingWithAI?: boolean;
   readonly reviewUrl?: string;
   readonly reviewId?: string;
   readonly reviewStatus?: string;
   readonly reviewProviderId?: string;
+  readonly reviewGate?: ReviewGateState;
   readonly mergeConflict?: {
     readonly failedBranch: string;
     readonly conflictFiles: readonly string[];
   };
+  readonly selectedAttemptId?: string;
+  readonly crashPreservedAt?: Date;
+  readonly crashPreservedOwnerPid?: number;
+  readonly crashPreservedReportPath?: string;
+  readonly crashPreservedDiagnosticSummary?: string;
 }
 
 // ── Task State ──────────────────────────────────────────────
@@ -197,20 +219,7 @@ export interface WorkflowRollupPatch {
 }
 
 
-export type TaskGraphEvent =
-  | {
-      readonly type: 'delta';
-      readonly delta: TaskDelta;
-      readonly workflowRollups: readonly WorkflowRollupPatch[];
-    }
-  | {
-      readonly type: 'snapshot';
-      readonly tasks: readonly TaskState[];
-      readonly workflows: readonly WorkflowMeta[];
-      readonly reason: string;
-      readonly streamSequence: number;
-      readonly forced?: boolean;
-    };
+export type { TaskGraphEvent } from '@invoker/contracts';
 
 
 export type WorkflowStatus =
@@ -355,7 +364,19 @@ declare global {
       appStartedAtEpochMs?: number;
       streamSequence?: number;
     };
+    __INVOKER_TRACE_RENDERER_TASK_GRAPH__?: boolean;
+    __INVOKER_TRACE_RENDERER_WORKFLOW_EVENTS__?: boolean;
     __INVOKER_TEST_OPEN_TERMINAL__?: (taskId: string) => ReturnType<InvokerAPI['openTerminal']>;
     __INVOKER_TEST_ON_TERMINAL_OUTPUT__?: (cb: (event: TerminalOutputEvent) => void) => () => void;
+    /** The live xterm.js Terminal instance backing the planning Tmux pane, when one is mounted. Test-only. */
+    __INVOKER_TEST_ACTIVE_PLANNING_TMUX_TERMINAL__?: {
+      rows: number;
+      buffer: { active: { getLine(n: number): { translateToString(trimRight?: boolean): string } | undefined } };
+    } | null;
+    /** Live xterm.js Terminal instances backing open task terminals in the drawer, keyed by sessionId. Test-only. */
+    __INVOKER_TEST_TASK_TERMINALS__?: Map<string, {
+      rows: number;
+      buffer: { active: { getLine(n: number): { translateToString(trimRight?: boolean): string } | undefined } };
+    }>;
   }
 }

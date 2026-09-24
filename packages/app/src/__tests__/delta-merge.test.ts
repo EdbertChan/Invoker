@@ -17,6 +17,9 @@ import { describe, it, expect } from 'vitest';
 import {
   applyDelta,
   recoverQuarantinedTask,
+  recoveryFound,
+  recoveryMissing,
+  recoveryUnavailable,
   resolveQuarantine,
   TaskSnapshotCache,
 } from '../delta-merge.js';
@@ -215,6 +218,40 @@ describe('applyDelta', () => {
       expect(cache.isQuarantined('t1')).toBe(false);
       const stored = JSON.parse(cache.get('t1')!);
       expect(stored.status).toBe('running');
+    });
+
+    it('drops a stale delta without mutating cache, then quarantines a genuine forward gap', () => {
+      const cache = new TaskSnapshotCache();
+      cache.set('t1', JSON.stringify(makeTask('t1', { taskStateVersion: 5, status: 'running' })));
+
+      const staleResult = applyDelta({
+        type: 'updated',
+        taskId: 't1',
+        changes: { status: 'completed' },
+        taskStateVersion: 4,
+        previousTaskStateVersion: 3,
+      }, cache);
+
+      expect(staleResult.accepted).toBe(false);
+      expect(staleResult.quarantined).toEqual([]);
+      expect(cache.isQuarantined('t1')).toBe(false);
+      const afterStale = JSON.parse(cache.get('t1')!);
+      expect(afterStale.status).toBe('running');
+      expect(afterStale.taskStateVersion).toBe(5);
+
+      const gapResult = applyDelta({
+        type: 'updated',
+        taskId: 't1',
+        changes: { status: 'completed' },
+        taskStateVersion: 10,
+        previousTaskStateVersion: 9, // gap: cached taskStateVersion is 5, not 9
+      }, cache);
+
+      expect(gapResult.quarantined).toEqual(['t1']);
+      expect(cache.getEntry('t1')?.quarantined).toBe(true);
+      const afterGap = JSON.parse(cache.get('t1')!);
+      expect(afterGap.status).toBe('running');
+      expect(afterGap.taskStateVersion).toBe(5);
     });
 
     it('quarantines when task is unknown (no prior created)', () => {
@@ -420,8 +457,14 @@ function simulateMainProcessDeltaHandler(
   }
   for (const taskId of quarantined) {
     const { rendererDelta } = recoverQuarantinedTask(cache, taskId, {
-      loadTask: persistence.loadTask,
-      getMergeNode: orchestrator.getMergeNode,
+      loadTask: (id) => {
+        const task = persistence.loadTask(id);
+        return task ? recoveryFound(task) : recoveryMissing();
+      },
+      getMergeNode: (workflowId) => {
+        const task = orchestrator.getMergeNode(workflowId);
+        return task ? recoveryFound(task) : recoveryMissing();
+      },
     });
     if (rendererDelta) {
       rendererDeltas.push(rendererDelta);
@@ -483,6 +526,57 @@ describe('gap recovery: unknown task → quarantine + authoritative reload', () 
     const [first] = rendererDeltas;
     expect(first.type).toBe('removed');
     expect((first as { type: 'removed'; taskId: string }).taskId).toBe('ghost');
+  });
+
+  it('unknown task with unavailable local read does not emit removed', () => {
+    const cache = new TaskSnapshotCache();
+
+    const delta: TaskDelta = {
+      type: 'updated',
+      taskId: 'detached-task',
+      changes: { status: 'completed' },
+      taskStateVersion: 2,
+      previousTaskStateVersion: 1,
+    };
+
+    const { quarantined } = applyDelta(delta, cache);
+    expect(quarantined).toEqual(['detached-task']);
+
+    const recovery = recoverQuarantinedTask(cache, 'detached-task', {
+      loadTask: () => recoveryUnavailable('read-only-viewer'),
+      getMergeNode: () => recoveryUnavailable('read-only-viewer'),
+    });
+
+    expect(recovery.outcome).toBe('unavailable');
+    expect(recovery.rendererDelta).toBeUndefined();
+    expect(cache.has('detached-task')).toBe(false);
+  });
+
+  it('version gap with unavailable local read keeps stale entry quarantined', () => {
+    const cache = new TaskSnapshotCache();
+    cache.set('detached-task', JSON.stringify(makeTask('detached-task', {
+      status: 'running',
+      taskStateVersion: 2,
+    })));
+
+    const { quarantined } = applyDelta({
+      type: 'updated',
+      taskId: 'detached-task',
+      changes: { status: 'completed' },
+      taskStateVersion: 5,
+      previousTaskStateVersion: 4,
+    }, cache);
+    expect(quarantined).toEqual(['detached-task']);
+
+    const recovery = recoverQuarantinedTask(cache, 'detached-task', {
+      loadTask: () => recoveryUnavailable('read-only-viewer'),
+      getMergeNode: () => recoveryUnavailable('read-only-viewer'),
+    });
+
+    expect(recovery.outcome).toBe('unavailable');
+    expect(recovery.rendererDelta).toBeUndefined();
+    expect(cache.has('detached-task')).toBe(true);
+    expect(cache.isQuarantined('detached-task')).toBe(true);
   });
 });
 

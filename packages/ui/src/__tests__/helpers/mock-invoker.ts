@@ -81,6 +81,7 @@ export function makePlanningSessionSummary(
     title: 'Saved planning chat',
     status: 'draft_ready',
     presetKey: 'codex',
+    confirmationMode: 'require',
     messages: [
       {
         id: 1,
@@ -110,7 +111,7 @@ export function createMockInvoker(
   let workflowSnapshot = initialWorkflows;
   let historySnapshot: TaskHistoryEntry[] = [];
   const eventsByTask = new Map<string, TaskEvent[]>();
-  let graphEventCallback: ((event: TaskGraphEvent) => void) | undefined;
+  const graphEventCallbacks = new Set<(event: TaskGraphEvent) => void>();
   let workflowsCallback: ((workflows: unknown[]) => void) | undefined;
   const planningChatStreamCallbacks = new Set<(event: InAppPlanningStreamEvent) => void>();
   const terminalOutputCallbacks = new Set<(event: TerminalOutputEvent) => void>();
@@ -167,20 +168,22 @@ export function createMockInvoker(
       () =>
         new Promise<void>((resolve) => {
           queueMicrotask(() => {
-            graphEventCallback?.({
-              type: 'snapshot',
-              tasks: taskSnapshot,
-              workflows: workflowSnapshot,
-              reason: 'mock-refresh',
-              streamSequence: 0,
-            });
+            for (const cb of graphEventCallbacks) {
+              cb({
+                type: 'snapshot',
+                tasks: taskSnapshot,
+                workflows: workflowSnapshot,
+                reason: 'mock-refresh',
+                streamSequence: 0,
+              });
+            }
             resolve();
           });
         }),
     ),
     onTaskGraphEvent: vi.fn((cb: (event: TaskGraphEvent) => void) => {
-      graphEventCallback = cb;
-      return () => { graphEventCallback = undefined; };
+      graphEventCallbacks.add(cb);
+      return () => { graphEventCallbacks.delete(cb); };
     }),
     onWorkflowsChanged: vi.fn((cb: (workflows: unknown[]) => void) => {
       workflowsCallback = cb;
@@ -201,6 +204,7 @@ export function createMockInvoker(
         title: 'Untitled plan',
         status: 'still_discussing',
         presetKey: 'codex',
+        confirmationMode: 'require',
         messages: [],
         draftPlanAvailable: false,
         createdAt: '2026-01-01T00:00:00.000Z',
@@ -208,10 +212,12 @@ export function createMockInvoker(
       },
     })),
     planningChatList: vi.fn(async () => ({ ok: true, sessions: [] })),
-    planningChatSend: vi.fn(async () => ({
+    planningChatSend: vi.fn(async (request?: { turnId?: string }) => ({
       ok: true,
       sessionId: 'session-1',
+      turnId: request?.turnId,
       reply: 'I can help draft that.',
+      confirmationMode: 'require',
       draftPlanAvailable: false,
     })),
     planningChatSubmit: vi.fn(async () => ({
@@ -219,12 +225,16 @@ export function createMockInvoker(
       planName: 'Mock Plan',
       workflowId: 'wf-1',
     })),
+    planningChatDiscardDraft: vi.fn(async () => ({ ok: true })),
     planningChatReset: vi.fn(async () => ({ ok: true })),
+    planningChatDelete: vi.fn(async () => ({ ok: true })),
+    planningChatDeleteSubmitted: vi.fn(async () => ({ ok: true, deletedSessionIds: [] })),
     onPlanningChatStream: vi.fn((cb: (event: InAppPlanningStreamEvent) => void) => {
       planningChatStreamCallbacks.add(cb);
       return () => { planningChatStreamCallbacks.delete(cb); };
     }),
     planningChatSetTerminalMode: vi.fn(async () => ({ ok: true })),
+    planningChatRebindRepo: vi.fn(async () => ({ ok: true, action: 'provision' })),
     planningTerminalOpen: vi.fn(async (planningSessionId: string) => ({
       opened: true,
       session: {
@@ -241,11 +251,12 @@ export function createMockInvoker(
     planningTerminalList: vi.fn(async () => []),
     planningTerminalWrite: vi.fn(async () => ({ ok: true })),
     planningTerminalResize: vi.fn(async () => ({ ok: true })),
+    planningTerminalAppliedSize: vi.fn(async () => null),
     planningTerminalClose: vi.fn(async () => ({ ok: true })),
     getPlanningPresets: vi.fn(async () => [
-      { key: 'codex', label: 'Codex', tool: 'codex', isDefault: true },
-      { key: 'omp+claude', label: 'Claude via OMP', tool: 'omp', model: 'claude', isDefault: false },
-      { key: 'omp', label: 'OMP', tool: 'omp', isDefault: false },
+      { key: 'codex', label: 'Codex', tool: 'codex', isDefault: true, defaultConfirmationMode: 'require' },
+      { key: 'omp+claude', label: 'Claude via OMP', tool: 'omp', model: 'claude', isDefault: false, defaultConfirmationMode: 'require' },
+      { key: 'omp', label: 'OMP', tool: 'omp', isDefault: false, defaultConfirmationMode: 'require' },
     ]),
     start: vi.fn(async () => taskSnapshot),
     stop: vi.fn(async () => {}),
@@ -255,7 +266,7 @@ export function createMockInvoker(
     approve: vi.fn(async () => accepted('invoker:approve')),
     reject: vi.fn(async () => accepted('invoker:reject')),
     selectExperiment: vi.fn(async () => accepted('invoker:select-experiment')),
-    restartTask: vi.fn(async () => accepted('invoker:restart-task')),
+    retryTask: vi.fn(async () => accepted('invoker:retry-task')),
     editTaskCommand: vi.fn(async () => accepted('invoker:edit-task-command')),
     editTaskPrompt: vi.fn(async () => accepted('invoker:edit-task-prompt')),
     editTaskPool: vi.fn(async () => accepted('invoker:edit-task-pool')),
@@ -333,6 +344,8 @@ export function createMockInvoker(
     replaceTask: vi.fn(async () => accepted('invoker:replace-task')),
     getActivityLogs: vi.fn(async () => []),
     reportUiPerf: vi.fn(async () => {}),
+    traceRendererTaskGraphEvent: vi.fn(async () => {}),
+    traceRendererWorkflowEvent: vi.fn(async () => {}),
     getUiPerfStats: vi.fn(async () => ({})),
     getEvents: vi.fn(async (taskId: string, options?: { limit: number; sortBy?: 'asc' | 'desc'; beforeId?: number }) => {
       const events = [...(eventsByTask.get(taskId) ?? [])];
@@ -417,7 +430,7 @@ export function createMockInvoker(
     approveMerge: vi.fn(async () => accepted('invoker:approve-merge')),
     resolveConflict: vi.fn(async () => accepted('invoker:resolve-conflict')),
     fixWithAgent: vi.fn(async () => accepted('invoker:fix-with-agent')),
-    setMergeMode: vi.fn(async () => accepted('invoker:set-merge-mode')),
+    setWorkflowMergeMode: vi.fn(async () => accepted('invoker:set-workflow-merge-mode')),
     checkPrStatuses: vi.fn(async () => {}),
     cancelTask: vi.fn(async () => accepted('invoker:cancel-task')),
     cancelWorkflow: vi.fn(async () => accepted('invoker:cancel-workflow')),
@@ -443,6 +456,10 @@ export function createMockInvoker(
       const row = workerStatus.workers.find((worker) => worker.kind === kind) ?? makeMockWorkerStatusEntry(kind);
       return row;
     }),
+    tickWorker: vi.fn(async (kind: string) => {
+      const row = workerStatus.workers.find((worker) => worker.kind === kind) ?? makeMockWorkerStatusEntry(kind);
+      return row;
+    }),
     getActionGraph: vi.fn(async () => actionGraphSnapshot),
     getClaudeSession: vi.fn(async () => null),
     getAgentSession: vi.fn(async () => null),
@@ -461,7 +478,7 @@ export function createMockInvoker(
 
       // Fire created graph events for each task after subscribers attach.
       for (const task of tasks) {
-        graphEventCallback?.({ type: 'delta', delta: { type: 'created', task }, workflowRollups: [] });
+        for (const cb of graphEventCallbacks) cb({ type: 'delta', delta: { type: 'created', task }, workflowRollups: [] });
       }
     });
   }
@@ -491,10 +508,10 @@ export function createMockInvoker(
 
 
   function fireDelta(delta: TaskDelta) {
-    graphEventCallback?.({ type: 'delta', delta, workflowRollups: [] });
+    for (const cb of graphEventCallbacks) cb({ type: 'delta', delta, workflowRollups: [] });
   }
   function fireGraphEvent(event: TaskGraphEvent) {
-    graphEventCallback?.(event);
+    for (const cb of graphEventCallbacks) cb(event);
   }
 
 
@@ -592,14 +609,18 @@ export function makeUITask(overrides: Partial<TaskState> & {
   status?: TaskStatus;
   workflowId?: string;
   isMergeNode?: boolean;
+  poolId?: string;
   command?: string;
   prompt?: string;
 } = {}): TaskState {
   const {
     workflowId,
     isMergeNode,
+    poolId,
     command,
     prompt,
+    config,
+    execution,
     ...rest
   } = overrides;
 
@@ -612,11 +633,12 @@ export function makeUITask(overrides: Partial<TaskState> & {
     config: {
       workflowId,
       isMergeNode,
+      poolId,
       command,
       prompt,
-      ...((overrides as any).config ?? {}),
+      ...(config ?? {}),
     } as TaskConfig,
-    execution: ((overrides as any).execution ?? {}) as TaskExecution,
+    execution: (execution ?? {}) as TaskExecution,
     ...rest,
   } as TaskState;
 }

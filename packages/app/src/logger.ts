@@ -4,28 +4,38 @@
  *
  * Does NOT monkey-patch the global `console` object.
  */
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 
-import type { Logger } from '@invoker/contracts';
+import { appendRotatingLogLine, type Logger } from '@invoker/contracts';
 import type { SQLiteAdapter } from '@invoker/data-store';
 
-const LOG_PATH = path.join(homedir(), '.invoker', 'invoker.log');
+const LOG_PATH = process.env.INVOKER_LOG_PATH ?? path.join(homedir(), '.invoker', 'invoker.log');
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
+
+function errorAwareReplacer(_key: string, value: unknown): unknown {
+  if (value instanceof Error) {
+    const { name, message, stack, ...rest } = value;
+    return { ...rest, name, message, stack };
+  }
+  return value;
+}
 
 export interface FileAndDbLoggerOptions {
   /** SQLiteAdapter instance for activity_log writes. Omit to skip DB writes. */
   persistence?: SQLiteAdapter;
   /** Override the default log file path (mainly for tests). */
   filePath?: string;
+  rotateBytes?: number;
 }
 
 export class FileAndDbLogger implements Logger {
   private readonly bindings: Record<string, unknown>;
   private readonly persistence: SQLiteAdapter | undefined;
   private readonly filePath: string;
+  private readonly rotateBytes: number | undefined;
   private dirEnsured = false;
 
   constructor(
@@ -35,6 +45,7 @@ export class FileAndDbLogger implements Logger {
     this.bindings = bindings;
     this.persistence = options.persistence;
     this.filePath = options.filePath ?? LOG_PATH;
+    this.rotateBytes = options.rotateBytes;
   }
 
   debug(msg: string, fields?: Record<string, unknown>): void {
@@ -56,7 +67,7 @@ export class FileAndDbLogger implements Logger {
   child(childBindings: Record<string, unknown>): Logger {
     return new FileAndDbLogger(
       { ...this.bindings, ...childBindings },
-      { persistence: this.persistence, filePath: this.filePath },
+      { persistence: this.persistence, filePath: this.filePath, rotateBytes: this.rotateBytes },
     );
   }
 
@@ -85,7 +96,11 @@ export class FileAndDbLogger implements Logger {
         mkdirSync(path.dirname(this.filePath), { recursive: true });
         this.dirEnsured = true;
       }
-      appendFileSync(this.filePath, JSON.stringify(record) + '\n');
+      appendRotatingLogLine(
+        this.filePath,
+        JSON.stringify(record, errorAwareReplacer) + '\n',
+        { maxBytes: this.rotateBytes },
+      );
     } catch {
       /* Logging must never crash the app. */
     }

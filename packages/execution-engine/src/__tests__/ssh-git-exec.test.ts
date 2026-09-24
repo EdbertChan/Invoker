@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
@@ -92,12 +92,17 @@ describe('buildMirrorCloneScript', () => {
     });
 
     expect(script).toContain('set -euo pipefail');
-    expect(script).toContain('REPO=$(echo');
-    expect(script).toContain('base64 -d)');
+    expect(script).toContain('invoker_base64_decode() {');
+    expect(script).toContain("REPO=$(printf '%s'");
     expect(script).toContain('H="abc123def456"');
-    expect(script).toContain('INVOKER_HOME=$(echo');
+    expect(script).toContain("INVOKER_HOME=$(printf '%s'");
     expect(script).toContain('CLONE="$INVOKER_HOME/repos/$H"');
-    expect(script).toContain('if [ ! -d "$CLONE/.git" ]; then git clone "$REPO" "$CLONE"; fi');
+    expect(script).toContain('if [ ! -d "$CLONE/.git" ]; then');
+    expect(script).toContain('git clone "$REPO"');
+    expect(script).toContain('git clone "$REPO" "$TMP_CLONE"');
+    expect(script).toContain('mv "$TMP_CLONE" "$CLONE"');
+    expect(script).toContain('date +%s > "$LOCK/heartbeat"');
+    expect(script).toContain('kill -0 "$HOLDER_PID"');
     expect(script).toContain('if ! git -C "$CLONE" fetch --all --prune; then');
     expect(script).toContain('__INVOKER_FETCH_FAILED__=1');
     expect(script).toContain('__INVOKER_FETCH_SUCCESS__=1');
@@ -140,8 +145,8 @@ describe('buildMirrorCloneScript', () => {
     // Should not contain the raw malicious string
     expect(script).not.toContain(maliciousUrl);
     // Should contain base64 encoded version
-    expect(script).toContain('REPO=$(echo');
-    expect(script).toContain('base64 -d)');
+    expect(script).toContain("REPO=$(printf '%s'");
+    expect(script).toContain('invoker_base64_decode');
   });
 
   it('fetches branch repo refs without mutating shared mirror remotes', () => {
@@ -152,12 +157,116 @@ describe('buildMirrorCloneScript', () => {
       baseRef: 'main',
     });
 
-    expect(script).toContain('BRANCH_REPO=$(echo');
+    expect(script).toContain("BRANCH_REPO=$(printf '%s'");
     expect(script).not.toContain('remote set-url invoker-branches');
     expect(script).not.toContain('remote add invoker-branches');
     expect(script).toContain('git -C "$CLONE" fetch "$BRANCH_REPO" \'+refs/heads/*:refs/remotes/invoker-branches/*\' --prune');
     expect(script).toContain('BRANCH_REPO_FETCH_FAILED=$BRANCH_REPO');
     expect(script).toContain('exit 32');
+  });
+
+  it('includes a retry-with-backoff loop and exit 33, runtime-guarded on requiredCommit being set', () => {
+    const script = buildMirrorCloneScript({
+      repoUrl: 'git@github.com:owner/repo.git',
+      repoHash: 'abc123',
+      baseRef: 'main',
+      requiredCommit: 'deadbeef',
+    });
+
+    expect(script).toContain('REQUIRED_COMMIT=$(printf');
+    expect(script).toContain('git -C "$CLONE" rev-parse --verify "$REQUIRED_COMMIT^{commit}"');
+    expect(script).toContain('REQUIRED_COMMIT_UNRESOLVED=$REQUIRED_COMMIT');
+    expect(script).toContain('exit 33');
+  });
+
+  it('reproduces the bug: a downstream task cannot resolve a dependency\'s just-pushed commit from a stale shared clone', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ssh-mirror-stale-clone-'));
+    const origin = join(root, 'origin.git');
+    const seed = join(root, 'seed');
+    const upstreamTask = join(root, 'upstream-task');
+
+    execSync('git init --bare -b master ' + JSON.stringify(origin), { stdio: 'ignore' });
+    execSync('git clone ' + JSON.stringify(origin) + ' ' + JSON.stringify(seed), { stdio: 'ignore' });
+    writeFileSync(join(seed, 'file.txt'), 'base\n');
+    execSync('git -c user.email=repro@example.com -c user.name=Repro add file.txt', { cwd: seed, stdio: 'ignore' });
+    execSync('git -c user.email=repro@example.com -c user.name=Repro commit -m base', { cwd: seed, stdio: 'ignore' });
+    execSync('git push origin master', { cwd: seed, stdio: 'ignore' });
+
+    // Simulate the real ordering: the shared mirror clone gets created and
+    // fetched (via buildMirrorCloneScript, no requiredCommit -- the caller
+    // has no way to know yet what commit a downstream task will need)
+    // BEFORE the dependency's branch is ever pushed. The clone is reused
+    // across tasks rather than recreated per task, so this fetch is the
+    // only one this clone gets until some later task runs.
+    const scriptBeforePush = buildMirrorCloneScript({
+      repoUrl: origin,
+      repoHash: 'shared-repo-hash',
+      baseRef: 'master',
+      invokerHome: root,
+    });
+    execFileSync('bash', ['-lc', scriptBeforePush], { env: { ...process.env, HOME: root } });
+    const sharedMirror = join(root, 'repos', 'shared-repo-hash');
+
+    // The upstream ("fix-ci") task commits and pushes a brand-new branch
+    // AFTER the shared mirror's fetch already ran.
+    execSync('git clone ' + JSON.stringify(origin) + ' ' + JSON.stringify(upstreamTask), { stdio: 'ignore' });
+    execSync('git checkout -b experiment/wf-repro/fix-ci/g0', { cwd: upstreamTask, stdio: 'ignore' });
+    writeFileSync(join(upstreamTask, 'fix.txt'), 'fix\n');
+    execSync('git -c user.email=repro@example.com -c user.name=Repro add fix.txt', { cwd: upstreamTask, stdio: 'ignore' });
+    execSync('git -c user.email=repro@example.com -c user.name=Repro commit -m fix', { cwd: upstreamTask, stdio: 'ignore' });
+    execSync('git push origin experiment/wf-repro/fix-ci/g0', { cwd: upstreamTask, stdio: 'ignore' });
+    const dependencyCommit = execSync('git rev-parse HEAD', { cwd: upstreamTask }).toString().trim();
+
+    // The downstream task's worktree setup (setupTaskBranch /
+    // buildWorktreeSandboxResetScript in the real code) tries to check out
+    // the dependency's recorded commit against the now-stale shared clone.
+    const check = require('node:child_process').spawnSync(
+      'git',
+      ['-C', sharedMirror, 'worktree', 'add', '--no-track', '-B', 'downstream-task', join(root, 'downstream-wt'), dependencyCommit],
+    );
+    expect(check.status).not.toBe(0);
+    expect(String(check.stderr)).toMatch(/invalid reference|not a valid object name|bad object|unknown revision/i);
+  });
+
+  it('self-heals: retries the fetch until the required commit resolves, then succeeds', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ssh-mirror-required-commit-'));
+    const origin = join(root, 'origin.git');
+    const seed = join(root, 'seed');
+
+    execSync('git init --bare -b master ' + JSON.stringify(origin), { stdio: 'ignore' });
+    execSync('git clone ' + JSON.stringify(origin) + ' ' + JSON.stringify(seed), { stdio: 'ignore' });
+    writeFileSync(join(seed, 'file.txt'), 'base\n');
+    execSync('git -c user.email=repro@example.com -c user.name=Repro add file.txt', { cwd: seed, stdio: 'ignore' });
+    execSync('git -c user.email=repro@example.com -c user.name=Repro commit -m base', { cwd: seed, stdio: 'ignore' });
+    execSync('git push origin master', { cwd: seed, stdio: 'ignore' });
+    execSync('git checkout -b experiment/wf-repro/fix-ci/g0', { cwd: seed, stdio: 'ignore' });
+    writeFileSync(join(seed, 'fix.txt'), 'fix\n');
+    execSync('git -c user.email=repro@example.com -c user.name=Repro add fix.txt', { cwd: seed, stdio: 'ignore' });
+    execSync('git -c user.email=repro@example.com -c user.name=Repro commit -m fix', { cwd: seed, stdio: 'ignore' });
+    execSync('git push origin experiment/wf-repro/fix-ci/g0', { cwd: seed, stdio: 'ignore' });
+    const dependencyCommit = execSync('git rev-parse HEAD', { cwd: seed }).toString().trim();
+
+    // The mirror clone here is created AFTER the push, so requiredCommit
+    // resolves on the very first pass -- proving the retry path is wired up
+    // correctly without needing to wait through the full backoff window.
+    const script = buildMirrorCloneScript({
+      repoUrl: origin,
+      repoHash: 'fresh-repo-hash',
+      baseRef: 'master',
+      invokerHome: root,
+      requiredCommit: dependencyCommit,
+    });
+
+    expect(() => {
+      execFileSync('bash', ['-lc', script], { env: { ...process.env, HOME: root } });
+    }).not.toThrow();
+
+    const clone = join(root, 'repos', 'fresh-repo-hash');
+    const check = require('node:child_process').spawnSync(
+      'git',
+      ['-C', clone, 'rev-parse', '--verify', `${dependencyCommit}^{commit}`],
+    );
+    expect(check.status).toBe(0);
   });
 });
 
@@ -241,7 +350,7 @@ describe('buildWorktreeListScript', () => {
     const script = buildWorktreeListScript({ repoHash: 'xyz789' });
     expect(script).toContain('set -euo pipefail');
     expect(script).toContain('H="xyz789"');
-    expect(script).toContain('INVOKER_HOME=$(echo');
+    expect(script).toContain("INVOKER_HOME=$(printf '%s'");
     expect(script).toContain('CLONE="$INVOKER_HOME/repos/$H"');
     expect(script).toContain('git -C "$CLONE" worktree list --porcelain');
   });
@@ -316,9 +425,9 @@ describe('buildWorktreeSandboxResetScript', () => {
     });
 
     expect(script).toContain('set -euo pipefail');
-    expect(script).toContain('WT=$(echo');
-    expect(script).toContain('REF=$(echo');
-    expect(script).toContain('base64 -d)');
+    expect(script).toContain("WT=$(printf '%s'");
+    expect(script).toContain("REF=$(printf '%s'");
+    expect(script).toContain('invoker_base64_decode');
     expect(script).toContain('git -C "$WT" reset --hard "$REF"');
     expect(script).toContain('git -C "$WT" clean -fd');
     expect(script).not.toContain('clean -fdx');
@@ -437,9 +546,9 @@ describe('buildWorktreeRenameBranchScript', () => {
       toBranch: 'experiment/task-new',
     });
 
-    expect(script).toContain('WT=$(echo');
-    expect(script).toContain('FROM=$(echo');
-    expect(script).toContain('TO=$(echo');
+    expect(script).toContain("WT=$(printf '%s'");
+    expect(script).toContain("FROM=$(printf '%s'");
+    expect(script).toContain("TO=$(printf '%s'");
     expect(script).toContain('git -C "$WT" branch -m "$FROM" "$TO"');
     expect(script).toContain('git -C "$WT" rev-parse --abbrev-ref HEAD');
   });
@@ -454,11 +563,12 @@ describe('buildRecordAndPushScript', () => {
       commitMessageEmpty: 'invoker: task-123\n\nExit code: 0',
       gitUserName: 'Invoker Bot',
       gitUserEmail: 'invoker@local',
+      idempotencyKey: 'exec-1',
     });
 
     expect(script).toContain('set -euo pipefail');
-    expect(script).toContain('WT=$(echo');
-    expect(script).toContain('base64 -d)');
+    expect(script).toContain("WT=$(printf '%s'");
+    expect(script).toContain('invoker_base64_decode');
     expect(script).not.toContain('git config user.name');
     expect(script).not.toContain('git config user.email');
     expect(script).toContain('GIT_AUTHOR_NAME="$GIT_NAME"');
@@ -467,8 +577,35 @@ describe('buildRecordAndPushScript', () => {
     expect(script).toContain('git commit --allow-empty -F');
     expect(script).toContain('git commit -F');
     expect(script).toContain('HASH=$(git rev-parse HEAD)');
-    expect(script).toContain('git push origin "$BR:refs/heads/$BR"');
+    expect(script).toContain('REMOTE_EXPECTED=$(git ls-remote "$PUSH_REMOTE" "refs/heads/$BR"');
+    expect(script).toContain('git push --force-with-lease="refs/heads/$BR:$REMOTE_EXPECTED" "$PUSH_REMOTE" "$HASH:refs/heads/$BR"');
+    expect(script).toContain('IDEMPOTENCY_KEY=$(printf');
+    expect(script).toContain('MARKER="$STATE_DIR/$SAFE_IDEMPOTENCY_KEY.hash"');
     expect(script).toContain('printf "%s" "$HASH"');
+  });
+
+  it('never embeds macOS owner or Homebrew paths after remote home canonicalization', async () => {
+    const { canonicalizeRemoteManagedWorkspacePath } = await import('../conflict-resolver.js');
+    const { base64Encode } = await import('../ssh-git-exec.js');
+    const macOwnerPath = '/Users/edbertchan/.invoker/worktrees/c9d4f5f68faf/experiment-task';
+    const linuxPath = canonicalizeRemoteManagedWorkspacePath(macOwnerPath, '/home/invoker/.invoker');
+    expect(linuxPath).toBe('/home/invoker/.invoker/worktrees/c9d4f5f68faf/experiment-task');
+
+    const script = buildRecordAndPushScript({
+      worktreePath: linuxPath,
+      branch: 'experiment/task',
+      commitMessageChanges: 'msg',
+      commitMessageEmpty: 'empty',
+      gitUserName: 'Invoker Bot',
+      gitUserEmail: 'invoker@local',
+      idempotencyKey: 'exec-linux',
+    });
+
+    expect(script).toContain(base64Encode(linuxPath));
+    expect(script).not.toContain(base64Encode(macOwnerPath));
+    expect(script).not.toContain('/Users/');
+    expect(script).not.toContain('/opt/homebrew');
+    expect(script).not.toContain('Homebrew');
   });
 
   it('includes tilde path normalization', () => {
@@ -497,7 +634,8 @@ describe('buildRecordAndPushScript', () => {
 
     expect(script).not.toContain('git remote set-url invoker-branches "$PUSH_URL"');
     expect(script).not.toContain('git remote add invoker-branches "$PUSH_URL"');
-    expect(script).toContain('git push "$PUSH_URL" "$BR:refs/heads/$BR"');
+    expect(script).toContain('PUSH_REMOTE="$PUSH_URL"');
+    expect(script).toContain('git push --force-with-lease="refs/heads/$BR:$REMOTE_EXPECTED" "$PUSH_REMOTE" "$HASH:refs/heads/$BR"');
   });
 
   it('commits and pushes successfully without preconfigured git identity', () => {
@@ -546,6 +684,138 @@ describe('buildRecordAndPushScript', () => {
     expect(authorName).toBe('Remote CI Bot');
     expect(authorEmail).toBe('remote-ci@example.com');
     expect(pushedHead).toBe(localHead);
+  });
+
+  it('reuses the recorded commit when retried with the same idempotency key', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ssh-record-push-idempotent-'));
+    try {
+      const source = join(root, 'source');
+      const bare = join(root, 'remote.git');
+      const clone = join(root, 'clone');
+      const branch = 'experiment/test-branch';
+
+      mkdirSync(source, { recursive: true });
+      execSync('git init -b master', { cwd: source, stdio: 'ignore' });
+      writeFileSync(join(source, 'README.md'), 'seed\n');
+      execSync('git add README.md', { cwd: source, stdio: 'ignore' });
+      execSync('git -c user.name="Seed User" -c user.email="seed@example.com" commit -m "seed"', {
+        cwd: source,
+        stdio: 'ignore',
+      });
+      execSync(`git clone --bare ${JSON.stringify(source)} ${JSON.stringify(bare)}`, { stdio: 'ignore' });
+      execSync(`git clone ${JSON.stringify(bare)} ${JSON.stringify(clone)}`, { stdio: 'ignore' });
+      execSync(`git checkout -b ${branch}`, { cwd: clone, stdio: 'ignore' });
+      writeFileSync(join(clone, 'result.txt'), 'ok\n');
+
+      const script = buildRecordAndPushScript({
+        worktreePath: clone,
+        branch,
+        commitMessageChanges: 'invoker: record remote result',
+        commitMessageEmpty: 'invoker: record remote empty result',
+        gitUserName: 'Remote CI Bot',
+        gitUserEmail: 'remote-ci@example.com',
+        idempotencyKey: 'exec-1',
+      });
+
+      const firstOutput = execFileSync('bash', ['-lc', script], {
+        env: {
+          ...process.env,
+          HOME: mkdtempSync(join(tmpdir(), 'ssh-record-push-home-')),
+        },
+      }).toString().trim();
+      const firstHash = firstOutput.split(/\s+/).pop();
+
+      const markerDir = execSync('git rev-parse --git-path invoker-record-and-push', { cwd: clone }).toString().trim();
+      rmSync(markerDir, { recursive: true, force: true });
+
+      const secondOutput = execFileSync('bash', ['-lc', script], {
+        env: {
+          ...process.env,
+          HOME: mkdtempSync(join(tmpdir(), 'ssh-record-push-home-')),
+        },
+      }).toString().trim();
+      const secondHash = secondOutput.split(/\s+/).pop();
+      const commitCount = execSync('git rev-list --count HEAD', { cwd: clone }).toString().trim();
+      const commitMessage = execSync('git log -1 --format=%B', { cwd: clone }).toString();
+      const pushedHead = execSync(`git --git-dir=${JSON.stringify(bare)} rev-parse refs/heads/${branch}`)
+        .toString()
+        .trim();
+
+      expect(secondHash).toBe(firstHash);
+      expect(commitCount).toBe('2');
+      expect(commitMessage).toContain('Invoker-Finalize-Id: exec-1');
+      expect(pushedHead).toBe(firstHash);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('pushes the recorded HEAD when the checkout branch differs from the target branch', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ssh-record-push-different-branch-'));
+    try {
+      const source = join(root, 'source');
+      const bare = join(root, 'remote.git');
+      const clone = join(root, 'clone');
+      const targetBranch = 'experiment/test-branch';
+
+      mkdirSync(source, { recursive: true });
+      execSync('git init -b master', { cwd: source, stdio: 'ignore' });
+      writeFileSync(join(source, 'README.md'), 'seed\n');
+      execSync('git add README.md', { cwd: source, stdio: 'ignore' });
+      execSync('git -c user.name="Seed User" -c user.email="seed@example.com" commit -m "seed"', {
+        cwd: source,
+        stdio: 'ignore',
+      });
+      execSync(`git clone --bare ${JSON.stringify(source)} ${JSON.stringify(bare)}`, { stdio: 'ignore' });
+      execSync(`git clone ${JSON.stringify(bare)} ${JSON.stringify(clone)}`, { stdio: 'ignore' });
+
+      execSync(`git checkout -b ${targetBranch}`, { cwd: clone, stdio: 'ignore' });
+      writeFileSync(join(clone, 'stale.txt'), 'stale target branch\n');
+      execSync('git add stale.txt', { cwd: clone, stdio: 'ignore' });
+      execSync('git -c user.name="Seed User" -c user.email="seed@example.com" commit -m "stale target"', {
+        cwd: clone,
+        stdio: 'ignore',
+      });
+      const staleTargetSha = execSync('git rev-parse HEAD', { cwd: clone }).toString().trim();
+      execSync(`git push origin HEAD:refs/heads/${targetBranch}`, { cwd: clone, stdio: 'ignore' });
+
+      execSync('git checkout -b pr/head master', { cwd: clone, stdio: 'ignore' });
+      writeFileSync(join(clone, 'result.txt'), 'recorded repair commit\n');
+
+      const script = buildRecordAndPushScript({
+        worktreePath: clone,
+        branch: targetBranch,
+        commitMessageChanges: 'invoker: record remote result',
+        commitMessageEmpty: 'invoker: record remote empty result',
+        gitUserName: 'Remote CI Bot',
+        gitUserEmail: 'remote-ci@example.com',
+      });
+
+      const stdout = execFileSync('bash', ['-lc', script], {
+        env: {
+          ...process.env,
+          HOME: mkdtempSync(join(tmpdir(), 'ssh-record-push-home-')),
+        },
+      }).toString().trim();
+      const outputParts = stdout.split(/\s+/);
+      const recordedSha = outputParts[outputParts.length - 1];
+      const pushedHead = execSync(`git --git-dir=${JSON.stringify(bare)} rev-parse refs/heads/${targetBranch}`)
+        .toString()
+        .trim();
+
+      expect(recordedSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(pushedHead).toBe(recordedSha);
+      expect(pushedHead).not.toBe(staleTargetSha);
+
+      const freshClone = join(root, 'fresh');
+      execSync(`git clone ${JSON.stringify(bare)} ${JSON.stringify(freshClone)}`, { stdio: 'ignore' });
+      const reachableSha = execSync(`git rev-parse --verify "${recordedSha}^{commit}"`, { cwd: freshClone })
+        .toString()
+        .trim();
+      expect(reachableSha).toBe(recordedSha);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

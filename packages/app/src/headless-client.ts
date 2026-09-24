@@ -13,6 +13,7 @@ import {
 
 import { resolveInvokerHomeRoot } from './delete-all-snapshot.js';
 import { isHeadlessMutatingCommand } from './headless-command-classification.js';
+import { isHeadlessHelpCommand, isRemovedHeadlessCommandAlias } from './headless-command-registry.js';
 import {
   resolveDelegationTimeoutMs,
   tryDelegateExec,
@@ -28,13 +29,15 @@ import {
   tryAcquireOwnerBootstrapLock,
 } from './headless-owner-bootstrap.js';
 import { loadConfig, type InvokerConfig } from './config.js';
+import { BOLD, RESET } from './headless-shared.js';
+import { flushOutputStream } from './headless-stdio.js';
 import { registerExternalWorkersFromConfig } from './external-worker-loader.js';
 import {
   discoverOwner,
   isStandaloneCapable,
 } from './owner-endpoint.js';
 import { createOwnerResolver, type ResolvedOwner } from './owner-resolver.js';
-import { AUTO_STARTED_OWNER_WORKER_KINDS, createLocalWorkerStatusSnapshot } from './worker-control.js';
+import { autoStartedOwnerWorkerKindsForConfig, createLocalWorkerStatusSnapshot } from './worker-control.js';
 import { renderWorkerLifecycle } from './headless-worker-lifecycle.js';
 import { resolveWorkerControlMutation, type WorkerControlMutation } from './worker-control-delegation.js';
 import { openMainProcessDatabase } from './viewer-db-boundary.js';
@@ -43,9 +46,9 @@ import {
   tryAcknowledgeNoTrackTaskMutationWithoutDb,
   tryAcknowledgeNoTrackTaskMutationWithoutOwner,
 } from './headless-no-track-fallback.js';
+import { printHeadlessUsage } from './headless-usage.js';
 
 const RED = '\x1b[31m';
-const RESET = '\x1b[0m';
 const repoRoot = resolveRepoRoot(__dirname);
 
 function delegationClientLog(message: string): void {
@@ -59,11 +62,7 @@ export function electronCommandArgs(args: string[], platform: NodeJS.Platform = 
 async function runElectronHeadless(args: string[]): Promise<number> {
   const electronLauncher = resolve(repoRoot, 'scripts', 'electron.cjs');
   const nodeArgs = [electronLauncher, ...electronCommandArgs(args)];
-  const command = process.platform === 'linux' && !process.env.DISPLAY ? 'xvfb-run' : process.execPath;
-  const commandArgs = command === 'xvfb-run'
-    ? ['--auto-servernum', process.execPath, ...nodeArgs]
-    : nodeArgs;
-  const child = spawn(command, commandArgs, {
+  const child = spawn(process.execPath, nodeArgs, {
     cwd: repoRoot,
     stdio: 'inherit',
     env: {
@@ -83,12 +82,6 @@ async function runElectronHeadless(args: string[]): Promise<number> {
   });
 }
 
-async function flushOutputStream(stream: NodeJS.WriteStream): Promise<void> {
-  await new Promise<void>((resolve) => {
-    stream.write('', () => resolve());
-  });
-}
-
 const DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS = 30_000;
 const POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS = 90_000;
 const POST_BOOTSTRAP_OWNER_READY_TIMEOUT_MS = 20_000;
@@ -96,14 +89,21 @@ const READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 20_000;
 const OPTIONAL_READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS = 2_000;
 const READ_ONLY_QUERY_REQUEST_TIMEOUT_MS = 15_000;
 const GENERIC_READ_OWNER_PING_TIMEOUT_MS = 10_000;
+const EXISTING_MUTATION_OWNER_DISCOVERY_TIMEOUT_MS = 3_000;
+const EXISTING_MUTATION_OWNER_REFRESH_DISCOVERY_TIMEOUT_MS = 1_000;
 const POST_BOOTSTRAP_OWNER_RESTART_ATTEMPTS = 3;
 const DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS = 60_000;
+const REQUIRE_EXISTING_OWNER_ENV = 'INVOKER_HEADLESS_REQUIRE_EXISTING_OWNER';
 
 function standaloneOwnerBootstrapTimeoutMs(): number {
   const raw = process.env.INVOKER_HEADLESS_OWNER_BOOTSTRAP_TIMEOUT_MS;
   const parsed = raw ? Number.parseInt(raw, 10) : NaN;
   if (Number.isFinite(parsed) && parsed > 0) return parsed;
   return DEFAULT_STANDALONE_OWNER_BOOTSTRAP_TIMEOUT_MS;
+}
+
+function requireExistingSharedMutationOwner(): boolean {
+  return process.env[REQUIRE_EXISTING_OWNER_ENV] === '1';
 }
 
 export class SharedMutationOwnerTimeoutError extends Error {
@@ -115,6 +115,13 @@ export class SharedMutationOwnerTimeoutError extends Error {
 
 export function isSharedMutationOwnerTimeoutError(error: unknown): error is SharedMutationOwnerTimeoutError {
   return error instanceof SharedMutationOwnerTimeoutError;
+}
+
+export class OwnerBuildMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OwnerBuildMismatchError';
+  }
 }
 
 const STALE_OWNER_NO_TRACK_TASK_COMMANDS = new Set([
@@ -202,6 +209,9 @@ function isGenericDelegatableReadCommand(args: string[]): boolean {
   if (command === 'query') {
     const sub = args[1];
     return sub !== undefined && sub !== 'workers' && sub !== 'queue' && sub !== 'ui-perf' && sub !== 'action-graph';
+  }
+  if (command === 'worker') {
+    return (args[1] ?? 'list') === 'status';
   }
   return command !== undefined && GENERIC_DELEGATABLE_READ_COMMANDS.has(command);
 }
@@ -347,14 +357,18 @@ async function delegateReadOnlyQuery(
   const ownerResult = await resolver.waitForAny(
     isUiPerf ? READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS : OPTIONAL_READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS,
   );
-  if (!ownerResult.resolved) {
+  let messageBus = bus;
+  if (ownerResult.resolved) {
+    messageBus = ownerResult.bus;
+  } else if (
+    (!isQueue && !isActionGraph) ||
+    !hasLiveWritableOwner(resolve(resolveInvokerHomeRoot(), 'invoker.db'))
+  ) {
     if (isQueue || isActionGraph) return false;
     throw new Error(isUiPerf
       ? 'query ui-perf requires a running shared owner process'
       : 'query queue requires a running shared owner process');
   }
-
-  let messageBus = ownerResult.bus;
   const deadline = Date.now() + READ_ONLY_QUERY_OWNER_READY_TIMEOUT_MS;
   let response: Record<string, unknown> | null = null;
   while (Date.now() < deadline) {
@@ -483,6 +497,20 @@ async function tryDelegateWorkersQuery(
   return true;
 }
 
+function isLocalWorkerListCommand(args: string[]): boolean {
+  return args[0] === 'worker' && (args[1] ?? 'list') === 'list';
+}
+
+function writeLocalWorkerList(invokerConfig: InvokerConfig): void {
+  const registry = registerExternalWorkersFromConfig(
+    invokerConfig.externalWorkers,
+    registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>()),
+  );
+  process.stdout.write(`${BOLD}Worker kinds${RESET}\n`);
+  for (const worker of registry.list()) {
+    process.stdout.write(`  ${worker.kind} — available (${worker.note})\n`);
+  }
+}
 async function runLocalWorkersQuery(args: string[], invokerConfig: InvokerConfig): Promise<number> {
   const dbPath = join(resolveInvokerHomeRoot(), 'invoker.db');
   const persistence = await openMainProcessDatabase({
@@ -499,7 +527,7 @@ async function runLocalWorkersQuery(args: string[], invokerConfig: InvokerConfig
     const snapshot = createLocalWorkerStatusSnapshot({
       registry,
       persistence,
-      autoStartKinds: AUTO_STARTED_OWNER_WORKER_KINDS,
+      autoStartKinds: autoStartedOwnerWorkerKindsForConfig(invokerConfig),
     });
     writeWorkerSnapshot(snapshot, args);
     return 0;
@@ -515,7 +543,7 @@ export interface HeadlessClientDeps {
   runElectronHeadless: (args: string[]) => Promise<number>;
 }
 
-async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void> {
+export async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void> {
   const invokerHomeRoot = resolveInvokerHomeRoot();
   const bootstrapLock = tryAcquireOwnerBootstrapLock(invokerHomeRoot);
   const startedAt = Date.now();
@@ -523,18 +551,38 @@ async function ensureStandaloneOwnerViaBootstrap(bus: MessageBus): Promise<void>
   try {
     if (bootstrapLock) {
       delegationClientLog('bootstrap spawning detached standalone owner');
-      spawnDetachedStandaloneOwner(repoRoot);
+      try {
+        spawnDetachedStandaloneOwner(repoRoot);
+      } catch (err) {
+        delegationClientLog(
+          `bootstrap refused to spawn detached standalone owner: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw err;
+      }
     }
     const deadline = Date.now() + standaloneOwnerBootstrapTimeoutMs();
     let attempts = 0;
     while (Date.now() < deadline) {
       attempts += 1;
-      const owner = await discoverOwner(bus, 500);
+      const owner = await discoverOwner(bus, 1500);
+      if (owner?.buildMismatchReason) {
+        delegationClientLog(
+          `bootstrap build mismatch attempts=${attempts} elapsedMs=${Date.now() - startedAt} ownerId=${owner.ownerId}: ${owner.buildMismatchReason}`,
+        );
+        throw new OwnerBuildMismatchError(owner.buildMismatchReason);
+      }
       if (isStandaloneCapable(owner)) {
         delegationClientLog(
           `bootstrap owner ready attempts=${attempts} elapsedMs=${Date.now() - startedAt} ownerId=${owner.ownerId}`,
         );
         return;
+      }
+      if (bus instanceof IpcBus) {
+        const fatal = bus.getFatalConnectError();
+        if (fatal) {
+          delegationClientLog(`bootstrap fatal connect error attempts=${attempts} elapsedMs=${Date.now() - startedAt}: ${fatal.message}`);
+          throw fatal;
+        }
       }
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
     }
@@ -566,6 +614,14 @@ function shouldUseSharedMutationOwner(args: string[], standaloneMode: boolean, i
   return isHeadlessMutatingCommand(args) && !standaloneMode && !internalOwnerServe;
 }
 
+function liveWritableOwnerDbPath(): string {
+  return resolve(resolveInvokerHomeRoot(), 'invoker.db');
+}
+
+function hasLiveWritableOwnerMarker(): boolean {
+  return hasLiveWritableOwner(liveWritableOwnerDbPath());
+}
+
 /**
  * Resolve a writable owner endpoint using the resolver, then delegate.
  *
@@ -590,12 +646,19 @@ async function resolveOwnerAndDelegate(
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
   };
+  const ensureStandaloneOwner = requireExistingSharedMutationOwner()
+    ? async () => {
+        const message = `Existing shared mutation owner is required; bootstrap disabled by ${REQUIRE_EXISTING_OWNER_ENV}=1`;
+        delegationClientLog(message);
+        throw new SharedMutationOwnerTimeoutError(message);
+      }
+    : deps.ensureStandaloneOwner;
 
   const resolver = createOwnerResolver(
     {
       messageBus: deps.messageBus,
       refreshMessageBus: deps.refreshMessageBus,
-      ensureStandaloneOwner: deps.ensureStandaloneOwner,
+      ensureStandaloneOwner,
       isRetryableBootstrapError: isSharedMutationOwnerTimeoutError,
     },
     {
@@ -658,6 +721,69 @@ async function resolveOwnerAndDelegate(
   return null; // Could not resolve
 }
 
+async function resolveExistingOwnerAndDelegate(
+  args: string[],
+  deps: HeadlessClientDeps,
+  waitForApproval?: boolean,
+  noTrack?: boolean,
+): Promise<number | null> {
+  delegationClientLog(`resolveExistingOwnerAndDelegate begin command=${args[0] ?? '<missing>'} noTrack=${noTrack ? 'true' : 'false'}`);
+  const resolver = createOwnerResolver(
+    {
+      messageBus: deps.messageBus,
+      refreshMessageBus: deps.refreshMessageBus,
+      ensureStandaloneOwner: async () => {},
+    },
+    {
+      discoveryTimeoutMs: EXISTING_MUTATION_OWNER_DISCOVERY_TIMEOUT_MS,
+      refreshDiscoveryTimeoutMs: EXISTING_MUTATION_OWNER_REFRESH_DISCOVERY_TIMEOUT_MS,
+      maxBootstrapAttempts: 0,
+    },
+  );
+
+  const discovered = await resolver.discover();
+  const resolved = discovered.resolved ? discovered : await resolver.refreshAndDiscover();
+  if (!resolved.resolved) {
+    delegationClientLog('resolveExistingOwnerAndDelegate no compatible existing owner');
+    return null;
+  }
+
+  let outcome: DelegationOutcome;
+  try {
+    outcome = await delegateMutation(
+      args,
+      resolved.bus,
+      waitForApproval,
+      noTrack,
+      noTrack ? POST_BOOTSTRAP_NO_TRACK_DELEGATION_TIMEOUT_MS : DEFAULT_NO_TRACK_DELEGATION_TIMEOUT_MS,
+    );
+  } catch (err) {
+    if (isAcceptedStaleOwnerNoTrackTaskMutationError(args, noTrack, err)) {
+      delegationClientLog(
+        `accepted stale-owner no-track task mutation command=${args[0]} workflow=${explicitTaskTargetWorkflowId(args)}`,
+      );
+      process.stdout.write('Delegated to owner\n');
+      process.stdout.write('--no-track enabled: delegated submission accepted; exiting without tracking.\n');
+      const exitCode = process.exitCode;
+      return typeof exitCode === 'number' ? exitCode : 0;
+    }
+    throw err;
+  }
+
+  if (outcome.kind === 'delegated') {
+    const exitCode = process.exitCode;
+    return typeof exitCode === 'number' ? exitCode : 0;
+  }
+
+  const detail = outcome.kind === 'protocol-error'
+    ? `: ${outcome.message}`
+    : ` (${outcome.kind})`;
+  process.stderr.write(
+    `${RED}Error:${RESET} Compatible owner "${resolved.owner.ownerId}" responded to discovery but did not accept mutation command "${args[0] ?? ''}"${detail}.\n`,
+  );
+  return 1;
+}
+
 export async function runHeadlessClientCommand(
   argv: string[],
   deps: HeadlessClientDeps,
@@ -668,11 +794,26 @@ export async function runHeadlessClientCommand(
 
   const { args, waitForApproval, noTrack } = parseArgs(argv);
   const standaloneMode = process.env.INVOKER_HEADLESS_STANDALONE === '1';
-  const internalOwnerServe = args[0] === 'owner-serve';
+  const command = args[0];
+  const internalOwnerServe = command === 'owner-serve';
+
+  if (isHeadlessHelpCommand(command)) {
+    printHeadlessUsage();
+    return 0;
+  }
+
+  if (isRemovedHeadlessCommandAlias(command)) {
+    throw new Error(`Unknown command: ${command}. Run with --help for usage.`);
+  }
 
   if (!internalOwnerServe && await delegateWorkerControl(args, deps.messageBus, invokerConfig, deps.refreshMessageBus)) {
     const exitCode = process.exitCode;
     return typeof exitCode === 'number' ? exitCode : 0;
+  }
+
+  if (!internalOwnerServe && isLocalWorkerListCommand(args)) {
+    writeLocalWorkerList(invokerConfig);
+    return 0;
   }
 
   if (
@@ -703,12 +844,27 @@ export async function runHeadlessClientCommand(
     return runLocalWorkersQuery(args, invokerConfig);
   }
 
+  if (standaloneMode && isHeadlessMutatingCommand(args) && !internalOwnerServe) {
+    const delegatedToExistingOwner = await resolveExistingOwnerAndDelegate(args, deps, waitForApproval, noTrack);
+    if (delegatedToExistingOwner !== null) {
+      return delegatedToExistingOwner;
+    }
+    if (hasLiveWritableOwnerMarker()) {
+      process.stderr.write(
+        `${RED}Error:${RESET} Standalone mutation command "${args[0] ?? ''}" found a live writable owner marker but could not reach a compatible owner over IPC.\n` +
+        'Refusing writable standalone fallback while another owner may have the database open.\n',
+      );
+      return 1;
+    }
+    return deps.runElectronHeadless(argv);
+  }
+
   if (!shouldUseSharedMutationOwner(args, standaloneMode, internalOwnerServe)) {
     return deps.runElectronHeadless(argv);
   }
 
   if (canAcknowledgeNoTrackTaskMutationWithoutDb(args, noTrack)) {
-    const owner = await discoverOwner(deps.messageBus, 500);
+    const owner = await discoverOwner(deps.messageBus, 1500);
     if (owner === null && tryAcknowledgeNoTrackTaskMutationWithoutDb(args, noTrack)) {
       return 0;
     }

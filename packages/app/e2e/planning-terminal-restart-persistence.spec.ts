@@ -32,7 +32,7 @@ function launchArgs(): string[] {
 
 async function waitForInvoker(page: Page): Promise<void> {
   await page.waitForLoadState('domcontentloaded');
-  await page.waitForFunction(() => typeof window.invoker !== 'undefined', null, { timeout: 10000 });
+  await page.waitForFunction(() => typeof window.invoker !== 'undefined', null, { timeout: 30000 });
 }
 
 async function launchApp(paths: { dbDir: string; userDataDir: string; ipcSocketPath: string; configPath: string }): Promise<{ app: ElectronApplication; page: Page }> {
@@ -53,7 +53,6 @@ async function launchApp(paths: { dbDir: string; userDataDir: string; ipcSocketP
       INVOKER_GUI_OWNER_MODE: process.env.INVOKER_E2E_GUI_OWNER_MODE ?? 'gui',
       INVOKER_DB_DIR: paths.dbDir,
       INVOKER_IPC_SOCKET: paths.ipcSocketPath,
-      INVOKER_ALLOW_DELETE_ALL: '1',
       INVOKER_E2E_ENABLE_COMPOSITOR: '1',
       INVOKER_EMBEDDED_TERMINAL_BACKEND: 'bash',
       INVOKER_REPO_CONFIG_PATH: paths.configPath,
@@ -79,12 +78,12 @@ async function closeApp(app: ElectronApplication): Promise<void> {
   });
   const closePromise = app.close().catch(() => undefined);
   const timedOut = await Promise.race([
-    closePromise.then(() => false),
+    Promise.all([closePromise, childExitPromise]).then(() => false),
     delay(5_000).then(() => true),
   ]);
   if (timedOut && !childExited) {
     child.kill('SIGTERM');
-    await Promise.race([closePromise, childExitPromise, delay(2_000)]);
+    await Promise.race([childExitPromise, delay(2_000)]);
     if (!childExited) child.kill('SIGKILL');
   }
 }
@@ -97,6 +96,13 @@ async function openPlanningTerminal(page: Page): Promise<void> {
 async function submitPlanningText(page: Page, text: string): Promise<void> {
   await page.getByTestId('invoker-terminal-input').fill(text);
   await page.getByTestId('invoker-terminal-input').press('Enter');
+}
+
+async function planningTmuxPaneText(page: Page): Promise<string> {
+  const pane = page.getByTestId('invoker-terminal-tmux-pane');
+  const rowsText = await pane.locator('.xterm-rows').textContent({ timeout: 1000 }).catch(() => null);
+  const paneText = await pane.textContent().catch(() => '');
+  return rowsText ?? paneText ?? '';
 }
 
 base.describe('Planning Terminal restart persistence', () => {
@@ -125,8 +131,9 @@ base.describe('Planning Terminal restart persistence', () => {
       }, { yaml: planYaml });
 
       await openPlanningTerminal(page);
-      await submitPlanningText(page, 'Add README');
-      await expect(page.getByTestId('invoker-terminal-ready-bar')).toContainText('draft ready', { timeout: 10000 });
+      await submitPlanningText(page, 'Draft a YAML plan to add a README');
+      await expect(page.getByRole('heading', { name: 'Review draft' })).toBeVisible({ timeout: 10000 });
+      await expect(page.getByTestId('draft-raw-yaml')).toContainText('name: Planning Terminal Restart', { timeout: 10000 });
       const savedSessionId = await page.evaluate(async () => {
         const list = await window.invoker.planningChatList();
         return list.sessions[0]?.id;
@@ -141,9 +148,9 @@ base.describe('Planning Terminal restart persistence', () => {
       ({ app, page } = await launchApp({ dbDir: testDir, userDataDir, ipcSocketPath, configPath }));
       await openPlanningTerminal(page);
 
-      await expect(page.getByTestId('invoker-terminal-transcript')).toContainText('Add README', { timeout: 10000 });
+      await expect(page.getByTestId('invoker-terminal-transcript')).toContainText('Draft a YAML plan to add a README', { timeout: 10000 });
       await expect(page.getByTestId('invoker-terminal-transcript')).toContainText('I drafted the restart plan.');
-      await expect(page.getByTestId('invoker-terminal-ready-bar')).toContainText('draft ready · "Planning Terminal Restart"');
+      await expect(page.getByTestId('invoker-terminal-ready-bar')).toContainText('Draft ready · Planning Terminal Restart · 1 task');
       await expect(page.getByTestId('invoker-terminal-input')).toBeEnabled();
       await expect(page.getByText('working…')).toHaveCount(0);
       const restoredSessionId = await page.evaluate(async () => {
@@ -186,8 +193,9 @@ base.describe('Planning Terminal restart persistence', () => {
       }, { yaml: planYaml });
 
       await openPlanningTerminal(page);
-      await submitPlanningText(page, 'Add README');
-      await expect(page.getByTestId('invoker-terminal-ready-bar')).toContainText('draft ready', { timeout: 10000 });
+      await submitPlanningText(page, 'Draft a YAML plan to add a README');
+      await expect(page.getByRole('heading', { name: 'Review draft' })).toBeVisible({ timeout: 10000 });
+      await expect(page.getByTestId('draft-raw-yaml')).toContainText('name: Planning Terminal Restart', { timeout: 10000 });
       const savedSessionId = await page.evaluate(async () => {
         const list = await window.invoker.planningChatList();
         return list.sessions[0]?.id;
@@ -221,6 +229,8 @@ base.describe('Planning Terminal restart persistence', () => {
       await expect(page.getByTestId('invoker-terminal-mode-toggle').getByRole('tab', { name: 'tmux' })).toHaveAttribute('aria-selected', 'true', { timeout: 10000 });
       await expect(page.getByTestId('invoker-terminal-tmux-pane')).toBeVisible({ timeout: 10000 });
       await expect(page.getByTestId('invoker-terminal-tmux-pane')).toHaveAttribute('data-session-id', firstTerminalSessionId ?? '');
+      await expect.poll(() => planningTmuxPaneText(page!), { timeout: 10000 }).toContain('Invoker planning tmux bridge');
+      await expect.poll(() => planningTmuxPaneText(page!), { timeout: 10000 }).toContain('Draft plan: Planning Terminal Restart (1 task) - Update README');
       await expect.poll(async () => page!.evaluate(async (sessionId) => {
         const list = await window.invoker.planningChatList();
         const session = list.sessions.find((candidate) => candidate.id === sessionId);

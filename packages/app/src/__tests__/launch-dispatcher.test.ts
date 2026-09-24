@@ -3,7 +3,7 @@ import { SQLiteAdapter } from '@invoker/data-store';
 import { DISPATCH_LEASE_MS, LAUNCH_STUCK_ABANDON_MS, type Logger } from '@invoker/contracts';
 import { InMemoryBus } from '@invoker/test-kit';
 import { Orchestrator } from '@invoker/workflow-core';
-import { LaunchDispatcher } from '../launch-dispatcher.js';
+import { LaunchDispatcher, releaseTaskResourceLeases } from '../launch-dispatcher.js';
 
 function makeLogger(): Logger & {
   records: { level: 'info' | 'warn' | 'error' | 'debug'; msg: string; fields?: Record<string, unknown> }[];
@@ -234,6 +234,29 @@ describe('LaunchDispatcher', () => {
       const { dispatcher } = makeDispatcher();
       expect(dispatcher.failDispatch(enqueued.id, 'too late')).toBe(false);
     });
+
+    it('fail abandons an already-accepted row instead of silently re-enqueuing it', () => {
+      seedWorkflowAndTask('attempt-fail-post-accept');
+      const enqueued = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-1/t1',
+        attemptId: 'attempt-fail-post-accept',
+        workflowId: 'wf-1',
+        generation: 0,
+      });
+      adapter.claimLaunchDispatchAtomic({ ownerId: 'owner-test' });
+      // Executor confirmed live -- acceptDispatch already fired.
+      expect(adapter.markLaunchDispatchAccepted(enqueued.id)).toBe(true);
+
+      const { dispatcher } = makeDispatcher();
+      expect(dispatcher.failDispatch(enqueued.id, new Error('metadata persist failed'))).toBe(true);
+
+      const after = adapter.loadLaunchDispatchById(enqueued.id);
+      // Must NOT look like "never launched" -- re-enqueuing here would let
+      // dispatchActive() try to relaunch a task that is already running.
+      expect(after?.state).toBe('abandoned');
+      expect(after?.lastError).toMatch(/Post-accept launch failure/);
+      expect(after?.lastError).toMatch(/metadata persist failed/);
+    });
   });
 
   describe('reapers', () => {
@@ -299,6 +322,30 @@ describe('LaunchDispatcher', () => {
       expect(dispatcher.reapExpiredLeases()).toBe(0);
     });
 
+    it('reapExpiredLeases does not reset an accepted row even past its fence (healthy long-running task)', () => {
+      seed();
+      const row = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-r/t1',
+        attemptId: 'attempt-reap-accepted',
+        workflowId: 'wf-r',
+        generation: 0,
+      });
+      const pastIso = new Date(Date.now() - 60_000).toISOString();
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch SET state = 'leased', dispatch_owner = 'owner-x', fenced_until = ? WHERE id = ?`,
+        [pastIso, row.id],
+      );
+      // The executor launched successfully -- this is a healthy task that
+      // just runs longer than its fence, not a crashed dispatcher claim.
+      expect(adapter.markLaunchDispatchAccepted(row.id)).toBe(true);
+
+      const { dispatcher } = dispatcherWithOrchestrator();
+      expect(dispatcher.reapExpiredLeases()).toBe(0);
+      // Must stay 'leased' -- resetting to 'enqueued' here would let
+      // dispatchActive() re-claim and re-dispatch an already-running task.
+      expect(adapter.loadLaunchDispatchById(row.id)?.state).toBe('leased');
+    });
+
     it('abandonStuckLeases abandons leased rows past max attempts and calls prepareTaskForNewAttempt', () => {
       seed();
       const row = adapter.enqueueLaunchDispatch({
@@ -332,6 +379,33 @@ describe('LaunchDispatcher', () => {
         source: 'launch-dispatcher',
         dispatchId: row.id,
       });
+    });
+
+    it('abandonStuckLeases does not abandon an accepted row via attempts_count alone', () => {
+      seed();
+      const row = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-r/t1',
+        attemptId: 'attempt-accepted-many-tries',
+        workflowId: 'wf-r',
+        generation: 0,
+      });
+      const pastIso = new Date(Date.now() - 60_000).toISOString();
+      (adapter as any).db.run(
+        `UPDATE task_launch_dispatch
+           SET state = 'leased', dispatch_owner = 'owner-x',
+               fenced_until = ?, attempts_count = 2, last_error = 'transient ssh hiccup'
+         WHERE id = ?`,
+        [pastIso, row.id],
+      );
+      // Attempt 3 (this claim) finally succeeded and the executor is live --
+      // attempts_count alone must not override that.
+      expect(adapter.markLaunchDispatchAccepted(row.id)).toBe(true);
+
+      const prepare = vi.fn();
+      const { dispatcher } = dispatcherWithOrchestrator({ prepareTaskForNewAttempt: prepare });
+      expect(dispatcher.abandonStuckLeases()).toBe(0);
+      expect(adapter.loadLaunchDispatchById(row.id)?.state).toBe('leased');
+      expect(prepare).not.toHaveBeenCalled();
     });
 
     it('CD.2: abandonStuckLeases releases execution-resource leases held by the abandoned task (Issue 14)', () => {
@@ -415,6 +489,48 @@ describe('LaunchDispatcher', () => {
         expect(payload.reason).toBe('launch-dispatch-abandoned');
       }
       expect(prepare).toHaveBeenCalledWith('wf-r/t1', 'launch-dispatch-abandoned');
+    });
+
+    it('CD.2: releaseTaskResourceLeases (exported) releases only leases held by the given task', () => {
+      seed();
+      const owned = adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh-pool/host-A',
+        resourceType: 'ssh-pool-slot',
+        holderId: 'direct-holder-1',
+        taskId: 'wf-r/t1',
+        poolId: 'ssh-pool',
+        poolMemberId: 'host-A',
+      });
+      const unrelated = adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh-pool/host-B',
+        resourceType: 'ssh-pool-slot',
+        holderId: 'direct-holder-2',
+        taskId: 'wf-other/tX',
+        poolId: 'ssh-pool',
+        poolMemberId: 'host-B',
+      });
+      expect(owned).toBe(true);
+      expect(unrelated).toBe(true);
+
+      const logger = makeLogger();
+      releaseTaskResourceLeases(
+        { persistence: adapter, logger, ownerId: 'owner-test' },
+        'wf-r/t1',
+        999,
+      );
+
+      expect(adapter.listExecutionResourceLeasesByTask('wf-r/t1')).toHaveLength(0);
+      expect(adapter.listExecutionResourceLeasesByTask('wf-other/tX')).toHaveLength(1);
+
+      const events = adapter.getEvents('wf-r/t1');
+      const releaseEvents = events.filter(
+        (event) => event.eventType === 'task.launch_dispatch_lease_released',
+      );
+      expect(releaseEvents).toHaveLength(1);
+      const payload = JSON.parse(releaseEvents[0].payload!);
+      expect(payload.dispatchId).toBe(999);
+      expect(payload.resourceKey).toBe('ssh-pool/host-A');
+      expect(payload.reason).toBe('launch-dispatch-abandoned');
     });
 
     it('CD.2: abandonStuckLeases is a no-op for leases when no resource leases are held', () => {
@@ -581,6 +697,7 @@ describe('LaunchDispatcher', () => {
         orchestrator: {
           prepareTaskForNewAttempt: vi.fn(),
           getTask,
+          getTaskLaunchReadiness: (id: string) => ({ ready: true, task: getTask(id) }),
         },
         taskRunnerProvider: () => ({ executeTask }),
       });
@@ -636,12 +753,29 @@ describe('LaunchDispatcher', () => {
         orchestrator: {
           prepareTaskForNewAttempt: vi.fn(),
           getTask,
+          getTaskLaunchReadiness: (id: string) => ({ ready: true, task: getTask(id) }),
         },
         taskRunnerProvider: () => ({ executeTask }),
         maxLeasesPerPoll: 2,
       });
       dispatcher.poll();
       expect(executeTask).toHaveBeenCalledTimes(2);
+    });
+
+    it('caps topUpReadyLaunches via startExecution({ limit: maxLeasesPerPoll })', () => {
+      const startExecution = vi.fn().mockReturnValue([]);
+      const dispatcher = new LaunchDispatcher({
+        persistence: adapter,
+        ownerId: 'owner-topup-cap',
+        orchestrator: {
+          prepareTaskForNewAttempt: vi.fn(),
+          startExecution,
+        },
+        taskRunnerProvider: () => ({ executeTask: vi.fn().mockResolvedValue(undefined) }),
+        maxLeasesPerPoll: 7,
+      });
+      dispatcher.poll();
+      expect(startExecution).toHaveBeenCalledWith({ limit: 7 });
     });
 
     it('hydrates the workflow before treating a dispatch row as missing', () => {
@@ -681,6 +815,7 @@ describe('LaunchDispatcher', () => {
             cold.prepareTaskForNewAttempt(taskId, reason),
           syncFromDb: (workflowId) => cold.syncFromDb(workflowId),
           getTask: (taskId) => cold.getTask(taskId),
+          getTaskLaunchReadiness: (taskId) => cold.getTaskLaunchReadiness(taskId),
         },
         taskRunnerProvider: () => ({ executeTask }),
       });
@@ -730,6 +865,88 @@ describe('LaunchDispatcher', () => {
       expect(dispatch?.taskId).toBe(task?.id);
     });
 
+    it('can dispatch existing launch rows while ready-task top-up is disabled', () => {
+      const task = seedWorkflowAndTask('wf-a/t-no-topup', 'wf-a', {
+        selectedAttemptId: 'attempt-no-topup',
+        generation: 0,
+      });
+      const enqueued = adapter.enqueueLaunchDispatch({
+        taskId: task.id,
+        attemptId: 'attempt-no-topup',
+        workflowId: 'wf-a',
+        generation: 0,
+      });
+      const executeTask = vi.fn().mockResolvedValue(undefined);
+      const startExecution = vi.fn(() => []);
+      const dispatcher = new LaunchDispatcher({
+        persistence: adapter,
+        ownerId: 'owner-no-topup',
+        orchestrator: {
+          prepareTaskForNewAttempt: vi.fn(),
+          getTask: () => task as any,
+          getTaskLaunchReadiness: () => ({ ready: true, task: task as any }),
+          startExecution,
+        },
+        taskRunnerProvider: () => ({ executeTask }),
+        topUpReadyLaunchesEnabled: () => false,
+      });
+
+      dispatcher.poll();
+
+      expect(startExecution).not.toHaveBeenCalled();
+      expect(executeTask).toHaveBeenCalledTimes(1);
+      expect(executeTask.mock.calls[0]?.[0].id).toBe(task.id);
+      expect(adapter.loadLaunchDispatchById(enqueued.id)?.state).toBe('leased');
+    });
+
+    it('logs and dispatches existing rows when the ready-task top-up predicate throws', () => {
+      const logger = makeLogger();
+      const task = seedWorkflowAndTask('wf-a/t-topup-predicate-throws', 'wf-a', {
+        selectedAttemptId: 'attempt-topup-predicate-throws',
+        generation: 0,
+      });
+      const enqueued = adapter.enqueueLaunchDispatch({
+        taskId: task.id,
+        attemptId: 'attempt-topup-predicate-throws',
+        workflowId: 'wf-a',
+        generation: 0,
+      });
+      const executeTask = vi.fn().mockResolvedValue(undefined);
+      const startExecution = vi.fn(() => []);
+      const topUpReadyLaunchesEnabled = vi.fn(() => {
+        throw new Error('predicate unavailable');
+      });
+      const dispatcher = new LaunchDispatcher({
+        persistence: adapter,
+        ownerId: 'owner-predicate',
+        logger,
+        orchestrator: {
+          prepareTaskForNewAttempt: vi.fn(),
+          getTask: () => task as any,
+          getTaskLaunchReadiness: () => ({ ready: true, task: task as any }),
+          startExecution,
+        },
+        taskRunnerProvider: () => ({ executeTask }),
+        topUpReadyLaunchesEnabled,
+      });
+
+      expect(() => dispatcher.poll()).not.toThrow();
+
+      expect(topUpReadyLaunchesEnabled).toHaveBeenCalledTimes(1);
+      expect(startExecution).not.toHaveBeenCalled();
+      expect(executeTask).toHaveBeenCalledTimes(1);
+      expect(executeTask.mock.calls[0]?.[0].id).toBe(task.id);
+      expect(adapter.loadLaunchDispatchById(enqueued.id)?.state).toBe('leased');
+      const warn = logger.records.find((entry) =>
+        entry.msg.includes('ready launch top-up predicate failed'),
+      );
+      expect(warn?.fields).toMatchObject({
+        ownerId: 'owner-predicate',
+        error: 'predicate unavailable',
+        module: 'launch-dispatcher',
+      });
+    });
+
     it('abandons a dispatch row when the selected attempt changed after lease', () => {
       const task = seedWorkflowAndTask('wf-a/t-stale', 'wf-a', {
         selectedAttemptId: 'attempt-old',
@@ -756,6 +973,7 @@ describe('LaunchDispatcher', () => {
         orchestrator: {
           prepareTaskForNewAttempt: vi.fn(),
           getTask: vi.fn().mockReturnValue(currentTask as any),
+          getTaskLaunchReadiness: () => ({ ready: true, task: currentTask as any }),
         },
         taskRunnerProvider: () => ({ executeTask }),
       });
@@ -797,6 +1015,7 @@ describe('LaunchDispatcher', () => {
         orchestrator: {
           prepareTaskForNewAttempt: vi.fn(),
           getTask: vi.fn().mockReturnValue(currentTask as any),
+          getTaskLaunchReadiness: () => ({ ready: true, task: currentTask as any }),
         },
         taskRunnerProvider: () => ({ executeTask }),
       });
@@ -847,6 +1066,7 @@ describe('LaunchDispatcher', () => {
         orchestrator: {
           prepareTaskForNewAttempt: vi.fn(),
           getTask: vi.fn().mockReturnValue(currentTask as any),
+          getTaskLaunchReadiness: () => ({ ready: true, task: currentTask as any }),
         },
         taskRunnerProvider: () => ({ executeTask }),
       });
@@ -897,6 +1117,7 @@ describe('LaunchDispatcher', () => {
         orchestrator: {
           prepareTaskForNewAttempt: vi.fn(),
           getTask: vi.fn().mockReturnValue(currentTask as any),
+          getTaskLaunchReadiness: () => ({ ready: true, task: currentTask as any }),
         },
         taskRunnerProvider: () => ({ executeTask }),
       });
@@ -969,6 +1190,43 @@ describe('LaunchDispatcher', () => {
       });
     });
 
+    it('abandons the dispatch when the orchestrator cannot verify launch readiness', () => {
+      const task = seedWorkflowAndTask('wf-a/t-unverifiable', 'wf-a', {
+        selectedAttemptId: 'attempt-unverifiable',
+        generation: 0,
+      });
+      const enq = adapter.enqueueLaunchDispatch({
+        taskId: task.id,
+        attemptId: 'attempt-unverifiable',
+        workflowId: 'wf-a',
+        generation: 0,
+      });
+      const executeTask = vi.fn();
+      const dispatcher = new LaunchDispatcher({
+        persistence: adapter,
+        ownerId: 'owner-a',
+        orchestrator: {
+          prepareTaskForNewAttempt: vi.fn(),
+          getTask: vi.fn().mockReturnValue(task as any),
+        },
+        taskRunnerProvider: () => ({ executeTask }),
+      });
+
+      dispatcher.poll();
+
+      expect(executeTask).not.toHaveBeenCalled();
+      const after = adapter.loadLaunchDispatchById(enq.id);
+      expect(after?.state).toBe('abandoned');
+      expect(after?.lastError).toMatch(/readiness could not be verified/);
+      const events = adapter.getEvents(task.id);
+      const invalidated = events.find((event) => event.eventType === 'task.launch_dispatch_invalidated');
+      expect(invalidated).toBeDefined();
+      expect(JSON.parse(invalidated!.payload!)).toMatchObject({
+        dispatchId: enq.id,
+        reason: 'readiness_unverifiable',
+      });
+    });
+
     it('abandons the dispatch when the orchestrator has no matching task', () => {
       seedWorkflowAndTask('wf-a/t-missing', 'wf-a', {
         selectedAttemptId: 'attempt-missing',
@@ -1031,6 +1289,7 @@ describe('LaunchDispatcher', () => {
         orchestrator: {
           prepareTaskForNewAttempt: vi.fn(),
           getTask: vi.fn().mockReturnValue(task as any),
+          getTaskLaunchReadiness: () => ({ ready: true, task: task as any }),
         },
         taskRunnerProvider: () => ({ executeTask }),
       });
@@ -1069,6 +1328,66 @@ describe('LaunchDispatcher', () => {
       expect(leases[0]?.resourceKey).toBe('ssh:live');
     });
 
+    it('poll heals a stalled-heartbeat lease on a genuinely live process instead of releasing it', () => {
+      // Same runner instance, task still actively executing -- a stalled
+      // heartbeat here is not the same as an orphaned lease. Releasing it
+      // would let a different task claim the same SSH slot while this one
+      // is still using it.
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:stalled-heartbeat-live',
+        resourceType: 'ssh',
+        holderId: 'holder-live-task',
+        taskId: 'wf-r/still-running',
+        leaseMs: -1,
+        metadata: { runnerInstanceId: 'runner-1' },
+      })).toBe(true);
+      // True orphan: same runner instance, but no active execution for
+      // this task anymore (e.g. it already finished or crashed).
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:orphan-same-runner',
+        resourceType: 'ssh',
+        holderId: 'holder-orphan',
+        taskId: 'wf-r/no-longer-running',
+        leaseMs: -1,
+        metadata: { runnerInstanceId: 'runner-1' },
+      })).toBe(true);
+      // True orphan: a different runner instance entirely (crashed owner).
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:different-owner',
+        resourceType: 'ssh',
+        holderId: 'holder-other-owner',
+        taskId: 'wf-r/still-running',
+        leaseMs: -1,
+        metadata: { runnerInstanceId: 'runner-2-crashed' },
+      })).toBe(true);
+      // Stale holder from an abandoned attempt of the SAME task that now
+      // has a different, live attempt (and thus a different lease holder
+      // id) -- must not be healed just because the task itself is alive.
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:stale-attempt-same-task',
+        resourceType: 'ssh',
+        holderId: 'holder-old-attempt',
+        taskId: 'wf-r/still-running',
+        leaseMs: -1,
+        metadata: { runnerInstanceId: 'runner-1' },
+      })).toBe(true);
+
+      const hasActiveExecutionForLeaseHolder = vi.fn((holderId: string) => holderId === 'holder-live-task');
+      const dispatcher = new LaunchDispatcher({
+        persistence: adapter,
+        ownerId: 'owner-sweep-liveness',
+        taskRunnerProvider: () => ({
+          executeTask: vi.fn(),
+          runnerInstanceId: 'runner-1',
+          hasActiveExecutionForLeaseHolder,
+        }),
+      });
+      dispatcher.poll();
+
+      const remainingKeys = adapter.listExecutionResourceLeases().map((l) => l.resourceKey).sort();
+      expect(remainingKeys).toEqual(['ssh:stalled-heartbeat-live']);
+    });
+
     it('re-tops stranded ready work when free scheduler slots remain', () => {
       const strandedTask = {
         id: 'wf/ready',
@@ -1094,6 +1413,8 @@ describe('LaunchDispatcher', () => {
       dispatcher.poll();
       expect(prepare).toHaveBeenCalledWith('wf/ready', 'launch-dispatcher-ready-topup');
       expect(startExecution).toHaveBeenCalledTimes(2);
+      expect(startExecution).toHaveBeenNthCalledWith(1, { limit: 32 });
+      expect(startExecution).toHaveBeenNthCalledWith(2, { limit: 32 });
     });
 
     it('does not thrash parked ready tasks when slots are free', () => {
@@ -1119,6 +1440,7 @@ describe('LaunchDispatcher', () => {
       dispatcher.poll();
       expect(prepare).not.toHaveBeenCalled();
       expect(startExecution).toHaveBeenCalledTimes(1);
+      expect(startExecution).toHaveBeenCalledWith({ limit: 32 });
     });
   });
 });

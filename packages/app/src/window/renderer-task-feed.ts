@@ -2,10 +2,10 @@ import type { BrowserWindow } from 'electron';
 import type { Logger, WorkResponse } from '@invoker/contracts';
 import type { Workflow } from '@invoker/data-store';
 import { Channels, type MessageBus } from '@invoker/transport';
-import type { TaskDelta, TaskState } from '@invoker/workflow-core';
-import { shouldSkipAutoFixForError } from '../auto-fix-gating.js';
+import { FailureClassifier, type TaskDelta, type TaskState } from '@invoker/workflow-core';
 import { applyDelta, recoverQuarantinedTask, TaskSnapshotCache } from '../delta-merge.js';
 import { evaluateExecutingStall, taskNeedsExecutingStallCheck } from '../executing-stall.js';
+import { deriveOrphanReason } from '../reconcile-orphaned-running-tasks.js';
 import { persistShutdownDiagnostic, type ShutdownDiagnosticDb } from '../shutdown-diagnostic.js';
 import type { TaskGraphEventPublisher } from '../task-graph-event-publisher.js';
 import type { TaskOutputData } from '../types.js';
@@ -27,6 +27,7 @@ export interface RendererTaskFeedAttempt {
 export interface RendererTaskFeedPersistence extends ShutdownDiagnosticDb {
   listWorkflows(): Workflow[];
   loadTasks(workflowId: string): TaskState[];
+  loadTasksForWorkflows?(workflowIds: string[]): TaskState[];
   loadTask(taskId: string): TaskState | undefined;
   loadAttempt?(attemptId: string): RendererTaskFeedAttempt | undefined;
   writeActivityLog(source: string, level: string, message: string): void;
@@ -36,7 +37,6 @@ export interface RendererTaskFeedPersistence extends ShutdownDiagnosticDb {
 export interface RendererTaskFeedOrchestrator {
   getAllTasks(): TaskState[];
   getMergeNode(workflowId: string): TaskState | undefined;
-  shouldAutoFix(taskId: string): boolean;
   syncAllFromDb(): void;
   handleWorkerResponse(response: WorkResponse): void;
   reclaimStalledFixSession(
@@ -64,7 +64,7 @@ export interface RendererTaskFeedUiPerfStats {
 export interface RendererTaskFeedDeps {
   logger: Logger;
   persistence: RendererTaskFeedPersistence;
-  messageBus: Pick<MessageBus, 'publish' | 'request'>;
+  messageBus: Pick<MessageBus, 'publish'>;
   getOrchestrator: () => RendererTaskFeedOrchestrator;
   taskHandles: { has(taskId: string): boolean };
   taskGraphEventPublisher: Pick<TaskGraphEventPublisher, 'publishDelta'>;
@@ -85,9 +85,7 @@ export interface RendererTaskFeed {
   enqueueTaskOutput(taskId: string, data: string): void;
   flushTaskOutput(taskId: string): void;
   seedUiSnapshotCache(): void;
-  hydrateDetachedViewerFromOwner(): Promise<void>;
   getDetachedViewerTasks(): TaskState[];
-  getDetachedViewerWorkflows(): unknown[] | null;
   publishTaskDeltaToRenderer(delta: TaskDelta): void;
   getLastKnownWorkflowCount(): number;
   setLastKnownWorkflowCount(count: number): void;
@@ -97,7 +95,6 @@ export interface RendererTaskFeed {
   replaceWorkflowRollups(tasks: TaskState[]): void;
   rememberTaskState(task: TaskState): void;
   resetSnapshotState(): void;
-  beginDetachedViewerBuffering(): void;
   receiveTaskDelta(delta: TaskDelta): void;
   startDbPolling(): RendererTaskFeedStopHandle;
   startActivityPolling(): RendererTaskFeedStopHandle;
@@ -109,8 +106,6 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
   const pendingOutputBuffers = new Map<string, string[]>();
   const outputFlushTimers = new Map<string, RendererTaskFeedTimer>();
   let lastKnownWorkflowCount = 0;
-  let detachedViewerWorkflows: unknown[] | null = null;
-  let detachedDeltaBuffer: TaskDelta[] | null = null;
 
   const flushTaskOutput = (taskId: string): void => {
     const timer = outputFlushTimers.get(taskId);
@@ -180,79 +175,21 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
     seedTaskCachesFromSnapshot(deps.getOrchestrator().getAllTasks(), { lastKnownTaskStates, workflowRollupProjection });
   };
 
-  // Detached viewer: the local DB is empty, so seed the delta caches and
-  // bootstrap snapshot from the owner. Without this, the empty cache quarantines
-  // every `updated` delta for a task the viewer has not seen (dropping live
-  // updates), and bootstrap getters return nothing. Failures are non-fatal — the
-  // renderer's delegated reads still populate the view.
-  const hydrateDetachedViewerFromOwner = async (): Promise<void> => {
-    try {
-      const snapshot = await deps.messageBus.request<{ kind: string }, { tasks?: TaskState[]; workflows?: unknown[] }>(
-        'headless.query',
-        { kind: 'tasks' },
-      );
-      const tasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
-      const workflows = Array.isArray(snapshot?.workflows) ? snapshot.workflows : [];
-      detachedViewerWorkflows = workflows;
-      seedTaskCachesFromSnapshot(tasks, { lastKnownTaskStates, workflowRollupProjection });
-      lastKnownWorkflowCount = workflows.length;
-      deps.setStartupWorkflowId(
-        [...workflows]
-          .map((wf) => wf as { id?: string; updatedAt?: string; createdAt?: string })
-          .sort((left, right) => (Date.parse(right.updatedAt ?? '') || 0) - (Date.parse(left.updatedAt ?? '') || 0))[0]?.id ?? null,
-      );
-      deps.logger.info(
-        `[init] Hydrated detached viewer from owner: ${tasks.length} tasks across ${workflows.length} workflows`,
-        { module: 'init' },
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      deps.logger.warn(`detached viewer hydration from owner failed; relying on delegated reads: ${message}`, { module: 'init' });
-    } finally {
-      // Resume direct delta processing and replay anything buffered during
-      // hydration (in arrival order). Always runs, so a hydration failure can
-      // never leave deltas buffered forever.
-      const buffered = detachedDeltaBuffer ?? [];
-      detachedDeltaBuffer = null;
-      for (const delta of buffered) processIncomingTaskDelta(delta);
-    }
-  };
-
   // Current task states for the detached viewer's bootstrap getter, derived from
-  // the live delta cache so a renderer reload never sees the stale hydration
-  // snapshot.
+  // the same cache owner mode uses for delta gap recovery.
   const getDetachedViewerTasks = (): TaskState[] => [...lastKnownTaskStates.keys()].map(
     (taskId) => JSON.parse(lastKnownTaskStates.get(taskId) ?? '{}') as TaskState,
   );
 
-  // Apply one owner task delta to the local cache and forward results to the
-  // renderer (and drive owner-side auto-fix). Extracted so the detached viewer
-  // can replay deltas that were buffered during hydration.
   const processIncomingTaskDelta = (delta: TaskDelta): void => {
     deps.uiPerfStats.mainDeltaToUi += 1;
-    if (deps.traceUiDeltaFlow) {
-      deps.logger.debug(`delta→ui: ${JSON.stringify(delta)}`, { module: 'ui' });
-    }
-    const deltaTaskId = delta.type === 'updated' || delta.type === 'removed' ? delta.taskId : undefined;
-    if (delta.type === 'updated' && delta.changes.status === 'failed') {
-      const cancellationError = shouldSkipAutoFixForError(delta.changes.execution?.error);
-      const shouldAutoFixFromOrchestrator = deps.getOrchestrator().shouldAutoFix(delta.taskId);
-      deps.logAutoFixDebug(delta.taskId, 'delta-failed', {
-        shouldSkipForCancellation: cancellationError,
-        shouldAutoFixFromOrchestrator,
-      });
-      if (!cancellationError && shouldAutoFixFromOrchestrator && deltaTaskId) {
-        deps.logAutoFixDebug(deltaTaskId, 'delta-trigger-schedule');
-        deps.scheduleAutoFix(deltaTaskId);
-      } else if (deltaTaskId) {
-        deps.logAutoFixDebug(deltaTaskId, 'delta-skip', {
-          reason: cancellationError ? 'cancellation-error' : 'shouldAutoFix-false',
-          shouldSkipForCancellation: cancellationError,
-          shouldAutoFixFromOrchestrator,
-        });
-      }
-    }
     for (const rendererDelta of applyTaskDeltaToOwnerCacheOrRecover(delta)) {
+      if (deps.traceUiDeltaFlow) {
+        // Trace what is actually published to the renderer (post gap-detect
+        // recovery), not the raw input -- recovery can expand one incoming
+        // delta into zero or more re-synthesized renderer deltas.
+        deps.logger.debug(`delta→ui: ${JSON.stringify(rendererDelta)}`, { module: 'ui' });
+      }
       publishTaskDeltaToRenderer(rendererDelta);
     }
   };
@@ -267,9 +204,11 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
 
   const startDbPolling = (): RendererTaskFeedStopHandle => {
     const interval = setInterval(() => {
-      const mainWindow = deps.getMainWindow();
-      if (!mainWindow || mainWindow.isDestroyed()) return;
+      // Headless owners have no BrowserWindow. Still run liveness/stall
+      // reaping and launch-dispatcher poll; only UI delta publish needs a window.
       try {
+        const mainWindow = deps.getMainWindow();
+        const canPublishUi = !!mainWindow && !mainWindow.isDestroyed();
         const workflows = deps.persistence.listWorkflows();
 
         if (workflows.length !== lastKnownWorkflowCount) {
@@ -277,15 +216,37 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
           deps.logger.info(msg, { module: 'db-poll' });
           try { deps.persistence.writeActivityLog('db-poll', 'info', msg); } catch { /* db locked */ }
           lastKnownWorkflowCount = workflows.length;
-          deps.requestWorkflowMetadataPublish('db-poll-count');
+          if (canPublishUi) {
+            deps.requestWorkflowMetadataPublish('db-poll-count');
+          }
 
           deps.getOrchestrator().syncAllFromDb();
           deps.logger.info(`Synced orchestrator for all ${workflows.length} workflows`, { module: 'db-poll' });
         }
 
-        for (const workflow of workflows) {
-          if (workflow.status === 'completed' || workflow.status === 'failed') continue;
-          const tasks = deps.persistence.loadTasks(workflow.id);
+        const activeWorkflows = workflows.filter(
+          (workflow) => workflow.status !== 'completed' && workflow.status !== 'failed',
+        );
+        const tasksByWorkflow = new Map<string, TaskState[]>();
+        let usedBatchedTaskLoad = false;
+        if (activeWorkflows.length > 0 && typeof deps.persistence.loadTasksForWorkflows === 'function') {
+          usedBatchedTaskLoad = true;
+          for (const task of deps.persistence.loadTasksForWorkflows(activeWorkflows.map((workflow) => workflow.id))) {
+            const workflowId = task.config.workflowId;
+            if (!workflowId) continue;
+            const tasks = tasksByWorkflow.get(workflowId);
+            if (tasks) {
+              tasks.push(task);
+            } else {
+              tasksByWorkflow.set(workflowId, [task]);
+            }
+          }
+        }
+
+        for (const workflow of activeWorkflows) {
+          const tasks = usedBatchedTaskLoad
+            ? tasksByWorkflow.get(workflow.id) ?? []
+            : deps.persistence.loadTasks(workflow.id);
           for (const loadedTask of tasks) {
             const task = loadedTask;
             const now = new Date();
@@ -319,6 +280,10 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
                 const executingError =
                   `Execution stalled: task remained in running/executing for ${Math.floor(executingAgeMs / 1000)}s ` +
                   `without a live execution handle and no completion signal from executor (${staleReason}).`;
+                const effectiveError = deriveOrphanReason(task.id, deps.persistence, executingError);
+                const failureClass = effectiveError === executingError
+                  ? 'liveness_stall'
+                  : FailureClassifier.classifyError(effectiveError);
                 deps.logger.info(
                   `[executing-stall] detected task="${task.id}" phase=${task.execution.phase} executingAgeMs=${executingAgeMs} ` +
                     `handlePresent=${deps.taskHandles.has(task.id)} leaseExpired=${leaseExpired} heartbeatStale=${heartbeatStale} ` +
@@ -338,8 +303,8 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
                   status: 'failed',
                   outputs: {
                     exitCode: 1,
-                    error: executingError,
-                    failureClass: 'liveness_stall',
+                    error: effectiveError,
+                    failureClass,
                   },
                 };
                 deps.logger.error(`[executing-stall] forcing failure for "${task.id}": ${executingError}`, { module: 'db-poll' });
@@ -395,6 +360,10 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
                 );
                 continue;
               }
+            }
+
+            if (!canPublishUi) {
+              continue;
             }
 
             const snapshot = JSON.stringify(task);
@@ -466,9 +435,7 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
     enqueueTaskOutput,
     flushTaskOutput,
     seedUiSnapshotCache,
-    hydrateDetachedViewerFromOwner,
     getDetachedViewerTasks,
-    getDetachedViewerWorkflows: () => detachedViewerWorkflows,
     publishTaskDeltaToRenderer,
     getLastKnownWorkflowCount: () => lastKnownWorkflowCount,
     setLastKnownWorkflowCount: (count) => { lastKnownWorkflowCount = count; },
@@ -482,14 +449,7 @@ export function createRendererTaskFeed(deps: RendererTaskFeedDeps): RendererTask
       workflowRollupProjection.clear();
       lastKnownWorkflowCount = 0;
     },
-    beginDetachedViewerBuffering: () => { detachedDeltaBuffer = []; },
-    receiveTaskDelta: (delta) => {
-      if (detachedDeltaBuffer) {
-        detachedDeltaBuffer.push(delta);
-        return;
-      }
-      processIncomingTaskDelta(delta);
-    },
+    receiveTaskDelta: processIncomingTaskDelta,
     startDbPolling,
     startActivityPolling,
   };

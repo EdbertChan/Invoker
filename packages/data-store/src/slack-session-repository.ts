@@ -1,11 +1,11 @@
 import type {
+  ChatSurface,
   Conversation,
   PersistenceAdapter,
   SlackLaunchContext,
   SlackPendingConfirmation,
 } from './adapter.js';
-
-export const SLACK_PENDING_CONFIRMATION_TTL_MS = 24 * 60 * 60 * 1000;
+import { DEFAULT_CHAT_SURFACE } from './adapter.js';
 
 export interface CreateSlackPendingConfirmation {
   confirmKey: string;
@@ -14,6 +14,7 @@ export interface CreateSlackPendingConfirmation {
   userId: string;
   kind: string;
   payload: unknown;
+  surface?: ChatSurface;
 }
 
 export interface PendingSlackConfirmation extends Omit<SlackPendingConfirmation, 'payloadJson'> {
@@ -27,12 +28,12 @@ export class SlackSessionRepository {
     this.adapter.saveSlackLaunchContext(context);
   }
 
-  getLaunchContext(threadTs: string): SlackLaunchContext | null {
-    return this.adapter.loadSlackLaunchContext(threadTs) ?? null;
+  getLaunchContext(threadTs: string, surface?: ChatSurface): SlackLaunchContext | null {
+    return this.adapter.loadSlackLaunchContext(threadTs, surface) ?? null;
   }
 
-  deleteLaunchContext(threadTs: string): void {
-    this.adapter.deleteSlackLaunchContext(threadTs);
+  deleteLaunchContext(threadTs: string, surface?: ChatSurface): void {
+    this.adapter.deleteSlackLaunchContext(threadTs, surface);
   }
 
   createPendingConfirmation(
@@ -42,8 +43,12 @@ export class SlackSessionRepository {
     const createdAtIso = createdAt.toISOString();
     const pending: PendingSlackConfirmation = {
       ...confirmation,
+      surface: confirmation.surface ?? DEFAULT_CHAT_SURFACE,
       createdAt: createdAtIso,
-      expiresAt: new Date(createdAt.getTime() + SLACK_PENDING_CONFIRMATION_TTL_MS).toISOString(),
+      // Confirmations never expire: a staged plan stays submittable until it
+      // is explicitly consumed or cancelled. The column is kept populated only
+      // for schema compatibility and has no read semantics.
+      expiresAt: createdAtIso,
     };
     this.adapter.saveSlackPendingConfirmation({
       ...pending,
@@ -52,30 +57,31 @@ export class SlackSessionRepository {
     return pending;
   }
 
-  getPendingConfirmation(
-    confirmKey: string,
-    now = new Date(),
-  ): PendingSlackConfirmation | null {
-    const confirmation = this.adapter.loadSlackPendingConfirmation(confirmKey);
-    if (!confirmation) return null;
-    if (new Date(confirmation.expiresAt) <= now) return null;
-    const { payloadJson, ...pending } = confirmation;
-    return {
-      ...pending,
-      payload: this.parsePayload(payloadJson),
-    };
+  getPendingConfirmation(confirmKey: string, surface?: ChatSurface): PendingSlackConfirmation | null {
+    const confirmation = this.adapter.loadSlackPendingConfirmation(confirmKey, surface);
+    return confirmation ? this.toPending(confirmation) : null;
+  }
+
+  /** The most recently staged confirmation for a thread, regardless of key. */
+  getLatestPendingConfirmationForThread(threadTs: string, surface?: ChatSurface): PendingSlackConfirmation | null {
+    const confirmation = this.adapter.loadLatestSlackPendingConfirmationByThread(threadTs, surface);
+    return confirmation ? this.toPending(confirmation) : null;
   }
 
   deletePendingConfirmation(confirmKey: string): void {
     this.adapter.deleteSlackPendingConfirmation(confirmKey);
   }
 
-  purgeExpiredPendingConfirmations(now = new Date()): number {
-    return this.adapter.purgeExpiredSlackPendingConfirmations(now.toISOString());
+  listActivePlanThreads(channelId: string, userId: string, surface?: ChatSurface): Conversation[] {
+    return this.adapter.listActivePlanConversations(channelId, userId, surface);
   }
 
-  listActivePlanThreads(channelId: string, userId: string): Conversation[] {
-    return this.adapter.listActivePlanConversations(channelId, userId);
+  private toPending(confirmation: SlackPendingConfirmation): PendingSlackConfirmation {
+    const { payloadJson, ...pending } = confirmation;
+    return {
+      ...pending,
+      payload: this.parsePayload(payloadJson),
+    };
   }
 
   private parsePayload(payloadJson: string): unknown {

@@ -5,12 +5,20 @@ set -e
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
 
+if [ "${INVOKER_DEVELOPMENT_PROFILE_ACTIVE:-0}" != "1" ]; then
+  exec node "$REPO_ROOT/scripts/with-invoker-development-profile.mjs" -- bash "$0" "$@"
+fi
+
 # Workspaces are durable task/attempt artifacts. Disable destructive cleanup
 # from this launcher even if the caller's environment opts into it.
 export INVOKER_ENABLE_WORKSPACE_CLEANUP=0
 
 BOOTSTRAP_STAMP="$REPO_ROOT/node_modules/.invoker-bootstrap-stamp"
 WORKSPACE_INSTALL_METADATA="$REPO_ROOT/node_modules/.modules.yaml"
+HEADLESS_MODE=0
+if [ "${1:-}" = "--headless" ]; then
+  HEADLESS_MODE=1
+fi
 
 has_bootstrap_artifacts() {
   [ -f "$WORKSPACE_INSTALL_METADATA" ] \
@@ -32,8 +40,17 @@ workspace_install_is_stale() {
 }
 
 ensure_workspace_bootstrapped() {
-  if has_bootstrap_artifacts && bootstrap_tools_are_healthy && ! workspace_install_is_stale && [ "${INVOKER_FORCE_BOOTSTRAP:-0}" != "1" ]; then
+  if [ "${INVOKER_SKIP_BOOTSTRAP_CHECK:-0}" = "1" ]; then
     return 0
+  fi
+
+  if has_bootstrap_artifacts && ! workspace_install_is_stale && [ "${INVOKER_FORCE_BOOTSTRAP:-0}" != "1" ]; then
+    if [ "$HEADLESS_MODE" = "1" ] && [ -f "$REPO_ROOT/packages/app/dist/headless-client.js" ]; then
+      return 0
+    fi
+    if bootstrap_tools_are_healthy; then
+      return 0
+    fi
   fi
 
   echo "Bootstrapping workspace dependencies..." >&2
@@ -41,53 +58,6 @@ ensure_workspace_bootstrapped() {
   # Keep the historical launcher marker; freshness is based on pnpm metadata.
   touch "$BOOTSTRAP_STAMP"
 }
-
-expand_home_path() {
-  case "$1" in
-    "~") printf '%s\n' "$HOME" ;;
-    "~/"*) printf '%s\n' "$HOME/${1#~/}" ;;
-    *) printf '%s\n' "$1" ;;
-  esac
-}
-
-normalize_path() {
-  local raw="$1"
-  local expanded
-  expanded="$(expand_home_path "$raw")"
-  expanded="${expanded%/}"
-  if [ -z "$expanded" ]; then
-    expanded="/"
-  fi
-
-  if [ -d "$expanded" ]; then
-    (cd "$expanded" && pwd -P)
-    return
-  fi
-
-  local parent base
-  parent="$(dirname "$expanded")"
-  base="$(basename "$expanded")"
-  if [ -d "$parent" ]; then
-    printf '%s/%s\n' "$(cd "$parent" && pwd -P)" "$base"
-  else
-    printf '%s\n' "$expanded"
-  fi
-}
-
-# Hard safety guard: never allow headless delete-all to target the default
-# production DB unless explicitly overridden.
-if [ "${1:-}" = "--headless" ] && [ "${2:-}" = "delete-all" ]; then
-  DB_ROOT_RAW="${INVOKER_DB_DIR:-$HOME/.invoker}"
-  DB_ROOT="$(normalize_path "$DB_ROOT_RAW")"
-  PROD_ROOT="$(normalize_path "$HOME/.invoker")"
-
-  if [ "${INVOKER_ALLOW_PRODUCTION_DELETE_ALL:-0}" != "1" ] && [ "$DB_ROOT" = "$PROD_ROOT" ]; then
-    echo "ERROR: Refusing to run 'delete-all' against production DB root: $DB_ROOT" >&2
-    echo "Set INVOKER_DB_DIR to an isolated temp directory for tests." >&2
-    echo "Override only if intentional: INVOKER_ALLOW_PRODUCTION_DELETE_ALL=1" >&2
-    exit 64
-  fi
-fi
 
 # Ensure workspace dependencies are linked before building.
 # Headless commands must keep stdout clean because scripts parse labels/JSON.
@@ -100,11 +70,13 @@ unset ELECTRON_RUN_AS_NODE
 if [ "$1" = "--headless" ]; then
   # Fast-path config validation in bash so malformed JSON fails immediately
   # without waiting for a dist build.
-  _cfg_path="${INVOKER_REPO_CONFIG_PATH:-$HOME/.invoker/config.json}"
-  if [ -f "$_cfg_path" ]; then
-    if ! node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$_cfg_path" 2>/dev/null; then
-      echo "Invalid Invoker config JSON at $_cfg_path: malformed JSON" >&2
-      exit 1
+  if [ ! -f "$REPO_ROOT/packages/app/dist/headless-client.js" ]; then
+    _cfg_path="${INVOKER_REPO_CONFIG_PATH:-$HOME/.invoker/config.json}"
+    if [ -f "$_cfg_path" ]; then
+      if ! node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$_cfg_path" 2>/dev/null; then
+        echo "Invalid Invoker config JSON at $_cfg_path: malformed JSON" >&2
+        exit 1
+      fi
     fi
   fi
   if [ "${2:-}" = "retry-tasks" ]; then
@@ -138,7 +110,7 @@ fi
 if ! node ./scripts/cleanup-orphaned-automation-chrome.mjs; then
   echo "WARN: orphaned automation Chrome cleanup failed; continuing launch" >&2
 fi
-pkill -f "electron.*packages/app/dist/main.js" 2>/dev/null || true
+bash "$REPO_ROOT/scripts/cleanup-local-invoker-processes.sh"
 pkill -f "tsup.*packages/app" 2>/dev/null || true
 sleep 0.2
 

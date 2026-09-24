@@ -32,10 +32,32 @@ export function repoStateUnchanged(before: RepoState | null, after: RepoState | 
     && before.statusPorcelain === after.statusPorcelain;
 }
 
+export function trackedFilesChanged(before: RepoState | null, after: RepoState | null): boolean {
+  if (!before || !after) return false;
+  const beforeEntries = new Set(before.statusPorcelain.split('\n').filter(Boolean));
+  return after.statusPorcelain
+    .split('\n')
+    .filter(Boolean)
+    .some((entry) => !beforeEntries.has(entry) && !entry.startsWith('??'));
+}
+
+export function restoreTrackedChanges(workingDir?: string): void {
+  if (!workingDir) return;
+  try {
+    execFileSync('git', ['restore', '--staged', '--worktree', '.'], { cwd: workingDir, stdio: 'ignore' });
+  } catch {
+    return;
+  }
+}
+
 export function looksLikeCompletionClaim(replyText: string): boolean {
   return /\b(?:fixed|implemented|completed)\b|^\s*changed\s*:|\bverified\s*:|\btests?\s+passed\b|\bbuild\s+passed\b/mui.test(replyText);
 }
 
 export function buildUnverifiedNotice(): string {
   return 'Note: no working-tree changes or new commits were detected in this session checkout, so this completion summary could not be verified.';
+}
+
+export function buildTrackedChangesRevertedNotice(): string {
+  return 'Note: tracked-file edits from this pre-approval session were reverted. New repro artifacts were kept. To execute changes through review, ask for a plan with `/plan`.';
 }

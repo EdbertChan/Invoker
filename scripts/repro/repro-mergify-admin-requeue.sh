@@ -12,17 +12,17 @@ cat > "$TMP/bin/gh" <<'PY'
 #!/usr/bin/env python3
 import json
 import sys
+from pathlib import Path
+
+sys.path.insert(0, "scripts")
+from mergify_admin_requeue_model import load_mergify_rules
 
 HEAD = "c2532d229dbed2fd57419698c48d973001c78e9e"
-REQUIRED = [
-    "build-artifacts",
-    "quality / Dependency Cruise",
-    "PR Body",
-    "quality / TypeScript Types",
-    "required-fast / Guardrails",
+# Loaded from .mergify.yml, not hardcoded: a hardcoded copy silently drifts
+# out of sync whenever the real required-check set changes.
+_, _, _REQUIRED_FROM_MERGIFY_YML = load_mergify_rules(Path(".mergify.yml"))
+REQUIRED = sorted(_REQUIRED_FROM_MERGIFY_YML | {
     "required-fast / Vitest Workspace",
-    "required-fast / Submit Workflow Chain",
-    "UI Vitest",
     "e2e-proof / aggregate",
     "playwright / 1-of-6",
     "playwright / 2-of-6",
@@ -34,7 +34,7 @@ REQUIRED = [
     "ssh / shard-31",
     "optional / Worktree Provisioning",
     "optional / Visual Proof Validate",
-]
+})
 
 
 def contexts(number):
@@ -117,6 +117,7 @@ PY
 chmod +x "$TMP/bin/gh"
 
 export PATH="$TMP/bin:$PATH"
+export INVOKER_HEADLESS_IPC_HELPER="$ROOT/scripts/repro/fixtures/fake-headless-ipc.js"
 out="$(python3 scripts/mergify_admin_requeue.py --dry-run --once --repo Neko-Catpital-Labs/Invoker --author EdbertChan --state-file "$TMP/ledger.jsonl")"
 printf '%s\n' "$out"
 
@@ -129,7 +130,7 @@ case "$out" in
   *) echo "[repro] missing repair line" >&2; exit 1 ;;
 esac
 case "$out" in
-  *"BLOCK PR #2607 human-review-thread"*) ;;
+  *"BLOCK PR #2607 unresolved human review thread thread-human"*) ;;
   *) echo "[repro] missing human block line" >&2; exit 1 ;;
 esac
 

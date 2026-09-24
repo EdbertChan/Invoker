@@ -2,29 +2,32 @@
  * Shared logic for opening an external OS terminal for a persisted task.
  */
 
-import type { Logger } from '@invoker/contracts';
+import { resolveInvokerHomeRoot, type Logger, type OpenTerminalResponse } from '@invoker/contracts';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
-import { homedir } from 'node:os';
 import {
   DEFAULT_EXECUTION_AGENT,
   DockerExecutor,
   getEffectivePath,
   WorktreeExecutor,
+  ScratchExecutor,
   SshExecutor,
   type Executor,
+  type ExecutorHandle,
   type ExecutorRegistry,
   type AgentRegistry,
   type PersistedTaskMeta,
   type TerminalSpec,
 } from '@invoker/execution-engine';
-import { loadConfig } from './config.js';
+import { loadConfig, resolveSecretsFilePath } from './config.js';
 import {
   buildLinuxXTerminalBashScript,
   buildMacOSOsascriptArgs,
   spawnDetachedTerminal,
   type OpenTerminalResult,
 } from './terminal-external-launch.js';
+import type { EmbeddedTerminalManager } from './embedded-terminal-manager.js';
+import type { TaskHandleMap } from './execution/task-runner-wiring.js';
 import { resolveEffectiveMaxConcurrency } from './execution-capacity.js';
 
 /** Persistence methods required to resolve terminal cwd / command for a task. */
@@ -51,6 +54,16 @@ export interface OpenExternalTerminalForTaskOptions {
   repoRoot: string;
   /** Shown when task status is `running`. */
   runningTaskReason?: string;
+  logger?: Logger;
+}
+export interface OpenEmbeddedTerminalForTaskOptions {
+  taskId: string;
+  persistence?: OpenTerminalPersistence;
+  executorRegistry: ExecutorRegistry;
+  executionAgentRegistry?: AgentRegistry;
+  repoRoot: string;
+  taskHandles: Pick<TaskHandleMap, 'get'>;
+  embeddedTerminalManager: Pick<EmbeddedTerminalManager, 'openOrReuse'>;
   logger?: Logger;
 }
 
@@ -143,6 +156,13 @@ export type ResolveTaskTerminalSpecResult =
     }
   | { ok: false; reason: string };
 
+export function shouldAttachEmbeddedTerminalToLiveExecutor(
+  meta: Pick<PersistedTaskMeta, 'agentSessionId'>,
+  liveHandle: { handle: Pick<ExecutorHandle, 'agentSessionId'>; executor: Pick<Executor, 'type'> } | undefined,
+): boolean {
+  return Boolean(liveHandle && (liveHandle.handle.agentSessionId || meta.agentSessionId));
+}
+
 export interface ResolveTaskTerminalSpecOptions {
   taskId: string;
   persistence: OpenTerminalPersistence;
@@ -221,25 +241,32 @@ export function resolveTaskTerminalSpec(
       executorRegistry.register('docker', docker);
       executor = docker;
     } else if (repairedMeta.runnerKind === 'worktree') {
-      const invokerHome = path.resolve(homedir(), '.invoker');
+      const invokerHome = resolveInvokerHomeRoot();
       const maxWorktrees = resolveEffectiveMaxConcurrency(loadConfig().maxConcurrency);
       const worktree = new WorktreeExecutor({
         worktreeBaseDir: path.resolve(invokerHome, 'worktrees'),
         cacheDir: path.resolve(invokerHome, 'repos'),
         maxWorktrees,
         agentRegistry: opts.executionAgentRegistry,
+        secretsFile: resolveSecretsFilePath(loadConfig()),
       });
       executorRegistry.register('worktree', worktree);
       executor = worktree;
+    } else if (repairedMeta.runnerKind === 'scratch') {
+      const scratch = new ScratchExecutor({
+        agentRegistry: opts.executionAgentRegistry,
+      });
+      executorRegistry.register('scratch', scratch);
+      executor = scratch;
     } else {
       executor = executorRegistry.getDefault();
     }
   }
 
-  // Managed-workspace executors (worktree, ssh, docker) MUST have a resolved workspacePath.
+  // Managed-workspace executors (worktree, ssh, docker, scratch) MUST have a resolved workspacePath.
   // Refuse fallback to repoRoot host cwd to prevent silent data loss when workspace metadata is missing.
-  const managedRunnerKinds = ['worktree', 'ssh', 'docker'];
-  const hostWorkspaceRunnerKinds = ['worktree'];
+  const managedRunnerKinds = ['worktree', 'ssh', 'docker', 'scratch'];
+  const hostWorkspaceRunnerKinds = ['worktree', 'scratch'];
   const isManagedExecutor = managedRunnerKinds.includes(repairedMeta.runnerKind);
   if (isManagedExecutor && !repairedMeta.workspacePath) {
     const errorMsg = [
@@ -283,6 +310,86 @@ export function resolveTaskTerminalSpec(
   termLogger?.info(`effective cwd=${cwd} (repoRoot=${repoRoot})`);
 
   return { ok: true, spec, cwd, meta: repairedMeta, executor };
+}
+/**
+ * Opens or reuses an embedded task terminal session. Running tasks only attach
+ * when a live executor handle is present; otherwise the current refusal text is
+ * preserved instead of spawning a second shell.
+ */
+export function openEmbeddedTerminalForTask(
+  opts: OpenEmbeddedTerminalForTaskOptions,
+): OpenTerminalResponse {
+  const {
+    taskId,
+    persistence,
+    executorRegistry,
+    executionAgentRegistry,
+    repoRoot,
+    taskHandles,
+    embeddedTerminalManager,
+    logger,
+  } = opts;
+  logger?.info(`invoked for task="${taskId}"`, { module: 'open-terminal' });
+  const liveHandle = taskHandles.get(taskId);
+  if (!persistence) {
+    if (!liveHandle) {
+      return {
+        opened: false,
+        reason: `Task "${taskId}" terminal metadata is unavailable.`,
+      };
+    }
+    try {
+      const cwd = liveHandle.handle.workspacePath ?? repoRoot;
+      const session = embeddedTerminalManager.openOrReuse({
+        taskId,
+        spec: { cwd },
+        cwd,
+        attach: { handle: liveHandle.handle, executor: liveHandle.executor },
+      });
+      return { opened: true, session };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      logger?.warn(`terminal session attach failed for task="${taskId}": ${reason}`, {
+        module: 'open-terminal',
+      });
+      return { opened: false, reason: `Failed to start terminal session: ${reason}` };
+    }
+  }
+  const resolved = resolveTaskTerminalSpec({
+    taskId,
+    persistence,
+    executorRegistry,
+    executionAgentRegistry,
+    repoRoot,
+    logger,
+    allowRunning: Boolean(liveHandle),
+    runningTaskReason:
+      'Task is still running or being fixed with AI. View output in the terminal panel below.',
+  });
+  if (!resolved.ok) {
+    return { opened: false, reason: resolved.reason };
+  }
+  const attachToLiveExecutor = shouldAttachEmbeddedTerminalToLiveExecutor(
+    resolved.meta,
+    liveHandle,
+  );
+  try {
+    const session = embeddedTerminalManager.openOrReuse({
+      taskId,
+      spec: resolved.spec,
+      cwd: resolved.cwd,
+      attach: attachToLiveExecutor && liveHandle
+        ? { handle: liveHandle.handle, executor: liveHandle.executor }
+        : undefined,
+    });
+    return { opened: true, session };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    logger?.warn(`terminal session spawn failed for task="${taskId}": ${reason}`, {
+      module: 'open-terminal',
+    });
+    return { opened: false, reason: `Failed to start terminal session: ${reason}` };
+  }
 }
 
 /**

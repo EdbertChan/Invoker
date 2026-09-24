@@ -1,0 +1,469 @@
+"""Behavioural tests for mergify_admin_requeue_async_repair's plan builders.
+
+Run:  python3 scripts/test_mergify_admin_requeue_async_repair.py
+"""
+
+from __future__ import annotations
+
+import subprocess
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import scripts.mergify_admin_requeue_async_repair as async_repair
+import scripts.mergify_admin_requeue_model as m
+
+HEAD = "c2532d229dbed2fd57419698c48d973001c78e9e"
+
+
+def pr(**kw):
+    base = dict(
+        number=2647,
+        title='Fix "quoted" title: with colons',
+        body="",
+        url="https://github.com/owner/repo/pull/2647",
+        state="OPEN",
+        is_draft=False,
+        base_ref_name="master",
+        head_ref_name="stack/2647",
+        head_ref_oid=HEAD,
+        merge_state_status="CLEAN",
+        mergeable="MERGEABLE",
+        labels=frozenset({"admin-bypass"}),
+        checks={},
+        review_threads=(),
+        latest_mergify=None,
+    )
+    base.update(kw)
+    return m.PrSnapshot(**base)
+
+
+class AsyncRepairPlanTests(unittest.TestCase):
+    def test_aggregated_checks_are_ordered_and_have_one_guarded_terminal_push(self):
+        plan = async_repair.build_aggregated_repair_check_plan(
+            pr(),
+            [
+                async_repair.RepairCheckSpec("lint", "https://example.invalid/lint", "/missing/lint", False, 0, None),
+                async_repair.RepairCheckSpec("tests", "https://example.invalid/tests", "/missing/tests", False, 0, None),
+            ],
+            repo="owner/repo", start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+        )
+        doc = yaml.safe_load(plan.yaml_text)
+        self.assertEqual(
+            [task["id"] for task in doc["tasks"]],
+            ["repair-1", "repair-2", "normalize", "safe-push"],
+        )
+        self.assertEqual(doc["tasks"][1]["dependencies"], ["repair-1"])
+        self.assertEqual(doc["tasks"][2]["dependencies"], ["repair-2"])
+        self.assertEqual(doc["tasks"][3]["dependencies"], ["normalize"])
+        self.assertEqual(plan.yaml_text.count("git push origin"), 0)
+        self.assertEqual(plan.yaml_text.count("pr_worker_safe_push.py"), 1)
+        self.assertIn("--expected-head '" + HEAD + "'", plan.yaml_text)
+        self.assertIn("committed history left by the preceding repair task", plan.yaml_text)
+
+    def test_all_three_plan_kinds_produce_parseable_yaml_with_expected_task_ids(self):
+        checks_plan = async_repair.build_repair_check_plan(
+            pr(), "PR Body", repo="owner/repo", details_url="https://example.invalid/job",
+            log_path="/tmp/pr-body.log", queue_only=False, queue_pr_number=0, latest=None,
+            start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+        )
+        rebase_plan = async_repair.build_rebase_onto_master_plan(
+            pr(), "GitHub reports merge conflict", repo="owner/repo", start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+        )
+        bot_thread_plan = async_repair.build_repair_bot_thread_plan(
+            pr(), "tbot", repo="owner/repo", start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+        )
+        for plan, expected_task_ids, expected_merge_mode, expected_on_finish in (
+            (checks_plan, ["repair", "normalize", "safe-push"], "manual", "none"),
+            (rebase_plan, ["repair", "safe-push"], "manual", "none"),
+            (bot_thread_plan, ["repair", "safe-push", "resolve-thread"], "external_review", "pull_request"),
+        ):
+            with self.subTest(plan=plan.plan_name):
+                doc = yaml.safe_load(plan.yaml_text)
+                self.assertEqual(doc["onFinish"], expected_on_finish)
+                self.assertEqual(doc["mergeMode"], expected_merge_mode)
+                self.assertEqual(doc["repoUrl"], "https://github.com/owner/repo.git")
+                self.assertEqual([task["id"] for task in doc["tasks"]], expected_task_ids)
+                for task, expected_id in zip(doc["tasks"][1:], expected_task_ids[1:]):
+                    self.assertEqual(task["dependencies"], [expected_task_ids[expected_task_ids.index(expected_id) - 1]])
+
+    def test_repair_check_plan_includes_three_tasks_in_dependency_order(self):
+        plan = async_repair.build_repair_check_plan(
+            pr(),
+            "PR Body",
+            repo="owner/repo",
+            details_url="https://example.invalid/job",
+            log_path="/tmp/pr-body.log",
+            queue_only=False,
+            queue_pr_number=0,
+            latest=None,
+            start_head=HEAD,
+            state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assertIn("id: repair", plan.yaml_text)
+        self.assertIn("id: normalize", plan.yaml_text)
+        self.assertIn("id: safe-push", plan.yaml_text)
+        self.assertIn("dependencies: [repair]", plan.yaml_text)
+        self.assertIn("dependencies: [normalize]", plan.yaml_text)
+        self.assertIn("mergify_admin_requeue_repair_normalize.py", plan.yaml_text)
+        self.assertNotIn("--record-json-ledger", plan.yaml_text)
+        self.assertNotIn("--json-kind", plan.yaml_text)
+        self.assertNotIn("/tmp/ledger.jsonl", plan.yaml_text)
+        self.assertIn("Failed check: PR Body", plan.yaml_text)
+        self.assertNotIn(
+            "executionAgent", plan.yaml_text,
+            "repair task must not hardcode an execution agent -- Invoker's own plan-submission "
+            "path already fills in the configured defaultExecutionAgent, and pinning one agent "
+            "here just trades one single-point-of-failure for another the next time that agent "
+            "has an outage (see #7085 for codex, and the 2026-08-16 claude OAuth incident this "
+            "hardcode caused)",
+        )
+        # PR titles with quotes/colons must not corrupt the YAML document.
+        self.assertIn('Fix \\"quoted\\" title: with colons', plan.yaml_text)
+
+    def test_repair_check_plan_runs_normalize_with_bytecode_disabled(self):
+        plan = async_repair.build_repair_check_plan(
+            pr(), "PR Body", repo="owner/repo", details_url="https://example.invalid/job",
+            log_path="/does/not/exist/pr-body.log", queue_only=False, queue_pr_number=0, latest=None,
+            start_head=HEAD, state_file=Path("ledger.jsonl"),
+        )
+        self.assertIn("python3 -B scripts/mergify_admin_requeue_repair_normalize.py", plan.yaml_text)
+
+    def test_repair_check_plan_inlines_job_log_content_not_local_path(self):
+        # log_path is a tempfile on the orchestrator's own machine; the plan
+        # is dispatched to a separate headless worker that does not share
+        # that filesystem, so the prompt must carry the log content itself.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = str(Path(tmp_dir) / "pr-body.log")
+            Path(log_path).write_text("some failure detail\n", encoding="utf-8")
+            plan = async_repair.build_repair_check_plan(
+                pr(), "PR Body", repo="owner/repo", details_url="https://example.invalid/job",
+                log_path=log_path, queue_only=False, queue_pr_number=0, latest=None,
+                start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+            )
+        self.assertIn("Job log (tail):", plan.yaml_text)
+        self.assertIn("some failure detail", plan.yaml_text)
+        self.assertNotIn(log_path, plan.yaml_text)
+
+    def test_repair_check_plan_job_log_missing_says_not_available(self):
+        plan = async_repair.build_repair_check_plan(
+            pr(), "PR Body", repo="owner/repo", details_url="https://example.invalid/job",
+            log_path="/does/not/exist/pr-body.log", queue_only=False, queue_pr_number=0, latest=None,
+            start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assertIn("Job log (tail):", plan.yaml_text)
+        self.assertIn("(not available)", plan.yaml_text)
+
+    def _excerpt(self, text):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "job.log"
+            log_path.write_text(text, encoding="utf-8")
+            return async_repair._job_log_excerpt(str(log_path))
+
+    def test_job_log_excerpt_keeps_failure_lines_a_blind_tail_would_drop(self):
+        failure = (
+            "PR body validation failed:\n"
+            "- Review lane behavior cannot ship with docs files in the same PR.\n"
+            "##[error]Process completed with exit code 1.\n"
+        )
+        cleanup = "".join(
+            f"Post Checkout trusted base\t[command]/usr/bin/git config --local get-regexp core.sshCommand {i}\n"
+            for i in range(400)
+        )
+        log = ("Progress: resolved 1006, reused 999, added 386\n" * 400) + failure + cleanup
+        self.assertGreater(len(cleanup), async_repair._JOB_LOG_EXCERPT_MAX_CHARS)
+
+        excerpt = self._excerpt(log)
+
+        self.assertIn("##[error]Process completed with exit code 1.", excerpt)
+        self.assertIn("PR body validation failed:", excerpt)
+        self.assertLessEqual(len(excerpt), async_repair._JOB_LOG_EXCERPT_MAX_CHARS)
+        self.assertNotIn("##[error]", log[-async_repair._JOB_LOG_EXCERPT_MAX_CHARS:])
+
+    def test_job_log_excerpt_without_failure_signal_falls_back_to_raw_tail(self):
+        log = "".join(f"Progress: resolved {i}, reused {i}, downloaded 0, added {i}\n" for i in range(2000))
+        self.assertEqual(async_repair._extract_error_signal(log), "")
+
+        excerpt = self._excerpt(log)
+
+        self.assertEqual(excerpt, log[-async_repair._JOB_LOG_EXCERPT_MAX_CHARS:])
+
+    def test_job_log_excerpt_under_budget_is_returned_whole(self):
+        log = "one line of failure detail\n"
+        self.assertEqual(self._excerpt(log), log)
+
+    def test_repair_check_plan_queue_only_appends_queue_pr_line(self):
+        plan = async_repair.build_repair_check_plan(
+            pr(checks={}),
+            "required-fast / Guardrails",
+            repo="owner/repo",
+            details_url="https://example.invalid/job",
+            log_path="/tmp/guardrails.log",
+            queue_only=True,
+            queue_pr_number=5854,
+            latest=None,
+            start_head=HEAD,
+            state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assertIn("Queue draft PR: #5854", plan.yaml_text)
+
+    def test_rebase_onto_master_plan_has_two_tasks_and_no_owner_ledger_path(self):
+        plan = async_repair.build_rebase_onto_master_plan(
+            pr(), "GitHub reports merge conflict", repo="owner/repo", start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assertTrue(plan.plan_name.startswith("admin-bypass-rebase-onto-master-pr-"))
+        self.assertIn("id: repair", plan.yaml_text)
+        self.assertIn("id: safe-push", plan.yaml_text)
+        self.assertNotIn("id: normalize", plan.yaml_text)
+        self.assertNotIn("--record-json-ledger", plan.yaml_text)
+        self.assertNotIn("--json-kind", plan.yaml_text)
+        self.assertNotIn("/tmp/ledger.jsonl", plan.yaml_text)
+        self.assertIn("Rebase this pull request onto `master`", plan.yaml_text)
+        self.assertIn("commit locally. Do not push.", plan.yaml_text)
+        self.assertIn("--expected-head", plan.yaml_text)
+        self.assertNotIn("executionAgent", plan.yaml_text)
+
+    def test_rebase_onto_master_plan_includes_dequeue_reason(self):
+        plan = async_repair.build_rebase_onto_master_plan(
+            pr(),
+            "Mergify dequeued with no named required-check failure",
+            repo="owner/repo",
+            start_head=HEAD,
+            state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assertTrue(plan.plan_name.startswith("admin-bypass-rebase-onto-master-pr-"))
+        self.assertIn("Rebase this pull request onto `master`", plan.yaml_text)
+        self.assertIn("id: repair", plan.yaml_text)
+        self.assertIn("id: safe-push", plan.yaml_text)
+        self.assertNotIn("id: normalize", plan.yaml_text)
+
+    def test_rebase_plan_targets_stack_parent_base_not_master(self):
+        parent = "stack/EdbertChan/parent--aaaa"
+        plan = async_repair.build_rebase_onto_master_plan(
+            pr(base_ref_name=parent),
+            "GitHub reports merge conflict",
+            repo="owner/repo",
+            start_head=HEAD,
+            state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assertIn(f"Rebase this pull request onto `{parent}`", plan.yaml_text)
+        self.assertIn(f"git rebase origin/{parent}", plan.yaml_text)
+        self.assertIn(f"Rebase PR #2647 onto {parent}", plan.yaml_text)
+        self.assertNotIn("Rebase this pull request onto `master`", plan.yaml_text)
+        self.assertIn("--expected-head", plan.yaml_text)
+
+    def test_repair_bot_thread_plan_keeps_thread_id_in_prompt_not_ledger(self):
+        plan = async_repair.build_repair_bot_thread_plan(
+            pr(), "tbot", repo="owner/repo", start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+        )
+        doc = yaml.safe_load(plan.yaml_text)
+        self.assertEqual([task["id"] for task in doc["tasks"]], ["repair", "safe-push", "resolve-thread"])
+        self.assertEqual(doc["tasks"][2]["dependencies"], ["safe-push"])
+        self.assertNotIn("--record-json-ledger", plan.yaml_text)
+        self.assertNotIn("--json-kind", plan.yaml_text)
+        self.assertIn("Thread: tbot", plan.yaml_text)
+        self.assertIn("Do not resolve the GitHub review thread", doc["tasks"][0]["prompt"])
+        self.assertIn("resolveReviewThread", doc["tasks"][2]["command"])
+        self.assertIn("refusing to resolve review thread before a pushed head change", doc["tasks"][2]["command"])
+        self.assertNotIn("executionAgent", plan.yaml_text)
+
+    def test_remote_safe_push_never_embeds_macos_owner_ledger_path(self):
+        owner_ledger = Path("/Users/edbertchan/.invoker/mergify-admin-requeue/state.jsonl")
+        for plan in (
+            async_repair.build_repair_check_plan(
+                pr(), "PR Body", repo="owner/repo", details_url="https://example.invalid/job",
+                log_path="/tmp/pr-body.log", queue_only=False, queue_pr_number=0, latest=None,
+                start_head=HEAD, state_file=owner_ledger,
+            ),
+            async_repair.build_rebase_onto_master_plan(
+                pr(), "GitHub reports merge conflict", repo="owner/repo", start_head=HEAD, state_file=owner_ledger,
+            ),
+            async_repair.build_repair_bot_thread_plan(
+                pr(), "tbot", repo="owner/repo", start_head=HEAD, state_file=owner_ledger,
+            ),
+        ):
+            with self.subTest(plan=plan.plan_name):
+                self.assertNotIn("--record-json-ledger", plan.yaml_text)
+                self.assertNotIn(str(owner_ledger), plan.yaml_text)
+                self.assertNotIn("/Users/", plan.yaml_text)
+                self.assertIn("pr_worker_safe_push.py", plan.yaml_text)
+                self.assertIn("--expected-head", plan.yaml_text)
+
+    def test_submit_async_repair_plan_calls_headless_run_and_cleans_up_temp_file(self):
+        plan = async_repair.AsyncRepairPlan(plan_name="admin-bypass-repair-check-pr-1-abc", yaml_text="name: x\n")
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="Workflow ID: wf-ack\n", stderr="")
+        written_paths = []
+
+        def fake_run_headless(command, *extra_args):
+            written_paths.append(Path(extra_args[0]))
+            self.assertTrue(written_paths[-1].exists())
+            self.assertEqual(written_paths[-1].read_text(encoding="utf-8"), "name: x\n")
+            return completed
+
+        with mock.patch("scripts.mergify_admin_requeue_async_repair.run_headless", side_effect=fake_run_headless) as run:
+            acknowledgement = async_repair.submit_async_repair_plan(plan)
+        run.assert_called_once()
+        self.assertEqual(acknowledgement.workflow_id, "wf-ack")
+        self.assertFalse(written_paths[0].exists())
+
+    def test_submit_async_repair_plan_stops_workflow_id_at_an_escaped_newline(self):
+        """An id capture must not run past an escaped newline into the next field.
+
+        Observed on PR #11576: the submit stdout carried the id and the failing
+        job name separated by a literal backslash-n, and `wf-[^\\s]+` swallowed
+        both -- backslash and `n` are not whitespace. The stored id
+        (`wf-1788334466115-1\\nrequired-fast`) then matched no workflow, so the
+        settle loop re-queried it on every cron tick forever.
+        """
+        plan = async_repair.AsyncRepairPlan(plan_name="admin-bypass-repair-check-pr-1-abc", yaml_text="name: x\n")
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="Workflow ID: wf-1788334466115-1\\nrequired-fast / Guardrails\n",
+            stderr="",
+        )
+        with mock.patch("scripts.mergify_admin_requeue_async_repair.run_headless", return_value=completed):
+            acknowledgement = async_repair.submit_async_repair_plan(plan)
+        self.assertEqual(acknowledgement.workflow_id, "wf-1788334466115-1")
+
+    def test_submit_async_repair_plan_keeps_non_numeric_workflow_ids(self):
+        """`wf-stress-1` / `wf-hitch-fat` are real ids (stress-fixture.ts,
+        main-process-hitch-fixture.ts), and the app's own predicate is
+        `/^wf-[^/]+$/` -- so the capture must not be narrowed to digits."""
+        plan = async_repair.AsyncRepairPlan(plan_name="admin-bypass-repair-check-pr-1-abc", yaml_text="name: x\n")
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="Workflow ID: wf-stress-1\n", stderr="",
+        )
+        with mock.patch("scripts.mergify_admin_requeue_async_repair.run_headless", return_value=completed):
+            acknowledgement = async_repair.submit_async_repair_plan(plan)
+        self.assertEqual(acknowledgement.workflow_id, "wf-stress-1")
+
+    def test_submit_async_repair_plan_honors_submit_test_seam(self):
+        plan = async_repair.AsyncRepairPlan(plan_name="admin-bypass-repair-check-pr-1-abc", yaml_text="name: x\n")
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        written_paths = []
+
+        def fake_run_headless(command, *extra_args):
+            self.assertEqual(command, '"$2" "$3" "$4"')
+            self.assertEqual(extra_args[0], "/tmp/submit-async")
+            written_paths.append(Path(extra_args[1]))
+            self.assertEqual(extra_args[2], plan.plan_name)
+            self.assertTrue(written_paths[-1].exists())
+            self.assertEqual(written_paths[-1].read_text(encoding="utf-8"), "name: x\n")
+            return completed
+
+        with mock.patch.dict(os.environ, {"INVOKER_ADMIN_BYPASS_ASYNC_REPAIR_SUBMIT_CMD": "/tmp/submit-async"}):
+            with mock.patch("scripts.mergify_admin_requeue_async_repair.run_headless", side_effect=fake_run_headless) as run:
+                async_repair.submit_async_repair_plan(plan)
+        run.assert_called_once()
+        self.assertFalse(written_paths[0].exists())
+
+    def test_foreign_repair_check_plan_omits_normalize_and_invoker_safe_push(self):
+        plan = async_repair.build_repair_check_plan(
+            pr(), "CI", repo="some-org/catstack", details_url="https://example.invalid/job",
+            log_path="/tmp/pr-body.log", queue_only=False, queue_pr_number=0, latest=None,
+            start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"), foreign=True,
+        )
+        doc = yaml.safe_load(plan.yaml_text)
+        self.assertEqual(doc["repoUrl"], "https://github.com/some-org/catstack.git")
+        self.assertEqual([task["id"] for task in doc["tasks"]], ["repair", "safe-push"])
+        self.assertNotIn("id: normalize", plan.yaml_text)
+        self.assertNotIn("mergify_admin_requeue_repair_normalize.py", plan.yaml_text)
+        self.assertNotIn("pr_worker_safe_push.py", plan.yaml_text)
+        self.assertIn("git push origin HEAD:", plan.yaml_text)
+        self.assertIn(HEAD, plan.yaml_text)
+
+    def test_foreign_rebase_and_bot_thread_plans_omit_invoker_safe_push(self):
+        rebase_plan = async_repair.build_rebase_onto_master_plan(
+            pr(), "GitHub reports merge conflict", repo="some-org/catstack",
+            start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"), foreign=True,
+        )
+        bot_thread_plan = async_repair.build_repair_bot_thread_plan(
+            pr(), "tbot", repo="some-org/catstack", start_head=HEAD,
+            state_file=Path("/tmp/ledger.jsonl"), foreign=True,
+        )
+        for plan in (rebase_plan, bot_thread_plan):
+            with self.subTest(plan=plan.plan_name):
+                self.assertNotIn("pr_worker_safe_push.py", plan.yaml_text)
+                self.assertIn("git push origin HEAD:", plan.yaml_text)
+
+    def test_non_foreign_repair_check_plan_still_includes_invoker_helpers(self):
+        # Default (foreign=False) behavior must stay exactly as it was before
+        # multi-repo support existed.
+        plan = async_repair.build_repair_check_plan(
+            pr(), "PR Body", repo="owner/repo", details_url="https://example.invalid/job",
+            log_path="/tmp/pr-body.log", queue_only=False, queue_pr_number=0, latest=None,
+            start_head=HEAD, state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assertIn("mergify_admin_requeue_repair_normalize.py", plan.yaml_text)
+        self.assertIn("pr_worker_safe_push.py", plan.yaml_text)
+
+    def test_submit_async_repair_plan_raises_on_failure(self):
+        plan = async_repair.AsyncRepairPlan(plan_name="p", yaml_text="name: x\n")
+        completed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom")
+        with mock.patch("scripts.mergify_admin_requeue_async_repair.run_headless", return_value=completed):
+            with self.assertRaises(RuntimeError):
+                async_repair.submit_async_repair_plan(plan)
+
+    def test_bot_thread_plan_yaml_is_accepted_by_invokers_real_plan_validator(self):
+        plan = async_repair.build_repair_bot_thread_plan(
+            pr(number=12006, head_ref_name="stack/bot-thread-example", merge_state_status="BLOCKED"),
+            "PRRT_example",
+            repo="owner/repo",
+            start_head=HEAD,
+            state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assert_plan_accepted_by_real_validator(plan, "bot-thread")
+
+    def test_requeue_stuck_plan_yaml_is_accepted_by_invokers_real_plan_validator(self):
+        plan = async_repair.build_requeue_stuck_plan(
+            pr(number=11441, head_ref_name="stack/requeue-stuck-example", merge_state_status="BLOCKED"),
+            attempts=2,
+            repo="owner/repo",
+            start_head=HEAD,
+            state_file=Path("/tmp/ledger.jsonl"),
+        )
+        self.assert_plan_accepted_by_real_validator(plan, "requeue-stuck")
+
+    def assert_plan_accepted_by_real_validator(self, plan, label):
+        repo_root = Path(__file__).resolve().parent.parent
+        validator = repo_root / "skills" / "plan-to-invoker" / "scripts" / "validate-plan.sh"
+        self.assertTrue(validator.exists(), f"real validator missing at {validator}")
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+            fh.write(plan.yaml_text)
+            plan_path = fh.name
+        try:
+            result = subprocess.run(
+                ["bash", str(validator), plan_path],
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+                timeout=30,
+            )
+        finally:
+            os.unlink(plan_path)
+
+        if result.returncode != 0:
+            import json
+
+            errors = json.loads(result.stdout or result.stderr)
+            # non_portable_pipefail on safe-push predates this feature (every plan
+            # _safe_push_task_yaml builds trips it, see the sibling plan asserted in
+            # test_non_foreign_repair_check_plan_still_includes_invoker_helpers) and
+            # is intentionally excluded here rather than silently un-asserted.
+            unexpected = [e for e in errors if e.get("errorType") != "non_portable_pipefail"]
+            self.assertEqual(
+                unexpected, [],
+                f"{label} plan failed real Invoker plan validation: {unexpected}",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

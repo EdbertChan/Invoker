@@ -5,7 +5,7 @@
  * Orchestrator writes a WorkRequest; executor runs the action;
  * executor returns a WorkResponse (via callback or IPC).
  */
-import type { FailureClass, ReviewGateArtifact, ReviewGateState, TaskStatus } from '@invoker/workflow-graph';
+import type { FailureClass, ReviewGateArtifact, ReviewGateState, TaskFreshnessSpec, TaskStatus } from '@invoker/workflow-graph';
 
 // ── Action Types ────────────────────────────────────────────
 
@@ -43,6 +43,14 @@ export interface WorkRequestInputs {
   /** Branch names from completed upstream dependencies to merge into the worktree. */
   upstreamBranches?: string[];
   /**
+   * The direct dependency branch/commit used as the starting point for the new
+   * task branch before any remaining upstream merges.
+   */
+  upstreamBase?: {
+    branch: string;
+    commitHash: string;
+  };
+  /**
    * Visible lifecycle tag (e.g. `g0.t1.aabc12345`) embedded in the branch name
    * to make every dispatch unique-by-construction across recreates and retries.
    * Replaces the legacy `salt` field that mixed lifecycle context into the
@@ -53,10 +61,14 @@ export interface WorkRequestInputs {
   baseBranch?: string;
   /** Already-resolved base commit for baseBranch, used to skip redundant base ref resolution. */
   baseCommit?: string;
+  specificationSnapshotCommit?: string;
   /** Name of the execution agent to use (e.g. 'claude', 'codex', 'omp'). Defaults to 'claude'. */
   executionAgent?: string;
   /** Agent-specific model selector. The selected CLI owns validation. */
   executionModel?: string;
+  /** Finite agent turn budget (Claude `--max-turns`) when set. */
+  maxTurns?: number;
+  freshness?: TaskFreshnessSpec;
   /** When true, executors must not reuse existing task worktrees for this run. */
   freshWorkspace?: boolean;
   /**
@@ -102,6 +114,7 @@ export type ResponseStatus =
   | 'review_ready'
   | 'failed'
   | 'needs_input'
+  | 'stale'
   | 'spawn_experiments'
   | 'select_experiment';
 
@@ -116,6 +129,8 @@ export interface WorkResponseOutputs {
   agentName?: string;
   /** Branch the executor used — persisted at completion to close the write-once gap. */
   branch?: string;
+  /** Workspace path the executor used — persisted at completion for terminal/folder restore. */
+  workspacePath?: string;
   /** Review URL produced by merge-gate style actions. */
   reviewUrl?: string;
   /** Provider-specific review identifier produced by merge-gate style actions. */

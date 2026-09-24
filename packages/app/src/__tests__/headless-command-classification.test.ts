@@ -34,8 +34,10 @@ describe('headless-command-classification', () => {
   it('classifies read-only commands', () => {
     expect(isHeadlessReadOnlyCommand([])).toBe(true);
     expect(isHeadlessReadOnlyCommand(['query'])).toBe(true);
-    expect(isHeadlessReadOnlyCommand(['list'])).toBe(true);
-    expect(isHeadlessReadOnlyCommand(['session'])).toBe(true);
+    expect(isHeadlessReadOnlyCommand(['query', 'workflows'])).toBe(true);
+    expect(isHeadlessReadOnlyCommand(['query', 'session'])).toBe(true);
+    expect(isHeadlessReadOnlyCommand(['list'])).toBe(false);
+    expect(isHeadlessReadOnlyCommand(['session'])).toBe(false);
     expect(isHeadlessReadOnlyCommand(['open-terminal'])).toBe(true);
     expect(isHeadlessReadOnlyCommand(['worker'])).toBe(true);
     expect(isHeadlessReadOnlyCommand(['worker', 'status'])).toBe(true);
@@ -51,22 +53,25 @@ describe('headless-command-classification', () => {
 
     expect(isHeadlessMutatingCommand(['run'])).toBe(true);
     expect(isHeadlessMutatingCommand(['migrate-compat'])).toBe(true);
+    expect(isHeadlessMutatingCommand(['check-pr-status'])).toBe(true);
     expect(isHeadlessMutatingCommand(['cancel-workflow'])).toBe(true);
+    expect(isHeadlessMutatingCommand(['close-task'])).toBe(true);
+    expect(isHeadlessMutatingCommand(['reset-autofix-budget'])).toBe(true);
     expect(isHeadlessMutatingCommand(['set', 'prompt'])).toBe(true);
     expect(isHeadlessMutatingCommand(['set', 'agent'])).toBe(true);
     expect(isHeadlessMutatingCommand(['set', 'fix-context'])).toBe(true);
-    expect(isHeadlessMutatingCommand(['set', 'xyz'])).toBe(false);
+    expect(isHeadlessMutatingCommand(['set', 'xyz'])).toBe(true);
     expect(isHeadlessMutatingCommand(['worker'])).toBe(false);
     expect(isHeadlessMutatingCommand(['worker', 'status'])).toBe(false);
     expect(isHeadlessMutatingCommand(['worker', 'disk-headroom'])).toBe(true);
   });
 
   it('classifies every registered set subcommand as mutating', () => {
-    for (const subcommand of HEADLESS_SET_SUBCOMMANDS) {
+    for (const { name: subcommand } of HEADLESS_SET_SUBCOMMANDS) {
       expect(isHeadlessMutatingCommand(['set', subcommand])).toBe(true);
     }
 
-    expect(isHeadlessMutatingCommand(['set', 'xyz'])).toBe(false);
+    expect(isHeadlessMutatingCommand(['set', 'xyz'])).toBe(true);
     expect(isHeadlessMutatingCommand(['set'])).toBe(false);
   });
 
@@ -85,7 +90,7 @@ describe('headless-command-classification', () => {
     await runHeadless(['--help'], {} as any);
 
     const help = write.mock.calls.map(([chunk]) => String(chunk)).join('');
-    for (const subcommand of HEADLESS_SET_SUBCOMMANDS) {
+    for (const { name: subcommand } of HEADLESS_SET_SUBCOMMANDS) {
       if (subcommand === 'executor') continue;
       expect(help).toContain(`set ${subcommand}`);
     }

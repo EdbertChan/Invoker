@@ -1,26 +1,284 @@
 from __future__ import annotations
 
-from typing import Collection
+import json
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Collection, Literal, Mapping
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 try:
-    from .mergify_admin_requeue_model import Action, BOT_OR_SELF_AUTHORS, Blocker, Ledger, MergifyQueueEvent, PrSnapshot, StackGroup
+    from .mergify_admin_requeue_model import (
+        Action,
+        BOT_OR_SELF_AUTHORS,
+        Blocker,
+        Ledger,
+        MergifyQueueEvent,
+        PrSnapshot,
+        RepairWorkflowEvidence,
+        RepairPrereqStatus,
+        StackExecutionPlan,
+        StackGroup,
+        StackReportSection,
+    )
 except ImportError:
-    from mergify_admin_requeue_model import Action, BOT_OR_SELF_AUTHORS, Blocker, Ledger, MergifyQueueEvent, PrSnapshot, StackGroup
+    from mergify_admin_requeue_model import (
+        Action,
+        BOT_OR_SELF_AUTHORS,
+        Blocker,
+        Ledger,
+        MergifyQueueEvent,
+        PrSnapshot,
+        RepairWorkflowEvidence,
+        RepairPrereqStatus,
+        StackExecutionPlan,
+        StackGroup,
+        StackReportSection,
+    )
+
+try:
+    from .mergify_admin_requeue_async_repair import (
+        _slugify,
+        rebase_onto_master_plan_name,
+        repair_bot_thread_plan_name,
+        repair_check_plan_name,
+    )
+    from .mergify_admin_requeue_infra_signal import (
+        SSH_OAUTH_INFRA_SIGNATURE,
+        repair_task_crashed_on_infra,
+    )
+    from . import repair_filing_ledger
+except ImportError:
+    from mergify_admin_requeue_async_repair import (
+        _slugify,
+        rebase_onto_master_plan_name,
+        repair_bot_thread_plan_name,
+        repair_check_plan_name,
+    )
+    from mergify_admin_requeue_infra_signal import (
+        SSH_OAUTH_INFRA_SIGNATURE,
+        repair_task_crashed_on_infra,
+    )
+    import repair_filing_ledger
 
 
 TRUNK = "master"
 
+# ClaimRepairFiling(kind, subject, state_sha) -> True means "already claimed
+# by someone else (this process, a prior tick, or a different system like
+# ci-regression-watch) -- skip filing"; False means "this call just claimed
+# it -- proceed". Every planning function below defaults this to None, which
+# preserves exact pre-existing behavior (no cross-system dedup check at all)
+# so the large existing test suite for this module needs no changes; only
+# the real production entrypoint (mergify_admin_requeue_exec.run_cycle) wires
+# in the real function, via default_claim_repair_filing below.
+ClaimRepairFiling = Callable[[str, str, str], bool]
+ReleaseRepairFiling = Callable[[str, str, str], None]
+
+
+def repair_filing_kind_for_check(check_name: str) -> str:
+    return f"admin-requeue:check:{_slugify(check_name)}"
+
+
+def mergify_check_state_sha(pr: PrSnapshot, latest: MergifyQueueEvent) -> str:
+    # A merge-queue-derived check can fail against Mergify's ephemeral
+    # speculative-merge commit (PR head + whatever master is right now),
+    # which is not represented anywhere in PrSnapshot -- pr.head_ref_oid
+    # alone can stay identical across two genuinely different real Mergify
+    # attempts (PR dequeued, re-requeued once master moved). comment_id is
+    # this codebase's own existing signal for "a distinct real Mergify
+    # attempt at this same head" (see plan_bottom_progress's
+    # `requeue_key = latest.comment_id or "manual"`), so composite it into
+    # the claim key: two attempts at the same head_ref_oid but a different
+    # comment_id must not collide into the same claim.
+    return f"{pr.head_ref_oid}:{latest.comment_id or 'no-comment'}"
+
+
+REBASE_CONFLICT_REPAIR_FILING_KIND = "admin-requeue:rebase-conflict"
+# Shared by GitHub DIRTY conflicts and no-CI Mergify dequeue-while-behind.
+REBASE_ONTO_MASTER_FILING_KIND = "admin-requeue:rebase-onto-master"
+REBASE_ONTO_MASTER_LEDGER_KIND = "rebase-onto-master"
+
+# Every claim_repair_filing call site below uses `subject=str(pr.number)` --
+# the raw PR number, same shape as repair_check_plan_name/rebase_onto_master_plan_name
+# in mergify_admin_requeue_async_repair.py (see that module's plan-naming
+# functions), which have no lineage concept either. PRs get recreated with a
+# new number on retarget under this repo's own `stack/` convention (see
+# land-stack.mjs), so a claim made against a PR that later gets closed and
+# replaced by a new PR number for the same logical stack slice just goes
+# stale rather than following the lineage -- not a correctness bug (the new
+# PR's own subject starts fresh), but the old claim never gets cleaned up
+# either. Known limitation, not fixed here.
+
+
+def default_claim_repair_filing(kind: str, subject: str, state_sha: str) -> bool:
+    """Real production claim function -- see ClaimRepairFiling above. Fails
+    closed (treats as already claimed) on any ledger-reach/parse failure,
+    matching e2e-regression-watch.mjs's claimRepairFiling: a broken dedup
+    check must never risk filing a duplicate PR."""
+    try:
+        result = repair_filing_ledger.insert_repair_filing(kind, subject, state_sha)
+        return not result["inserted"]
+    except Exception as exc:
+        print(
+            f"mergify_admin_requeue: repair-filing claim failed for kind={kind!r} subject={subject!r} state_sha={state_sha!r}; skipping this filing tick without consuming code-repair retry budget: {exc}",
+            file=sys.stderr,
+        )
+        return True
+
+
+def default_release_repair_filing(kind: str, subject: str, state_sha: str) -> None:
+    """Real production release function -- call after a claimed insert whose
+    downstream filing attempt then failed, so a later tick can reclaim the
+    same key. Never raises -- a failed release must not crash the caller's
+    own error handling; it just means this key stays claimed until manually
+    cleared or the sha changes."""
+    try:
+        repair_filing_ledger.release_repair_filing(kind, subject, state_sha)
+    except Exception as exc:
+        print(
+            f"mergify_admin_requeue: default_release_repair_filing failed for kind={kind!r} subject={subject!r} state_sha={state_sha!r}; this key stays claimed until manually cleared: {exc}",
+            file=sys.stderr,
+        )
+
+QUEUE_ONLY_REQUIRED_CHECK_PREFIXES = ("required-fast / ",)
+ACTIVE_QUEUE_STATES = frozenset({"queued", "merging"})
+STALE_QUEUE_EVENT_TTL_SECONDS = 5400
+REFRESH_STALE_QUEUE_LEDGER_KIND = "refresh-stale-queue"
+STALE_QUEUE_EVENT_REFRESH_KEY = "admin-bypass-current-head"
+
+HUMAN_BLOCKER_KINDS = frozenset({"draft", "human_review_thread", "missing_check", "closed", "human_decision"})
+TERMINAL_BLOCKER_KINDS = frozenset({"merged"})
+REPAIR_INVALID_BLOCKER_KINDS = frozenset({"failed_check", "bot_review_thread", "conflict"})
+REPAIR_STOP_PREFIX = "Mergify repair stopped: "
+MANUAL_SPLIT_STOP_MARKERS = (
+    "human stack split required",
+    "Split this into one Review Unit per PR.",
+    "cannot auto-split",
+    "cannot ship with tooling-policy, proof files",
+    "cannot ship with policy, proof files",
+    "cannot ship with proof files",
+)
+
+
+@dataclass(frozen=True)
+class BottomTopology:
+    kind: Literal["current_bottom", "external_open_base", "stale_unowned_base"]
+    root: PrSnapshot
+    bottom: PrSnapshot | None
+    external_open_base_pr_numbers: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class StackFacts:
+    stack: StackGroup
+    required_checks: frozenset[str]
+    trunk: str
+    bottom_topology: BottomTopology
+    bottom: PrSnapshot | None
+    upper_stack_needs_acceptance: bool
+    prereq_status: RepairPrereqStatus | None
+    queue_only_noop_check: str | None
+    suppressed_failed_checks_by_pr: Mapping[int, tuple[str, ...]]
+    blockers_by_pr: Mapping[int, tuple[Blocker, ...]]
+    all_blockers: tuple[Blocker, ...]
+    stale_base_by_pr: Mapping[int, bool]
+
+
+def is_queue_only_required_check(name: str) -> bool:
+    # Both required-fast matrices in .github/workflows/ci.yml are gated to
+    # merge-queue heads. Classify their shared emitted-name prefix instead of
+    # duplicating individual matrix entries here, so promoting a new entry in
+    # .mergify.yml cannot silently turn it into a missing PR-head check.
+    return name.startswith(QUEUE_ONLY_REQUIRED_CHECK_PREFIXES)
+
+
+def queue_event_queued_epoch(event: MergifyQueueEvent) -> int | None:
+    if not event.queued_at:
+        return None
+    try:
+        queued_at = datetime.fromisoformat(event.queued_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if queued_at.tzinfo is None:
+        queued_at = queued_at.replace(tzinfo=timezone.utc)
+    return int(queued_at.timestamp())
+
+
+def queue_event_is_stale(event: MergifyQueueEvent, now: int) -> bool:
+    queued_epoch = queue_event_queued_epoch(event)
+    if queued_epoch is None:
+        return False
+    return now - queued_epoch >= STALE_QUEUE_EVENT_TTL_SECONDS
+
+
+def has_stale_matching_head_queue_event(pr: PrSnapshot, now: int) -> bool:
+    latest = pr.latest_mergify
+    return bool(
+        latest
+        and latest.queue_rule_name == "admin-bypass"
+        and latest.state in ACTIVE_QUEUE_STATES
+        and latest.head_sha == pr.head_ref_oid
+        and queue_event_is_stale(latest, now)
+    )
+
+
+def stale_matching_head_queue_event_detail(pr: PrSnapshot) -> str:
+    latest = pr.latest_mergify
+    if not latest:
+        return "stale Mergify queue event on current head"
+    queued_at = latest.queued_at or "unknown time"
+    return (
+        f"stale Mergify queue event stayed {latest.state} on admin-bypass "
+        f"for current head since {queued_at}; force re-evaluation with @mergifyio refresh"
+    )
+
+
+def has_active_queue_event(pr: PrSnapshot, now: int) -> bool:
+    latest = pr.latest_mergify
+    if not latest:
+        return False
+    # A pending `queue` command reports state "waiting" with a null queue
+    # rule while Mergify evaluates its conditions; requeueing on top of it is
+    # a duplicate Mergify ignores but the retry-cap ledger still counts.
+    # Exception: Mergify also reports "waiting" when the PR is blocked on a
+    # conflict queue requirement (DIRTY / CONFLICTING / dequeued / waiting_for
+    # conflict). That is not a productive in-flight queue — treat it as idle
+    # so conflict repair can file (PR #10278).
+    if latest.state == "waiting":
+        if pr.merge_state_status == "DIRTY" or pr.mergeable == "CONFLICTING":
+            return False
+        if "dequeued" in pr.labels:
+            return False
+        if any("conflict" in item.lower() for item in latest.waiting_for):
+            return False
+        if latest.head_sha and latest.head_sha != pr.head_ref_oid:
+            return "queued" in pr.labels
+        return True
+    if latest.queue_rule_name != "admin-bypass" or latest.state not in ACTIVE_QUEUE_STATES:
+        return False
+    if latest.head_sha == pr.head_ref_oid:
+        return not queue_event_is_stale(latest, now)
+    if not latest.head_sha:
+        return True
+    return "queued" in pr.labels
+
 
 def classify_pr(pr: PrSnapshot, required_checks: Collection[str], trunk: str) -> tuple[Blocker, ...]:
     blockers: list[Blocker] = []
+    if pr.state == "MERGED":
+        blockers.append(Blocker("merged", "merged", pr.number, "state=MERGED"))
+        return tuple(blockers)
     if pr.state != "OPEN":
         blockers.append(Blocker("closed", "closed", pr.number, f"state={pr.state}"))
         return tuple(blockers)
     if pr.is_draft:
         blockers.append(Blocker("draft", "draft", pr.number, "PR is draft"))
         return tuple(blockers)
-    if pr.base_ref_name != trunk:
-        blockers.append(Blocker("not_current_bottom", "not_current_bottom", pr.number, f"base={pr.base_ref_name}"))
     if "merge-hold" in pr.labels:
         blockers.append(Blocker("merge-hold", "merge_hold", pr.number, "merge-hold label present"))
 
@@ -30,24 +288,29 @@ def classify_pr(pr: PrSnapshot, required_checks: Collection[str], trunk: str) ->
         authors = set(thread.author_logins)
         if not authors or authors - BOT_OR_SELF_AUTHORS:
             blockers.append(Blocker(thread.id, "human_review_thread", pr.number, f"unresolved human review thread {thread.id}"))
+        elif thread.is_outdated:
+            blockers.append(Blocker(thread.id, "outdated_bot_review_thread", pr.number, f"unresolved outdated bot review thread {thread.id}"))
         else:
             blockers.append(Blocker(thread.id, "bot_review_thread", pr.number, f"unresolved bot review thread {thread.id}"))
 
     if pr.merge_state_status == "DIRTY" or pr.mergeable == "CONFLICTING":
         blockers.append(Blocker("conflict", "conflict", pr.number, "GitHub reports merge conflict"))
 
-    for name in sorted(required_checks):
+    configured_names = tuple(sorted(required_checks))
+    check_names = configured_names or tuple(sorted(pr.checks))
+    check_detail = "required check" if configured_names else "CI check"
+    for name in check_names:
         ctx = pr.checks.get(name)
         if ctx is None:
-            if pr.base_ref_name == trunk:
+            if configured_names and pr.base_ref_name == trunk and not is_queue_only_required_check(name):
                 blockers.append(Blocker(name, "missing_check", pr.number, f"missing required check {name}"))
             continue
         if ctx.state == "success":
             continue
         if ctx.state == "failure":
-            blockers.append(Blocker(name, "failed_check", pr.number, f"required check failed: {name}"))
+            blockers.append(Blocker(name, "failed_check", pr.number, f"{check_detail} failed: {name}"))
         elif ctx.state in {"pending", "unknown"}:
-            blockers.append(Blocker(name, "pending_check", pr.number, f"required check not green: {name}={ctx.state}"))
+            blockers.append(Blocker(name, "pending_check", pr.number, f"{check_detail} not green: {name}={ctx.state}"))
     return tuple(blockers)
 
 
@@ -59,101 +322,1642 @@ def cap_action(pr: PrSnapshot, blocker: Blocker, detail: str) -> Action:
     return Action("comment_blocked", pr.number, "capped", f"{detail}. The retry cap was reached for current head {pr.head_ref_oid}.")
 
 
+# Distinct from repair_in_flight's TTL-bounded "still might be running" check:
+# once the submitted attempt's own Invoker workflow already shows the crash
+# text below, there is nothing to wait out -- the coding agent never launched,
+# so no further wait changes the outcome. Checked before repair_in_flight so a
+# confirmed infra crash stops silently eating retry-cap attempts well before
+# the TTL would otherwise expire. This module only adjusts what counts toward
+# the cap; deciding what (if anything) to do about a crashed pool member is
+# the autofix worker's job (packages/execution-engine/src/auto-fix-recovery.ts),
+# not this Python-side admin-bypass planner's.
+def repair_crash_reason(
+    ledger: Ledger,
+    pr_number: int,
+    head_sha: str,
+    submit_kind: str,
+    key: str,
+    plan_name: str,
+) -> str | None:
+    submitted = ledger.latest(submit_kind, pr_number, head_sha, key)
+    if submitted is None:
+        return None
+    settled = ledger.latest(f"{submit_kind}-settled", pr_number, head_sha, key)
+    if settled is not None and int(settled.get("epoch", 0) or 0) >= int(submitted.get("epoch", 0) or 0):
+        return None
+    # Named call (not a default-bound parameter) so tests can patch this
+    # module's `repair_task_crashed_on_infra` name directly instead of the
+    # real one, which shells out to a live Invoker instance.
+    if repair_task_crashed_on_infra(plan_name):
+        return SSH_OAUTH_INFRA_SIGNATURE
+    return None
+
+
+# The retry-cap count for (pr, head, submit_kind, key) minus one, when the
+# most recent unsettled attempt crashed on the known SSH/OAuth infra
+# signature -- that attempt never gave the coding agent a chance to touch the
+# PR, so it should not spend budget a real attempt would have used. Returns
+# the adjusted count and whether an infra crash was found (the caller skips
+# the repair_in_flight TTL wait in that case, since there is nothing left to
+# wait out).
+# Outcomes that must not spend Mergify's code-repair attempt budget.
+CODE_REPAIR_CAP_EXCLUDED_OUTCOMES = frozenset({"infra", "superseded", "capacity-deferred"})
+# After an infra settle, give infra-repair this long to own/retry before Mergify
+# may file another repair for the same unit.
+INFRA_REPAIR_OWNERSHIP_TTL_SECONDS = 30 * 60
+
+
+def count_code_repair_attempts(
+    ledger: Ledger,
+    submit_kind: str,
+    pr_number: int,
+    head_sha: str,
+    key: str,
+) -> int:
+    """Count attempts for the PR's current head that spend the code cap.
+
+    Settled attempts classified as `infra` or `superseded` are excluded.
+    Unsettled submits still count (in-flight is gated separately).
+
+    A successful repair/rebase changes the PR head. It completed the unit of
+    work for the old head, so attempts on that old head must not consume the
+    retry budget for the new head.
+    """
+    settled_kind = f"{submit_kind}-settled"
+    count = 0
+    for row in ledger.rows:
+        if row.get("kind") != submit_kind:
+            continue
+        if int(row.get("pr", -1)) != pr_number:
+            continue
+        if str(row.get("headSha") or "") != head_sha:
+            continue
+        if row.get("key") != key:
+            continue
+        head = str(row.get("headSha") or "")
+        epoch = int(row.get("epoch", 0) or 0)
+        settled = ledger.latest(settled_kind, pr_number, head, key)
+        if settled is not None and int(settled.get("epoch", 0) or 0) >= epoch:
+            outcome = (settled.get("meta") or {}).get("outcomeClass")
+            if outcome in CODE_REPAIR_CAP_EXCLUDED_OUTCOMES:
+                continue
+        count += 1
+    return count
+
+
+def infra_repair_owns_unit(
+    ledger: Ledger,
+    pr_number: int,
+    head_sha: str,
+    submit_kind: str,
+    key: str,
+    now: int,
+    *,
+    workflow_status_fn=None,
+) -> bool:
+    """True when the latest settle for this unit was infra and infra-repair
+    should still own the failed workflow (running/pending, or failed within TTL)."""
+    settled = ledger.latest(f"{submit_kind}-settled", pr_number, head_sha, key)
+    if settled is None:
+        return False
+    meta = settled.get("meta") or {}
+    if meta.get("outcomeClass") != "infra":
+        return False
+    settled_epoch = int(settled.get("epoch", 0) or 0)
+    workflow_id = meta.get("workflowId")
+    if not workflow_id:
+        return now - settled_epoch < INFRA_REPAIR_OWNERSHIP_TTL_SECONDS
+    status_fn = workflow_status_fn
+    if status_fn is None:
+        try:
+            from .mergify_admin_requeue_workflow_fastpath import workflow_status as status_fn
+        except ImportError:
+            from mergify_admin_requeue_workflow_fastpath import workflow_status as status_fn
+    status = status_fn(str(workflow_id))
+    if status in ("running", "pending", "queued"):
+        return True
+    if status == "failed" and now - settled_epoch < INFRA_REPAIR_OWNERSHIP_TTL_SECONDS:
+        return True
+    return False
+
+
+def repair_attempt_count_excluding_infra_crash(
+    ledger: Ledger,
+    pr_number: int,
+    head_sha: str,
+    submit_kind: str,
+    key: str,
+    plan_name: str,
+) -> tuple[int, bool]:
+    count = ledger.count(submit_kind, pr_number, head_sha, key)
+    crashed_on_infra = repair_crash_reason(ledger, pr_number, head_sha, submit_kind, key, plan_name) is not None
+    if crashed_on_infra:
+        count -= 1
+    return count, crashed_on_infra
+
+
+# The retry-cap decision for (pr, current head, kind, key), shared with the JS
+# CI-regression watcher (scripts/retry-ledger.mjs) instead of re-deriving
+# the same "should we try again?" logic in Python a second time -- see that
+# module's header for why. The count is scoped to the current head_sha: a
+# successful repair attempt pushes a new commit as its normal side effect,
+# completing the old-head unit without spending the new-head budget.
+#
+# backoff_base_ms defaults to 0 (no cooldown between attempts): this module
+# already has its own real "don't resubmit while outstanding" gate
+# (repair_in_flight, a TTL keyed on the current head_sha, checked separately
+# by every caller below), so a second, independent cooldown layer isn't part
+# of what this bug needs fixing. 0 makes the shared decision a pure
+# persistent-count cap check here, matching this module's original timing
+# behavior exactly -- only the count's persistence changes.
+def retry_decision(
+    ledger: Ledger,
+    pr_number: int,
+    head_sha: str,
+    submit_kind: str,
+    key: str,
+    plan_name: str,
+    now: int,
+    max_attempts: int,
+    backoff_base_ms: int = 0,
+) -> dict:
+    count = count_code_repair_attempts(ledger, submit_kind, pr_number, head_sha, key)
+    crashed_on_infra = repair_crash_reason(ledger, pr_number, head_sha, submit_kind, key, plan_name) is not None
+    if crashed_on_infra:
+        # Live OAuth/infra crash on the current unsettled attempt: do not spend
+        # code-cap budget, and skip backoff so infra ownership can reclaim it.
+        if count > 0:
+            count -= 1
+        if count >= max_attempts:
+            return {"action": "needs-human", "attempts": count, "crashed_on_infra": True}
+        return {"action": "file", "attempts": count, "crashed_on_infra": True}
+    latest = ledger.latest_by_unit(submit_kind, pr_number, key)
+    payload = json.dumps({
+        "attempts": count,
+        "lastAttemptAt": (
+            datetime.fromtimestamp(int(latest["epoch"]), tz=timezone.utc).isoformat()
+            if latest else None
+        ),
+        "nowMs": now * 1000,
+        "maxAttempts": max_attempts,
+        "backoffBaseMs": backoff_base_ms,
+    })
+    result = subprocess.run(
+        ["node", str(REPO_ROOT / "scripts" / "retry-ledger.mjs"), "decide", "--json", payload],
+        capture_output=True, text=True, check=True,
+    )
+    decision = json.loads(result.stdout)
+    decision["crashed_on_infra"] = False
+    return decision
+
+
+# An acknowledged async repair submission is "in flight" until a
+# same-kind "-settled" row lands with an equal-or-later epoch. The submitted plan's
+# `normalize` task writes that settle row unconditionally as its first action, so
+# reaching `normalize` at all -- pushed, no-op, prereq-created, or still-invalid --
+# frees this PR/blocker for its next tick. Only a crash before `normalize` ever runs
+# (the `repair` task itself dying) leaves no settle row; the TTL bounds that case so
+# a single wedged attempt can't block this (pr, headSha, blockerKey) forever.
+REPAIR_IN_FLIGHT_TTL_SECONDS = 5400
+
+
+def repair_in_flight(
+    ledger: Ledger,
+    pr_number: int,
+    head_sha: str,
+    submit_kind: str,
+    key: str,
+    now: int,
+    *,
+    ttl_seconds: int = REPAIR_IN_FLIGHT_TTL_SECONDS,
+) -> bool:
+    submitted = ledger.latest(submit_kind, pr_number, head_sha, key)
+    if submitted is None:
+        return False
+    submitted_epoch = int(submitted.get("epoch", 0) or 0)
+    settled = ledger.latest(f"{submit_kind}-settled", pr_number, head_sha, key)
+    if settled is not None and int(settled.get("epoch", 0) or 0) >= submitted_epoch:
+        if (settled.get("meta") or {}).get("outcomeClass") == "capacity-deferred":
+            return True
+        return False
+    if now - submitted_epoch >= ttl_seconds:
+        return False
+    return True
+
+
 def mergify_condition_map(event: MergifyQueueEvent | None) -> dict[str, str]:
     return dict(event.condition_states) if event else {}
 
 
-def effective_blockers(pr: PrSnapshot, required_checks: Collection[str], trunk: str) -> tuple[Blocker, ...]:
-    blockers = [b for b in classify_pr(pr, required_checks, trunk) if b.kind != "not_current_bottom"]
+def effective_blockers(
+    pr: PrSnapshot,
+    required_checks: Collection[str],
+    trunk: str,
+    suppressed_failed_checks: Collection[str] = (),
+) -> tuple[Blocker, ...]:
+    suppressed = set(suppressed_failed_checks)
+    blockers = [
+        b for b in classify_pr(pr, required_checks, trunk)
+        if not (b.kind == "failed_check" and b.key in suppressed)
+    ]
     latest = pr.latest_mergify
     if not latest or latest.head_sha != pr.head_ref_oid:
         return tuple(blockers)
     conditions = mergify_condition_map(latest)
     return tuple(
         blocker for blocker in blockers
-        if not (blocker.kind == "missing_check" and conditions.get(blocker.key) == "success")
+        if not (
+            blocker.kind == "missing_check"
+            and (
+                conditions.get(blocker.key) == "success"
+                or (
+                    latest.state == "dequeued"
+                    and is_queue_only_required_check(blocker.key)
+                    and blocker.key in latest.failing_checks
+                )
+            )
+        )
     )
 
 
-def mergify_failed_check_actions(pr: PrSnapshot, ledger: Ledger) -> tuple[Action, ...]:
+def is_non_repairable_check_state(state: str) -> bool:
+    """Cancelled/skipped/neutral checks are not code failures to repair."""
+    return state in {"skipped", "cancelled", "neutral"}
+
+
+def all_observed_checks_green(pr: PrSnapshot) -> bool:
+    """True when every check GitHub currently reports for this PR's head is
+    green (or a non-repairable state like skipped/neutral).
+
+    Only meaningful for the empty-required_checks land path (see
+    plan_bottom_progress): a repo with no admin-bypass Mergify rule has no
+    required-check allowlist, so latest_contexts_by_required_check reports
+    every observed check instead of filtering to a known set. An empty
+    checks mapping means no CI signal has arrived yet, not "nothing to wait
+    for", so it is treated as not-green.
+    """
+    if not pr.checks:
+        return False
+    return all(
+        ctx.state == "success" or is_non_repairable_check_state(ctx.state)
+        for ctx in pr.checks.values()
+    )
+
+
+def mergify_failed_check_actions(
+    pr: PrSnapshot,
+    ledger: Ledger,
+    max_repair_attempts: int,
+    now: int,
+    suppressed_failed_checks: Collection[str] = (),
+    claim_repair_filing: ClaimRepairFiling | None = None,
+) -> tuple[Action, ...]:
+    suppressed = set(suppressed_failed_checks)
     latest = pr.latest_mergify
     if not latest or latest.state != "dequeued" or latest.head_sha != pr.head_ref_oid:
         return ()
-    for name in latest.failing_checks:
-        if ledger.count("repair-check", pr.number, pr.head_ref_oid, name) >= 3:
-            return (cap_action(pr, Blocker(name, "failed_check", pr.number, f"Mergify queue check failed: {name}"), f"Mergify queue check failed: {name}"),)
-        return (Action("repair_check", pr.number, name, f"Mergify queue check failed: {name}"),)
+    # A queue-only check always resolves to a no-op repair (nothing to fix
+    # outside the queue -- see is_queue_only_required_check), so trying a
+    # genuinely repairable check first prevents a queue-only check earlier
+    # in Mergify's list from starving out the one failing check a repair
+    # could actually fix.
+    ordered_failing_checks = sorted(
+        latest.failing_checks, key=lambda name: is_queue_only_required_check(name)
+    )
+    for name in ordered_failing_checks:
+        if name in suppressed:
+            continue
+        ctx = pr.checks.get(name)
+        if ctx is not None and is_non_repairable_check_state(ctx.state):
+            continue
+        detail = f"Mergify queue check failed: {name}"
+        decision = retry_decision(
+            ledger, pr.number, pr.head_ref_oid, "repair-check", name,
+            repair_check_plan_name(pr.number, name, pr.head_ref_oid), now, max_repair_attempts,
+        )
+        if decision["action"] == "needs-human":
+            return (cap_action(pr, Blocker(name, "failed_check", pr.number, detail), detail),)
+        if decision["action"] == "backoff":
+            continue
+        if not decision["crashed_on_infra"] and repair_in_flight(ledger, pr.number, pr.head_ref_oid, "repair-check", name, now):
+            continue
+        if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "repair-check", name, now):
+            continue
+        if claim_repair_filing is not None and claim_repair_filing(
+            repair_filing_kind_for_check(name), str(pr.number), mergify_check_state_sha(pr, latest),
+        ):
+            # Another filer (a previous tick that crashed before recording,
+            # or a different system entirely, e.g. ci-regression-watch)
+            # already claimed this exact (kind, subject, stateSha) -- try the
+            # next failing check instead of returning a duplicate repair.
+            continue
+        return (Action("repair_check", pr.number, name, detail),)
     return ()
 
 
-def plan_stack_actions(stack: StackGroup, required_checks: Collection[str], ledger: Ledger, now_epoch: int) -> tuple[Action, ...]:
-    del now_epoch
-    blockers_by_pr = {pr.number: effective_blockers(pr, required_checks, TRUNK) for pr in stack.prs}
-    all_blockers = [b for blockers in blockers_by_pr.values() for b in blockers]
-
+def current_bottom_pr(stack: StackGroup, trunk: str) -> PrSnapshot | None:
     for pr in stack.prs:
-        actions = mergify_failed_check_actions(pr, ledger)
+        if pr.state == "OPEN" and pr.base_ref_name == trunk:
+            return pr
+    return None
+
+def classify_bottom_topology(
+    stack: StackGroup,
+    trunk: str,
+    open_pr_numbers_by_head: Mapping[str, Collection[int]],
+) -> BottomTopology:
+    root = stack.prs[0]
+    bottom = current_bottom_pr(stack, trunk)
+    if bottom is not None:
+        return BottomTopology(
+            kind="current_bottom",
+            root=root,
+            bottom=bottom,
+            external_open_base_pr_numbers=(),
+        )
+    current_stack_numbers = {pr.number for pr in stack.prs}
+    external_open_base_pr_numbers = tuple(sorted(
+        number
+        for number in open_pr_numbers_by_head.get(root.base_ref_name, ())
+        if number not in current_stack_numbers
+    ))
+    if external_open_base_pr_numbers:
+        return BottomTopology(
+            kind="external_open_base",
+            root=root,
+            bottom=None,
+            external_open_base_pr_numbers=external_open_base_pr_numbers,
+        )
+    return BottomTopology(
+        kind="stale_unowned_base",
+        root=root,
+        bottom=None,
+        external_open_base_pr_numbers=(),
+    )
+
+
+
+
+def unaccepted_upper_prs(stack: StackGroup, bottom: PrSnapshot | None) -> tuple[PrSnapshot, ...]:
+    if not bottom:
+        return ()
+    return tuple(
+        pr
+        for pr in stack.prs
+        if pr.state == "OPEN" and pr.number != bottom.number and "admin-bypass" not in pr.labels
+    )
+
+
+def stack_has_unaccepted_upper_pr(stack: StackGroup, bottom: PrSnapshot | None) -> bool:
+    return bool(unaccepted_upper_prs(stack, bottom))
+
+
+def latest_repair_prereq_status(
+    stack: StackGroup,
+    ledger: Ledger,
+    open_pr_numbers: Collection[int],
+    trunk: str,
+) -> RepairPrereqStatus | None:
+    bottom = current_bottom_pr(stack, trunk)
+    if not bottom:
+        return None
+    latest_row: dict[str, object] | None = None
+    latest_epoch = float("-inf")
+    for row in ledger.rows:
+        if row.get("kind") != "repair-prereq-created":
+            continue
+        if int(row.get("pr", -1)) != bottom.number:
+            continue
+        if row.get("headSha") != bottom.head_ref_oid:
+            continue
+        epoch = int(row.get("epoch", 0) or 0)
+        if latest_row is None or epoch >= latest_epoch:
+            latest_row = row
+            latest_epoch = epoch
+    if latest_row is None:
+        return None
+    meta = latest_row.get("meta") if isinstance(latest_row.get("meta"), Mapping) else {}
+    prereq_pr_number = int(meta.get("prNumber") or 0) if isinstance(meta, Mapping) else 0
+    check_name = str(latest_row.get("key") or "")
+    needs_followup_requeue = (
+        bool(check_name)
+        and ledger.latest("repair-prereq-requeue", bottom.number, bottom.head_ref_oid, check_name) is None
+    )
+    return RepairPrereqStatus(
+        check_name=check_name,
+        prereq_pr_number=prereq_pr_number,
+        prereq_branch=str(meta.get("branch") or "") if isinstance(meta, Mapping) else "",
+        is_open=prereq_pr_number in open_pr_numbers,
+        needs_followup_requeue=needs_followup_requeue,
+    )
+
+
+def latest_queue_only_noop_check(stack: StackGroup, ledger: Ledger, trunk: str) -> str | None:
+    bottom = current_bottom_pr(stack, trunk)
+    if not bottom:
+        return None
+    latest = bottom.latest_mergify
+    if (
+        not latest
+        or latest.state != "dequeued"
+        or latest.queue_rule_name != "admin-bypass"
+        or latest.head_sha != bottom.head_ref_oid
+    ):
+        return None
+    latest_row: dict[str, object] | None = None
+    latest_epoch = float("-inf")
+    for row in ledger.rows:
+        if row.get("kind") != "queue-only-noop":
+            continue
+        if int(row.get("pr", -1)) != bottom.number:
+            continue
+        if row.get("headSha") != bottom.head_ref_oid:
+            continue
+        epoch = int(row.get("epoch", 0) or 0)
+        if latest_row is None or epoch >= latest_epoch:
+            latest_row = row
+            latest_epoch = epoch
+    if latest_row is None:
+        return None
+    check_name = str(latest_row.get("key") or "")
+    if (
+        not check_name
+        or not is_queue_only_required_check(check_name)
+        or check_name not in latest.failing_checks
+        or ledger.latest("queue-only-requeue", bottom.number, bottom.head_ref_oid, check_name) is not None
+    ):
+        return None
+    return check_name
+
+
+def repair_invalid_keys_for_blocker(pr: PrSnapshot, blocker: Blocker) -> tuple[str, ...]:
+    if blocker.kind == "conflict":
+        return ("conflict", f"conflict:{pr.number}")
+    return (blocker.key,)
+
+
+def latest_repair_invalid_blocker(pr: PrSnapshot, blocker: Blocker, ledger: Ledger) -> Blocker | None:
+    if blocker.kind not in REPAIR_INVALID_BLOCKER_KINDS:
+        return None
+    latest = None
+    for key in repair_invalid_keys_for_blocker(pr, blocker):
+        row = ledger.latest("repair-invalid", pr.number, pr.head_ref_oid, key)
+        if row is None:
+            continue
+        if latest is None or int(row.get("epoch", 0) or 0) >= int(latest.get("epoch", 0) or 0):
+            latest = row
+    if latest is None:
+        return None
+    meta = latest.get("meta") if isinstance(latest.get("meta"), Mapping) else {}
+    errors = meta.get("errors") if isinstance(meta, Mapping) else None
+    if isinstance(errors, list):
+        detail = "\n".join(str(error) for error in errors if str(error))
+        if detail:
+            return Blocker(blocker.key, "human_decision", pr.number, detail)
+    return Blocker(blocker.key, "human_decision", pr.number, blocker.detail)
+
+
+def existing_split_stop_blocker(pr: PrSnapshot, blocker: Blocker) -> Blocker | None:
+    if blocker.kind != "failed_check":
+        return None
+    ctx = pr.checks.get(blocker.key)
+    completed_at = ctx.completed_at if ctx else ""
+    for comment in pr.repair_stop_comments:
+        body = comment.body.strip()
+        if not body.startswith(REPAIR_STOP_PREFIX):
+            continue
+        detail = body[len(REPAIR_STOP_PREFIX):].strip()
+        if not detail or not any(marker in detail for marker in MANUAL_SPLIT_STOP_MARKERS):
+            continue
+        if completed_at and comment.updated_at and comment.updated_at < completed_at:
+            continue
+        return Blocker(blocker.key, "human_decision", pr.number, detail)
+    return None
+
+
+def latest_mergify_repair_invalid_blockers(
+    pr: PrSnapshot,
+    ledger: Ledger,
+    suppressed_failed_checks: Collection[str],
+) -> tuple[Blocker, ...]:
+    latest = pr.latest_mergify
+    if not latest or latest.state != "dequeued" or latest.head_sha != pr.head_ref_oid:
+        return ()
+    suppressed = set(suppressed_failed_checks)
+    blockers: list[Blocker] = []
+    for name in latest.failing_checks:
+        if name in suppressed:
+            continue
+        blocker = latest_repair_invalid_blocker(
+            pr,
+            Blocker(name, "failed_check", pr.number, f"Mergify queue check failed: {name}"),
+            ledger,
+        )
+        if blocker is not None:
+            blockers.append(blocker)
+    return tuple(blockers)
+
+
+def _assert_stack_facts_invariants(facts: StackFacts) -> None:
+    assert facts.stack.prs, "stack must contain at least one PR"
+    pr_numbers = tuple(pr.number for pr in facts.stack.prs)
+    assert len(pr_numbers) == len(set(pr_numbers)), "stack PR numbers must be unique"
+    assert set(facts.blockers_by_pr) == set(pr_numbers), "every PR must have blocker facts"
+    expected_all = tuple(
+        blocker
+        for pr in facts.stack.prs
+        for blocker in facts.blockers_by_pr[pr.number]
+    )
+    assert facts.all_blockers == expected_all, "all_blockers must flatten blockers_by_pr in stack order"
+    assert facts.bottom is facts.bottom_topology.bottom, "bottom mirror must track bottom topology"
+    assert (facts.bottom_topology.kind == "current_bottom") is (facts.bottom is not None), "current_bottom topology must match bottom presence"
+    assert (facts.bottom_topology.kind != "current_bottom") is (facts.bottom is None), "non-current topology must match missing bottom"
+    assert (facts.bottom_topology.kind == "external_open_base") is bool(facts.bottom_topology.external_open_base_pr_numbers), "external owners must only appear on external_open_base topology"
+    assert (
+        facts.bottom_topology.kind == "stale_unowned_base"
+    ) is (
+        facts.bottom is None and facts.bottom_topology.external_open_base_pr_numbers == ()
+    ), "stale_unowned_base must mean no bottom and no external owners"
+    if facts.suppressed_failed_checks_by_pr:
+        assert facts.bottom is not None, "suppression requires a current bottom PR"
+        assert set(facts.suppressed_failed_checks_by_pr) == {facts.bottom.number}, "derived suppression is bottom-only"
+    if facts.prereq_status is not None:
+        assert facts.bottom is not None, "prerequisite status requires a current bottom PR"
+    if facts.queue_only_noop_check is not None:
+        assert facts.bottom is not None, "queue-only noop requires a current bottom PR"
+        latest = facts.bottom.latest_mergify
+        assert latest is not None, "queue-only noop requires a Mergify event"
+        assert latest.state == "dequeued", "queue-only noop requires a dequeued Mergify event"
+        assert latest.queue_rule_name == "admin-bypass", "queue-only noop requires the admin-bypass queue"
+        assert latest.head_sha == facts.bottom.head_ref_oid, "queue-only noop requires a same-head Mergify event"
+        assert facts.queue_only_noop_check in latest.failing_checks, "queue-only noop check must still be failing in Mergify"
+
+
+def build_stack_facts(
+    stack: StackGroup,
+    required_checks: Collection[str],
+    ledger: Ledger,
+    open_pr_numbers: Collection[int],
+    open_pr_numbers_by_head: Mapping[str, Collection[int]],
+    trunk: str,
+    stale_base_by_pr: Mapping[int, bool] | None = None,
+) -> StackFacts:
+    required = frozenset(required_checks)
+    bottom_topology = classify_bottom_topology(stack, trunk, open_pr_numbers_by_head)
+    bottom = bottom_topology.bottom
+    upper_stack_needs_acceptance = stack_has_unaccepted_upper_pr(stack, bottom)
+    prereq_status = latest_repair_prereq_status(stack, ledger, open_pr_numbers, trunk)
+    queue_only_noop_check = latest_queue_only_noop_check(stack, ledger, trunk)
+
+    suppressed_failed_checks_by_pr: dict[int, tuple[str, ...]] = {}
+    if prereq_status and prereq_status.needs_followup_requeue and bottom:
+        suppressed_failed_checks_by_pr[bottom.number] = suppressed_failed_checks_by_pr.get(bottom.number, ()) + (prereq_status.check_name,)
+    if queue_only_noop_check and bottom:
+        suppressed_failed_checks_by_pr[bottom.number] = suppressed_failed_checks_by_pr.get(bottom.number, ()) + (queue_only_noop_check,)
+    if (
+        bottom
+        and "PR Body" in required
+        and ledger.latest("repair-noop", bottom.number, bottom.head_ref_oid, "PR Body") is not None
+    ):
+        suppressed_failed_checks_by_pr[bottom.number] = suppressed_failed_checks_by_pr.get(bottom.number, ()) + ("PR Body",)
+
+    blockers_by_pr: dict[int, tuple[Blocker, ...]] = {}
+    for pr in stack.prs:
+        effective = effective_blockers(pr, required, trunk, suppressed_failed_checks_by_pr.get(pr.number, ()))
+        blockers = [
+            latest_repair_invalid_blocker(pr, blocker, ledger)
+            or existing_split_stop_blocker(pr, blocker)
+            or blocker
+            for blocker in effective
+        ]
+        existing_keys = {blocker.key for blocker in blockers}
+        blockers.extend(
+            blocker for blocker in latest_mergify_repair_invalid_blockers(
+                pr,
+                ledger,
+                suppressed_failed_checks_by_pr.get(pr.number, ()),
+            )
+            if blocker.key not in existing_keys
+        )
+        blockers_by_pr[pr.number] = tuple(blockers)
+    facts = StackFacts(
+        stack=stack,
+        required_checks=required,
+        trunk=trunk,
+        bottom_topology=bottom_topology,
+        bottom=bottom,
+        upper_stack_needs_acceptance=upper_stack_needs_acceptance,
+        prereq_status=prereq_status,
+        queue_only_noop_check=queue_only_noop_check,
+        suppressed_failed_checks_by_pr=suppressed_failed_checks_by_pr,
+        blockers_by_pr=blockers_by_pr,
+        all_blockers=tuple(
+            blocker
+            for pr in stack.prs
+            for blocker in blockers_by_pr[pr.number]
+        ),
+        stale_base_by_pr=dict(stale_base_by_pr or {}),
+    )
+    _assert_stack_facts_invariants(facts)
+    return facts
+
+
+
+
+def summarize_stack(facts: StackFacts) -> dict[str, object]:
+    return {
+        "stack_id": facts.stack.stack_id,
+        "bottom_topology": facts.bottom_topology.kind,
+        "bottom_pr": facts.bottom.number if facts.bottom else None,
+        "upper_stack_needs_acceptance": facts.upper_stack_needs_acceptance,
+        "prs": [
+            {
+                "number": pr.number,
+                "state": pr.state,
+                "base": pr.base_ref_name,
+                "head": pr.head_ref_name,
+                "head_sha": pr.head_ref_oid,
+                "labels": sorted(pr.labels),
+                "merge_state_status": pr.merge_state_status,
+                "mergeable": pr.mergeable,
+                "draft": pr.is_draft,
+                "latest_mergify": None if not pr.latest_mergify else {
+                    "state": pr.latest_mergify.state,
+                    "head_sha": pr.latest_mergify.head_sha,
+                    "comment_id": pr.latest_mergify.comment_id,
+                    "failing_checks": list(pr.latest_mergify.failing_checks),
+                    "waiting_for": list(pr.latest_mergify.waiting_for),
+                },
+                "blockers": [
+                    {"kind": blocker.kind, "key": blocker.key, "detail": blocker.detail}
+                    for blocker in facts.blockers_by_pr[pr.number]
+                ],
+            }
+            for pr in facts.stack.prs
+        ],
+    }
+
+
+def wait_reason_for_facts(facts: StackFacts, now: int) -> str:
+    if facts.upper_stack_needs_acceptance:
+        return "upper-stack-needs-acceptance"
+    for pr in facts.stack.prs:
+        blocker_kinds = {blocker.kind for blocker in facts.blockers_by_pr[pr.number]}
+        if "pending_check" in blocker_kinds:
+            return "pending-check"
+        if "merge_hold" in blocker_kinds and len(blocker_kinds) == 1:
+            return "merge-hold-only"
+        if TERMINAL_BLOCKER_KINDS & blocker_kinds:
+            return "terminal-merged"
+        if HUMAN_BLOCKER_KINDS & blocker_kinds:
+            return "blocked-needs-human"
+    if facts.bottom and has_active_queue_event(facts.bottom, now):
+        return "bottom-already-queued"
+    return "no-action"
+
+
+def _has_pending_or_human_blocker(facts: StackFacts) -> bool:
+    return any(
+        blocker.kind == "pending_check"
+        or blocker.kind in HUMAN_BLOCKER_KINDS
+        or blocker.kind in TERMINAL_BLOCKER_KINDS
+        for blocker in facts.all_blockers
+    )
+
+
+def _bottom_has_pending_or_human_blocker(facts: StackFacts) -> bool:
+    if not facts.bottom:
+        return _has_pending_or_human_blocker(facts)
+    return any(
+        blocker.pr_number == facts.bottom.number
+        and (
+            blocker.kind == "pending_check"
+            or blocker.kind in HUMAN_BLOCKER_KINDS
+            or blocker.kind in TERMINAL_BLOCKER_KINDS
+        )
+        for blocker in facts.all_blockers
+    )
+
+
+# Kinds plan_direct_repairs/plan_bot_thread_repairs/mergify_failed_check_actions
+# normally turn into a repair action. When the one blocking such a kind is
+# in-flight, those planners skip it without producing an action -- correct for
+# "don't resubmit," but the blocker is still real. Without this check, the
+# ladder would fall through to plan_bottom_progress and requeue a PR whose
+# required check is still actually failing, just because this tick didn't
+# resubmit a repair for it.
+REPAIRABLE_BLOCKER_KINDS = frozenset({"failed_check", "conflict", "bot_review_thread", "outdated_bot_review_thread"})
+
+
+def _bottom_has_repairable_blocker(facts: StackFacts) -> bool:
+    if not facts.bottom:
+        return False
+    return any(
+        blocker.pr_number == facts.bottom.number and blocker.kind in REPAIRABLE_BLOCKER_KINDS
+        for blocker in facts.all_blockers
+    )
+
+
+def _candidate_prs(facts: StackFacts, pr_numbers: Collection[int] | None = None) -> tuple[PrSnapshot, ...]:
+    if pr_numbers is None:
+        return facts.stack.prs
+    allowed = frozenset(pr_numbers)
+    return tuple(pr for pr in facts.stack.prs if pr.number in allowed)
+
+
+def plan_mergify_queue_repairs(
+    facts: StackFacts,
+    ledger: Ledger,
+    max_repair_attempts: int,
+    now: int,
+    pr_numbers: Collection[int] | None = None,
+    claim_repair_filing: ClaimRepairFiling | None = None,
+    release_repair_filing: ReleaseRepairFiling | None = None,
+) -> Action | None:
+    for pr in _candidate_prs(facts, pr_numbers):
+        if any(blocker.kind == "human_decision" for blocker in facts.blockers_by_pr[pr.number]):
+            continue
+        if facts.upper_stack_needs_acceptance and facts.bottom and pr.number == facts.bottom.number:
+            continue
+        # GitHub CONFLICTING/DIRTY beats named CI (#10514): leftover parent
+        # commits after a squash+retarget make CI repair unable to push.
+        # Mergeable-but-behind named CI still never rebases (#10242).
+        conflict = next(
+            (blocker for blocker in facts.blockers_by_pr[pr.number] if blocker.kind == "conflict"),
+            None,
+        )
+        if conflict is not None:
+            legacy_key = f"conflict:{pr.number}"
+            if repair_in_flight(ledger, pr.number, pr.head_ref_oid, "conflict-repair", legacy_key, now):
+                continue
+            if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "conflict-repair", legacy_key, now):
+                continue
+            action = plan_invoker_rebase_onto_master(
+                pr,
+                ledger,
+                max_repair_attempts,
+                now,
+                conflict.detail,
+                claim_repair_filing,
+                release_repair_filing,
+            )
+            if action is not None:
+                return action
+            continue
+        # Named CI failures always go to repair_check — never rebase because
+        # the branch is also behind master (see #10242 rewrite incident).
+        actions = mergify_failed_check_actions(
+            pr, ledger, max_repair_attempts, now, facts.suppressed_failed_checks_by_pr.get(pr.number, ()),
+            claim_repair_filing,
+        )
         if actions:
-            return actions
+            return actions[0]
+        # Dequeued with no named required-check failure AND behind master →
+        # Invoker rebase (timeout / speculative merge onto moved trunk). A green
+        # dequeue that is already based on current master still falls through to
+        # plan_bottom_progress's requeue path.
+        latest = pr.latest_mergify
+        if (
+            latest
+            and latest.state == "dequeued"
+            and latest.head_sha == pr.head_ref_oid
+            and not latest.failing_checks
+            and not any(b.kind == "failed_check" for b in facts.blockers_by_pr[pr.number])
+            and not any(b.kind == "pending_check" for b in facts.blockers_by_pr[pr.number])
+            and not any(b.kind in {"bot_review_thread", "outdated_bot_review_thread"} for b in facts.blockers_by_pr[pr.number])
+            and not (facts.prereq_status and facts.prereq_status.needs_followup_requeue)
+            and facts.stale_base_by_pr.get(pr.number)
+        ):
+            action = plan_invoker_rebase_onto_master(
+                pr,
+                ledger,
+                max_repair_attempts,
+                now,
+                "Mergify dequeued with no named required-check failure while behind master",
+                claim_repair_filing,
+                release_repair_filing,
+            )
+            if action is not None:
+                return action
+    return None
 
-    for pr in stack.prs:
-        for blocker in blockers_by_pr[pr.number]:
+
+def plan_direct_repairs(
+    facts: StackFacts,
+    ledger: Ledger,
+    max_repair_attempts: int,
+    now: int,
+    pr_numbers: Collection[int] | None = None,
+    claim_repair_filing: ClaimRepairFiling | None = None,
+    release_repair_filing: ReleaseRepairFiling | None = None,
+) -> Action | None:
+    for pr in _candidate_prs(facts, pr_numbers):
+        if any(blocker.kind == "human_decision" for blocker in facts.blockers_by_pr[pr.number]):
+            continue
+        for blocker in facts.blockers_by_pr[pr.number]:
             if blocker.kind == "conflict":
-                key = f"conflict:{pr.number}"
-                if ledger.count("conflict-repair", pr.number, pr.head_ref_oid, key) >= 3:
-                    return (cap_action(pr, blocker, blocker.detail),)
-                return (Action("rebase_recreate", pr.number, key, blocker.detail),)
+                # Legacy conflict-repair filings may still be in flight.
+                legacy_key = f"conflict:{pr.number}"
+                if repair_in_flight(ledger, pr.number, pr.head_ref_oid, "conflict-repair", legacy_key, now):
+                    continue
+                if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "conflict-repair", legacy_key, now):
+                    continue
+                action = plan_invoker_rebase_onto_master(
+                    pr, ledger, max_repair_attempts, now, blocker.detail, claim_repair_filing,
+                    release_repair_filing,
+                )
+                if action is not None:
+                    return action
+                continue
             if blocker.kind == "failed_check":
-                if ledger.count("repair-check", pr.number, pr.head_ref_oid, blocker.key) >= 3:
-                    return (cap_action(pr, blocker, blocker.detail),)
-                return (Action("repair_check", pr.number, blocker.key, blocker.detail),)
+                decision = retry_decision(
+                    ledger, pr.number, pr.head_ref_oid, "repair-check", blocker.key,
+                    repair_check_plan_name(pr.number, blocker.key, pr.head_ref_oid), now, max_repair_attempts,
+                )
+                if decision["action"] == "needs-human":
+                    return cap_action(pr, blocker, blocker.detail)
+                if decision["action"] == "backoff":
+                    continue
+                if not decision["crashed_on_infra"] and repair_in_flight(ledger, pr.number, pr.head_ref_oid, "repair-check", blocker.key, now):
+                    continue
+                if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "repair-check", blocker.key, now):
+                    continue
+                # Same kind formula as mergify_failed_check_actions -- a claim
+                # made via that path (the Mergify-queue-driven view of this
+                # same check) and a claim made via this path (the PR's own
+                # check state) collapse to the identical ledger key, which is
+                # exactly what closes the bug this class reproduces: both
+                # paths often fire for the same real check at once.
+                if claim_repair_filing is not None and claim_repair_filing(
+                    repair_filing_kind_for_check(blocker.key), str(pr.number), pr.head_ref_oid,
+                ):
+                    continue
+                return Action("repair_check", pr.number, blocker.key, blocker.detail)
+    return None
 
-    for pr in stack.prs:
-        for blocker in blockers_by_pr[pr.number]:
-            if blocker.kind == "bot_review_thread":
-                if ledger.has_different_head("repair-bot-thread", pr.number, pr.head_ref_oid, blocker.key):
-                    return (Action("resolve_bot_threads", pr.number, blocker.key, blocker.detail),)
-                if ledger.count("repair-bot-thread", pr.number, pr.head_ref_oid, blocker.key) >= 3:
-                    return (cap_action(pr, blocker, blocker.detail),)
-                return (Action("repair_check", pr.number, "bot_review_thread:" + blocker.key, blocker.detail),)
 
-    for pr in stack.prs:
-        for blocker in blockers_by_pr[pr.number]:
+def plan_bot_thread_repairs(
+    facts: StackFacts,
+    ledger: Ledger,
+    max_repair_attempts: int,
+    now: int,
+    pr_numbers: Collection[int] | None = None,
+) -> Action | None:
+    for pr in _candidate_prs(facts, pr_numbers):
+        if any(blocker.kind == "human_decision" for blocker in facts.blockers_by_pr[pr.number]):
+            continue
+        for blocker in facts.blockers_by_pr[pr.number]:
+            if blocker.kind == "outdated_bot_review_thread":
+                return Action("resolve_bot_threads", pr.number, blocker.key, blocker.detail)
+            if blocker.kind != "bot_review_thread":
+                continue
+            if ledger.has_different_head("repair-bot-thread", pr.number, pr.head_ref_oid, blocker.key):
+                return Action("resolve_bot_threads", pr.number, blocker.key, blocker.detail)
+            decision = retry_decision(
+                ledger, pr.number, pr.head_ref_oid, "repair-bot-thread", blocker.key,
+                repair_bot_thread_plan_name(pr.number, pr.head_ref_oid), now, max_repair_attempts,
+            )
+            if decision["action"] == "needs-human":
+                return cap_action(pr, blocker, blocker.detail)
+            if decision["action"] == "backoff":
+                continue
+            if not decision["crashed_on_infra"] and repair_in_flight(ledger, pr.number, pr.head_ref_oid, "repair-bot-thread", blocker.key, now):
+                continue
+            if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "repair-bot-thread", blocker.key, now):
+                continue
+            return Action("repair_check", pr.number, "bot_review_thread:" + blocker.key, blocker.detail)
+    return None
+
+
+def has_active_repair_for_current_blocker(facts: StackFacts, ledger: Ledger, now: int) -> bool:
+    for pr in facts.stack.prs:
+        latest = pr.latest_mergify
+        if latest and latest.state == "dequeued" and latest.head_sha == pr.head_ref_oid:
+            for check_name in latest.failing_checks:
+                if repair_in_flight(ledger, pr.number, pr.head_ref_oid, "repair-check", check_name, now):
+                    return True
+                if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "repair-check", check_name, now):
+                    return True
+            if not latest.failing_checks:
+                key = f"rebase-onto-master:{pr.number}"
+                if repair_in_flight(ledger, pr.number, pr.head_ref_oid, REBASE_ONTO_MASTER_LEDGER_KIND, key, now):
+                    return True
+                if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, REBASE_ONTO_MASTER_LEDGER_KIND, key, now):
+                    return True
+        for blocker in facts.blockers_by_pr[pr.number]:
+            if blocker.kind == "conflict":
+                key = f"rebase-onto-master:{pr.number}"
+                if repair_in_flight(ledger, pr.number, pr.head_ref_oid, REBASE_ONTO_MASTER_LEDGER_KIND, key, now):
+                    return True
+                if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, REBASE_ONTO_MASTER_LEDGER_KIND, key, now):
+                    return True
+                legacy_key = f"conflict:{pr.number}"
+                if repair_in_flight(ledger, pr.number, pr.head_ref_oid, "conflict-repair", legacy_key, now):
+                    return True
+                if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "conflict-repair", legacy_key, now):
+                    return True
+            elif blocker.kind == "failed_check":
+                if repair_in_flight(ledger, pr.number, pr.head_ref_oid, "repair-check", blocker.key, now):
+                    return True
+                if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "repair-check", blocker.key, now):
+                    return True
+            elif blocker.kind == "bot_review_thread":
+                if repair_in_flight(ledger, pr.number, pr.head_ref_oid, "repair-bot-thread", blocker.key, now):
+                    return True
+                if infra_repair_owns_unit(ledger, pr.number, pr.head_ref_oid, "repair-bot-thread", blocker.key, now):
+                    return True
+    return False
+
+
+def plan_hard_blockers(
+    facts: StackFacts,
+    ledger: Ledger,
+    pr_numbers: Collection[int] | None = None,
+) -> Action | None:
+    for pr in _candidate_prs(facts, pr_numbers):
+        for blocker in facts.blockers_by_pr[pr.number]:
             if blocker.kind == "pending_check":
-                return ()
-            if blocker.kind in {"draft", "human_review_thread", "missing_check", "closed"}:
-                return (Action("comment_blocked", pr.number, blocker.key, public_blocker_kind(blocker.kind)),)
+                return None
+            if blocker.kind == "human_decision":
+                return None
+            if blocker.kind in HUMAN_BLOCKER_KINDS:
+                if ledger.count("comment-blocked", pr.number, pr.head_ref_oid, blocker.key) > 0:
+                    return None
+                return Action("comment_blocked", pr.number, blocker.key, blocker.detail)
+    return None
 
-    current_bottoms = [pr for pr in stack.prs if pr.state == "OPEN" and pr.base_ref_name == TRUNK]
-    if not current_bottoms:
-        first = stack.prs[0]
-        return (Action("comment_blocked", first.number, "no-current-bottom", "no current bottom on master"),)
-    bottom = current_bottoms[0]
 
-    non_hold_blockers = [b for b in all_blockers if b.kind != "merge_hold"]
-    hold_blockers = [b for b in all_blockers if b.kind == "merge_hold"]
+def plan_upper_stack_acceptance_blocker(facts: StackFacts, ledger: Ledger) -> Action | None:
+    if not facts.upper_stack_needs_acceptance or not facts.bottom or facts.all_blockers:
+        return None
+    upper_prs = unaccepted_upper_prs(facts.stack, facts.bottom)
+    if not upper_prs:
+        return None
+    key = "upper-stack-needs-acceptance"
+    if ledger.count("comment-blocked", facts.bottom.number, facts.bottom.head_ref_oid, key) > 0:
+        return None
+    upper_list = ", ".join(f"#{pr.number}" for pr in upper_prs)
+    return Action(
+        "comment_blocked",
+        facts.bottom.number,
+        key,
+        f"PR #{facts.bottom.number} is ready to land, but upper stack PR(s) {upper_list} are open without `admin-bypass`; a human must decide whether to include them in the admin-bypass landing stack or land them separately.",
+    )
+
+
+def plan_merge_hold_cleanup(facts: StackFacts, ledger: Ledger) -> Action | None:
+    if _has_pending_or_human_blocker(facts) or not facts.bottom:
+        return None
+    non_hold_blockers = [blocker for blocker in facts.all_blockers if blocker.kind != "merge_hold"]
+    hold_blockers = [blocker for blocker in facts.all_blockers if blocker.kind == "merge_hold"]
     if hold_blockers and not non_hold_blockers:
         blocker = hold_blockers[0]
-        pr = next(p for p in stack.prs if p.number == blocker.pr_number)
+        pr = next(pr for pr in facts.stack.prs if pr.number == blocker.pr_number)
         if ledger.count("remove-merge-hold", pr.number, pr.head_ref_oid, "merge-hold") >= 1:
-            return (cap_action(pr, blocker, blocker.detail),)
-        return (Action("remove_merge_hold", pr.number, "merge-hold", blocker.detail),)
-    if hold_blockers:
-        return ()
+            return cap_action(pr, blocker, blocker.detail)
+        return Action("remove_merge_hold", pr.number, "merge-hold", blocker.detail)
+    return None
 
-    if "admin-bypass" not in bottom.labels:
-        return (Action("comment_admin_bypass_nudge", bottom.number, "admin-bypass", "missing admin-bypass label"),)
 
+def plan_invoker_rebase_onto_master(
+    pr: PrSnapshot,
+    ledger: Ledger,
+    max_repair_attempts: int,
+    now: int,
+    reason: str,
+    claim_repair_filing: ClaimRepairFiling | None = None,
+    release_repair_filing: ReleaseRepairFiling | None = None,
+) -> Action | None:
+    """File an Invoker prompt job to rebase the PR onto master (no local force-push)."""
+    key = f"rebase-onto-master:{pr.number}"
+    decision = retry_decision(
+        ledger, pr.number, pr.head_ref_oid, REBASE_ONTO_MASTER_LEDGER_KIND, key,
+        rebase_onto_master_plan_name(pr.number, pr.head_ref_oid), now, max_repair_attempts,
+    )
+    if decision["action"] == "needs-human":
+        return cap_action(
+            pr,
+            Blocker(key, "rebase_onto_master", pr.number, reason),
+            reason,
+        )
+    if decision["action"] == "backoff":
+        return None
+    if not decision["crashed_on_infra"] and repair_in_flight(
+        ledger, pr.number, pr.head_ref_oid, REBASE_ONTO_MASTER_LEDGER_KIND, key, now,
+    ):
+        return None
+    if infra_repair_owns_unit(
+        ledger, pr.number, pr.head_ref_oid, REBASE_ONTO_MASTER_LEDGER_KIND, key, now,
+    ):
+        return None
+    legacy_key = f"conflict:{pr.number}"
+    if not decision["crashed_on_infra"] and repair_in_flight(
+        ledger, pr.number, pr.head_ref_oid, "conflict-repair", legacy_key, now,
+    ):
+        return None
+    if claim_repair_filing is not None and claim_repair_filing(
+        REBASE_ONTO_MASTER_FILING_KIND, str(pr.number), pr.head_ref_oid,
+    ):
+        if not _release_stale_rebase_filing_claim(
+            ledger, pr, key, legacy_key, now, claim_repair_filing, release_repair_filing,
+        ):
+            return None
+    return Action("rebase_onto_master", pr.number, key, reason)
+
+
+def _release_stale_rebase_filing_claim(
+    ledger: Ledger,
+    pr: PrSnapshot,
+    key: str,
+    legacy_key: str,
+    now: int,
+    claim_repair_filing: ClaimRepairFiling,
+    release_repair_filing: ReleaseRepairFiling | None,
+) -> bool:
+    """Release a held filing claim when a prior attempt already settled.
+
+    Returns True when the caller may proceed (claim re-acquired). Returns False
+    when the claim is still held for a live attempt or release is unavailable.
+    """
+    if release_repair_filing is None:
+        return False
+    if repair_in_flight(ledger, pr.number, pr.head_ref_oid, REBASE_ONTO_MASTER_LEDGER_KIND, key, now):
+        return False
+    if repair_in_flight(ledger, pr.number, pr.head_ref_oid, "conflict-repair", legacy_key, now):
+        return False
+    settled = ledger.latest(
+        f"{REBASE_ONTO_MASTER_LEDGER_KIND}-settled", pr.number, pr.head_ref_oid, key,
+    )
+    if settled is None:
+        settled = ledger.latest("conflict-repair-settled", pr.number, pr.head_ref_oid, legacy_key)
+    if settled is None:
+        settled = ledger.latest_by_unit(
+            f"{REBASE_ONTO_MASTER_LEDGER_KIND}-settled", pr.number, key,
+        )
+    if settled is None:
+        settled = ledger.latest_by_unit("conflict-repair-settled", pr.number, legacy_key)
+    if settled is None:
+        return False
+    release_repair_filing(REBASE_ONTO_MASTER_FILING_KIND, str(pr.number), pr.head_ref_oid)
+    return not claim_repair_filing(REBASE_ONTO_MASTER_FILING_KIND, str(pr.number), pr.head_ref_oid)
+
+
+def plan_rebase_onto_base(
+    pr: PrSnapshot,
+    trunk: str,
+    ledger: Ledger,
+    max_attempts: int,
+    reason: str,
+    claim_repair_filing: ClaimRepairFiling | None = None,
+) -> Action | None:
+    # Retained for unit tests that pin the legacy Python force-push path.
+    # Production planners no longer call this for behind-master or CI failures;
+    # conflicts and no-CI Mergify dequeues use plan_invoker_rebase_onto_master.
+    # Persistent count (count_by_unit), not the head_sha-scoped count() --
+    # a rebase attempt changes head_sha by definition, so the head_sha-scoped
+    # count could never accumulate past 1 no matter how many times it
+    # genuinely re-hit a conflict. This call site has no backoff/cooldown
+    # concept and never has (a flat cap only, unlike the shared retry_decision
+    # used elsewhere in this module) -- kept that way here deliberately.
+    rebase_attempts = ledger.count_by_unit("rebase-onto-base-conflict", pr.number, trunk)
+    if rebase_attempts >= max_attempts:
+        return cap_action(
+            pr,
+            Blocker("rebase-onto-base", "rebase_conflict", pr.number, "rebase onto base"),
+            f"rebase onto `{trunk}` keeps hitting a real conflict; a human needs to rebase PR #{pr.number} manually",
+        )
+    # None here (not a cap_action) means "no action this tick" -- a different
+    # filer already claimed this exact (kind, subject, stateSha); every
+    # caller of plan_rebase_onto_base already returns an Action | None
+    # verbatim, so this propagates as "try the next planning pass" without
+    # needing any caller changes.
+    if claim_repair_filing is not None and claim_repair_filing(
+        REBASE_CONFLICT_REPAIR_FILING_KIND, str(pr.number), pr.head_ref_oid,
+    ):
+        return None
+    return Action("rebase_onto_base", pr.number, trunk, f"rebase #{pr.number} onto `{trunk}`: {reason}")
+
+
+def plan_bottom_progress(
+    facts: StackFacts,
+    ledger: Ledger,
+    max_requeue_attempts: int,
+    now: int,
+    claim_repair_filing: ClaimRepairFiling | None = None,
+) -> Action | None:
+    if _bottom_has_pending_or_human_blocker(facts):
+        return None
+    if any(blocker.kind == "merge_hold" for blocker in facts.all_blockers):
+        return None
+    if not facts.bottom:
+        if facts.bottom_topology.kind == "current_bottom":
+            raise AssertionError("current_bottom topology reached no-bottom branch")
+        root = facts.bottom_topology.root
+        if facts.bottom_topology.kind == "external_open_base":
+            owners = ", ".join(f"#{number}" for number in facts.bottom_topology.external_open_base_pr_numbers)
+            return Action(
+                "comment_blocked",
+                root.number,
+                "external-open-base-pr",
+                f"lowest open stack PR #{root.number} is based on `{root.base_ref_name}`, which still belongs to open PR(s) {owners} outside this stack; leaving it alone to avoid dropping dependency changes",
+            )
+        return Action(
+            "retarget_base",
+            root.number,
+            facts.trunk,
+            f"retarget stack root from `{root.base_ref_name}` to `{facts.trunk}`",
+        )
+
+    bottom = facts.bottom
     latest = bottom.latest_mergify
-    requeue_reason = ""
-    requeue_key = "manual"
+    if "admin-bypass" not in bottom.labels:
+        if (
+            facts.queue_only_noop_check
+            and latest
+            and latest.queue_rule_name == "admin-bypass"
+            and latest.state == "dequeued"
+        ):
+            return Action(
+                "restore_admin_bypass_label",
+                bottom.number,
+                facts.queue_only_noop_check,
+                "restore admin-bypass label after queue-only noop",
+            )
+        return Action("comment_admin_bypass_nudge", bottom.number, "admin-bypass", "missing admin-bypass label")
+    if facts.upper_stack_needs_acceptance:
+        return None
+    if has_active_queue_event(bottom, now):
+        return None
+    if has_stale_matching_head_queue_event(bottom, now):
+        detail = stale_matching_head_queue_event_detail(bottom)
+        attempts = ledger.count(
+            REFRESH_STALE_QUEUE_LEDGER_KIND,
+            bottom.number,
+            bottom.head_ref_oid,
+            STALE_QUEUE_EVENT_REFRESH_KEY,
+        )
+        if attempts >= max_requeue_attempts:
+            return cap_action(
+                bottom,
+                Blocker(STALE_QUEUE_EVENT_REFRESH_KEY, "stale_queue_event", bottom.number, detail),
+                detail,
+            )
+        return Action("refresh_stale_queue", bottom.number, STALE_QUEUE_EVENT_REFRESH_KEY, detail)
+    if not facts.required_checks:
+        # Non-Invoker repo (no admin-bypass Mergify rule -> no required-check
+        # allowlist -> no Mergify queue to requeue into). Land directly via
+        # squash-merge once GitHub reports MERGEABLE and every observed CI
+        # check is green; otherwise wait for CI rather than merging blind.
+        # Invoker itself always resolves a non-empty required_checks set
+        # from its own .mergify.yml, so this branch never fires for it and
+        # it keeps landing through the Mergify-queue requeue path below.
+        if bottom.mergeable != "MERGEABLE" or not all_observed_checks_green(bottom):
+            return None
+        key = "squash"
+        attempts = ledger.count("squash-merge", bottom.number, bottom.head_ref_oid, key)
+        if attempts >= max_requeue_attempts:
+            return cap_action(bottom, Blocker(key, "capped", bottom.number, "squash-merge"), "squash-merge")
+        return Action("squash_merge", bottom.number, key, "MERGEABLE with all observed CI green")
+    # Behind master alone is not a rebase trigger: wait / requeue. Rebases are
+    # Invoker jobs for GitHub conflicts and no-CI Mergify dequeues only.
+    requeue_reason = "eligible-when-ready"
+    requeue_key = "ready"
     if latest and latest.state == "dequeued":
         requeue_reason = "eligible-after-dequeue"
         requeue_key = latest.comment_id or "manual"
     elif "dequeued" in bottom.labels:
         requeue_reason = "eligible-after-dequeued-label"
-    if not requeue_reason:
+    attempts = ledger.count("requeue", bottom.number, bottom.head_ref_oid, requeue_key)
+    if attempts >= max_requeue_attempts:
+        if ledger.count("requeue-escalation", bottom.number, bottom.head_ref_oid, requeue_key) == 0:
+            return Action(
+                "escalate_requeue_stuck",
+                bottom.number,
+                requeue_key,
+                f"requeue capped after {attempts} attempt(s) at head {bottom.head_ref_oid}; escalating to an agent",
+            )
+        return cap_action(bottom, Blocker(requeue_key, "capped", bottom.number, "requeue"), "requeue")
+    return Action("requeue", bottom.number, requeue_key, requeue_reason)
+
+
+def plan_actions_from_facts(
+    facts: StackFacts,
+    ledger: Ledger,
+    max_requeue_attempts: int,
+    max_repair_attempts: int,
+    now: int,
+    claim_repair_filing: ClaimRepairFiling | None = None,
+    release_repair_filing: ReleaseRepairFiling | None = None,
+) -> tuple[Action, ...]:
+    if facts.bottom:
+        bottom_pr_numbers = (facts.bottom.number,)
+        action = plan_mergify_queue_repairs(
+            facts, ledger, max_repair_attempts, now, bottom_pr_numbers, claim_repair_filing, release_repair_filing,
+        )
+        if action is not None:
+            return (action,)
+        action = plan_direct_repairs(
+            facts, ledger, max_repair_attempts, now, bottom_pr_numbers, claim_repair_filing, release_repair_filing,
+        )
+        if action is not None:
+            return (action,)
+        action = plan_bot_thread_repairs(facts, ledger, max_repair_attempts, now, bottom_pr_numbers)
+        if action is not None:
+            return (action,)
+        action = plan_hard_blockers(facts, ledger, bottom_pr_numbers)
+        if action is not None:
+            return (action,)
+        if has_active_repair_for_current_blocker(facts, ledger, now):
+            return ()
+        if _bottom_has_pending_or_human_blocker(facts) or _bottom_has_repairable_blocker(facts):
+            return ()
+        action = plan_bottom_progress(facts, ledger, max_requeue_attempts, now, claim_repair_filing)
+        if action is not None:
+            return (action,)
+    action = plan_mergify_queue_repairs(
+        facts, ledger, max_repair_attempts, now,
+        claim_repair_filing=claim_repair_filing, release_repair_filing=release_repair_filing,
+    )
+    if action is not None:
+        return (action,)
+    action = plan_direct_repairs(
+        facts, ledger, max_repair_attempts, now,
+        claim_repair_filing=claim_repair_filing, release_repair_filing=release_repair_filing,
+    )
+    if action is not None:
+        return (action,)
+    action = plan_bot_thread_repairs(facts, ledger, max_repair_attempts, now)
+    if action is not None:
+        return (action,)
+    if has_active_repair_for_current_blocker(facts, ledger, now):
         return ()
-    if ledger.count("requeue", bottom.number, bottom.head_ref_oid, requeue_key) >= 2:
-        return (cap_action(bottom, Blocker(requeue_key, "capped", bottom.number, "requeue"), "requeue"),)
-    return (Action("requeue", bottom.number, requeue_key, requeue_reason),)
+    action = plan_hard_blockers(facts, ledger)
+    if action is not None:
+        return (action,)
+    action = plan_upper_stack_acceptance_blocker(facts, ledger)
+    if action is not None:
+        return (action,)
+    action = plan_merge_hold_cleanup(facts, ledger)
+    if action is not None:
+        return (action,)
+    action = plan_bottom_progress(facts, ledger, max_requeue_attempts, now, claim_repair_filing)
+    if action is not None:
+        return (action,)
+    return ()
+
+
+def plan_stack_actions(
+    stack: StackGroup,
+    required_checks: Collection[str],
+    ledger: Ledger,
+    now_epoch: int,
+    max_requeue_attempts: int = 2,
+    max_repair_attempts: int = 3,
+    suppressed_failed_checks_by_pr: Mapping[int, Collection[str]] | None = None,
+    open_pr_numbers_by_head: Mapping[str, Collection[int]] | None = None,
+    claim_repair_filing: ClaimRepairFiling | None = None,
+    release_repair_filing: ReleaseRepairFiling | None = None,
+) -> tuple[Action, ...]:
+    del suppressed_failed_checks_by_pr
+    facts = build_stack_facts(
+        stack,
+        required_checks,
+        ledger,
+        open_pr_numbers=(),
+        open_pr_numbers_by_head=open_pr_numbers_by_head or {},
+        trunk=TRUNK,
+    )
+    return plan_actions_from_facts(
+        facts, ledger, max_requeue_attempts, max_repair_attempts, now_epoch,
+        claim_repair_filing, release_repair_filing,
+    )
+
+
+def plan_stack_execution(
+    stack: StackGroup,
+    required_checks: Collection[str],
+    ledger: Ledger,
+    now_epoch: int,
+    open_pr_numbers: Collection[int],
+    open_pr_numbers_by_head: Mapping[str, Collection[int]],
+    max_requeue_attempts: int = 2,
+    max_repair_attempts: int = 3,
+    trunk: str = TRUNK,
+    stale_base_by_pr: Mapping[int, bool] | None = None,
+    claim_repair_filing: ClaimRepairFiling | None = None,
+    release_repair_filing: ReleaseRepairFiling | None = None,
+) -> StackExecutionPlan:
+    facts = build_stack_facts(stack, required_checks, ledger, open_pr_numbers, open_pr_numbers_by_head, trunk, stale_base_by_pr=stale_base_by_pr)
+    summary = summarize_stack(facts)
+    if facts.prereq_status and facts.prereq_status.is_open:
+        return StackExecutionPlan(
+            summary=summary,
+            actions=(),
+            wait_reason="repair-prereq-open",
+            prereq_status=facts.prereq_status,
+            queue_only_noop_check=facts.queue_only_noop_check,
+        )
+    actions = plan_actions_from_facts(
+        facts, ledger, max_requeue_attempts, max_repair_attempts, now_epoch,
+        claim_repair_filing, release_repair_filing,
+    )
+    if actions:
+        return StackExecutionPlan(
+            summary=summary,
+            actions=actions,
+            prereq_status=facts.prereq_status,
+            queue_only_noop_check=facts.queue_only_noop_check,
+        )
+    wait_reason = "repair-in-flight" if has_active_repair_for_current_blocker(facts, ledger, now_epoch) else wait_reason_for_facts(facts, now_epoch)
+    return StackExecutionPlan(
+        summary=summary,
+        actions=(),
+        wait_reason=wait_reason,
+        prereq_status=facts.prereq_status,
+        queue_only_noop_check=facts.queue_only_noop_check,
+    )
+
+
+REPORT_REPAIR_KINDS = frozenset({"repair-check", "conflict-repair", "rebase-onto-master", "repair-bot-thread"})
+
+
+def stack_arrow(stack: StackGroup) -> str:
+    return " -> ".join(f"#{pr.number}" for pr in stack.prs)
+
+
+def _display_value(value: object) -> str:
+    text = str(value)
+    return text.replace("\n", " ").strip()
+
+
+def _json_value(value: object) -> str:
+    return json.dumps(str(value), sort_keys=True)
+
+
+def _repair_plan_name(kind: str, pr_number: int, head_sha: str, key: str) -> str:
+    if kind == "repair-check":
+        return repair_check_plan_name(pr_number, key, head_sha)
+    if kind == "conflict-repair":
+        return repair_conflict_plan_name(pr_number, head_sha)
+    if kind == "rebase-onto-master":
+        return rebase_onto_master_plan_name(pr_number, head_sha)
+    return repair_bot_thread_plan_name(pr_number, head_sha)
+
+
+def _repair_kind_key_for_action(action: Action) -> tuple[str, str] | None:
+    if action.kind == "repair_check":
+        if action.key.startswith("bot_review_thread:"):
+            return "repair-bot-thread", action.key.split(":", 1)[1]
+        return "repair-check", action.key
+    if action.kind == "rebase_onto_master":
+        return "rebase-onto-master", action.key
+    return None
+
+
+def _normalized_repair_row_kind(kind: str) -> tuple[str, str] | None:
+    if kind.endswith("-pending-settled"):
+        base = kind.removesuffix("-pending-settled")
+        return (base, "pending-settled") if base in REPORT_REPAIR_KINDS else None
+    if kind.endswith("-pending"):
+        base = kind.removesuffix("-pending")
+        return (base, "pending") if base in REPORT_REPAIR_KINDS else None
+    if kind.endswith("-settled"):
+        base = kind.removesuffix("-settled")
+        return (base, "settled") if base in REPORT_REPAIR_KINDS else None
+    return (kind, "submitted") if kind in REPORT_REPAIR_KINDS else None
+
+
+def _repair_row_note(phase: str, dispatch_state: str, workflow_id: str | None, meta: Mapping[str, object]) -> str | None:
+    if dispatch_state == "not-acknowledged" and meta.get("failurePhase") == "submission":
+        error = str(meta.get("error") or "").lower()
+        if "timeout" in error or "timed out" in error:
+            return "submission-timeout"
+        return "submission-not-acknowledged"
+    if dispatch_state == "acknowledged" and not workflow_id:
+        return "missing workflow id"
+    if phase == "pending" and not workflow_id:
+        return "awaiting submission acknowledgement; missing workflow id"
+    reason = meta.get("reason")
+    return str(reason) if reason else None
+
+
+def repair_workflow_evidence_for_stack(
+    stack: StackGroup,
+    ledger: Ledger,
+    max_repair_attempts: int,
+) -> tuple[RepairWorkflowEvidence, ...]:
+    current_heads = {pr.number: pr.head_ref_oid for pr in stack.prs}
+    evidence: list[RepairWorkflowEvidence] = []
+    for row in ledger.rows:
+        normalized = _normalized_repair_row_kind(str(row.get("kind") or ""))
+        if normalized is None:
+            continue
+        kind, phase = normalized
+        pr_number = int(row.get("pr", -1))
+        head_sha = str(row.get("headSha") or "")
+        if current_heads.get(pr_number) != head_sha:
+            continue
+        key = str(row.get("key") or "")
+        meta = row.get("meta") if isinstance(row.get("meta"), Mapping) else {}
+        workflow_id_value = meta.get("workflowId") if isinstance(meta, Mapping) else None
+        workflow_id = str(workflow_id_value) if workflow_id_value else None
+        dispatch_state = str(meta.get("dispatchState") or phase)
+        plan_name = str(meta.get("planName") or _repair_plan_name(kind, pr_number, head_sha, key))
+        evidence.append(
+            RepairWorkflowEvidence(
+                kind=kind,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                key=key,
+                plan_name=plan_name,
+                dispatch_state=dispatch_state,
+                workflow_id=workflow_id,
+                workflow_status=str(meta.get("workflowStatus")) if meta.get("workflowStatus") else None,
+                outcome_class=str(meta.get("outcomeClass")) if meta.get("outcomeClass") else None,
+                note=_repair_row_note(phase, dispatch_state, workflow_id, meta),
+                epoch=int(row.get("epoch", 0) or 0),
+                cap_attempts=count_code_repair_attempts(ledger, kind, pr_number, key),
+                cap_limit=max_repair_attempts,
+            )
+        )
+    return tuple(sorted(evidence, key=lambda item: (item.pr_number, item.kind, item.key, item.epoch)))
+
+
+def _format_evidence(evidence: RepairWorkflowEvidence) -> str:
+    parts = [
+        f"{evidence.kind} PR #{evidence.pr_number}",
+        f"key={_json_value(evidence.key)}",
+        f"plan={evidence.plan_name}",
+        f"dispatch={evidence.dispatch_state}",
+        f"workflow={evidence.workflow_id or 'missing'}",
+    ]
+    if evidence.workflow_status:
+        parts.append(f"status={evidence.workflow_status}")
+    if evidence.outcome_class:
+        parts.append(f"outcome={evidence.outcome_class}")
+    if evidence.cap_attempts is not None and evidence.cap_limit is not None:
+        parts.append(f"cap={evidence.cap_attempts}/{evidence.cap_limit}")
+    if evidence.note:
+        parts.append(f"note={evidence.note}")
+    return " ".join(parts)
+
+
+def _action_diagnosis(action: Action) -> str:
+    if action.kind == "comment_blocked":
+        return action.detail
+    return f"{action.kind}: {action.detail}"
+
+
+def _plan_diagnosis(plan: StackExecutionPlan) -> str:
+    if plan.actions:
+        return "; ".join(_action_diagnosis(action) for action in plan.actions)
+    reason = plan.wait_reason or "no-action"
+    blockers = []
+    for pr_summary in plan.summary.get("prs", []):
+        if not isinstance(pr_summary, Mapping):
+            continue
+        for blocker in pr_summary.get("blockers", []):
+            if isinstance(blocker, Mapping):
+                blockers.append(f"#{pr_summary.get('number')}: {blocker.get('detail')}")
+    if blockers:
+        return f"wait: {reason}; " + "; ".join(_display_value(item) for item in blockers)
+    return f"wait: {reason}"
+
+
+def _report_cap_lines(plan: StackExecutionPlan, ledger: Ledger, max_repair_attempts: int) -> tuple[str, ...]:
+    lines: list[str] = []
+    for pr_summary in plan.summary.get("prs", []):
+        if not isinstance(pr_summary, Mapping):
+            continue
+        pr_number = int(pr_summary.get("number") or 0)
+        head_sha = str(pr_summary.get("head_sha") or "")
+        for blocker in pr_summary.get("blockers", []):
+            if not isinstance(blocker, Mapping):
+                continue
+            kind = str(blocker.get("kind") or "")
+            key = str(blocker.get("key") or "")
+            if kind == "failed_check":
+                attempts = count_code_repair_attempts(ledger, "repair-check", pr_number, key)
+                lines.append(f"repair-check PR #{pr_number} key={_json_value(key)} cap={attempts}/{max_repair_attempts}")
+            elif kind == "conflict":
+                repair_key = f"rebase-onto-master:{pr_number}"
+                attempts = count_code_repair_attempts(ledger, "rebase-onto-master", pr_number, repair_key)
+                lines.append(f"rebase-onto-master PR #{pr_number} key={_json_value(repair_key)} cap={attempts}/{max_repair_attempts}")
+            elif kind == "bot_review_thread":
+                attempts = count_code_repair_attempts(ledger, "repair-bot-thread", pr_number, key)
+                lines.append(f"repair-bot-thread PR #{pr_number} key={_json_value(key)} cap={attempts}/{max_repair_attempts}")
+        if plan.actions:
+            for action in plan.actions:
+                normalized = _repair_kind_key_for_action(action)
+                if normalized is None or action.pr_number != pr_number:
+                    continue
+                action_kind, action_key = normalized
+                if action_kind == "rebase-onto-master":
+                    action_key = f"rebase-onto-master:{pr_number}"
+                attempts = count_code_repair_attempts(ledger, action_kind, pr_number, action_key)
+                line = f"{action_kind} PR #{pr_number} key={_json_value(action_key)} cap={attempts}/{max_repair_attempts}"
+                if line not in lines:
+                    lines.append(line)
+        del head_sha
+    return tuple(lines)
+
+
+def build_stack_report_sections(
+    stacks: Collection[StackGroup],
+    required_checks: Collection[str],
+    ledger: Ledger,
+    now_epoch: int,
+    open_pr_numbers: Collection[int],
+    open_pr_numbers_by_head: Mapping[str, Collection[int]],
+    max_requeue_attempts: int = 2,
+    max_repair_attempts: int = 3,
+    trunk: str = TRUNK,
+    stale_base_by_pr: Mapping[int, bool] | None = None,
+) -> tuple[StackReportSection, ...]:
+    sections: list[StackReportSection] = []
+    for stack in stacks:
+        plan = plan_stack_execution(
+            stack,
+            required_checks,
+            ledger,
+            now_epoch,
+            open_pr_numbers,
+            open_pr_numbers_by_head,
+            max_requeue_attempts,
+            max_repair_attempts,
+            trunk,
+            stale_base_by_pr,
+            None,
+            None,
+        )
+        root = stack.prs[0]
+        descendants = tuple(pr for pr in stack.prs[1:] if pr.state == "OPEN")
+        details = [
+            f"Stack: {stack_arrow(stack)}",
+            f"Bottom topology: {plan.summary.get('bottom_topology')}",
+            f"Bottom PR: #{plan.summary.get('bottom_pr')}" if plan.summary.get("bottom_pr") else "Bottom PR: none",
+            "Descendants: " + (", ".join(f"#{pr.number}" for pr in descendants) if descendants else "none"),
+        ]
+        if plan.summary.get("bottom_topology") == "external_open_base":
+            details.append(f"External base: root #{root.number} is based on {root.base_ref_name}")
+        if plan.prereq_status:
+            details.append(
+                "Prerequisite repair: "
+                f"check={_json_value(plan.prereq_status.check_name)} "
+                f"pr=#{plan.prereq_status.prereq_pr_number} "
+                f"branch={plan.prereq_status.prereq_branch or 'missing'} "
+                f"open={str(plan.prereq_status.is_open).lower()} "
+                f"needs_followup_requeue={str(plan.prereq_status.needs_followup_requeue).lower()}"
+            )
+        if plan.actions:
+            for action in plan.actions:
+                repair = _repair_kind_key_for_action(action)
+                if repair is not None:
+                    repair_kind, repair_key = repair
+                    details.append(
+                        "Planned repair: "
+                        f"{repair_kind} PR #{action.pr_number} "
+                        f"key={_json_value(repair_key)} "
+                        f"plan={_repair_plan_name(repair_kind, action.pr_number, root.head_ref_oid if action.pr_number == root.number else next(pr.head_ref_oid for pr in stack.prs if pr.number == action.pr_number), repair_key)}"
+                    )
+                else:
+                    details.append(f"Planned action: {action.kind} PR #{action.pr_number} key={_json_value(action.key)}")
+        else:
+            details.append(f"Wait reason: {plan.wait_reason or 'no-action'}")
+        blockers = []
+        for pr_summary in plan.summary.get("prs", []):
+            if not isinstance(pr_summary, Mapping):
+                continue
+            for blocker in pr_summary.get("blockers", []):
+                if isinstance(blocker, Mapping):
+                    blockers.append(
+                        f"#{pr_summary.get('number')} {blocker.get('kind')} key={_json_value(blocker.get('key'))}: {_display_value(blocker.get('detail'))}"
+                    )
+        details.append("Blockers: " + ("; ".join(blockers) if blockers else "none"))
+        cap_lines = _report_cap_lines(plan, ledger, max_repair_attempts)
+        details.append("Caps: " + ("; ".join(cap_lines) if cap_lines else "none"))
+        evidence = repair_workflow_evidence_for_stack(stack, ledger, max_repair_attempts)
+        details.append("Repair evidence: " + ("; ".join(_format_evidence(row) for row in evidence) if evidence else "none for current heads"))
+        sections.append(
+            StackReportSection(
+                stack_id=stack.stack_id,
+                stack_arrow=stack_arrow(stack),
+                root_pr_number=root.number,
+                diagnosis=_plan_diagnosis(plan),
+                details=tuple(details),
+            )
+        )
+    return tuple(sections)
+
+
+def render_stack_report(repo: str, sections: Collection[StackReportSection]) -> str:
+    lines = [f"Admin-bypass stack report for {repo}", "", "STACK | DIAGNOSIS", "----- | ---------"]
+    for section in sections:
+        lines.append(f"{section.stack_arrow} | {_display_value(section.diagnosis)}")
+    if not sections:
+        lines.append("(none) | no eligible admin-bypass stacks")
+    for section in sections:
+        lines.extend(["", f"Root #{section.root_pr_number} ({section.stack_id})"])
+        for detail in section.details:
+            lines.append(f"  {detail}")
+    return "\n".join(lines) + "\n"

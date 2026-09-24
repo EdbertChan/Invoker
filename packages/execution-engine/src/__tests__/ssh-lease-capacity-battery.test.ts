@@ -192,6 +192,56 @@ describe('SSH lease capacity battery', () => {
     expect(liveLeases(adapter)[0]?.resourceKey).toBe('ssh:invoker@shared.example.com:22');
   });
 
+  it('releases a pending SSH pool lease when task-start persistence fails', async () => {
+    const adapter = await SQLiteAdapter.create(':memory:');
+    adapters.push(adapter);
+    const first = makeTask('wf-persist-fails/first', 'pnpm-ssh');
+    const second = makeTask('wf-persist-fails/second', 'pnpm-ssh');
+    const taskMap = new Map([first, second].map((task) => [task.id, task]));
+    const sshExecutor = makeSshExecutor();
+    const persistence = bindLeasePersistence(adapter);
+    const persistFailure = new Error('task-start persist failed');
+    persistence.updateTask.mockImplementationOnce(() => {
+      throw persistFailure;
+    });
+    const handleWorkerResponse = vi.fn(() => []);
+    const runner = makePoolRunner({
+      pools: 'dual-shared',
+      sshExecutor,
+      persistence,
+      orchestrator: {
+        getTask: (id: string) => taskMap.get(id) ?? null,
+        getAllTasks: () => [...taskMap.values()],
+        deferTask: vi.fn(),
+        markTaskRunningAfterLaunch: () => true,
+        handleWorkerResponse,
+      },
+    });
+
+    await runner.executeTask(first);
+
+    expect(sshExecutor.start).toHaveBeenCalledTimes(1);
+    expect(handleWorkerResponse).toHaveBeenCalledWith(expect.objectContaining({
+      actionId: first.id,
+      attemptId: first.execution.selectedAttemptId,
+      status: 'failed',
+    }));
+    expect(liveLeases(adapter)).toHaveLength(0);
+
+    const secondRun = runner.executeTask(second);
+    await vi.waitFor(() => expect(sshExecutor.start).toHaveBeenCalledTimes(2));
+    sshExecutor.completeByTaskId.get(second.id)?.({
+      requestId: `done-${second.id}`,
+      actionId: second.id,
+      attemptId: second.execution.selectedAttemptId,
+      status: 'completed',
+      outputs: { exitCode: 0 },
+    });
+    await secondRun;
+
+    expect(liveLeases(adapter)).toHaveLength(0);
+  });
+
   it('fills expectedCap after recreate/preempt-style churn with ready work remaining', async () => {
     const adapter = await SQLiteAdapter.create(':memory:');
     adapters.push(adapter);
@@ -316,5 +366,47 @@ describe('SSH lease capacity battery', () => {
     }
     await Promise.all(runs);
     expect(liveLeases(adapter)).toHaveLength(0);
+  });
+
+  it('killActiveExecution releases the SSH pool lease when it kills an active execution', async () => {
+    const taskId = 'wf-kill/task';
+    const attemptId = 'wf-kill/task-attempt';
+    const task = makeTask(taskId, 'pnpm-ssh', attemptId);
+    const releaseExecutionResourceLease = vi.fn();
+    const executor = { ...makeSshExecutor(), kill: vi.fn().mockResolvedValue(undefined) };
+
+    const runner = new TaskRunner({
+      orchestrator: {
+        getTask: (id: string) => (id === taskId ? task : null),
+        getAllTasks: () => [task],
+        deferTask: vi.fn(),
+        markTaskRunningAfterLaunch: () => true,
+        handleWorkerResponse: () => [],
+      },
+      persistence: { releaseExecutionResourceLease },
+      executorRegistry: {
+        getDefault: () => executor,
+        get: () => executor,
+        getAll: () => [executor],
+        register: vi.fn(),
+      },
+      cwd: '/tmp',
+    } as never);
+
+    const handle = { attemptId, taskId };
+    (runner as unknown as { activeExecutions: Map<string, unknown> }).activeExecutions.set(attemptId, {
+      handle,
+      executor,
+      taskId,
+      poolId: 'pnpm-ssh',
+      poolMemberKey: 'ssh:remote-a',
+      leaseResourceKey: 'ssh:invoker@a.example.com:22',
+      leaseHolderId: attemptId,
+    });
+
+    expect(await runner.killActiveExecution(taskId)).toBe(true);
+
+    expect(executor.kill).toHaveBeenCalledWith(handle);
+    expect(releaseExecutionResourceLease).toHaveBeenCalledWith('ssh:invoker@a.example.com:22', attemptId);
   });
 });

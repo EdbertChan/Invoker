@@ -7,14 +7,31 @@ export interface AgentCommandSpec {
 
 export interface AgentCommandBuildOptions {
   executionModel?: string;
+  maxTurns?: number;
 }
 export interface ExecutionModelOption {
   id: string;
   label: string;
 }
 
+export type SupportedModelsProvenance = 'agent' | 'built-in';
 
 export const DEFAULT_EXECUTION_AGENT = 'codex';
+
+export class ExecutionModelDiscoveryUnavailableError extends Error {
+  readonly executionModelDiscoveryUnavailable = true;
+}
+
+export function isExecutionModelDiscoveryUnavailableError(
+  error: unknown,
+): error is ExecutionModelDiscoveryUnavailableError {
+  if (error instanceof ExecutionModelDiscoveryUnavailableError) return true;
+  return (
+    typeof error === 'object'
+    && error !== null
+    && (error as { executionModelDiscoveryUnavailable?: unknown }).executionModelDiscoveryUnavailable === true
+  );
+}
 
 export interface ExecutionAgent {
   readonly name: string;
@@ -23,6 +40,7 @@ export interface ExecutionAgent {
   readonly bundledSkillRoot?: string;
   readonly bundledSkills?: readonly string[];
   readonly supportedModels?: readonly ExecutionModelOption[];
+  readonly supportedModelsProvenance?: SupportedModelsProvenance;
   supportsModel?(executionModel: string): boolean;
   buildCommand(fullPrompt: string, options?: AgentCommandBuildOptions): AgentCommandSpec;
   buildResumeArgs(sessionId: string): { cmd: string; args: string[] };
@@ -34,7 +52,7 @@ export interface ExecutionAgent {
 }
 
 export function assertExecutionModelSupported(
-  agent: Pick<ExecutionAgent, 'name' | 'supportedModels' | 'supportsModel'>,
+  agent: Pick<ExecutionAgent, 'name' | 'supportedModels' | 'supportedModelsProvenance' | 'supportsModel'>,
   executionModel: string | null | undefined,
 ): void {
   const normalizedModel = executionModel?.trim();
@@ -42,7 +60,11 @@ export function assertExecutionModelSupported(
   if (agent.supportedModels?.some((candidate) => candidate.id === normalizedModel)) return;
   if (agent.supportsModel?.(normalizedModel)) return;
   const supported = agent.supportedModels?.map((candidate) => candidate.id) ?? [];
-  const hint = supported.length > 0 ? ` Known models: [${supported.join(', ')}].` : '';
+  const hint = supported.length > 0
+    ? agent.supportedModelsProvenance === 'built-in'
+      ? ` Known models: [${supported.join(', ')}] (built-in fallback; live discovery was unavailable).`
+      : ` Known models: [${supported.join(', ')}].`
+    : '';
   throw new Error(`Execution model "${normalizedModel}" is not supported for execution agent "${agent.name}".${hint}`);
 }
 

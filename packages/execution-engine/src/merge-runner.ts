@@ -5,7 +5,7 @@
  * capabilities) as its first parameter, avoiding circular imports.
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { normalize, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -13,12 +13,12 @@ import { pathToFileURL } from 'node:url';
 import type { Orchestrator, TaskLineageExpectation, TaskState, TaskStateChanges } from '@invoker/workflow-core';
 import { OrchestratorError, OrchestratorErrorCode } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
-import type { WorkResponse } from '@invoker/contracts';
+import { appendRotatingLogLine, type WorkResponse } from '@invoker/contracts';
 import type { TaskRunnerCallbacks } from './task-runner-callbacks.js';
 import type { MergeGateProvider } from './merge-gate-provider.js';
 import type { ReviewProviderRegistry } from './review-provider-registry.js';
 import { normalizeBranchForGithubCli } from './github-branch-ref.js';
-import { isInvokerRepoUrl, type PrAuthoringContext, type PrAuthoringTaskEntry } from './pr-authoring.js';
+import { isInvokerRepoUrl, reviewClaimSlices, type PrAuthoringContext, type PrAuthoringTaskEntry } from './pr-authoring.js';
 import { isGitRefLockRace } from './git-utils.js';
 type ReviewGateState = NonNullable<TaskState['execution']['reviewGate']>;
 type ReviewGateArtifact = ReviewGateState['artifacts'][number];
@@ -30,7 +30,7 @@ export const MERGE_TRACE_LOG = resolve(homedir(), '.invoker', 'merge-trace.log')
 export function mergeTrace(tag: string, data: Record<string, unknown>): void {
   try {
     mkdirSync(resolve(homedir(), '.invoker'), { recursive: true });
-    appendFileSync(MERGE_TRACE_LOG, `${new Date().toISOString()} [merge-trace:runner] ${tag} ${JSON.stringify(data)}\n`);
+    appendRotatingLogLine(MERGE_TRACE_LOG, `${new Date().toISOString()} [merge-trace:runner] ${tag} ${JSON.stringify(data)}\n`);
   } catch { /* best effort */ }
 }
 
@@ -59,19 +59,86 @@ function safeGetWorkspacePath(persistence: SQLiteAdapter, taskId: string): strin
     : undefined;
 }
 
-function canonicalMergeMode(mode: string | undefined): 'manual' | 'automatic' | 'external_review' {
+function canonicalMergeMode(mode: string | undefined): 'manual' | 'automatic' | 'external_review' | 'no_op' {
   const m = mode ?? 'manual';
   if (m === 'external_review') return 'external_review';
   if (m === 'automatic') return 'automatic';
+  if (m === 'no_op') return 'no_op';
   return 'manual';
 }
 
 async function resolveBaseCheckoutRef(
   host: MergeRunnerHost,
   baseBranch: string,
-  _preferOriginTracking: boolean,
+  preferDefaultBranchAlternate: boolean,
 ): Promise<string> {
-  return normalizeBranchForGithubCli(baseBranch);
+  const normalizedBase = normalizeBranchForGithubCli(baseBranch);
+  if (!preferDefaultBranchAlternate) {
+    return normalizedBase;
+  }
+
+  for (const branchName of defaultBranchNameCandidates(normalizedBase)) {
+    for (const ref of gitRefCandidatesForBranch(branchName)) {
+      try {
+        const resolved = (await host.execGitReadonly(['rev-parse', '--verify', `${ref}^{commit}`])).trim();
+        if (resolved) {
+          return branchName;
+        }
+      } catch {
+        // Try the next spelling.
+      }
+    }
+  }
+  return normalizedBase;
+}
+
+type ResolvedReviewBaseRef = {
+  branchName: string;
+  gitRef: string;
+};
+
+function defaultBranchNameCandidates(branchName: string): string[] {
+  const candidates = [branchName];
+  if (branchName === 'main') {
+    candidates.push('master');
+  } else if (branchName === 'master') {
+    candidates.push('main');
+  }
+  return Array.from(new Set(candidates.filter(Boolean)));
+}
+
+function gitRefCandidatesForBranch(branchName: string): string[] {
+  return Array.from(new Set([
+    `refs/remotes/origin/${branchName}`,
+    `origin/${branchName}`,
+    `refs/heads/${branchName}`,
+    branchName,
+  ]));
+}
+
+async function resolveReviewBaseRef(
+  host: MergeRunnerHost,
+  dir: string,
+  baseBranch: string,
+): Promise<ResolvedReviewBaseRef> {
+  const normalizedBase = normalizeBranchForGithubCli(baseBranch);
+  for (const branchName of defaultBranchNameCandidates(normalizedBase)) {
+    for (const ref of gitRefCandidatesForBranch(branchName)) {
+      try {
+        const resolved = (await execGitInMergeSafe(
+          host,
+          ['rev-parse', '--verify', `${ref}^{commit}`],
+          dir,
+        )).trim();
+        if (resolved) {
+          return { branchName, gitRef: ref };
+        }
+      } catch {
+        // Try the next base spelling.
+      }
+    }
+  }
+  return { branchName: normalizedBase, gitRef: baseBranch };
 }
 
 /**
@@ -93,6 +160,15 @@ function setMergeGateReviewReady(
   expectedLineage?: TaskLineageExpectation,
 ): void {
   host.orchestrator.setTaskReviewReady(taskId, changes, expectedLineage);
+}
+
+function mergeGateConfig(config: TaskStateChanges['config']): TaskStateChanges['config'] {
+  return {
+    ...(config ?? {}),
+    runnerKind: 'merge',
+    poolId: undefined,
+    poolMemberId: undefined,
+  };
 }
 
 function buildSingleArtifactReviewGate(args: {
@@ -210,6 +286,33 @@ async function pushFeatureBranchWithRefLockRetry(
   await assertBranchRetrievableOnOrigin(host, dir, featureBranch);
 }
 
+async function assertBranchContainsRecordedFix(
+  host: MergeRunnerHost,
+  dir: string,
+  branch: string,
+  recordedCommit: string,
+): Promise<void> {
+  const resolvedCommit = (await execGitInMergeSafe(
+    host,
+    ['rev-parse', '--verify', `${recordedCommit}^{commit}`],
+    dir,
+  )).trim();
+  try {
+    await execGitInMergeSafe(host, ['merge-base', '--is-ancestor', resolvedCommit, branch], dir);
+  } catch {
+    const branchHead = (await execGitInMergeSafe(host, ['rev-parse', '--verify', `${branch}^{commit}`], dir)
+      .catch(() => '')).trim();
+    throw new Error(
+      [
+        'repair-publication-unowned-diff: refusing to publish a repair PR whose head does not contain the recorded fix-session commit.',
+        `Recorded commit: ${resolvedCommit}`,
+        `Published branch: ${branch}`,
+        `Published head: ${branchHead || '(unresolved)'}`,
+      ].join('\n'),
+    );
+  }
+}
+
 export async function assertBranchRetrievableOnOrigin(
   host: MergeRunnerHost,
   dir: string,
@@ -258,6 +361,23 @@ async function syncGateWorkspaceToFeatureBranch(
   await execGitInMergeSafe(host, ['checkout', featureBranch], gateWorkspacePath);
 }
 
+async function listReviewableChangedFiles(
+  host: MergeRunnerHost,
+  dir: string,
+  baseGitRef: string,
+  featureBranch: string,
+): Promise<string[]> {
+  const out = await execGitInMergeSafe(
+    host,
+    ['diff', '--name-only', `${baseGitRef}...${featureBranch}`, '--'],
+    dir,
+  );
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 // ── Host interface ───────────────────────────────────────
 
 /**
@@ -289,6 +409,7 @@ export interface MergeRunnerHost {
     cwd: string;
     expectedGeneration: number;
     reviewGate?: ReviewGateState;
+    recordedFixCommit?: string;
   }): Promise<{ artifacts: ReviewGateArtifact[]; sessionId: string; agentName: string }>;
   authorPrBodyWithSkill?(args: {
     workflowId?: string;
@@ -346,7 +467,7 @@ async function authorPrBodyForMerge(
   );
   return authored.body;
 }
-async function publishReviewArtifactsForMerge(host: MergeRunnerHost, args: {
+export async function publishReviewArtifactsForMerge(host: MergeRunnerHost, args: {
   workflowId?: string;
   mergeNodeTaskId: string;
   workflowName: string;
@@ -357,12 +478,14 @@ async function publishReviewArtifactsForMerge(host: MergeRunnerHost, args: {
   expectedGeneration: number;
   repoUrl?: string;
   reviewGate?: ReviewGateState;
+  recordedFixCommit?: string;
 }): Promise<{
   reviewUrl?: string;
   reviewId?: string;
   reviewStatus: 'Awaiting review';
   reviewGate: ReviewGateState;
 }> {
+  const reviewClaims = args.workflowId ? workflowReviewClaims(host, args.workflowId) : [];
   if (isInvokerRepoUrl(args.repoUrl)) {
     if (!host.publishReviewStackWithMakePrSkill) {
       throw new Error('make-pr skill is required to publish Invoker review stacks');
@@ -380,7 +503,13 @@ async function publishReviewArtifactsForMerge(host: MergeRunnerHost, args: {
       cwd: args.cwd,
       expectedGeneration: args.expectedGeneration,
       reviewGate: args.reviewGate,
+      recordedFixCommit: args.recordedFixCommit,
     });
+    if (reviewClaims.length > published.artifacts.length) {
+      throw new Error(
+        `review stack for workflow ${args.workflowId} has ${published.artifacts.length} PR(s) for ${reviewClaims.length} review claims; publish one PR per claim: ${reviewClaims.map((claim) => `"${claim}"`).join('; ')}`,
+      );
+    }
     logTaskProgress(host, args.mergeNodeTaskId, 'info', 'Review stack published', {
       agentName: published.agentName,
       artifactCount: published.artifacts.length,
@@ -413,6 +542,11 @@ async function publishReviewArtifactsForMerge(host: MergeRunnerHost, args: {
 
   if (!host.mergeGateProvider) {
     throw new Error('merge review publication requires a configured review provider');
+  }
+  if (reviewClaims.length > 1) {
+    throw new Error(
+      `workflow ${args.workflowId} carries ${reviewClaims.length} review claims, but it would publish as one PR; split the plan into a workflow chain with one claim per workflow: ${reviewClaims.map((claim) => `"${claim}"`).join('; ')}`,
+    );
   }
 
   logTaskProgress(host, args.mergeNodeTaskId, 'info', 'Authoring PR body', {
@@ -466,6 +600,13 @@ async function publishReviewArtifactsForMerge(host: MergeRunnerHost, args: {
     reviewStatus: 'Awaiting review',
     reviewGate,
   };
+}
+
+function workflowReviewClaims(host: MergeRunnerHost, workflowId: string): string[] {
+  const tasks = host.orchestrator.getAllTasks().filter(
+    (t) => t.config.workflowId === workflowId && !t.config.isMergeNode,
+  );
+  return reviewClaimSlices(tasks.map((t) => ({ description: t.description, command: t.config.command ?? undefined })));
 }
 
 /**
@@ -728,6 +869,19 @@ export async function runMergeGateActionImpl(
   const featureBranch = workflow?.featureBranch;
   const visualProof = workflow?.visualProof ?? false;
 
+  if (mergeMode === 'no_op') {
+    return {
+      response: {
+        requestId: `merge-${task.id}`,
+        actionId: task.id,
+        executionGeneration: task.execution.generation ?? 0,
+        status: 'completed',
+        outputs: { exitCode: 0 },
+      },
+      taskChanges: {},
+    };
+  }
+
   let response: WorkResponse;
   let reviewUrl: string | undefined;
   let reviewId: string | undefined;
@@ -832,7 +986,7 @@ export async function runMergeGateActionImpl(
           actionId: task.id,
           executionGeneration: task.execution.generation ?? 0,
           status: 'review_ready',
-          outputs: { exitCode: 0, summary, branch: featureBranch ?? undefined },
+          outputs: { exitCode: 0, summary, branch: featureBranch ?? undefined, workspacePath: gateWorkspacePath },
         };
         return {
           response,
@@ -847,12 +1001,55 @@ export async function runMergeGateActionImpl(
           featureBranch,
         });
         await syncGateWorkspaceToFeatureBranch(host, gateWorkspacePath, featureBranch);
+        const reviewBase = await resolveReviewBaseRef(host, gateWorkspacePath!, baseBranch);
+
+        const changedFiles = await listReviewableChangedFiles(
+          host,
+          gateWorkspacePath!,
+          reviewBase.gitRef,
+          featureBranch,
+        );
+        if (changedFiles.length === 0) {
+          logTaskProgress(host, task.id, 'info', 'Skipping review stack publication for empty branch', {
+            baseBranch: reviewBase.branchName,
+            featureBranch,
+          });
+          mergeTrace('GATE_WS_PATH_REVIEW_PUBLISH_NOOP', {
+            taskId: task.id,
+            gateWorkspacePath: gateWorkspacePath ?? null,
+            baseBranch: reviewBase.branchName,
+            featureBranch,
+            onFinish,
+            mergeMode,
+          });
+          response = {
+            requestId: `merge-${task.id}`,
+            actionId: task.id,
+            executionGeneration: task.execution.generation ?? 0,
+            status: 'completed',
+            outputs: { exitCode: 0, summary, branch: featureBranch },
+          };
+          return {
+            response,
+            taskChanges: {
+              config: { summary },
+              execution: {
+                branch: featureBranch,
+                workspacePath: gateWorkspacePath,
+                reviewUrl: undefined,
+                reviewId: undefined,
+                reviewStatus: undefined,
+                reviewGate: undefined,
+              },
+            },
+          };
+        }
 
         const expectedGeneration = task.execution.generation ?? 0;
         let fullSummary = summary;
         if (visualProof && host.runVisualProofCapture) {
           const slug = (featureBranch ?? 'workflow').replace(/\//g, '-');
-          const vpMarkdown = await host.runVisualProofCapture(baseBranch, featureBranch!, slug, workflow?.repoUrl);
+          const vpMarkdown = await host.runVisualProofCapture(reviewBase.branchName, featureBranch!, slug, workflow?.repoUrl);
           if (vpMarkdown) {
             fullSummary = (summary ?? '') + '\n\n' + vpMarkdown;
           }
@@ -862,7 +1059,7 @@ export async function runMergeGateActionImpl(
           workflowId,
           mergeNodeTaskId: task.id,
           workflowName: workflow?.name ?? 'Workflow',
-          baseBranch,
+          baseBranch: reviewBase.branchName,
           featureBranch,
           workflowSummary: fullSummary ?? '',
           cwd: gateWorkspacePath!,
@@ -895,6 +1092,7 @@ export async function runMergeGateActionImpl(
             exitCode: 0,
             summary,
             branch: featureBranch,
+            workspacePath: gateWorkspacePath,
             reviewUrl,
             reviewId,
             reviewStatus,
@@ -921,7 +1119,7 @@ export async function runMergeGateActionImpl(
         actionId: task.id,
         executionGeneration: task.execution.generation ?? 0,
         status: 'completed',
-        outputs: { exitCode: 0, summary, branch: featureBranch ?? undefined },
+        outputs: { exitCode: 0, summary, branch: featureBranch ?? undefined, workspacePath: gateWorkspacePath },
       };
     } catch (err) {
       logTaskProgress(host, task.id, 'error', 'Merge gate failed', {
@@ -960,7 +1158,7 @@ export async function runMergeGateActionImpl(
         actionId: task.id,
         executionGeneration: task.execution.generation ?? 0,
         status: 'review_ready',
-        outputs: { exitCode: 0, summary, branch: featureBranch ?? undefined },
+        outputs: { exitCode: 0, summary, branch: featureBranch ?? undefined, workspacePath: gateWorkspacePath },
       };
       return {
         response,
@@ -975,7 +1173,7 @@ export async function runMergeGateActionImpl(
       actionId: task.id,
       executionGeneration: task.execution.generation ?? 0,
       status: 'completed',
-      outputs: { exitCode: 0, summary, branch: featureBranch ?? undefined },
+      outputs: { exitCode: 0, summary, branch: featureBranch ?? undefined, workspacePath: gateWorkspacePath },
     };
   }
 
@@ -1012,21 +1210,17 @@ export async function executeMergeNodeImpl(
 ): Promise<void> {
   const result = await runMergeGateActionImpl(host, task);
   const { response } = result;
-  const legacyConfig = {
-    ...(result.taskChanges.config ?? {}),
-    runnerKind: 'worktree',
-  } as TaskStateChanges['config'];
-  const legacyChanges: TaskStateChanges = {
+  const mergeChanges: TaskStateChanges = {
     status: result.taskChanges.status,
     dependencies: result.taskChanges.dependencies,
     execution: result.taskChanges.execution,
-    config: legacyConfig,
+    config: mergeGateConfig(result.taskChanges.config),
   };
 
-  updateMergeGateMetadataIfCurrent(host, task.id, legacyChanges, captureMergeGateLineage(task));
+  updateMergeGateMetadataIfCurrent(host, task.id, mergeChanges, captureMergeGateLineage(task));
 
   if (response.status === 'review_ready') {
-    setMergeGateReviewReady(host, task.id, legacyChanges, {
+    setMergeGateReviewReady(host, task.id, mergeChanges, {
       selectedAttemptId: task.execution.selectedAttemptId,
       generation: task.execution.generation ?? 0,
     });
@@ -1152,6 +1346,7 @@ export async function publishAfterFixImpl(
   const baseBranch = workflow?.baseBranch ?? host.defaultBranch ?? await host.detectDefaultBranch();
   const featureBranch = workflow?.featureBranch;
   const visualProof = workflow?.visualProof ?? false;
+  const shouldPublishReview = mergeMode === 'external_review' || onFinish === 'pull_request';
 
   const summary = workflowId ? await host.buildMergeSummary(workflowId) : undefined;
   const gateWorkspacePath = safeGetWorkspacePath(host.persistence, task.id) ?? undefined;
@@ -1183,7 +1378,7 @@ export async function publishAfterFixImpl(
           `will persist workspacePath=${gateWorkspacePath ?? 'NULL'}`,
       );
       setMergeGateReviewReady(host, task.id, {
-        config: { runnerKind: 'worktree', summary },
+        config: mergeGateConfig({ summary }),
         execution: {
           workspacePath: gateWorkspacePath,
           fixedIntegrationSha: undefined,
@@ -1196,6 +1391,11 @@ export async function publishAfterFixImpl(
       });
       await startReviewReadyDependents(host);
       return;
+    }
+    if (shouldPublishReview && !fixedIntegrationSha) {
+      throw new Error(
+        'repair-publication-missing-session-commit: post-fix repair PR publication requires the fix session recorded commit hash.',
+      );
     }
 
     // Consolidate task branches in the gate clone, starting from the gate
@@ -1235,6 +1435,11 @@ export async function publishAfterFixImpl(
           gateWorkspacePath,
           error,
         });
+        if (shouldPublishReview) {
+          throw new Error(
+            `repair-publication-missing-session-commit: recorded fix session commit ${fixedIntegrationSha} is not present in the repair workspace.`,
+          );
+        }
         console.warn(
           `[merge] Post-fix: failed to use fixedIntegrationSha=${fixedIntegrationSha} ` +
           `for ${task.id}; falling back to current gate HEAD. Error: ${error}`,
@@ -1349,36 +1554,61 @@ export async function publishAfterFixImpl(
     }
 
     // Push feature branch directly to origin (GitHub) from the gate clone
+    if (shouldPublishReview) {
+      await assertBranchContainsRecordedFix(host, consolidateDir, featureBranch, fixedIntegrationSha!);
+    }
     logTaskProgress(host, task.id, 'info', 'Pushing feature branch', {
       featureBranch,
     });
     await pushFeatureBranchWithRefLockRetry(host, consolidateDir, featureBranch);
 
+    const reviewBase = shouldPublishReview || visualProof
+      ? await resolveReviewBaseRef(host, consolidateDir, baseBranch)
+      : { branchName: normalizeBranchForGithubCli(baseBranch), gitRef: baseBranch };
+
+    let skipReviewForEmptyDiff = false;
+    if (shouldPublishReview) {
+      const changedFiles = await listReviewableChangedFiles(host, consolidateDir, reviewBase.gitRef, featureBranch);
+      if (changedFiles.length === 0) {
+        logTaskProgress(host, task.id, 'info', 'Skipping review stack publication for empty branch', {
+          baseBranch: reviewBase.branchName,
+          featureBranch,
+        });
+        mergeTrace('PUBLISH_AFTER_FIX_REVIEW_PUBLISH_NOOP', {
+          taskId: task.id,
+          baseBranch: reviewBase.branchName,
+          featureBranch,
+        });
+        skipReviewForEmptyDiff = true;
+      }
+    }
+
     let fullSummary = summary;
     if (visualProof && host.runVisualProofCapture) {
       const slug = featureBranch.replace(/\//g, '-');
-      const vpMarkdown = await host.runVisualProofCapture(baseBranch, featureBranch, slug, workflow?.repoUrl);
+      const vpMarkdown = await host.runVisualProofCapture(reviewBase.branchName, featureBranch, slug, workflow?.repoUrl);
       if (vpMarkdown) {
         fullSummary = (summary ?? '') + '\n\n' + vpMarkdown;
       }
     }
 
-    if (mergeMode === 'external_review' || onFinish === 'pull_request') {
+    if (shouldPublishReview && !skipReviewForEmptyDiff) {
       const published = await publishReviewArtifactsForMerge(host, {
         workflowId,
         mergeNodeTaskId: task.id,
         workflowName: workflow?.name ?? 'Workflow',
-        baseBranch,
+        baseBranch: reviewBase.branchName,
         featureBranch,
         workflowSummary: fullSummary ?? '',
         cwd: consolidateDir,
         expectedGeneration: task.execution.generation ?? 0,
         repoUrl: workflow?.repoUrl,
         reviewGate: task.execution.reviewGate,
+        recordedFixCommit: fixedIntegrationSha,
       });
 
       setMergeGateReviewReady(host, task.id, {
-        config: { runnerKind: 'worktree', summary },
+        config: mergeGateConfig({ summary }),
         execution: {
           branch: featureBranch,
           workspacePath: gateWorkspacePath,
@@ -1399,7 +1629,7 @@ export async function publishAfterFixImpl(
     }
 
     setMergeGateReviewReady(host, task.id, {
-      config: { runnerKind: 'worktree', summary },
+      config: mergeGateConfig({ summary }),
       execution: {
         branch: featureBranch,
         workspacePath: gateWorkspacePath,

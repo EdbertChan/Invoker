@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
@@ -7,10 +7,20 @@ import {
   readFileSync,
   readdirSync,
   existsSync,
+  createReadStream,
+  createWriteStream,
+  unlinkSync,
 } from 'node:fs';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { SQLiteAdapter, isDatabaseCorruptionError } from '../sqlite-adapter.js';
+import { pipeline } from 'node:stream/promises';
+import { createGzip } from 'node:zlib';
+import {
+  SQLiteAdapter,
+  isDatabaseCorruptionError,
+  isCorruptionRecoveryEligible,
+  findLatestCleanHourlySnapshot,
+} from '../sqlite-adapter.js';
 
 /**
  * SQLiteAdapter.create() recovers a corrupt database by renaming it (and its
@@ -54,6 +64,20 @@ async function seedSnapshot(snapshotPath: string, workflowIds: string[]): Promis
     const sidecar = `${snapshotPath}${suffix}`;
     if (existsSync(sidecar)) rmSync(sidecar);
   }
+}
+
+/**
+ * Seed a valid SQLite snapshot the same way {@link seedSnapshot} does, then
+ * gzip it in place to `<path>.gz` and remove the raw intermediate — matching
+ * exactly what `createDbSnapshot` in `packages/app/src/delete-all-snapshot.ts`
+ * produces in production. Returns the final `.gz` path.
+ */
+async function seedGzippedSnapshot(snapshotPath: string, workflowIds: string[]): Promise<string> {
+  await seedSnapshot(snapshotPath, workflowIds);
+  const gzPath = `${snapshotPath}.gz`;
+  await pipeline(createReadStream(snapshotPath), createGzip(), createWriteStream(gzPath));
+  unlinkSync(snapshotPath);
+  return gzPath;
 }
 
 describe('isDatabaseCorruptionError', () => {
@@ -119,6 +143,51 @@ describe('SQLiteAdapter.create recovery', () => {
 
     expect(readdirSync(dir).some((name) => name.includes('.corrupt-'))).toBe(false);
     expect(existsSync(join(dbPath, 'sentinel'))).toBe(true);
+  });
+});
+
+describe('isCorruptionRecoveryEligible', () => {
+  const corruptionErr = { errcode: 11 }; // SQLITE_CORRUPT
+  const operationalErr = { errcode: 14 }; // SQLITE_CANTOPEN, not corruption
+
+  it('is eligible when the target is a file, writable, existing, and the error is corruption', () => {
+    expect(isCorruptionRecoveryEligible(corruptionErr, {
+      isFile: true,
+      readOnly: false,
+      dbPathExists: true,
+    })).toBe(true);
+  });
+
+  it('is NOT eligible for a non-file (e.g. in-memory/ephemeral) database', () => {
+    expect(isCorruptionRecoveryEligible(corruptionErr, {
+      isFile: false,
+      readOnly: false,
+      dbPathExists: true,
+    })).toBe(false);
+  });
+
+  it('is NOT eligible when opened read-only', () => {
+    expect(isCorruptionRecoveryEligible(corruptionErr, {
+      isFile: true,
+      readOnly: true,
+      dbPathExists: true,
+    })).toBe(false);
+  });
+
+  it('is NOT eligible when the db file does not exist yet', () => {
+    expect(isCorruptionRecoveryEligible(corruptionErr, {
+      isFile: true,
+      readOnly: false,
+      dbPathExists: false,
+    })).toBe(false);
+  });
+
+  it('is NOT eligible when the error is not classified as corruption', () => {
+    expect(isCorruptionRecoveryEligible(operationalErr, {
+      isFile: true,
+      readOnly: false,
+      dbPathExists: true,
+    })).toBe(false);
   });
 });
 
@@ -192,6 +261,130 @@ describe('SQLiteAdapter.create auto-restore from hourly snapshot', () => {
     } finally {
       adapter.close();
     }
+  });
+
+  it('restores from a gzip-compressed hourly snapshot (production write format)', async () => {
+    const dir = makeDir();
+    const dbPath = join(dir, 'invoker.db');
+    const backupDir = join(dir, 'db-backups');
+    mkdirSync(backupDir);
+
+    const olderGz = await seedGzippedSnapshot(
+      join(backupDir, `${basename(dbPath)}.hourly-auto-20260708-090000-000Z`),
+      ['wf-older'],
+    );
+    const newerGz = await seedGzippedSnapshot(
+      join(backupDir, `${basename(dbPath)}.hourly-auto-20260708-100000-000Z`),
+      ['wf-newer-1', 'wf-newer-2'],
+    );
+    expect(olderGz).toMatch(/\.gz$/);
+    expect(newerGz).toMatch(/\.gz$/);
+
+    writeFileSync(dbPath, Buffer.from('xx not a sqlite header xx '.repeat(50)));
+
+    const adapter = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+    try {
+      const ids = adapter.listWorkflows().map((w) => w.id).sort();
+      expect(ids).toEqual(['wf-newer-1', 'wf-newer-2']);
+      expect(adapter.corruptionRecovery?.restoredFromSnapshot).toBe(newerGz);
+    } finally {
+      adapter.close();
+    }
+  });
+
+  it('skips a corrupt .gz snapshot (undecodable gzip stream) and falls back to the next clean one', async () => {
+    const dir = makeDir();
+    const dbPath = join(dir, 'invoker.db');
+    const backupDir = join(dir, 'db-backups');
+    mkdirSync(backupDir);
+
+    const cleanGz = await seedGzippedSnapshot(
+      join(backupDir, `${basename(dbPath)}.hourly-auto-20260708-090000-000Z`),
+      ['wf-clean-older'],
+    );
+    // Not valid gzip data at all -- decompression itself must fail, and
+    // fileQuickCheckOk must treat that the same as any other bad candidate.
+    writeFileSync(
+      join(backupDir, `${basename(dbPath)}.hourly-auto-20260708-100000-000Z.gz`),
+      Buffer.from('not a gzip stream '.repeat(50)),
+    );
+
+    writeFileSync(dbPath, Buffer.from('xx primary corrupt xx '.repeat(50)));
+
+    const adapter = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+    try {
+      expect(adapter.listWorkflows().map((w) => w.id)).toEqual(['wf-clean-older']);
+      expect(adapter.corruptionRecovery?.restoredFromSnapshot).toBe(cleanGz);
+    } finally {
+      adapter.close();
+    }
+  });
+
+  it('never leaves dbPath partially written when the restore write itself fails after a clean snapshot passed its own check', async () => {
+    const dir = makeDir();
+    const dbPath = join(dir, 'invoker.db');
+    const backupDir = join(dir, 'db-backups');
+    mkdirSync(backupDir);
+
+    await seedGzippedSnapshot(
+      join(backupDir, `${basename(dbPath)}.hourly-auto-20260708-090000-000Z`),
+      ['wf-clean'],
+    );
+    writeFileSync(dbPath, Buffer.from('xx primary corrupt xx '.repeat(50)));
+
+    // Pin the staging filename so we can pre-occupy it with a directory,
+    // forcing the restore write (gunzip -> stagingPath) to fail with EISDIR
+    // instead of succeeding -- the same failure shape as a disk-full or
+    // permission error mid-write.
+    const fixedNow = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    const stagingPath = `${dbPath}.restore-staging-${fixedNow}`;
+    mkdirSync(stagingPath);
+
+    try {
+      const adapter = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+      try {
+        // Falls back to a fresh empty database -- NOT the snapshot's data,
+        // and NOT the pre-corrupt original -- proving dbPath never ended up
+        // holding a partial write from the failed staging attempt.
+        expect(adapter.listWorkflows()).toEqual([]);
+        expect(adapter.corruptionRecovery?.restoredFromSnapshot).toBeNull();
+      } finally {
+        adapter.close();
+      }
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('findLatestCleanHourlySnapshot picks the newest clean snapshot from a fixture directory, skipping corrupt ones', async () => {
+    const dir = makeDir();
+    const backupDir = join(dir, 'db-backups');
+    mkdirSync(backupDir);
+    const dbBasename = 'invoker.db';
+
+    await seedSnapshot(join(backupDir, `${dbBasename}.hourly-auto-20260708-090000-000Z`), ['wf-clean-older']);
+    writeFileSync(
+      join(backupDir, `${dbBasename}.hourly-auto-20260708-100000-000Z`),
+      Buffer.from('xx not a sqlite header xx '.repeat(50)),
+    );
+
+    const result = await findLatestCleanHourlySnapshot(backupDir, dbBasename);
+    expect(result).toBe(join(backupDir, `${dbBasename}.hourly-auto-20260708-090000-000Z`));
+  });
+
+  it('findLatestCleanHourlySnapshot returns null when no snapshot in the fixture directory is clean', async () => {
+    const dir = makeDir();
+    const backupDir = join(dir, 'db-backups');
+    mkdirSync(backupDir);
+    const dbBasename = 'invoker.db';
+    writeFileSync(
+      join(backupDir, `${dbBasename}.hourly-auto-20260708-090000-000Z`),
+      Buffer.from('xx not a sqlite header xx '.repeat(50)),
+    );
+
+    const result = await findLatestCleanHourlySnapshot(backupDir, dbBasename);
+    expect(result).toBeNull();
   });
 
   it('falls back to an empty DB when db-backups has no clean snapshot', async () => {

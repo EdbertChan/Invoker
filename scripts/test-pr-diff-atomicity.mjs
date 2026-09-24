@@ -192,6 +192,132 @@ function kinds(findings) {
   assert.match(formatDiffAtomicityFindings(spreadFindings)[0], /packages\/app/);
 }
 
+// Case 7: a same-PR test-assertion flip alongside a product-code change is fatal.
+{
+  const text = diff([
+    'diff --git a/packages/ui/src/App.tsx b/packages/ui/src/App.tsx',
+    '--- a/packages/ui/src/App.tsx',
+    '+++ b/packages/ui/src/App.tsx',
+    '@@ -1,3 +1,3 @@',
+    ' export function App() {',
+    '-  return null;',
+    '+  return <Banner />;',
+    ' }',
+    'diff --git a/packages/ui/src/App.test.tsx b/packages/ui/src/App.test.tsx',
+    '--- a/packages/ui/src/App.test.tsx',
+    '+++ b/packages/ui/src/App.test.tsx',
+    '@@ -1,3 +1,3 @@',
+    " it('hides banner', () => {",
+    "-  expect(screen.queryByText('Banner')).not.toBeInTheDocument();",
+    "+  expect(screen.queryByText('Banner')).toBeInTheDocument();",
+    ' });',
+  ]);
+  const findings = collectDiffAtomicityFindings({ diffText: text });
+  assert.deepEqual(kinds(findings), ['test-assertion-weakened']);
+  assert.equal(findings[0].severity, 'fatal');
+  assert.equal(findings[0].path, 'packages/ui/src/App.test.tsx');
+  assert.equal(findings[0].line, 2);
+}
+
+// Case 8: the same flipped assertion with only test-file changes does not
+// fire — the policy targets a same-PR product-code + test-flip pairing, not
+// a bare test edit.
+{
+  const text = diff([
+    'diff --git a/packages/ui/src/App.test.tsx b/packages/ui/src/App.test.tsx',
+    '--- a/packages/ui/src/App.test.tsx',
+    '+++ b/packages/ui/src/App.test.tsx',
+    '@@ -1,3 +1,3 @@',
+    " it('hides banner', () => {",
+    "-  expect(screen.queryByText('Banner')).not.toBeInTheDocument();",
+    "+  expect(screen.queryByText('Banner')).toBeInTheDocument();",
+    ' });',
+  ]);
+  assert.deepEqual(collectDiffAtomicityFindings({ diffText: text }), []);
+}
+
+function assertionEditDiff(removedLines, addedLines) {
+  return diff([
+    'diff --git a/packages/app/src/api.ts b/packages/app/src/api.ts',
+    '--- a/packages/app/src/api.ts',
+    '+++ b/packages/app/src/api.ts',
+    '@@ -1,3 +1,3 @@',
+    ' export function send(payload) {',
+    '-  return post(payload);',
+    "+  return post({ ...payload, kind: 'x' });",
+    ' }',
+    'diff --git a/packages/app/src/api.test.ts b/packages/app/src/api.test.ts',
+    '--- a/packages/app/src/api.test.ts',
+    '+++ b/packages/app/src/api.test.ts',
+    `@@ -1,${removedLines.length + 2} +1,${addedLines.length + 2} @@`,
+    " it('sends payload', () => {",
+    ...removedLines.map((line) => `-${line}`),
+    ...addedLines.map((line) => `+${line}`),
+    ' });',
+  ]);
+}
+
+// Case 8b: an expected object that only gains fields is stricter, not weaker.
+{
+  const flat = assertionEditDiff(
+    ['  expect(send).toHaveBeenCalledWith({ a: 1 });'],
+    ['  expect(send).toHaveBeenCalledWith({ a: 1, b: 2 });'],
+  );
+  assert.deepEqual(collectDiffAtomicityFindings({ diffText: flat }), []);
+
+  const nested = assertionEditDiff(
+    ['  expect(send).toHaveBeenCalledWith({', "    outputs: { exitCode: 1, error: 'quit' },", '  });'],
+    ['  expect(send).toHaveBeenCalledWith({', "    outputs: { exitCode: 1, error: 'quit', failureClass: 'owner-interrupted' },", '  });'],
+  );
+  assert.deepEqual(collectDiffAtomicityFindings({ diffText: nested }), []);
+
+  const containing = assertionEditDiff(
+    ['  expect(send).toHaveBeenCalledWith(expect.objectContaining({ a: 1 }));'],
+    ['  expect(send).toHaveBeenCalledWith(expect.objectContaining({ a: 1, b: 2 }));'],
+  );
+  assert.deepEqual(collectDiffAtomicityFindings({ diffText: containing }), []);
+}
+
+// Case 8c: removing a field, changing a kept value, or loosening a negated
+// check is still a weakened assertion.
+{
+  const cases = [
+    [['  expect(send).toHaveBeenCalledWith({ a: 1, b: 2 });'], ['  expect(send).toHaveBeenCalledWith({ a: 1 });']],
+    [['  expect(send).toHaveBeenCalledWith({ a: 1 });'], ['  expect(send).toHaveBeenCalledWith({ a: 2, b: 3 });']],
+    [['  expect(send).not.toEqual({ a: 1 });'], ['  expect(send).not.toEqual({ a: 1, b: 2 });']],
+    [['  expect(send).toHaveBeenCalledWith({ a: 1 }, 2);'], ['  expect(send).toHaveBeenCalledWith({ a: 1, b: 2 }, 3);']],
+    [['  expect(send).toBe(1);'], ['  expect(send).toBe(2);']],
+  ];
+  for (const [removedLines, addedLines] of cases) {
+    const findings = collectDiffAtomicityFindings({ diffText: assertionEditDiff(removedLines, addedLines) });
+    assert.deepEqual(kinds(findings), ['test-assertion-weakened'], `${removedLines[0]} -> ${addedLines[0]}`);
+  }
+}
+
+// Case 9: a product-code change alongside a test file change with no
+// assertion flip does not fire.
+{
+  const text = diff([
+    'diff --git a/packages/ui/src/App.tsx b/packages/ui/src/App.tsx',
+    '--- a/packages/ui/src/App.tsx',
+    '+++ b/packages/ui/src/App.tsx',
+    '@@ -1,3 +1,3 @@',
+    ' export function App() {',
+    '-  return null;',
+    '+  return <Banner />;',
+    ' }',
+    'diff --git a/packages/ui/src/App.test.tsx b/packages/ui/src/App.test.tsx',
+    '--- a/packages/ui/src/App.test.tsx',
+    '+++ b/packages/ui/src/App.test.tsx',
+    '@@ -1,3 +1,4 @@',
+    " it('shows banner', () => {",
+    "+  render(<Banner />);",
+    "   expect(screen.getByText('Banner')).toBeInTheDocument();",
+    ' });',
+  ]);
+  assert.deepEqual(collectDiffAtomicityFindings({ diffText: text }), []);
+}
+
 // Temp git case: the git entry path flags a real added debugger and exits 1,
 // and a clean follow-up change passes with the success message on stdout.
 {
@@ -258,6 +384,26 @@ function kinds(findings) {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+// Case: a mis-shaped argument throws instead of reporting a clean diff.
+{
+  const text = diff([
+    'diff --git a/packages/core/src/add.ts b/packages/core/src/add.ts',
+    '--- a/packages/core/src/add.ts',
+    '+++ b/packages/core/src/add.ts',
+    '@@ -1,1 +1,1 @@',
+    '-export const a = 1;',
+    '+export const a = 2;',
+  ]);
+  const parsed = parseUnifiedDiff(text);
+  assert.throws(() => collectDiffAtomicityFindings(parsed), TypeError);
+  assert.throws(() => collectDiffAtomicityFindings(), TypeError);
+  assert.throws(() => collectDiffAtomicityFindings({}), TypeError);
+  assert.throws(() => collectDiffAtomicityFindings({ diffText: null }), TypeError);
+  assert.throws(() => collectDiffAtomicityFindings(text), TypeError);
+  assert.deepEqual(collectDiffAtomicityFindings({ files: parsed }), []);
+  assert.deepEqual(collectDiffAtomicityFindings({ diffText: '' }), []);
 }
 
 console.log('ok pr diff atomicity');

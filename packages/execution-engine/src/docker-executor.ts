@@ -9,10 +9,12 @@ import { computeContentHash, buildExperimentBranchName } from './branch-utils.js
 import type { AgentRegistry } from './agent-registry.js';
 import { DEFAULT_EXECUTION_AGENT } from './agent.js';
 import { traceExecution } from './exec-trace.js';
+import { syncPlanBaseRemoteForRef, ensureRequiredCommitResolvable } from './plan-base-remote.js';
 
 const CONTAINER_STOP_TIMEOUT_S = 5;
 const TAG = '[DockerExecutor]';
 const CONTAINER_CWD = '/app';
+const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * Secret-bearing environment variable keys that must be redacted from logs.
@@ -93,6 +95,12 @@ interface ContainerEntry extends BaseEntry {
 
 function shellEscape(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+function isMissingOriginRemoteError(errorMsg: string): boolean {
+  return /No such remote/i.test(errorMsg)
+    || /'origin' does not appear to be a git repository/i.test(errorMsg)
+    || /Could not read from remote repository/i.test(errorMsg);
 }
 
 /**
@@ -223,7 +231,7 @@ export class DockerExecutor extends BaseExecutor<ContainerEntry> {
       await this.execGitSimple(['remote', 'get-url', 'origin'], cwd);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      if (/No such remote/i.test(errorMsg)) {
+      if (isMissingOriginRemoteError(errorMsg)) {
         const msg = '[Git Fetch] Status: skipped | Remote: origin missing | Using image-baked repo state\n';
         traceExecution(msg);
         if (executionId) this.emitOutput(executionId, msg);
@@ -239,20 +247,21 @@ export class DockerExecutor extends BaseExecutor<ContainerEntry> {
     branch: string,
     executionId?: string,
     branchRepoUrlOverride?: string,
+    sourceCommitHash?: string,
   ): Promise<string | undefined> {
     try {
       await this.execGitSimple(['remote', 'get-url', 'origin'], cwd);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      if (/No such remote/i.test(errorMsg)) {
+      if (isMissingOriginRemoteError(errorMsg)) {
         const msg = `[docker] pushBranchToRemote skipped for ${branch}: origin missing; using image-baked repo state\n`;
         traceExecution(msg);
         if (executionId) this.emitOutput(executionId, msg);
         return undefined;
       }
-      return await super.pushBranchToRemote(cwd, branch, executionId, branchRepoUrlOverride);
+      return await super.pushBranchToRemote(cwd, branch, executionId, branchRepoUrlOverride, sourceCommitHash);
     }
-    return await super.pushBranchToRemote(cwd, branch, executionId, branchRepoUrlOverride);
+    return await super.pushBranchToRemote(cwd, branch, executionId, branchRepoUrlOverride, sourceCommitHash);
   }
 
   // ---------------------------------------------------------------------------
@@ -376,11 +385,20 @@ export class DockerExecutor extends BaseExecutor<ContainerEntry> {
     emit(`${TAG} Container started`);
 
     return await this.containerContext.run(container.id, async () => {
-      // -- Git setup (reuses BaseExecutor methods via overridden execGitSimple + runBash) --
       await this.syncFromRemote(CONTAINER_CWD, executionId);
 
-      const baseRef = request.inputs.baseBranch ?? 'HEAD';
-      const baseHead = (await this.execGitSimple(['rev-parse', baseRef], CONTAINER_CWD)).trim();
+      const upstreamBaseCommit = request.inputs.upstreamBase?.commitHash?.trim();
+      const baseRef = upstreamBaseCommit || request.inputs.baseBranch || 'HEAD';
+      const runGit = (args: string[]) => this.execGitSimple(args, CONTAINER_CWD);
+      if (upstreamBaseCommit) {
+        // syncPlanBaseRemoteForRef is a no-op for full SHAs, so it never
+        // fetches for upstreamBaseCommit specifically -- verify it directly.
+        await ensureRequiredCommitResolvable(runGit, upstreamBaseCommit);
+      }
+      await syncPlanBaseRemoteForRef(runGit, baseRef);
+      const baseHead = FULL_SHA_RE.test(baseRef)
+        ? baseRef
+        : (await this.execGitSimple(['rev-parse', baseRef], CONTAINER_CWD)).trim();
       const upstreamCommits = (request.inputs.upstreamContext ?? [])
         .map(c => c.commitHash)
         .filter((h): h is string => !!h);
@@ -406,7 +424,8 @@ export class DockerExecutor extends BaseExecutor<ContainerEntry> {
         // Best-effort early persistence; the post-start path persists the
         // same value again.
       }
-      const baseBranch = request.inputs.upstreamBranches?.[0]
+      const baseBranch = upstreamBaseCommit
+        ?? request.inputs.upstreamBranches?.[0]
         ?? request.inputs.baseBranch
         ?? 'HEAD';
 
@@ -521,8 +540,7 @@ export class DockerExecutor extends BaseExecutor<ContainerEntry> {
 
   sendInput(handle: ExecutorHandle, input: string): void {
     const entry = this.entries.get(handle.executionId);
-    if (!entry || entry.completed) return;
-    entry.process?.stdin?.write(input);
+    this.writeProcessInput(entry, input);
   }
 
   getTerminalSpec(handle: ExecutorHandle): TerminalSpec | null {

@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -8,51 +8,12 @@ import { collectDirectNonMergeTaskIds } from '../merge-runner.js';
 import { getCurrentRequiredReviewArtifacts } from '../task-runner-review-gate.js';
 import { ResourceLimitError } from '../repo-pool.js';
 import { SshExecutor } from '../ssh-executor.js';
-import type { TaskState } from '@invoker/workflow-core';
+import { resolveTaskConfig, type TaskState } from '@invoker/workflow-core';
 import type { WorkResponse, Logger } from '@invoker/contracts';
 import { EventEmitter } from 'events';
-import { buildCanonicalPrBody, validateCanonicalPrBody } from '../pr-authoring.js';
+import { buildCanonicalPrBody, validateCanonicalPrBody, validateReviewStackPrBody, validateReviewStackPrBodyAgainstLocalDiff } from '../pr-authoring.js';
 import type { PrAuthoringContext } from '../pr-authoring.js';
-
-/**
- * Creates a mock executor that auto-completes on start().
- * For merge nodes (no command/prompt), this simulates the executor's
- * handleProcessExit(0) path which immediately completes.
- */
-function createAutoCompleteExecutor() {
-  let completeCallback: ((response: WorkResponse) => void) | undefined;
-  return {
-    type: 'worktree',
-    start: vi.fn().mockImplementation(async (request: any) => {
-      const handle = {
-        executionId: `exec-${request.actionId}`,
-        taskId: request.actionId,
-        workspacePath: '/tmp/mock-worktree',
-        branch: `experiment/${request.actionId}-mock`,
-      };
-      // Auto-complete after start (simulates no-command path)
-      setTimeout(() => {
-        if (completeCallback) {
-          completeCallback({
-            requestId: request.requestId,
-            actionId: request.actionId,
-            executionGeneration: request.executionGeneration,
-            status: 'completed',
-            outputs: { exitCode: 0 },
-          });
-        }
-      }, 0);
-      return handle;
-    }),
-    onComplete: vi.fn().mockImplementation((_handle: any, cb: any) => {
-      completeCallback = cb;
-    }),
-    onOutput: vi.fn(),
-    onHeartbeat: vi.fn(),
-    kill: vi.fn(),
-    destroyAll: vi.fn(),
-  };
-}
+import { createAutoCompleteExecutor } from './helpers/task-runner-fixtures.js';
 
 function makeTask(overrides: {
   id?: string;
@@ -63,15 +24,18 @@ function makeTask(overrides: {
   config?: Partial<TaskState['config']>;
   execution?: Partial<TaskState['execution']>;
 } = {}): TaskState {
+  const inputConfig = overrides.config?.runnerKind === 'ssh' && !overrides.config.poolId
+    ? { ...overrides.config, poolId: 'ssh-fixture' }
+    : overrides.config;
   return {
     id: overrides.id ?? 'test',
     description: overrides.description ?? 'Test task',
     status: overrides.status ?? 'pending',
     dependencies: overrides.dependencies ?? [],
     createdAt: overrides.createdAt ?? new Date(),
-    config: { ...overrides.config },
+    config: resolveTaskConfig(inputConfig ?? {}),
     execution: { ...overrides.execution },
-  } as TaskState;
+  };
 }
 
 function createExecutorWithTasks(tasks: Map<string, TaskState>): TaskRunner {
@@ -97,6 +61,14 @@ function createMockLogger(): Logger {
   };
   (logger.child as any).mockReturnValue(logger);
   return logger;
+}
+
+function sshFixturePool(...memberIds: string[]) {
+  return () => ({
+    'ssh-fixture': {
+      members: memberIds.map((id) => ({ type: 'ssh' as const, id })),
+    },
+  });
 }
 
 const tempWorkspaces: string[] = [];
@@ -782,6 +754,7 @@ describe('TaskRunner', () => {
             sshKeyPath: '/tmp/test-key',
           },
         }),
+        executionPoolsProvider: sshFixturePool('remote-1'),
       });
 
       await runner.publishApprovedFix(task);
@@ -842,6 +815,7 @@ describe('TaskRunner', () => {
             sshKeyPath: '/tmp/test-key',
           },
         }),
+        executionPoolsProvider: sshFixturePool('remote-1'),
       });
       const selectExecutorSpy = vi.spyOn(runner, 'selectExecutor');
       const originalSelectExecutor = TaskRunner.prototype.selectExecutor.bind(runner);
@@ -1255,6 +1229,10 @@ describe('TaskRunner', () => {
       });
 
       const ghCalls: string[][] = [];
+      (executor as any).execGitIn = async (args: string[]) => {
+        if (args[0] === 'remote') return 'origin\nupstream\n';
+        return '';
+      };
       (executor as any).execGh = async (args: string[]) => {
         ghCalls.push(args);
         if (args[0] === 'pr' && args[1] === 'list') throw new Error('gh pr list should not be used');
@@ -1272,6 +1250,40 @@ describe('TaskRunner', () => {
 
       const listCall = ghCalls.find(c => c[0] === 'api' && c[1] === 'repos/owner/repo/pulls' && c.includes('GET'));
       expect(listCall).toContain('head=owner:plan/experiment');
+
+      const createCall = ghCalls.find(c => c[0] === 'api' && c[1] === 'repos/owner/repo/pulls' && c.includes('POST'));
+      expect(createCall).toContain('base=fix/my-work');
+      expect(createCall).toContain('head=plan/experiment');
+    });
+
+    it('execPr strips explicit upstream/ prefixes when the repo advertises that remote', async () => {
+      process.env.INVOKER_GITHUB_TARGET_REPO = 'owner/repo';
+      const executor = new TaskRunner({
+        orchestrator: { getTask: () => null } as any,
+        persistence: {} as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+        cwd: '/tmp',
+      });
+
+      const ghCalls: string[][] = [];
+      (executor as any).execGitIn = async (args: string[]) => {
+        if (args[0] === 'remote') return 'origin\nupstream\n';
+        return '';
+      };
+      (executor as any).execGh = async (args: string[]) => {
+        ghCalls.push(args);
+        if (args[0] === 'pr' && args[1] === 'list') throw new Error('gh pr list should not be used');
+        if (args[0] === 'api' && args[1] === 'repos/owner/repo/pulls' && args.includes('GET')) return '[]';
+        if (args[0] === 'api' && args[1] === 'repos/owner/repo/pulls' && args.includes('POST')) return '{"html_url":"https://github.com/owner/repo/pull/201","number":201}';
+        return '';
+      };
+
+      await (executor as any).execPr(
+        'upstream/fix/my-work',
+        'upstream/plan/experiment',
+        'Title',
+        'Body',
+      );
 
       const createCall = ghCalls.find(c => c[0] === 'api' && c[1] === 'repos/owner/repo/pulls' && c.includes('POST'));
       expect(createCall).toContain('base=fix/my-work');
@@ -1334,7 +1346,138 @@ describe('TaskRunner', () => {
       }
     });
 
-    it('publishReviewStackWithMakePrSkill uses preferred agent then falls back to another make-pr agent', async () => {
+    it('publishReviewStackWithMakePrSkill does not invoke Claude when Codex is registered', async () => {
+      const tempHome = createTempWorkspace();
+      const originalHome = process.env.HOME;
+      process.env.HOME = tempHome;
+      mkdirSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr'), { recursive: true });
+      writeFileSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr', 'SKILL.md'), '# make-pr\n');
+
+      try {
+        const codexAgent = {
+          name: 'codex',
+          stdinMode: 'ignore',
+          bundledSkillRoot: join(tempHome, '.codex', 'skills'),
+          bundledSkills: ['make-pr'],
+          buildCommand: () => ({
+            cmd: 'node',
+            args: ['-e', 'var b=["## Summary","","x","","## Review Claim","","x","","## Review Lane","","cleanup","","## Review Unit","","scalar","","## Safety Invariant","","x","","## Slice Rationale","","x","","## Non-goals","- none","","## Test Plan","- [x] x","","## Revert Plan","- Safe to revert? Yes"].join("\\n");process.stdout.write(JSON.stringify({artifacts:[{id:"only",title:"Only",url:"https://example.test/pr/1",providerId:"1",branch:"stack/only",baseBranch:"master",body:b}]}))'],
+            sessionId: 'sess-codex',
+          }),
+          buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
+        };
+        const claudeAgent = {
+          name: 'claude',
+          stdinMode: 'ignore',
+          bundledSkillRoot: '/tmp/claude-skills',
+          bundledSkills: ['make-pr'],
+          buildCommand: () => { throw new Error('Claude must not be invoked'); },
+          buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
+        };
+        const executor = new TaskRunner({
+          orchestrator: { getTask: () => null, getAllTasks: () => [] } as any,
+          persistence: { logEvent: vi.fn() } as any,
+          executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+          executionAgentRegistry: {
+            get: (name: string) => name === 'codex' ? codexAgent : name === 'claude' ? claudeAgent : undefined,
+            getOrThrow: vi.fn(),
+            getSessionDriver: vi.fn().mockReturnValue(undefined),
+            listWithCapability: vi.fn().mockReturnValue([claudeAgent, codexAgent]),
+          } as any,
+          cwd: '/tmp',
+        });
+
+        const result = await (executor as any).publishReviewStackWithMakePrSkill({
+          workflowId: 'wf-codex-only', title: 'Stack', baseBranch: 'master', featureBranch: 'plan/feature',
+          workflowSummary: 'summary', cwd: '/tmp', mergeNodeTaskId: '__merge__wf-codex-only', expectedGeneration: 1,
+        });
+
+        expect(result.agentName).toBe('codex');
+        expect(result.artifacts).toHaveLength(1);
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it('publishReviewStackWithMakePrSkill reuses an existing review stack when live bodies validate', async () => {
+      const validBody = [
+        '## Summary', '', 'Already published.', '',
+        '## Review Claim', '', 'Reviewers can approve the existing slice.', '',
+        '## Review Lane', '', 'cleanup', '',
+        '## Review Unit', '', 'cleanup', '',
+        '## Safety Invariant', '', 'The existing PR body already passed the make-pr schema.', '',
+        '## Slice Rationale', '', 'This retry should not republish an unchanged stack.', '',
+        '## Non-goals', '', '- No branch, title, or body mutation.', '',
+        '## Test Plan', '', '<details>', '<summary>Test Plan</summary>', '', '- [x] pnpm test', '', '</details>', '',
+        '## Revert Plan', '', '<details>', '<summary>Revert Plan</summary>', '', '- Safe to revert? Yes', '', '</details>',
+      ].join('\n');
+      const agent = {
+        name: 'codex',
+        stdinMode: 'ignore',
+        bundledSkillRoot: '/tmp/codex-skills',
+        bundledSkills: ['make-pr'],
+        buildCommand: () => { throw new Error('agent must not run for a validated existing stack'); },
+        buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
+      };
+      const getReviewBody = vi.fn().mockResolvedValue(validBody);
+      const executor = new TaskRunner({
+        orchestrator: { getTask: () => null, getAllTasks: () => [] } as any,
+        persistence: { logEvent: vi.fn() } as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+        executionAgentRegistry: {
+          get: vi.fn().mockReturnValue(agent),
+          getOrThrow: vi.fn(),
+          getSessionDriver: vi.fn().mockReturnValue(undefined),
+          listWithCapability: vi.fn().mockReturnValue([agent]),
+        } as any,
+        mergeGateProvider: {
+          name: 'github',
+          createReview: vi.fn(),
+          checkApproval: vi.fn(),
+          getReviewBody,
+        } as any,
+        cwd: '/tmp',
+      });
+
+      const result = await (executor as any).publishReviewStackWithMakePrSkill({
+        workflowId: 'wf-retry',
+        title: 'Stack',
+        baseBranch: 'master',
+        featureBranch: 'plan/feature',
+        workflowSummary: 'summary',
+        cwd: '/tmp',
+        mergeNodeTaskId: '__merge__wf-retry',
+        expectedGeneration: 9,
+        reviewGate: {
+          activeGeneration: 3,
+          completion: { required: 'all', status: 'approved' },
+          artifacts: [
+            {
+              id: 'only',
+              title: 'Only',
+              url: 'https://example.test/pr/1',
+              providerId: '1',
+              provider: 'github',
+              branch: 'stack/only',
+              baseBranch: 'master',
+              required: true,
+              status: 'open',
+              generation: 3,
+            },
+          ],
+        },
+      });
+
+      expect(result.agentName).toBe('deterministic');
+      expect(result.sessionId).toBe('existing-review-stack');
+      expect(result.artifacts).toEqual([
+        expect.objectContaining({ id: 'only', providerId: '1', generation: 9 }),
+      ]);
+      expect(getReviewBody).toHaveBeenCalledWith({ identifier: '1', cwd: '/tmp' });
+    });
+
+    it('publishReviewStackWithMakePrSkill uses the workflow declared agent, not a fallback chain', async () => {
       const tempHome = createTempWorkspace();
       const originalHome = process.env.HOME;
       process.env.HOME = tempHome;
@@ -1352,7 +1495,11 @@ describe('TaskRunner', () => {
           bundledSkills: ['make-pr'],
           buildCommand: () => {
             attempts.push('claude');
-            return { cmd: 'node', args: ['-e', 'process.stdout.write("not json")'], sessionId: 'sess-claude' };
+            return {
+              cmd: 'node',
+              args: ['-e', 'var b=["## Summary","","Slice prose.","","## Review Claim","","c","","## Review Lane","","cleanup","","## Review Unit","","scalar","","## Safety Invariant","","s","","## Slice Rationale","","r","","## Non-goals","- none","","## Test Plan","- [x] pnpm test","","## Revert Plan","- Safe to revert? Yes"].join("\\n");process.stdout.write(JSON.stringify({artifacts:[{id:"contracts",title:"Contracts",url:"https://example.test/pr/1",providerId:"1",branch:"stack/contracts",baseBranch:"master",body:b},{id:"runtime",title:"Runtime",url:"https://example.test/pr/2",providerId:"2",branch:"stack/runtime",baseBranch:"stack/contracts",dependsOn:["contracts"],body:b}]}))'],
+              sessionId: 'sess-claude',
+            };
           },
           buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
         };
@@ -1363,11 +1510,7 @@ describe('TaskRunner', () => {
           bundledSkills: ['make-pr'],
           buildCommand: () => {
             attempts.push('codex');
-            return {
-              cmd: 'node',
-              args: ['-e', 'var b=["## Summary","","Slice prose.","","## Review Claim","","c","","## Review Lane","","cleanup","","## Review Unit","","scalar","","## Safety Invariant","","s","","## Slice Rationale","","r","","## Non-goals","- none","","## Test Plan","- [x] pnpm test","","## Revert Plan","- Safe to revert? Yes"].join("\\n");process.stdout.write(JSON.stringify({artifacts:[{id:"contracts",title:"Contracts",url:"https://example.test/pr/1",providerId:"1",branch:"stack/contracts",baseBranch:"master",body:b},{id:"runtime",title:"Runtime",url:"https://example.test/pr/2",providerId:"2",branch:"stack/runtime",baseBranch:"stack/contracts",dependsOn:["contracts"],body:b}]}))'],
-              sessionId: 'sess-codex',
-            };
+            throw new Error('codex must not be invoked when claude is the declared agent');
           },
           buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
         };
@@ -1399,8 +1542,8 @@ describe('TaskRunner', () => {
           expectedGeneration: 26,
         });
 
-        expect(attempts).toEqual(['claude', 'codex']);
-        expect(result.agentName).toBe('codex');
+        expect(attempts).toEqual(['claude']);
+        expect(result.agentName).toBe('claude');
         expect(result.artifacts[1].dependsOn).toEqual(['contracts']);
         expect(result.artifacts.map((a: any) => a.generation)).toEqual([26, 26]);
         expect(logEvent).toHaveBeenCalledWith(
@@ -1409,15 +1552,7 @@ describe('TaskRunner', () => {
           expect.objectContaining({
             level: 'info',
             message: 'Preparing make-pr review stack publisher',
-            agentCount: 2,
-          }),
-        );
-        expect(logEvent).toHaveBeenCalledWith(
-          '__merge__wf-1',
-          'task.log',
-          expect.objectContaining({
-            level: 'warn',
-            message: 'claude make-pr agent failed',
+            agentCount: 1,
           }),
         );
         expect(logEvent).toHaveBeenCalledWith(
@@ -1428,6 +1563,212 @@ describe('TaskRunner', () => {
             message: 'Review stack body validated',
             artifactCount: 2,
           }),
+        );
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it('publishReviewStackWithMakePrSkill falls back to the fleet default agent when the workflow declares none', async () => {
+      const tempHome = createTempWorkspace();
+      const originalHome = process.env.HOME;
+      process.env.HOME = tempHome;
+      mkdirSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr'), { recursive: true });
+      writeFileSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr', 'SKILL.md'), '# make-pr\n');
+
+      try {
+        const attempts: string[] = [];
+        const codexAgent = {
+          name: 'codex',
+          stdinMode: 'ignore',
+          bundledSkillRoot: join(tempHome, '.codex', 'skills'),
+          bundledSkills: ['make-pr'],
+          buildCommand: () => {
+            attempts.push('codex');
+            return {
+              cmd: 'node',
+              args: ['-e', 'var b=["## Summary","","x","","## Review Claim","","x","","## Review Lane","","cleanup","","## Review Unit","","scalar","","## Safety Invariant","","x","","## Slice Rationale","","x","","## Non-goals","- none","","## Test Plan","- [x] x","","## Revert Plan","- Safe to revert? Yes"].join("\\n");process.stdout.write(JSON.stringify({artifacts:[{id:"only",title:"Only",url:"https://example.test/pr/1",providerId:"1",branch:"stack/only",baseBranch:"master",body:b}]}))'],
+              sessionId: 'sess-codex',
+            };
+          },
+          buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
+        };
+        const executor = new TaskRunner({
+          orchestrator: {
+            getTask: () => null,
+            getAllTasks: () => [makeTask({ id: 't1', config: { workflowId: 'wf-no-agent' } })],
+          } as any,
+          persistence: { logEvent: vi.fn() } as any,
+          executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+          executionAgentRegistry: {
+            get: (name: string) => (name === 'codex' ? codexAgent : undefined),
+            getOrThrow: vi.fn(),
+            getSessionDriver: vi.fn().mockReturnValue(undefined),
+            listWithCapability: vi.fn().mockReturnValue([codexAgent]),
+          } as any,
+          cwd: '/tmp',
+        });
+
+        const result = await (executor as any).publishReviewStackWithMakePrSkill({
+          workflowId: 'wf-no-agent',
+          title: 'Stack',
+          baseBranch: 'master',
+          featureBranch: 'plan/feature',
+          workflowSummary: 'summary',
+          cwd: '/tmp',
+          mergeNodeTaskId: '__merge__wf-no-agent',
+          expectedGeneration: 1,
+        });
+
+        expect(attempts).toEqual(['codex']);
+        expect(result.agentName).toBe('codex');
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+
+    it('publishReviewStackWithMakePrSkill prefers the merge node\'s own declared agent over its upstream tasks\'', async () => {
+      const tempHome = createTempWorkspace();
+      const originalHome = process.env.HOME;
+      process.env.HOME = tempHome;
+      mkdirSync(join(tempHome, '.claude', 'skills', 'invoker-make-pr'), { recursive: true });
+      writeFileSync(join(tempHome, '.claude', 'skills', 'invoker-make-pr', 'SKILL.md'), '# make-pr\n');
+      mkdirSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr'), { recursive: true });
+      writeFileSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr', 'SKILL.md'), '# make-pr\n');
+
+      try {
+        const attempts: string[] = [];
+        const claudeAgent = {
+          name: 'claude',
+          stdinMode: 'ignore',
+          bundledSkillRoot: join(tempHome, '.claude', 'skills'),
+          bundledSkills: ['make-pr'],
+          buildCommand: () => {
+            attempts.push('claude');
+            return {
+              cmd: 'node',
+              args: ['-e', 'var b=["## Summary","","x","","## Review Claim","","x","","## Review Lane","","cleanup","","## Review Unit","","scalar","","## Safety Invariant","","x","","## Slice Rationale","","x","","## Non-goals","- none","","## Test Plan","- [x] x","","## Revert Plan","- Safe to revert? Yes"].join("\\n");process.stdout.write(JSON.stringify({artifacts:[{id:"only",title:"Only",url:"https://example.test/pr/1",providerId:"1",branch:"stack/only",baseBranch:"master",body:b}]}))'],
+              sessionId: 'sess-claude',
+            };
+          },
+          buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
+        };
+        const codexAgent = {
+          name: 'codex',
+          stdinMode: 'ignore',
+          bundledSkillRoot: join(tempHome, '.codex', 'skills'),
+          bundledSkills: ['make-pr'],
+          buildCommand: () => {
+            attempts.push('codex');
+            throw new Error('codex must not be invoked when the merge node itself declares claude');
+          },
+          buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
+        };
+        const mergeTaskId = '__merge__wf-own-agent';
+        const executor = new TaskRunner({
+          orchestrator: {
+            getTask: () => null,
+            getAllTasks: () => [
+              makeTask({ id: 't1', config: { workflowId: 'wf-own-agent', executionAgent: 'codex' } }),
+              makeTask({
+                id: mergeTaskId,
+                config: { workflowId: 'wf-own-agent', isMergeNode: true, executionAgent: 'claude' },
+              }),
+            ],
+          } as any,
+          persistence: { logEvent: vi.fn() } as any,
+          executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+          executionAgentRegistry: {
+            get: (name: string) => (name === 'claude' ? claudeAgent : name === 'codex' ? codexAgent : undefined),
+            getOrThrow: vi.fn(),
+            getSessionDriver: vi.fn().mockReturnValue(undefined),
+            listWithCapability: vi.fn().mockReturnValue([claudeAgent, codexAgent]),
+          } as any,
+          cwd: '/tmp',
+        });
+
+        const result = await (executor as any).publishReviewStackWithMakePrSkill({
+          workflowId: 'wf-own-agent',
+          title: 'Stack',
+          baseBranch: 'master',
+          featureBranch: 'plan/feature',
+          workflowSummary: 'summary',
+          cwd: '/tmp',
+          mergeNodeTaskId: mergeTaskId,
+          expectedGeneration: 1,
+        });
+
+        expect(attempts).toEqual(['claude']);
+        expect(result.agentName).toBe('claude');
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it('publishReviewStackWithMakePrSkill writes skill=invoker-make-pr onto merge task output', async () => {
+      const tempHome = createTempWorkspace();
+      const originalHome = process.env.HOME;
+      process.env.HOME = tempHome;
+      mkdirSync(join(tempHome, '.claude', 'skills', 'invoker-make-pr'), { recursive: true });
+      writeFileSync(join(tempHome, '.claude', 'skills', 'invoker-make-pr', 'SKILL.md'), '# make-pr\n');
+
+      try {
+        const agent = {
+          name: 'claude',
+          stdinMode: 'ignore' as const,
+          bundledSkills: ['make-pr'],
+          bundledSkillRoot: join(tempHome, '.claude', 'skills'),
+          buildCommand: () => ({
+            cmd: 'node',
+            args: ['-e', 'process.exit(1)'],
+            sessionId: 'skill-visible',
+          }),
+          buildResumeArgs: () => ({ cmd: 'node', args: ['-e', ''] }),
+        };
+        const appendTaskOutput = vi.fn();
+        const onOutput = vi.fn();
+        const executor = new TaskRunner({
+          orchestrator: { getTask: () => null, getAllTasks: () => [] } as any,
+          persistence: { appendTaskOutput } as any,
+          executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+          executionAgentRegistry: {
+            get: vi.fn().mockReturnValue(agent),
+            getOrThrow: vi.fn(),
+            getSessionDriver: vi.fn().mockReturnValue(undefined),
+            listWithCapability: vi.fn().mockReturnValue([agent]),
+          } as any,
+          cwd: '/tmp',
+          callbacks: { onOutput },
+          logger: createMockLogger(),
+        });
+
+        await expect((executor as any).publishReviewStackWithMakePrSkill({
+          workflowId: 'wf-1',
+          mergeNodeTaskId: '__merge__wf-1',
+          title: 'Stack',
+          baseBranch: 'master',
+          featureBranch: 'plan/feature',
+          workflowSummary: 'summary',
+          cwd: '/tmp',
+        })).rejects.toThrow('make-pr skill is required to publish Invoker review stacks');
+
+        const output = [
+          ...onOutput.mock.calls.map((call) => String(call[1])),
+          ...appendTaskOutput.mock.calls.map((call) => String(call[1])),
+        ].join('\n');
+        expect(output).toContain('skill=invoker-make-pr');
+        expect(output).not.toContain('/pr-skill');
+        expect(onOutput).toHaveBeenCalledWith(
+          '__merge__wf-1',
+          expect.stringContaining('skill=invoker-make-pr'),
+        );
+        expect(appendTaskOutput).toHaveBeenCalledWith(
+          '__merge__wf-1',
+          expect.stringContaining('skill=invoker-make-pr'),
         );
       } finally {
         if (originalHome === undefined) delete process.env.HOME;
@@ -1673,7 +2014,7 @@ describe('TaskRunner', () => {
       '',
       '## Review Unit',
       '',
-      'write-path',
+      'routing',
       '',
       '## Safety Invariant',
       '',
@@ -1689,11 +2030,24 @@ describe('TaskRunner', () => {
       '',
       '## Test Plan',
       '',
+      '<details>',
+      '<summary>Test Plan</summary>',
+      '',
       '- [x] `pnpm test`',
+      '',
+      '</details>',
       '',
       '## Revert Plan',
       '',
+      '<details>',
+      '<summary>Revert Plan</summary>',
+      '',
       '- Safe to revert? Yes',
+      '- Revert command: `git revert <sha>`',
+      '- Post-revert steps: None',
+      '- Data migration? No',
+      '',
+      '</details>',
     ].join('\n');
 
     const CANONICAL_ONLY_BODY = '## Summary\n\nAuthored\n\n## Test Plan\n\n- [x] `pnpm test`\n\n## Revert Plan\n\n- Safe to revert? Yes';
@@ -1714,7 +2068,7 @@ describe('TaskRunner', () => {
       };
     }
 
-    function makeStrictGateExecutor(agent: any) {
+    function makeStrictGateExecutor(agent: any, cwd = '/tmp') {
       return new TaskRunner({
         orchestrator: {
           getTask: () => null,
@@ -1728,9 +2082,28 @@ describe('TaskRunner', () => {
           getSessionDriver: vi.fn().mockReturnValue(undefined),
           listWithCapability: vi.fn().mockReturnValue([agent]),
         } as any,
-        cwd: '/tmp',
+        cwd,
         logger: createMockLogger(),
       });
+    }
+
+    function createCiParityPrWorkspace() {
+      const cwd = createTempWorkspace();
+      const sourceFile = join(cwd, 'packages', 'app', 'src', 'refresh-route.ts');
+      symlinkSync(join(process.cwd(), '..', '..', 'scripts'), join(cwd, 'scripts'), 'dir');
+      mkdirSync(join(cwd, 'packages', 'app', 'src'), { recursive: true });
+      writeFileSync(sourceFile, 'export const refreshRoute = 1;\n');
+      execSync('git init --initial-branch=master', { cwd, stdio: 'pipe' });
+      execSync('git config user.email pr-body-test@example.test', { cwd, stdio: 'pipe' });
+      execSync('git config user.name "PR Body Test"', { cwd, stdio: 'pipe' });
+      execSync('git add packages scripts && git commit -m baseline', { cwd, stdio: 'pipe' });
+      execSync('git remote add origin .', { cwd, stdio: 'pipe' });
+      execSync('git update-ref refs/remotes/origin/master HEAD', { cwd, stdio: 'pipe' });
+      execSync('git switch -c feature', { cwd, stdio: 'pipe' });
+      writeFileSync(sourceFile, 'export const refreshRoute = 2;\n');
+      execSync('git add packages && git commit -m routing-change', { cwd, stdio: 'pipe' });
+      expect(execSync('git diff --name-only origin/master...HEAD', { cwd, encoding: 'utf8' })).toContain('packages/app/src/refresh-route.ts');
+      return cwd;
     }
 
     it('authorPrBodyWithSkill rejects a canonical-only body and refuses fallback for Invoker repoUrl', async () => {
@@ -1760,13 +2133,14 @@ describe('TaskRunner', () => {
 
     it('authorPrBodyWithSkill accepts a review-stack-compliant body for Invoker repoUrl', async () => {
       const tempHome = createTempWorkspace();
+      const cwd = createCiParityPrWorkspace();
       const originalHome = process.env.HOME;
       process.env.HOME = tempHome;
       mkdirSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr'), { recursive: true });
       writeFileSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr', 'SKILL.md'), '# make-pr\n');
 
       try {
-        const executor = makeStrictGateExecutor(makeBodyEmittingAgent(tempHome, STRICT_COMPLIANT_REVIEW_STACK_BODY));
+        const executor = makeStrictGateExecutor(makeBodyEmittingAgent(tempHome, STRICT_COMPLIANT_REVIEW_STACK_BODY), cwd);
 
         const result = await (executor as any).authorPrBodyWithSkill({
           workflowId: 'wf-1',
@@ -1774,13 +2148,49 @@ describe('TaskRunner', () => {
           baseBranch: 'master',
           featureBranch: 'plan/feature',
           workflowSummary: '## Summary\nSource summary',
-          cwd: '/tmp',
+          cwd,
           repoUrl: 'git@github.com:EdbertChan/Invoker.git',
         });
 
         expect(result.agentName).toBe('codex');
         expect(result.body).toContain('## Non-goals');
         expect(result.body).toContain('## Review Claim');
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    });
+
+    it('authorPrBodyWithSkill rejects an Invoker refactor body that CI would reject', async () => {
+      const tempHome = createTempWorkspace();
+      const cwd = createCiParityPrWorkspace();
+      const originalHome = process.env.HOME;
+      process.env.HOME = tempHome;
+      mkdirSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr'), { recursive: true });
+      writeFileSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr', 'SKILL.md'), '# make-pr\n');
+
+      try {
+        const bodyWithoutUnchangedBehaviorClaim = STRICT_COMPLIANT_REVIEW_STACK_BODY
+          .replace('\nbehavior\n', '\nrefactor\n');
+        expect((await validateReviewStackPrBodyAgainstLocalDiff({
+          body: bodyWithoutUnchangedBehaviorClaim,
+          cwd,
+          baseBranch: 'master',
+        })).join('\n')).toContain('Review lane refactor must state in ## Non-goals that behavior stays unchanged');
+        const executor = makeStrictGateExecutor(
+          makeBodyEmittingAgent(tempHome, bodyWithoutUnchangedBehaviorClaim),
+          cwd,
+        );
+
+        await expect((executor as any).authorPrBodyWithSkill({
+          workflowId: 'wf-1',
+          title: 'Test Workflow',
+          baseBranch: 'master',
+          featureBranch: 'plan/feature',
+          workflowSummary: '## Summary\nSource summary',
+          cwd,
+          repoUrl: 'git@github.com:EdbertChan/Invoker.git',
+        })).rejects.toThrow(/Review lane refactor must state in ## Non-goals that behavior stays unchanged/);
       } finally {
         if (originalHome === undefined) delete process.env.HOME;
         else process.env.HOME = originalHome;
@@ -1836,6 +2246,112 @@ describe('TaskRunner', () => {
         if (originalHome === undefined) delete process.env.HOME;
         else process.env.HOME = originalHome;
       }
+    });
+
+    function createRepoCheckerWorkspace(checkerSource?: string) {
+      const cwd = createTempWorkspace();
+      if (checkerSource !== undefined) {
+        mkdirSync(join(cwd, 'scripts'), { recursive: true });
+        writeFileSync(join(cwd, 'scripts', 'validate-pr-body-local.mjs'), checkerSource);
+      }
+      return cwd;
+    }
+
+    it.each([
+      [1, 'target checker rejected the body'],
+      [3, 'UNCHECKED: PR body rules not checked (drafter-core not installed)'],
+    ])('no-registry fallback refuses target checker exit %s', async (code, message) => {
+      const cwd = createRepoCheckerWorkspace(`console.error(${JSON.stringify(message)}); process.exit(${code});`);
+      const executor = createExecutorWithTasks(new Map());
+      await expect(executor.authorPrBodyWithSkill({
+        title: 'Recorded work', baseBranch: 'main', featureBranch: 'repair',
+        workflowSummary: 'Recorded context', cwd,
+      })).rejects.toThrow(String(message));
+    });
+
+    async function authorNonInvokerBody(body: string, cwd: string) {
+      const tempHome = createTempWorkspace();
+      const originalHome = process.env.HOME;
+      process.env.HOME = tempHome;
+      mkdirSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr'), { recursive: true });
+      writeFileSync(join(tempHome, '.codex', 'skills', 'invoker-make-pr', 'SKILL.md'), '# make-pr\n');
+      try {
+        const executor = makeStrictGateExecutor(makeBodyEmittingAgent(tempHome, body), cwd);
+        return await (executor as any).authorPrBodyWithSkill({
+          workflowId: 'wf-1',
+          title: 'Test Workflow',
+          baseBranch: 'master',
+          featureBranch: 'plan/feature',
+          workflowSummary: '## Summary\nSource summary',
+          cwd,
+          repoUrl: 'https://github.com/EdbertChan/catstack',
+        });
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+      }
+    }
+
+    it('authorPrBodyWithSkill refuses canonical fallback when a non-Invoker repo checker rejects every body', async () => {
+      const cwd = createRepoCheckerWorkspace(
+        "console.error('catstack checker: missing ## Why section'); process.exit(1);\n",
+      );
+
+      const outcome = authorNonInvokerBody(CANONICAL_ONLY_BODY, cwd);
+
+      await expect(outcome).rejects.toThrow(
+        /^\[pr-authoring\] target repo checker rejected every PR body; refusing canonical fallback/,
+      );
+      await expect(outcome).rejects.toThrow(/catstack checker: missing ## Why section/);
+    });
+
+    it('authorPrBodyWithSkill uses canonical fallback when the repo checker accepts the fallback body', async () => {
+      const cwd = createRepoCheckerWorkspace(
+        [
+          "import { readFileSync } from 'node:fs';",
+          "const args = process.argv.slice(2);",
+          "const body = readFileSync(args[args.indexOf('--body-file') + 1], 'utf8');",
+          "const ok = body.includes('## Summary') && body.includes('## Test Plan') && body.includes('## Revert Plan');",
+          "process.exit(ok ? 0 : 1);",
+          '',
+        ].join('\n'),
+      );
+
+      const result = await authorNonInvokerBody('## Summary\n\nOnly summary', cwd);
+
+      expect(result.agentName).toBe('canonical');
+      expect(result.sessionId).toBe('canonical-fallback');
+      expect(result.body).toContain('## Test Plan');
+      expect(result.body).toContain('## Revert Plan');
+    });
+
+    it('authorPrBodyWithSkill returns the agent body when a non-Invoker repo checker accepts it', async () => {
+      const cwd = createRepoCheckerWorkspace(
+        [
+          "import { readFileSync } from 'node:fs';",
+          "const args = process.argv.slice(2);",
+          "const body = readFileSync(args[args.indexOf('--body-file') + 1], 'utf8');",
+          "process.exit(body.includes('## Summary') && args[args.indexOf('--base') + 1] === 'master' ? 0 : 1);",
+          '',
+        ].join('\n'),
+      );
+
+      const result = await authorNonInvokerBody(CANONICAL_ONLY_BODY, cwd);
+
+      expect(result.agentName).toBe('codex');
+      expect(result.sessionId).not.toBe('canonical-fallback');
+      expect(result.body).toBe(CANONICAL_ONLY_BODY);
+    });
+
+    it('authorPrBodyWithSkill keeps the canonical fallback for a non-Invoker repo without a checker', async () => {
+      const cwd = createRepoCheckerWorkspace();
+
+      const result = await authorNonInvokerBody('## Summary\n\nOnly summary', cwd);
+
+      expect(result.agentName).toBe('canonical');
+      expect(result.sessionId).toBe('canonical-fallback');
+      expect(result.body).toContain('## Test Plan');
+      expect(result.body).toContain('## Revert Plan');
     });
 
     it('authorPrBodyWithSkill falls back to second agent when first fails', async () => {
@@ -2215,7 +2731,7 @@ describe('TaskRunner', () => {
         status: 'running',
         dependencies: ['t1'],
         config: { isMergeNode: true, workflowId: 'wf-pub' },
-        execution: { pendingFixError: undefined },
+        execution: { pendingFixError: undefined, fixedIntegrationSha: 'deadbeef' },
       });
 
       const allTasks = [mergeTask, completedTask];
@@ -2263,9 +2779,21 @@ describe('TaskRunner', () => {
         return '';
       };
       (executor as any).execGitIn = async (args: string[], dir: string) => {
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         gitCalls.push({ args: [...args], dir });
         if (args[0] === 'rev-parse' && args[1] === 'HEAD') return 'deadbeef';
-        if (args[0] === 'rev-parse' && args[1] === '--verify') return '';
+        if (args[0] === 'rev-parse' && args[1] === '--verify') {
+          if (args[2] === 'deadbeef^{commit}') return 'deadbeef';
+          return '';
+        }
+        if (
+          args[0] === 'merge-base'
+          && args[1] === '--is-ancestor'
+          && args[2] === 'deadbeef'
+          && args[3] === 'plan/ext-review'
+        ) {
+          return '';
+        }
         if (args[0] === 'merge-base' && args[1] === '--is-ancestor') throw new Error('not ancestor');
         return '';
       };
@@ -2319,10 +2847,10 @@ describe('TaskRunner', () => {
       expect(body).toContain('`pnpm run a11y:check` — Verify accessibility contrast');
 
       // Failed tasks must NOT appear (only completed commands)
-      expect(body).not.toContain('pnpm run build:broken');
+      expect(body.split('## Test Plan')[1]).not.toContain('pnpm run build:broken');
 
       // Tasks without commands must NOT appear as checklist items
-      expect(body).not.toContain('Manual review');
+      expect(body.split('## Test Plan')[1]).not.toContain('Manual review');
 
       // Must NOT contain "Manual verification required" since we have completed commands
       expect(body).not.toContain('Manual verification required');
@@ -2414,10 +2942,10 @@ describe('TaskRunner', () => {
       // No completed command tasks → must show manual verification
       expect(body).toContain('Manual verification required');
       // Failed command task must NOT appear
-      expect(body).not.toContain('pnpm run build');
+      expect(body.split('## Test Plan')[1]).not.toContain('pnpm run build');
     });
 
-    it('canonical body uses workflowDescription over workflowSummary in Summary section', () => {
+    it('canonical body preserves both inputs outside Summary', () => {
       // buildCanonicalPrBody already imported at top of file
 
       const body = buildCanonicalPrBody({
@@ -2430,7 +2958,9 @@ describe('TaskRunner', () => {
       });
 
       expect(body).toContain('This is the structured description from the plan YAML.');
-      expect(body).not.toContain('This is the raw summary');
+      expect(body.split('## Workflow Context')[1]).toContain('This is the raw summary');
+      expect(body.split('## Review Claim')[0]).not.toContain('This is the raw summary');
+      expect(body.split('## Review Claim')[0]).not.toContain('structured description');
     });
 
     it('resolveConflict includes dep description in merge -m', async () => {
@@ -2556,6 +3086,7 @@ describe('TaskRunner', () => {
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [], register: vi.fn() } as any,
         cwd: '/tmp',
         remoteTargetsProvider: provider,
+        executionPoolsProvider: sshFixturePool('do-droplet'),
       });
 
       const task = makeTask({
@@ -2572,6 +3103,192 @@ describe('TaskRunner', () => {
 
       expect(provider).toHaveBeenCalledTimes(2);
     });
+    it('forwards SSH target provisioning fields into the selected SSH executor', () => {
+      const provider = vi.fn()
+        .mockReturnValueOnce({
+          'do-droplet': {
+            host: '1.2.3.4',
+            user: 'root',
+            sshKeyPath: '/old/key',
+            managedWorkspaces: true,
+            remoteInvokerHome: '/srv/invoker-a',
+            provisionCommand: 'old provision',
+          },
+        })
+        .mockReturnValueOnce({
+          'do-droplet': {
+            host: '1.2.3.4',
+            user: 'root',
+            sshKeyPath: '/old/key',
+            managedWorkspaces: true,
+            remoteInvokerHome: '/srv/invoker-b',
+            provisionCommand: 'new provision',
+          },
+        });
+
+      const executor = new TaskRunner({
+        orchestrator: { getTask: () => undefined } as any,
+        persistence: {} as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [], register: vi.fn() } as any,
+        cwd: '/tmp',
+        remoteTargetsProvider: provider,
+        executionPoolsProvider: sshFixturePool('do-droplet'),
+      });
+
+      const task = makeTask({
+        id: 'ssh-task',
+        config: { runnerKind: 'ssh', poolMemberId: 'do-droplet' },
+      });
+
+      const executor1 = executor.selectExecutor(task);
+      expect(executor1.executor.type).toBe('ssh');
+      expect(Reflect.get(executor1.executor, 'remoteInvokerHome')).toBe('/srv/invoker-a');
+      expect(Reflect.get(executor1.executor, 'provisionCommand')).toBe('old provision');
+
+      const executor2 = executor.selectExecutor(task);
+      expect(Reflect.get(executor2.executor, 'remoteInvokerHome')).toBe('/srv/invoker-b');
+      expect(Reflect.get(executor2.executor, 'provisionCommand')).toBe('new provision');
+
+      expect(provider).toHaveBeenCalledTimes(2);
+    });
+    it('forwards repoProvisionCommands into the selected SSH executor', () => {
+      const repoProvisionProvider = vi.fn()
+        .mockReturnValueOnce({ 'https://github.com/EdbertChan/catstack.git': 'npm ci' })
+        .mockReturnValueOnce({ 'https://github.com/EdbertChan/catstack.git': 'npm install' });
+
+      const executor = new TaskRunner({
+        orchestrator: { getTask: () => undefined } as any,
+        persistence: {} as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [], register: vi.fn() } as any,
+        cwd: '/tmp',
+        remoteTargetsProvider: () => ({
+          'do-droplet': {
+            host: '1.2.3.4',
+            user: 'root',
+            sshKeyPath: '/old/key',
+            managedWorkspaces: true,
+            provisionCommand: 'target provision',
+          },
+        }),
+        executionPoolsProvider: sshFixturePool('do-droplet'),
+        repoProvisionCommandsProvider: repoProvisionProvider,
+      });
+
+      const task = makeTask({
+        id: 'ssh-task',
+        config: { runnerKind: 'ssh', poolMemberId: 'do-droplet' },
+      });
+
+      const executor1 = executor.selectExecutor(task).executor as any;
+      expect(executor1.type).toBe('ssh');
+      expect(executor1.resolveProvisionCommand('git@github.com:EdbertChan/catstack.git')).toBe('npm ci');
+
+      const executor2 = executor.selectExecutor(task).executor as any;
+      expect(executor2).not.toBe(executor1);
+      expect(executor2.resolveProvisionCommand('git@github.com:EdbertChan/catstack.git')).toBe('npm install');
+    });
+    it('resolves worktree provisioning from worktree targets', () => {
+      const poolProvider = vi.fn()
+        .mockReturnValueOnce({
+          fast: {
+            members: [{ type: 'worktree', id: 'local-mac' }],
+          },
+        })
+        .mockReturnValueOnce({
+          fast: {
+            members: [{ type: 'worktree', id: 'local-mac' }],
+          },
+        });
+      const targetProvider = vi.fn()
+        .mockReturnValueOnce({
+          'local-mac': { provisionCommand: 'old provision' },
+        })
+        .mockReturnValueOnce({
+          'local-mac': { provisionCommand: 'new provision' },
+        });
+
+      const executor = new TaskRunner({
+        orchestrator: { getTask: () => undefined } as any,
+        persistence: {} as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [], register: vi.fn() } as any,
+        cwd: '/tmp',
+        executionPoolsProvider: poolProvider,
+        worktreeTargetsProvider: targetProvider,
+      } as any);
+
+      const task = makeTask({
+        id: 'worktree-task',
+        config: { runnerKind: 'worktree', poolId: 'fast' },
+      });
+
+      const executor1 = executor.selectExecutor(task);
+      expect(executor1.executor.type).toBe('worktree');
+      expect(Reflect.get(executor1.executor, 'provisionCommand')).toBe('old provision');
+
+      const executor2 = executor.selectExecutor(task);
+      expect(Reflect.get(executor2.executor, 'provisionCommand')).toBe('new provision');
+
+      expect(poolProvider).toHaveBeenCalledTimes(2);
+      expect(targetProvider).toHaveBeenCalledTimes(2);
+    });
+    it('roots lazy worktree executors under INVOKER_DB_DIR when set', () => {
+      const previousDbDir = process.env.INVOKER_DB_DIR;
+      const invokerHome = createTempWorkspace();
+      process.env.INVOKER_DB_DIR = invokerHome;
+      try {
+        const executor = new TaskRunner({
+          orchestrator: { getTask: () => undefined } as any,
+          persistence: {} as any,
+          executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [], register: vi.fn() } as any,
+          cwd: '/tmp',
+        } as any);
+
+        const selected = executor.selectExecutor(makeTask({
+          id: 'worktree-task',
+          config: { runnerKind: 'worktree' },
+        }));
+
+        expect(selected.executor.type).toBe('worktree');
+        expect(Reflect.get(selected.executor, 'worktreeBaseDir')).toBe(join(invokerHome, 'worktrees'));
+        expect(Reflect.get(Reflect.get(selected.executor, 'pool'), 'cacheDir')).toBe(join(invokerHome, 'repos'));
+      } finally {
+        if (previousDbDir === undefined) delete process.env.INVOKER_DB_DIR;
+        else process.env.INVOKER_DB_DIR = previousDbDir;
+      }
+    });
+    it('bypasses arbitrary registered worktree executors so target provisioning fingerprints win', () => {
+      const preRegistered = { type: 'worktree' };
+      const executor = new TaskRunner({
+        orchestrator: { getTask: () => undefined } as any,
+        persistence: {} as any,
+        executorRegistry: {
+          getDefault: () => ({ type: 'worktree' }),
+          get: (type: string) => type === 'worktree' ? preRegistered : null,
+          getAll: () => [],
+          register: vi.fn(),
+        } as any,
+        cwd: '/tmp',
+        executionPoolsProvider: () => ({
+          fast: {
+            members: [{ type: 'worktree', id: 'local-mac' }],
+          },
+        }),
+        worktreeTargetsProvider: () => ({
+          'local-mac': { provisionCommand: 'pnpm install --frozen-lockfile' },
+        }),
+      });
+
+      const task = makeTask({
+        id: 'worktree-task',
+        config: { runnerKind: 'worktree', poolId: 'fast' },
+      });
+
+      const selected = executor.selectExecutor(task);
+      expect(selected.executor).not.toBe(preRegistered);
+      expect(selected.executor.type).toBe('worktree');
+      expect(Reflect.get(selected.executor, 'provisionCommand')).toBe('pnpm install --frozen-lockfile');
+    });
+
 
     it('throws when provider returns no entry for the target ID', () => {
       const provider = vi.fn().mockReturnValue({});
@@ -2581,6 +3298,7 @@ describe('TaskRunner', () => {
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
         remoteTargetsProvider: provider,
+        executionPoolsProvider: sshFixturePool('missing-target'),
       });
 
       const task = makeTask({
@@ -2589,6 +3307,27 @@ describe('TaskRunner', () => {
       });
 
       expect(() => executor.selectExecutor(task)).toThrow('no matching');
+    });
+    it('throws when selected worktree member has no matching worktree target', () => {
+      const executor = new TaskRunner({
+        orchestrator: { getTask: () => undefined } as any,
+        persistence: {} as any,
+        executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+        cwd: '/tmp',
+        executionPoolsProvider: () => ({
+          fast: {
+            members: [{ type: 'worktree', id: 'missing-target' }],
+          },
+        }),
+        worktreeTargetsProvider: () => ({}),
+      });
+
+      const task = makeTask({
+        id: 'worktree-task',
+        config: { runnerKind: 'worktree', poolId: 'fast' },
+      });
+
+      expect(() => executor.selectExecutor(task)).toThrow('worktreeTargets config');
     });
   });
 
@@ -2600,16 +3339,22 @@ describe('TaskRunner', () => {
       gateWorkspacePath?: string | null;
       taskBranches?: TaskState[];
       repoUrl?: string;
+      fixedIntegrationSha?: string;
     }) {
       const mergeTaskId = '__merge__wf-pub';
       const workflowId = 'wf-pub';
+      const publishesReview = opts.mergeMode === 'external_review' || opts.onFinish === 'pull_request';
+      const fixedIntegrationSha = opts.fixedIntegrationSha ?? (publishesReview ? 'abc123deadbeef' : undefined);
 
       const mergeTask = makeTask({
         id: mergeTaskId,
         status: 'running',
         dependencies: (opts.taskBranches ?? []).map((t) => t.id),
         config: { isMergeNode: true, workflowId },
-        execution: { pendingFixError: undefined },
+        execution: {
+          pendingFixError: undefined,
+          ...(fixedIntegrationSha ? { fixedIntegrationSha } : {}),
+        },
       });
 
       const allTasks = [mergeTask, ...(opts.taskBranches ?? [])];
@@ -2660,9 +3405,23 @@ describe('TaskRunner', () => {
       (executor as any).execGitIn = async (args: string[], dir: string) => {
         gitCalls.push({ args: [...args], dir });
         if (args[0] === 'rev-parse' && args[1] === 'HEAD') return 'abc123deadbeef';
-        if (args[0] === 'rev-parse' && args[1] === '--verify') return '';
+        if (args[0] === 'rev-parse' && args[1] === '--verify') {
+          if (fixedIntegrationSha && args[2] === `${fixedIntegrationSha}^{commit}`) return fixedIntegrationSha;
+          return '';
+        }
+        if (
+          fixedIntegrationSha
+          &&
+          args[0] === 'merge-base'
+          && args[1] === '--is-ancestor'
+          && args[2] === fixedIntegrationSha
+          && args[3] === opts.featureBranch
+        ) {
+          return '';
+        }
         // merge-base --is-ancestor exits non-zero when branch is NOT an ancestor of HEAD
         if (args[0] === 'merge-base' && args[1] === '--is-ancestor') throw new Error('not ancestor');
+        if (args[0] === 'diff' && args[1] === '--name-only') return 'src/example.ts';
         return '';
       };
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
@@ -2945,7 +3704,7 @@ describe('TaskRunner', () => {
       await executor.publishAfterFix(mergeTask);
 
       expect(orchestrator.setTaskReviewReady).toHaveBeenCalledWith('__merge__wf-pub', expect.objectContaining({
-        config: expect.objectContaining({ runnerKind: 'worktree' }),
+        config: expect.objectContaining({ runnerKind: 'merge' }),
         execution: expect.objectContaining({ workspacePath: '/tmp/gate-clone' }),
       }), expect.objectContaining({ generation: 0 }));
 
@@ -3046,6 +3805,80 @@ describe('TaskRunner', () => {
         }),
       }));
     });
+
+    it('renews selected attempt heartbeat while publishAfterFix is still running', async () => {
+      vi.useFakeTimers();
+      try {
+        const mergeTask = makeTask({
+          id: '__merge__wf-pub',
+          status: 'running',
+          config: { isMergeNode: true, workflowId: 'wf-pub' },
+          execution: {
+            selectedAttemptId: 'pub-attempt-1',
+            generation: 3,
+          },
+        });
+        const setTaskReviewReady = vi.fn();
+        const autoStartExternallyUnblockedReadyTasksMock = vi.fn(() => []);
+        const orchestrator = {
+          getTask: (id: string) => (id === mergeTask.id ? mergeTask : undefined),
+          getAllTasks: () => [mergeTask],
+          setTaskReviewReady,
+          autoStartExternallyUnblockedReadyTasks: autoStartExternallyUnblockedReadyTasksMock,
+        };
+        const updateAttempt = vi.fn();
+        const onHeartbeat = vi.fn();
+        const executor = new TaskRunner({
+          orchestrator: orchestrator as any,
+          persistence: {
+            loadWorkflow: () => ({
+              id: 'wf-pub',
+              onFinish: 'none',
+              mergeMode: 'manual',
+              baseBranch: 'master',
+              featureBranch: undefined,
+              name: 'Workflow',
+            }),
+            updateAttempt,
+            updateTask: vi.fn(),
+          } as any,
+          executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
+          cwd: '/tmp',
+          callbacks: { onHeartbeat },
+        });
+
+        (executor as any).buildMergeSummary = () => new Promise<string>((resolve) => {
+          setTimeout(() => resolve('summary'), 60_000);
+        });
+
+        const pending = executor.publishAfterFix(mergeTask);
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(updateAttempt).toHaveBeenCalledWith(
+          'pub-attempt-1',
+          expect.objectContaining({
+            lastHeartbeatAt: expect.any(Date),
+            leaseExpiresAt: expect.any(Date),
+          }),
+        );
+        expect(onHeartbeat).toHaveBeenCalled();
+        expect(setTaskReviewReady).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await pending;
+
+        expect(setTaskReviewReady).toHaveBeenCalledWith(
+          '__merge__wf-pub',
+          expect.objectContaining({
+            execution: expect.objectContaining({ workspacePath: undefined }),
+          }),
+          expect.objectContaining({ selectedAttemptId: 'pub-attempt-1', generation: 3 }),
+        );
+        expect(autoStartExternallyUnblockedReadyTasksMock).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('SSH Executor Caching', () => {
@@ -3071,6 +3904,7 @@ describe('TaskRunner', () => {
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [], register: vi.fn() } as any,
         cwd: '/tmp',
         remoteTargetsProvider: () => remoteTargets,
+        executionPoolsProvider: sshFixturePool('remote-a', 'remote-b'),
       });
 
       const task1 = makeTask({
@@ -3097,7 +3931,7 @@ describe('TaskRunner', () => {
       expect(executor2.executor).not.toBe(executor3.executor);
     });
 
-    it('does not cache non-SSH executors', () => {
+    it('caches worktree executors by provisioning fingerprint', () => {
       const executor = new TaskRunner({
         orchestrator: { getTask: () => null, getAllTasks: () => [] } as any,
         persistence: {} as any,
@@ -3122,11 +3956,53 @@ describe('TaskRunner', () => {
       const executor1 = executor.selectExecutor(task1);
       const executor2 = executor.selectExecutor(task2);
 
-      // Worktree executors are created fresh each time (lazy registration creates new instances)
-      // Both should be worktree type but may be different instances
+      // Worktree executors are cached by local provisioning fingerprint.
       expect(executor1.executor.type).toBe('worktree');
       expect(executor2.executor.type).toBe('worktree');
+      expect(executor1.executor).toBe(executor2.executor);
     });
+    it('retains cached worktree executors for earlier worktree target provisioning fingerprints', () => {
+      const executor = new TaskRunner({
+        orchestrator: { getTask: () => null, getAllTasks: () => [] } as any,
+        persistence: {} as any,
+        executorRegistry: {
+          getDefault: () => ({ type: 'worktree' }),
+          get: () => null,
+          getAll: () => [],
+          register: vi.fn(),
+        } as any,
+        cwd: '/tmp',
+        executionPoolsProvider: () => ({
+          fast: {
+            members: [{ type: 'worktree', id: 'local-a' }],
+          },
+          slow: {
+            members: [{ type: 'worktree', id: 'local-b' }],
+          },
+        }),
+        worktreeTargetsProvider: () => ({
+          'local-a': { provisionCommand: 'pnpm install --frozen-lockfile' },
+          'local-b': { provisionCommand: 'pnpm install' },
+        }),
+      });
+
+      const executorA1 = executor.selectExecutor(makeTask({
+        id: 'task-a1',
+        config: { runnerKind: 'worktree', poolId: 'fast' },
+      }));
+      const executorB = executor.selectExecutor(makeTask({
+        id: 'task-b',
+        config: { runnerKind: 'worktree', poolId: 'slow' },
+      }));
+      const executorA2 = executor.selectExecutor(makeTask({
+        id: 'task-a2',
+        config: { runnerKind: 'worktree', poolId: 'fast' },
+      }));
+
+      expect(executorA1.executor).not.toBe(executorB.executor);
+      expect(executorA1.executor).toBe(executorA2.executor);
+    });
+
 
     it('clearSshExecutorCache removes all cached SSH executors', async () => {
       const remoteTargets = {
@@ -3144,6 +4020,7 @@ describe('TaskRunner', () => {
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [], register: vi.fn() } as any,
         cwd: '/tmp',
         remoteTargetsProvider: () => remoteTargets,
+        executionPoolsProvider: sshFixturePool('remote-a'),
       });
 
       const task1 = makeTask({
@@ -3163,13 +4040,14 @@ describe('TaskRunner', () => {
       expect(executor1.executor).not.toBe(executor2.executor);
     });
 
-    it('throws when SSH task has no poolMemberId', () => {
+    it('throws when an SSH pool has no selectable member', () => {
       const executor = new TaskRunner({
         orchestrator: { getTask: () => null, getAllTasks: () => [] } as any,
         persistence: {} as any,
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
         remoteTargetsProvider: () => ({}),
+        executionPoolsProvider: sshFixturePool(),
       });
 
       const task = makeTask({
@@ -3177,7 +4055,7 @@ describe('TaskRunner', () => {
         config: { runnerKind: 'ssh' },
       });
 
-      expect(() => executor.selectExecutor(task)).toThrow('has runnerKind=ssh but no poolMemberId');
+      expect(() => executor.selectExecutor(task)).toThrow('has no member capacity available');
     });
 
     it('throws when poolMemberId does not exist in config', () => {
@@ -3195,6 +4073,7 @@ describe('TaskRunner', () => {
         executorRegistry: { getDefault: () => ({ type: 'worktree' }), get: () => null, getAll: () => [] } as any,
         cwd: '/tmp',
         remoteTargetsProvider: () => remoteTargets,
+        executionPoolsProvider: sshFixturePool('remote-unknown'),
       });
 
       const task = makeTask({
@@ -3376,7 +4255,7 @@ describe('TaskRunner', () => {
       expect(handleWorkerResponse).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
     });
 
-    it('logs explicit SSH executor selection as explicitPoolMemberId', async () => {
+    it('logs explicit SSH member selection through its concrete pool', async () => {
       const sshExecutor = createCompletingExecutor('ssh', {
         workspacePath: '/remote/worktrees/task-explicit',
         branch: 'experiment/task-explicit',
@@ -3400,13 +4279,19 @@ describe('TaskRunner', () => {
         remoteTargetsProvider: () => ({
           'remote-b': { host: 'dev.example.com', user: 'dev', sshKeyPath: '/secret/dev-key' },
         }),
+        executionPoolsProvider: sshFixturePool('remote-b'),
       });
 
       await runner.executeTask(task);
 
       expect(logEvent).toHaveBeenCalledWith('task-explicit', 'task.executor.selected', expect.objectContaining({
         runnerKind: 'ssh',
-        reason: { type: 'explicitPoolMemberId' },
+        reason: {
+          type: 'poolId',
+          poolId: 'ssh-fixture',
+          selectionStrategy: 'roundRobin',
+          poolMemberId: 'remote-b',
+        },
         poolMemberId: 'remote-b',
         remoteHost: 'dev.example.com',
         remoteUser: 'dev',
@@ -3440,13 +4325,13 @@ describe('TaskRunner', () => {
 
       expect(logEvent).toHaveBeenCalledWith('task-local', 'task.executor.selected', expect.objectContaining({
         runnerKind: 'worktree',
-        reason: { type: 'configuredWorktree' },
+        reason: { type: 'poolId', poolId: 'local-worktree' },
         workspacePath: '/tmp/worktree/task-local',
         branch: 'experiment/task-local',
       }));
     });
 
-    it('logs SSH pool fallback to worktree when no pool member or remote target exists', async () => {
+    it('rejects a missing SSH pool without falling back to worktree', async () => {
       const worktreeExecutor = createCompletingExecutor('worktree', {
         workspacePath: '/tmp/worktree/task-fallback',
         branch: 'experiment/task-fallback',
@@ -3473,12 +4358,11 @@ describe('TaskRunner', () => {
 
       await runner.executeTask(task);
 
-      expect(logEvent).toHaveBeenCalledWith('task-fallback', 'task.executor.selected', expect.objectContaining({
-        runnerKind: 'worktree',
-        reason: { type: 'sshPoolFallbackToWorktree', poolId: 'missing-pool' },
-        workspacePath: '/tmp/worktree/task-fallback',
-        branch: 'experiment/task-fallback',
-      }));
+      expect(logEvent).not.toHaveBeenCalledWith(
+        'task-fallback',
+        'task.executor.selected',
+        expect.anything(),
+      );
     });
 
     it('fails fast when executor returns handle without workspacePath', async () => {
@@ -3521,6 +4405,7 @@ describe('TaskRunner', () => {
           getAll: () => [badExecutor],
         } as any,
         cwd: '/tmp',
+        executionPoolsProvider: sshFixturePool('remote-1'),
       });
 
       await executor.executeTask(task);
@@ -3588,6 +4473,7 @@ describe('TaskRunner', () => {
           getAll: () => [managedSshExecutor],
         } as any,
         cwd: '/tmp',
+        executionPoolsProvider: sshFixturePool('remote-1'),
       });
 
       await executor.executeTask(task);
@@ -3649,13 +4535,14 @@ describe('TaskRunner', () => {
           getAll: () => [failingExecutor],
         } as any,
         cwd: '/tmp',
+        executionPoolsProvider: sshFixturePool('remote-1'),
       });
 
       await executor.executeTask(task);
 
       // Check that metadata was persisted despite error
       expect(updateSpy).toHaveBeenCalledWith('task-failed', {
-        config: { runnerKind: 'ssh' },
+        config: { runnerKind: 'ssh', poolMemberId: 'remote-1' },
         execution: {
           workspacePath: '~/.invoker/worktrees/abc123/task-failed-xyz',
           branch: 'experiment/task-failed-xyz',
@@ -3841,13 +4728,14 @@ describe('TaskRunner', () => {
           getAll: () => [byoExecutor],
         } as any,
         cwd: '/tmp',
+        executionPoolsProvider: sshFixturePool('remote-1'),
       });
 
       await executor.executeTask(task);
 
       // Check that metadata was persisted with workspacePath and branch=undefined
       expect(updateSpy).toHaveBeenCalledWith('byo-task-1', {
-        config: { runnerKind: 'ssh', executionAgent: 'codex', executionModel: undefined },
+        config: { runnerKind: 'ssh', executionAgent: 'codex', executionModel: undefined, poolMemberId: 'remote-1' },
         execution: {
           workspacePath: '/remote/user-provided/workspace',
           branch: undefined,
@@ -4667,22 +5555,30 @@ describe('TaskRunner', () => {
   });
 
   describe('no-capable-agent deterministic PR-body fallback', () => {
-    it('canonical fallback includes all required sections', () => {
+    it('canonical fallback includes review sections when metadata is supplied', () => {
       const body = buildCanonicalPrBody({
         title: 'Test PR',
         workflowSummary: 'Implemented feature X.',
+        reviewMetadata: { unit: 'routing', lane: 'behavior' },
       });
 
       expect(body).toContain('## Summary');
+      expect(body).toContain('## Review Claim');
+      expect(body).toContain('## Review Lane');
+      expect(body).toContain('## Review Unit');
+      expect(body).toContain('## Safety Invariant');
+      expect(body).toContain('## Slice Rationale');
+      expect(body).toContain('## Non-goals');
       expect(body).toContain('## Test Plan');
       expect(body).toContain('## Revert Plan');
       expect(validateCanonicalPrBody(body)).toEqual([]);
+      expect(validateReviewStackPrBody(body)).toEqual([]);
     });
 
-    it('canonical fallback uses workflowDescription over workflowSummary when available', () => {
+    it('canonical fallback keeps both supplied sources in later sections', () => {
       const body = buildCanonicalPrBody({
         title: 'Test PR',
-        workflowSummary: 'Raw summary that should not appear.',
+        workflowSummary: 'Raw technical summary.',
         structuredContext: {
           workflowDescription: 'Preferred description from YAML.',
           tasks: [],
@@ -4690,7 +5586,9 @@ describe('TaskRunner', () => {
       });
 
       expect(body).toContain('Preferred description from YAML.');
-      expect(body).not.toContain('Raw summary that should not appear.');
+      expect(body.split('## Workflow Context')[1]).toContain('Raw technical summary.');
+      expect(body.split('## Review Claim')[0]).not.toContain('Raw technical summary.');
+      expect(body.split('## Review Claim')[0]).not.toContain('Preferred description');
     });
 
     it('canonical fallback lists completed command tasks as checked items in Test Plan', () => {
@@ -4711,9 +5609,9 @@ describe('TaskRunner', () => {
       expect(body).toContain('- [x] `pnpm test` — Run unit tests');
       expect(body).toContain('- [x] `pnpm lint` — Run lint');
       // Non-command task excluded from Test Plan command list
-      expect(body).not.toContain('Implement feature');
+      expect(body.split('## Test Plan')[1]).not.toContain('Implement feature');
       // Failed command task excluded
-      expect(body).not.toContain('pnpm deploy');
+      expect(body.split('## Test Plan')[1]).not.toContain('pnpm deploy');
     });
 
     it('canonical fallback shows manual verification when no completed command tasks exist', () => {
@@ -4827,7 +5725,7 @@ describe('TaskRunner', () => {
         if (args[0] === 'branch' && args[1] === '--show-current') return 'master';
         return '';
       };
-      (executor as any).execGitIn = async () => '';
+      (executor as any).execGitIn = async (args: string[]) => (args[0] === 'diff' && args[1] === '--name-only' ? 'src/example.ts' : '');
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
       (executor as any).buildMergeSummary = vi.fn().mockResolvedValue(rawSummary);
@@ -4902,7 +5800,7 @@ describe('TaskRunner', () => {
       });
 
       (executor as any).execGitReadonly = async () => '';
-      (executor as any).execGitIn = async () => '';
+      (executor as any).execGitIn = async (args: string[]) => (args[0] === 'diff' && args[1] === '--name-only' ? 'src/example.ts' : '');
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
       (executor as any).buildMergeSummary = vi.fn().mockResolvedValue('## Summary\nWorkflow summary');
@@ -5168,6 +6066,7 @@ describe('TaskRunner', () => {
         } as any,
         cwd: '/tmp',
         callbacks: { onHeartbeat },
+        executionPoolsProvider: sshFixturePool('remote-1'),
       });
 
       const pending = runner.executeTask(runningTask);

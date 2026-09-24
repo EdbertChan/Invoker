@@ -109,8 +109,17 @@ export function registerReadOnlyIpcHandlers(context: RegisterReadOnlyIpcHandlers
     return local();
   }
 
+  let cachedWorkflowList: { at: number; value: unknown } | null = null;
   ipcMain.handle('invoker:list-workflows', () =>
-    delegatedRead('workflows', {}, 'workflows', () => persistence.listWorkflows()));
+    delegatedRead('workflows', {}, 'workflows', () => {
+      const now = Date.now();
+      if (cachedWorkflowList && now - cachedWorkflowList.at >= 0 && now - cachedWorkflowList.at < 1000) {
+        return cachedWorkflowList.value;
+      }
+      const value = persistence.listWorkflows();
+      cachedWorkflowList = { at: now, value };
+      return value;
+    }));
   ipcMain.handle('invoker:get-execution-pools', () => Object.keys(loadConfig().executionPools ?? {}));
 
   ipcMain.handle('invoker:load-workflow', async (_event, workflowId: string) => {
@@ -159,7 +168,10 @@ export function registerReadOnlyIpcHandlers(context: RegisterReadOnlyIpcHandlers
     }
 
     const { tasks, workflows, streamSequence } = buildTaskGraphSnapshot({
-      orchestrator,
+      orchestrator: {
+        syncAllFromDb: () => orchestrator.syncAllFromDb(),
+        getAllTasks: () => orchestrator.getAllTasks(),
+      },
       persistence,
       getStreamSequence: getTaskDeltaStreamSequence,
     });

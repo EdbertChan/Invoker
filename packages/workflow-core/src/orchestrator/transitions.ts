@@ -13,7 +13,7 @@
  * downstream auto-start / deferred re-enqueue sequence are preserved exactly.
  */
 
-import type { FailureClass, TaskState, TaskDelta, TaskStateChanges } from '@invoker/workflow-graph';
+import { FailureClassifier, getTransitiveDependents, type FailureClass, type TaskState, type TaskDelta, type TaskStateChanges } from '@invoker/workflow-graph';
 import type { Logger } from '@invoker/contracts';
 import type { ParsedResponse } from '../response-handler.js';
 import { scopePlanTaskId } from '../task-id-scope.js';
@@ -51,6 +51,7 @@ export interface TransitionHost {
   readonly activeWorkflowIds: Set<string>;
 
   stateGetTask(taskId: string): TaskState | undefined;
+  clearQueuedSchedulerEntries(taskId: string, attemptId?: string): void;
   writeAndSync(
     taskId: string,
     changes: TaskStateChanges,
@@ -59,6 +60,7 @@ export interface TransitionHost {
   buildUpdateDelta(before: TaskState, after: TaskState, changes: TaskStateChanges): TaskDelta;
   ensureCurrentPendingAttempt(task: TaskState): string;
   touchWorkflow(workflowId: string): void;
+  getWorkflowIdsToTouchAfterWorkflowTransition(workflowId: string): string[];
   setTaskApprovalStatus(
     taskId: string,
     status: 'awaiting_approval' | 'review_ready',
@@ -71,10 +73,10 @@ export interface TransitionHost {
 
   // Scheduler-domain entrypoints (kept as Orchestrator methods that delegate
   // to scheduler-domain.ts); transitions trigger downstream work through them.
-  autoStartReadyTasks(taskIds: string[], priority?: number, opts?: LaunchReadinessOptions): TaskState[];
+  autoStartReadyTasks(taskIds: string[], priority?: number, opts?: LaunchReadinessOptions & { alreadyRefreshed?: boolean }): TaskState[];
   autoStartUnblockedTasks(): TaskState[];
   autoStartExternallyUnblockedReadyTasks(): TaskState[];
-  drainScheduler(): TaskState[];
+  drainScheduler(opts?: { alreadyRefreshed?: boolean }): TaskState[];
 }
 
 // ── Extracted Functions ─────────────────────────────────────
@@ -180,8 +182,12 @@ export function handleCompletedImpl(
     started.push(...host.autoStartReadyTasks(deferredTaskIds));
   }
 
-  checkWorkflowCompletionImpl(host);
+  checkWorkflowCompletionImpl(host, task?.config.workflowId);
   return started;
+}
+
+function isAgentTask(task: TaskState): boolean {
+  return typeof task.config.prompt === 'string' && task.config.prompt.length > 0;
 }
 
 /**
@@ -208,10 +214,16 @@ export function finalizeFailedTaskImpl(
     throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `finalizeFailedTask: task ${taskId} not found in graph`);
   }
 
+  const failureClass = executionFields.failureClass
+    ?? FailureClassifier.classifyError(executionFields.error)
+    ?? FailureClassifier.classifyWorkFailure(executionFields.error)
+    ?? (isAgentTask(existing) ? FailureClassifier.classifyAgentQuotaRefusal(executionFields.error) : undefined);
+
   const changes: TaskStateChanges = {
     status: 'failed',
     execution: {
       ...executionFields,
+      failureClass,
       completedAt: new Date(),
     },
   };
@@ -239,6 +251,39 @@ export function finalizeFailedTaskImpl(
 
   checkExperimentCompletionImpl(host, taskId);
 
+  const allTasks = host.stateMachine.getAllTasks();
+  const taskMap = new Map(allTasks.map((task) => [task.id, task]));
+  const upstreamLabel = taskId.includes('/') && !taskId.startsWith('__merge__')
+    ? taskId.slice(taskId.indexOf('/') + 1)
+    : taskId;
+  const descendantIds = getTransitiveDependents(
+    taskId,
+    taskMap,
+    (task) =>
+      task.status === 'completed' ||
+      task.status === 'stale' ||
+      task.config.isReconciliation === true,
+  );
+  for (const descendantId of descendantIds) {
+    const dependent = host.stateGetTask(descendantId);
+    if (!dependent || dependent.config.isReconciliation) continue;
+    const neverStarted =
+      !dependent.execution.startedAt &&
+      (dependent.status === 'pending' || dependent.status === 'queued' || dependent.status === 'blocked');
+    if (!neverStarted) continue;
+
+    host.deferredTaskIds.delete(descendantId);
+    host.clearQueuedSchedulerEntries(descendantId, dependent.execution.selectedAttemptId);
+    const skippedChanges: TaskStateChanges = {
+      status: 'skipped',
+      execution: { blockedBy: `upstream task "${upstreamLabel}" failed` },
+    };
+    const skippedUpdated = host.writeAndSync(descendantId, skippedChanges);
+    const skippedDelta = host.buildUpdateDelta(dependent, skippedUpdated, skippedChanges);
+    host.persistence.logEvent?.(descendantId, 'task.skipped', skippedChanges);
+    host.messageBus.publish(TASK_DELTA_CHANNEL, skippedDelta);
+  }
+
   const readyTaskIds = host.stateMachine.findNewlyReadyTasks(taskId);
   host.logger.info('[orchestrator] finalizeFailedTask', {
     taskId,
@@ -261,7 +306,7 @@ export function finalizeFailedTaskImpl(
     started.push(...host.autoStartReadyTasks(deferredTaskIds));
   }
 
-  checkWorkflowCompletionImpl(host);
+  checkWorkflowCompletionImpl(host, existing.config.workflowId);
   return started;
 }
 
@@ -270,11 +315,13 @@ export function handleReviewReadyImpl(
   taskId: string,
   parsed: Extract<ParsedResponse, { type: 'review_ready' }>,
 ): TaskState[] {
+  const task = host.stateGetTask(taskId);
   const changes: TaskStateChanges = {
     config: { summary: parsed.summary },
     execution: {
       exitCode: parsed.exitCode,
       branch: parsed.branch,
+      workspacePath: parsed.workspacePath,
       reviewUrl: parsed.reviewUrl,
       reviewId: parsed.reviewId,
       reviewStatus: parsed.reviewStatus,
@@ -285,7 +332,7 @@ export function handleReviewReadyImpl(
 
   const started = host.autoStartUnblockedTasks();
   started.push(...host.autoStartExternallyUnblockedReadyTasks());
-  checkWorkflowCompletionImpl(host);
+  checkWorkflowCompletionImpl(host, task?.config.workflowId);
   return started;
 }
 
@@ -331,6 +378,65 @@ export function handleNeedsInputImpl(
   return [];
 }
 
+export function handleStaleImpl(
+  host: TransitionHost,
+  taskId: string,
+  parsed: Extract<ParsedResponse, { type: 'stale' }>,
+): TaskState[] {
+  const changes: TaskStateChanges = { status: 'stale', execution: { exitCode: parsed.exitCode, error: parsed.error } };
+  const before = host.stateGetTask(taskId)!;
+  const updated = host.writeAndSync(taskId, changes);
+  const attemptId = updated.execution.selectedAttemptId;
+  if (attemptId) host.taskRepository.updateAttempt(attemptId, { status: 'stale', error: parsed.error });
+  const delta = host.buildUpdateDelta(before, updated, changes);
+  host.persistence.logEvent?.(taskId, 'task.stale', changes);
+  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+  return host.autoStartUnblockedTasks();
+}
+
+function resolveSpawnPivotSourceChanges(
+  parentTask: TaskState | undefined,
+  host: TransitionHost,
+  wf: { baseBranch?: string } | undefined,
+): { execution: { branch?: string; commit?: string } } | undefined {
+  const baseBranch =
+    wf && typeof wf.baseBranch === 'string' ? wf.baseBranch.trim() : '';
+
+  const parentBranch = parentTask?.execution?.branch?.trim() ?? '';
+  const parentCommit = parentTask?.execution?.commit?.trim() ?? '';
+  if (parentCommit) {
+    return {
+      execution: {
+        branch: parentBranch || baseBranch || undefined,
+        commit: parentCommit,
+      },
+    };
+  }
+
+  const depTips: Array<{ branch: string; commit: string }> = [];
+  for (const depId of parentTask?.dependencies ?? []) {
+    const dep = host.stateGetTask(depId);
+    if (dep?.status !== 'completed') continue;
+    const branch = dep.execution?.branch?.trim() ?? '';
+    const commit = dep.execution?.commit?.trim() ?? '';
+    if (branch && commit) depTips.push({ branch, commit });
+  }
+
+  if (depTips.length === 1) {
+    return { execution: depTips[0]! };
+  }
+
+  // depTips.length > 1: no single dependency tip can be inherited
+  // unambiguously, so fall through to the baseBranch fallback below rather
+  // than returning undefined — leaving execution unset here trips the
+  // completed-dependency branch guard in task-runner-prepare.ts and blocks
+  // every spawned variant from launching at all.
+  if (baseBranch) {
+    return { execution: { branch: baseBranch } };
+  }
+  return undefined;
+}
+
 export function handleSpawnExperimentsImpl(
   host: TransitionHost,
   taskId: string,
@@ -346,16 +452,33 @@ export function handleSpawnExperimentsImpl(
   }
   const scopeLocal = (local: string) => scopePlanTaskId(wfId, local);
 
+  const parentPoolId = parentTask?.config.poolId;
+  const parentRunnerKind = parentTask?.config.runnerKind;
+  const parentDockerImage =
+    parentTask?.config.runnerKind === 'docker' ? parentTask.config.dockerImage : undefined;
+  const parentExecutionAgent = parentTask?.config.executionAgent;
+  const parentExecutionModel = parentTask?.config.executionModel;
+  const parentMaxTurns = parentTask?.config.maxTurns;
+  const parentDepIds = (parentTask?.dependencies ?? []).filter(
+    (depId) => depId !== taskId && typeof depId === 'string' && depId.length > 0,
+  );
+
   const experimentTasks: GraphMutationNodeDef[] = parsed.variants.map((v) => ({
     id: scopeLocal(v.id),
     description: v.description ?? `Experiment: ${v.id}`,
-    dependencies: [taskId],
+    dependencies: [taskId, ...parentDepIds],
     workflowId: wfId,
     parentTask: taskId,
+    variantLocalId: v.localId,
     experimentPrompt: v.prompt,
     prompt: v.prompt,
     command: v.command,
-    runnerKind: parentTask?.config.runnerKind,
+    runnerKind: parentRunnerKind,
+    poolId: parentPoolId,
+    dockerImage: parentDockerImage,
+    executionAgent: parentExecutionAgent,
+    executionModel: parentExecutionModel,
+    maxTurns: parentMaxTurns,
   }));
 
   const reconciliationId = `${taskId}-reconciliation`;
@@ -369,6 +492,12 @@ export function handleSpawnExperimentsImpl(
       parentTask: taskId,
       isReconciliation: true,
       requiresManualApproval: true,
+      runnerKind: parentRunnerKind,
+      poolId: parentPoolId,
+      dockerImage: parentDockerImage,
+      executionAgent: parentExecutionAgent,
+      executionModel: parentExecutionModel,
+      maxTurns: parentMaxTurns,
     },
   ];
 
@@ -376,12 +505,7 @@ export function handleSpawnExperimentsImpl(
     wfId && typeof host.persistence.loadWorkflow === 'function'
       ? host.persistence.loadWorkflow(wfId)
       : undefined;
-  const pivotBranch =
-    wf && typeof (wf as { baseBranch?: string }).baseBranch === 'string'
-      ? (wf as { baseBranch: string }).baseBranch.trim()
-      : '';
-  const sourceChanges =
-    pivotBranch !== '' ? { execution: { branch: pivotBranch } } : undefined;
+  const sourceChanges = resolveSpawnPivotSourceChanges(parentTask, host, wf);
 
   host.applyGraphMutation({
     sourceNodeId: taskId,
@@ -445,8 +569,9 @@ export function checkExperimentCompletionImpl(host: TransitionHost, taskId: stri
   }
 }
 
-export function checkWorkflowCompletionImpl(host: TransitionHost): void {
-  for (const wfId of host.activeWorkflowIds) {
+export function checkWorkflowCompletionImpl(host: TransitionHost, transitionedWorkflowId?: string): void {
+  if (!transitionedWorkflowId) return;
+  for (const wfId of host.getWorkflowIdsToTouchAfterWorkflowTransition(transitionedWorkflowId)) {
     host.touchWorkflow(wfId);
   }
 }

@@ -229,8 +229,35 @@ export const SUBSCRIBER_ERROR_RATE_LIMIT_MS = 1_000;
 // Default socket path
 // ---------------------------------------------------------------------------
 
+/**
+ * Decides whether a relayed error response should be forwarded to the
+ * original requester (and its relay bookkeeping cleared), given that the
+ * responding peer has already been removed from the awaiting set.
+ *
+ * Forward once the error isn't NO_HANDLER (some other, more specific error
+ * should reach the requester immediately) or once no peers remain awaited
+ * (NO_HANDLER from everyone means the request truly has no handler).
+ */
+export function shouldForwardRelayedErrorResponse(
+  isNoHandlerError: boolean,
+  remainingAwaitingCount: number,
+): boolean {
+  return !isNoHandlerError || remainingAwaitingCount === 0;
+}
+
 export function resolveDefaultSocketPath(): string {
   return resolveInvokerIpcSocketPath();
+}
+
+/**
+ * True for errno codes that mean a socket path can never be connected to or
+ * bound, regardless of retries (e.g. it exceeds the OS's `sun_path` length
+ * limit, ~104 bytes on macOS / ~108 on Linux). Every other connect/listen
+ * error (ECONNREFUSED, ENOENT, EACCES from a transient permission race, ...)
+ * is treated as potentially transient elsewhere in this file.
+ */
+function isPermanentSocketPathError(err: NodeJS.ErrnoException): boolean {
+  return err.code === 'EINVAL' || err.code === 'ENAMETOOLONG';
 }
 
 export const DEFAULT_SOCKET_PATH = resolveDefaultSocketPath();
@@ -241,11 +268,24 @@ export const DEFAULT_SOCKET_PATH = resolveDefaultSocketPath();
  *  caller deadline so the responder is less likely to finish after the requester has given up. */
 const LONG_REQUEST_DEADLINE_CHANNELS = new Set([
   'invoker:plan-from-goal',
+  'invoker:planning-chat-send',
+  'invoker:planning-chat-submit',
+  'invoker:planning-chat-rebind-repo',
+  'invoker:start-ready',
   // start-ready --recreate-all and other bulk mutations run inline on the owner.
   'headless.exec',
 ]);
 export const LONG_REQUEST_DEADLINE_MS = 2 * 60 * 60 * 1000;
 export const DEFAULT_REQUEST_DEADLINE_MS = 30_000;
+const PLANNING_CHAT_CHANNEL_PREFIX = 'invoker:planning-chat-';
+
+/** True when a request on this channel (or a gui-mutation inner channel) gets
+ *  the long deadline. Planning-chat channels inherit it so a new clone/send
+ *  sibling cannot ship on the 30s default just because nobody appended a name. */
+export function channelHasLongRequestDeadline(channel: string): boolean {
+  return LONG_REQUEST_DEADLINE_CHANNELS.has(channel)
+    || channel.startsWith(PLANNING_CHAT_CHANNEL_PREFIX);
+}
 
 export interface IpcBusOptions {
   allowServe?: boolean;
@@ -258,6 +298,24 @@ export interface IpcBusOptions {
   /** Optional callback invoked when a subscriber handler throws.
    *  Rate-limited to at most one call per {@link SUBSCRIBER_ERROR_RATE_LIMIT_MS}. */
   onSubscriberError?: SubscriberErrorObserver;
+}
+
+/** Snapshot of the state {@link isServeRecoveryEligible} needs to decide whether an
+ *  IpcBus should schedule another attempt at reconnecting/becoming the server. */
+export interface ServeRecoveryState {
+  disconnected: boolean;
+  hasServer: boolean;
+  hasPeers: boolean;
+  recoveryAlreadyScheduled: boolean;
+}
+
+/** Whether an IpcBus in the given state should schedule another recovery attempt.
+ *  Recovery is unnecessary once the bus is disconnected, already has a server, already
+ *  has a peer, or already has a recovery attempt in flight. */
+export function isServeRecoveryEligible(state: ServeRecoveryState): boolean {
+  return (
+    !state.disconnected && !state.hasServer && !state.hasPeers && !state.recoveryAlreadyScheduled
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +347,7 @@ export class IpcBus implements MessageBus {
   private readyPromise: Promise<void>;
   private resolveReady!: () => void;
   private disconnected = false;
+  private fatalConnectError: TransportError | null = null;
 
   // Request/reply correlation.
   private nextReqId = 0;
@@ -321,6 +380,18 @@ export class IpcBus implements MessageBus {
     this.tryConnect();
   }
 
+  /** Record a permanent socket-path failure, once, for `getFatalConnectError()`. */
+  private recordFatalConnectError(err: NodeJS.ErrnoException): void {
+    if (this.fatalConnectError) return;
+    this.fatalConnectError = new TransportError(
+      TransportErrorCode.SOCKET_PATH_INVALID,
+      `Cannot use IPC socket path "${this.socketPath}" (${this.socketPath.length} chars): `
+        + `${err.code}. Unix domain socket paths are limited to roughly 100 characters on `
+        + 'most operating systems. Set INVOKER_IPC_SOCKET to a shorter path, or shorten '
+        + 'INVOKER_DB_DIR.',
+    );
+  }
+
   private tryConnect(): void {
     const sock = createConnection({ path: this.socketPath }, () => {
       // Connected as client.
@@ -329,33 +400,51 @@ export class IpcBus implements MessageBus {
     });
 
     sock.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'ECONNREFUSED' || err.code === 'ENOENT') {
-        if (!this.allowServe) {
-          this.resolveReady();
-          return;
-        }
-        // No server yet — try to become the server.
-        this.tryServe();
+      if (isPermanentSocketPathError(err)) {
+        // Retrying this path can never succeed, so still keep the existing
+        // resolve+retry contract (every other caller of ready()/request()
+        // depends on it), but record the cause so a caller that specifically
+        // checks getFatalConnectError() can fail fast instead of waiting out
+        // a bootstrap timeout for a condition that will never clear.
+        this.recordFatalConnectError(err);
+      }
+      if (!this.allowServe) {
+        // A pure client (allowServe: false, e.g. a headless CLI) must never
+        // become the server, but the server it's waiting for may simply not
+        // exist yet (ENOENT while an owner is still booting) or be mid
+        // restart (ECONNREFUSED) — keep retrying in the background so a
+        // caller polling via request()/discoverOwner() eventually succeeds
+        // once a server appears, instead of this bus being permanently
+        // unable to connect for its entire lifetime.
+        this.resolveReady();
+        this.scheduleRecovery();
+        return;
+      }
+      if (err.code === 'ECONNREFUSED') {
+        // Safety invariant: only a refused connect proves the socket file is
+        // dead, so this is the sole path allowed to reclaim (unlink) it.
+        this.tryServe(true);
+      } else if (err.code === 'ENOENT') {
+        this.tryServe(false);
       } else {
-        if (!this.allowServe) {
-          this.resolveReady();
-          return;
-        }
-        // Unexpected error — still try to serve.
-        this.tryServe();
+        // Safety invariant: on any other error the server may be alive —
+        // never unlink its socket; retry connecting instead.
+        this.resolveReady();
+        this.scheduleRecovery();
       }
     });
   }
 
-  private tryServe(): void {
+  private tryServe(reclaimStale: boolean): void {
     // Ensure directory exists.
     mkdirSync(dirname(this.socketPath), { recursive: true });
 
-    // Clean stale socket file before binding.
-    try {
-      unlinkSync(this.socketPath);
-    } catch {
-      // File may not exist — fine.
+    if (reclaimStale) {
+      try {
+        unlinkSync(this.socketPath);
+      } catch {
+        // File may not exist — fine.
+      }
     }
 
     const srv = createServer((client) => {
@@ -366,6 +455,10 @@ export class IpcBus implements MessageBus {
       if (err.code === 'EADDRINUSE') {
         // Another process won the race — fall back to client.
         this.tryConnectRetry();
+        return;
+      }
+      if (isPermanentSocketPathError(err)) {
+        this.recordFatalConnectError(err);
       }
       // Other server errors are silently ignored (no payload logging).
     });
@@ -385,24 +478,41 @@ export class IpcBus implements MessageBus {
 
     sock.on('error', () => {
       if (this.allowServe) {
-        this.scheduleServeRecovery();
+        this.scheduleRecovery();
       }
       // Nothing else we can do synchronously — resolve ready so callers don't hang forever.
       this.resolveReady();
     });
   }
 
-  private scheduleServeRecovery(): void {
-    if (this.disconnected || !this.allowServe || this.server || this.peers.size > 0 || this.serveRetryScheduled) {
+  // Reconnection is valid for both server-capable and pure-client buses —
+  // only *becoming* the server (tryServe) is exclusively gated on
+  // allowServe, and that gate lives in tryConnect()'s error handler above.
+  private scheduleRecovery(): void {
+    if (
+      !isServeRecoveryEligible({
+        disconnected: this.disconnected,
+        hasServer: this.server !== null,
+        hasPeers: this.peers.size > 0,
+        recoveryAlreadyScheduled: this.serveRetryScheduled,
+      })
+    ) {
       return;
     }
     this.serveRetryScheduled = true;
     setTimeout(() => {
       this.serveRetryScheduled = false;
-      if (this.disconnected || !this.allowServe || this.server || this.peers.size > 0) {
+      if (
+        !isServeRecoveryEligible({
+          disconnected: this.disconnected,
+          hasServer: this.server !== null,
+          hasPeers: this.peers.size > 0,
+          recoveryAlreadyScheduled: false,
+        })
+      ) {
         return;
       }
-      this.tryServe();
+      this.tryConnect();
     }, 25).unref?.();
   }
 
@@ -423,12 +533,12 @@ export class IpcBus implements MessageBus {
     sock.on('data', (chunk: Buffer) => decoder.push(chunk));
     sock.on('close', () => {
       this.peers.delete(sock);
-      this.scheduleServeRecovery();
+      this.scheduleRecovery();
     });
     sock.on('error', () => {
       sock.destroy();
       this.peers.delete(sock);
-      this.scheduleServeRecovery();
+      this.scheduleRecovery();
     });
   }
 
@@ -568,7 +678,7 @@ export class IpcBus implements MessageBus {
 
     relay.awaiting.delete(source);
     const noHandlerError = env.code === TransportErrorCode.NO_HANDLER;
-    if (!noHandlerError || relay.awaiting.size === 0) {
+    if (shouldForwardRelayedErrorResponse(noHandlerError, relay.awaiting.size)) {
       this.relayedRequests.delete(env.reqId);
       this.sendToSocket(relay.source, env);
     }
@@ -661,7 +771,13 @@ export class IpcBus implements MessageBus {
     const env: ReqEnvelope = { kind: 'req', channel, body: message, reqId };
 
     return new Promise<Res>((resolve, reject) => {
-      const effectiveDeadlineMs = LONG_REQUEST_DEADLINE_CHANNELS.has(channel)
+      // Generic wrapper channels (e.g. headless.gui-mutation) carry the real
+      // operation name inside the message body, so a long-running operation
+      // delegated through one must be recognized there too.
+      const innerChannel = (message as { channel?: unknown } | null)?.channel;
+      const isLongRunning = channelHasLongRequestDeadline(channel)
+        || (typeof innerChannel === 'string' && channelHasLongRequestDeadline(innerChannel));
+      const effectiveDeadlineMs = isLongRunning
         ? Math.max(this.requestDeadlineMs, LONG_REQUEST_DEADLINE_MS)
         : this.requestDeadlineMs;
       const timer = setTimeout(() => {
@@ -687,6 +803,41 @@ export class IpcBus implements MessageBus {
   /** Wait until the transport is connected or serving. */
   ready(): Promise<void> {
     return this.readyPromise;
+  }
+
+  /**
+   * A permanent, non-retryable reason this bus can never connect or serve
+   * (currently: the socket path is too long for the OS), or null if none has
+   * been observed. Callers that poll on `ready()`/`request()` in a loop with
+   * their own timeout (e.g. headless CLI bootstrap) can check this to fail
+   * fast with a clear cause instead of waiting out the full timeout.
+   */
+  getFatalConnectError(): TransportError | null {
+    return this.fatalConnectError;
+  }
+
+  /** True when this bus currently owns the listening socket. */
+  isServing(): boolean {
+    return this.server !== null;
+  }
+
+  /**
+   * Authoritatively (re)bind the socket. Only for a process that holds the DB
+   * writer lock: it drops any client peers, closes a stale server, and serves
+   * fresh — reclaiming a socket path that was deleted or taken while this
+   * process remained the rightful owner.
+   */
+  serveAsOwner(): void {
+    if (this.disconnected || !this.allowServe) return;
+    for (const peer of this.peers) {
+      peer.destroy();
+    }
+    this.peers.clear();
+    if (this.server) {
+      this.server.close();
+      this.server = null;
+    }
+    this.tryServe(true);
   }
 
   disconnect(): void {

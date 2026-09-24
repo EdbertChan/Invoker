@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import type { WorkRequest, WorkResponse } from '@invoker/contracts';
-import type { PersistedTaskMeta } from '../executor.js';
+import { ExecutorStartup, StartupCancelledError, type PersistedTaskMeta } from '../executor.js';
 import type { Writable, Readable } from 'node:stream';
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -21,9 +21,10 @@ vi.mock('node:fs', async (importOriginal) => {
 // Must import after mock setup
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
-import { WorktreeExecutor, computeContentHash } from '../worktree-executor.js';
-import { BaseExecutor } from '../base-executor.js';
+import { WorktreeExecutor, computeContentHash, isCloneableRepoUrl } from '../worktree-executor.js';
+import { BaseExecutor, isHeartbeatAliveDuringFinalize, normalizeRepoUrlForProvisionLookup } from '../base-executor.js';
 import { registerBuiltinAgents } from '../agents/index.js';
+import { SIGKILL_TIMEOUT_MS } from '../process-utils.js';
 
 const mockedSpawn = vi.mocked(spawn);
 
@@ -142,6 +143,10 @@ function setupSpawnMock(): {
           finish(2, null);
           return;
         }
+        if (argsArr?.[0] === 'ls-remote' && argsArr?.[1] === '--heads') {
+          const branch = argsArr[argsArr.length - 1];
+          gitProc.stdout!.emit('data', Buffer.from(`abc123def456\trefs/heads/${branch}\n`));
+        }
         if (argsArr?.includes('rev-parse')) {
           gitProc.stdout!.emit('data', Buffer.from('abc123def456\n'));
         }
@@ -197,6 +202,40 @@ describe('computeContentHash (re-exported by worktree-executor)', () => {
   });
 });
 
+describe('normalizeRepoUrlForProvisionLookup', () => {
+  it.each([
+    'git@github.com:test/repo.git',
+    'https://github.com/test/repo.git',
+    'https://github.com/test/repo.git/',
+    'ssh://git@github.com/test/repo.git',
+  ])('canonicalizes %s', (repoUrl) => {
+    expect(normalizeRepoUrlForProvisionLookup(repoUrl)).toBe('github.com/test/repo');
+  });
+});
+
+describe('isCloneableRepoUrl', () => {
+  it.each([
+    ['https://github.com/owner/repo', true],
+    ['https://github.com/owner/repo.git', true],
+    ['http://example.com/repo.git', true],
+    ['git@github.com:owner/repo.git', true],
+    ['git@gitlab.com:group/project.git', true],
+    ['ssh://git@github.com/owner/repo.git', true],
+    ['file:///home/user/repo.git', true],
+    ['owner/repo', true],
+    ['/tmp/invoker-repro-fixture/repro-repo', true],
+    ['.', false],
+    ['..', false],
+    ['./repo', false],
+    ['../repo', false],
+    ['', false],
+    ['  ', false],
+    ['just-a-name', false],
+  ])('isCloneableRepoUrl(%j) returns %s', (repoUrl, expected) => {
+    expect(isCloneableRepoUrl(repoUrl)).toBe(expected);
+  });
+});
+
 describe('WorktreeExecutor', () => {
   let executor: WorktreeExecutor;
 
@@ -247,6 +286,44 @@ describe('WorktreeExecutor', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+  });
+
+  it('startup cancellation checks the absolute deadline before spawn even when the timer has not fired', async () => {
+    setupSpawnMock();
+    const now = Date.now();
+    const startup = new ExecutorStartup(now + 1000, new StartupCancelledError('timeout', 'test deadline expired'));
+    vi.spyOn(executor as any, 'provisionWorktree').mockImplementation(() => ({
+      child: null,
+      completion: Promise.resolve().then(() => {
+        // Model a delayed event loop: wall time passes inside the continuation,
+        // without running any timeout callback before the next startup stage.
+        vi.spyOn(Date, 'now').mockReturnValue(now + 1001);
+      }),
+    }));
+    await expect(executor.start(makeRequest(), startup)).rejects.toMatchObject({ reason: 'timeout' });
+    expect(mockedSpawn.mock.calls.filter(([command]) => command !== 'git')).toHaveLength(0);
+    const pool = (executor as any).pool;
+    const acquired = await pool.acquireWorktree.mock.results[0].value;
+    expect(acquired.softRelease).toHaveBeenCalledTimes(1);
+    expect((executor as any).entries.size).toBe(0);
+  });
+
+  it('startup cancellation fences a recreated attempt after a late acquisition and releases only its handle', async () => {
+    setupSpawnMock();
+    let current = true;
+    const startup = new ExecutorStartup(Date.now() + 10000, new StartupCancelledError('timeout', 'test deadline'), () => current);
+    const pool = (executor as any).pool;
+    const acquire = pool.acquireWorktree.getMockImplementation();
+    pool.acquireWorktree.mockImplementation(async (...args: unknown[]) => {
+      const acquired = await acquire(...args);
+      current = false;
+      return acquired;
+    });
+    await expect(executor.start(makeRequest(), startup)).rejects.toMatchObject({ reason: 'stale' });
+    const acquired = await pool.acquireWorktree.mock.results[0].value;
+    expect(acquired.softRelease).toHaveBeenCalledTimes(1);
+    expect(mockedSpawn.mock.calls.filter(([command]) => command !== 'git')).toHaveLength(0);
+    expect((executor as any).entries.size).toBe(0);
   });
 
   it('start creates git worktree with unique branch', async () => {
@@ -338,6 +415,263 @@ describe('WorktreeExecutor', () => {
 
     taskProcess.emit('close', 0, null);
   });
+  it('runs a configured provision command before spawning the task process', async () => {
+    const { taskProcess } = setupSpawnMock();
+    const baseImpl = mockedSpawn.getMockImplementation();
+    const provisionProcess = createMockProcess();
+    mockedSpawn.mockImplementation((cmd: string, args?: readonly string[], options?: { signal?: AbortSignal }) => {
+      if (cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile') {
+        return provisionProcess;
+      }
+      return baseImpl!(cmd, args, options);
+    });
+
+    const provisionedExecutor = new WorktreeExecutor({
+      cacheDir: '/fake/cache',
+      worktreeBaseDir: '/fake/worktrees',
+      provisionCommand: 'pnpm install --frozen-lockfile',
+    });
+    mockPool(provisionedExecutor);
+
+    const startPromise = provisionedExecutor.start(makeRequest());
+    await vi.waitFor(() => {
+      expect(mockedSpawn.mock.calls.find(
+        ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile',
+      )).toBeDefined();
+    });
+
+    const provisionCall = mockedSpawn.mock.calls.find(
+      ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile',
+    );
+    expect((provisionCall?.[2] as { cwd: string }).cwd).toMatch(/^\/fake\/worktrees\//);
+
+    provisionProcess.emit('close', 0, null);
+    await startPromise;
+
+    const taskCall = mockedSpawn.mock.calls.find(
+      ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'echo hello',
+    );
+    expect(taskCall).toBeDefined();
+
+    taskProcess.emit('close', 0, null);
+  });
+  it('BUG: fails the whole task when the provision command fails only because the repo has no package.json', async () => {
+    // Repro for a production incident: a pool's provisionCommand (e.g. this
+    // repo's own local-mac/local-fallback `pnpm install --frozen-lockfile`)
+    // is configured per pool, not per repoUrl. When a workflow targets a
+    // repoUrl that isn't a Node/pnpm project, pnpm reports
+    // ERR_PNPM_NO_PKG_MANIFEST and today that hard-fails the task even
+    // though there was never anything for this command to install here.
+    // This test currently documents that buggy behavior (task.start()
+    // rejects); a follow-up slice flips this assertion once the executor
+    // treats a missing package.json as "this command doesn't apply" instead
+    // of a fatal provisioning error.
+    setupSpawnMock();
+    const baseImpl = mockedSpawn.getMockImplementation();
+    const provisionProcess = createMockProcess();
+    mockedSpawn.mockImplementation((cmd: string, args?: readonly string[], options?: { signal?: AbortSignal }) => {
+      if (cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile') {
+        return provisionProcess;
+      }
+      return baseImpl!(cmd, args, options);
+    });
+
+    const provisionedExecutor = new WorktreeExecutor({
+      cacheDir: '/fake/cache',
+      worktreeBaseDir: '/fake/worktrees',
+      provisionCommand: 'pnpm install --frozen-lockfile',
+    });
+    mockPool(provisionedExecutor);
+
+    const startPromise = provisionedExecutor.start(makeRequest());
+    await vi.waitFor(() => {
+      expect(mockedSpawn.mock.calls.find(
+        ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile',
+      )).toBeDefined();
+    });
+
+    (provisionProcess.stdout as EventEmitter).emit(
+      'data',
+      'ERR_PNPM_NO_PKG_MANIFEST  No package.json found in /fake/worktrees/checkout\n',
+    );
+    provisionProcess.emit('close', 1, null);
+
+    await expect(startPromise).rejects.toThrow('ERR_PNPM_NO_PKG_MANIFEST');
+  });
+  it('uses the repo-specific provision command instead of the pool default when repoUrl has an override', async () => {
+    const { taskProcess } = setupSpawnMock();
+    const baseImpl = mockedSpawn.getMockImplementation();
+    const provisionProcess = createMockProcess();
+    mockedSpawn.mockImplementation((cmd: string, args?: readonly string[], options?: { signal?: AbortSignal }) => {
+      if (cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'echo repo-specific-install') {
+        return provisionProcess;
+      }
+      return baseImpl!(cmd, args, options);
+    });
+
+    const provisionedExecutor = new WorktreeExecutor({
+      cacheDir: '/fake/cache',
+      worktreeBaseDir: '/fake/worktrees',
+      provisionCommand: 'pnpm install --frozen-lockfile',
+      repoProvisionCommands: {
+        // Deliberately not byte-identical to the request's repoUrl
+        // (https:// form vs. the request's git@ form, trailing .git) to
+        // prove lookup normalization, not just an exact string match.
+        'https://github.com/test/repo.git': 'echo repo-specific-install',
+      },
+    });
+    mockPool(provisionedExecutor);
+
+    const startPromise = provisionedExecutor.start(makeRequest());
+    await vi.waitFor(() => {
+      expect(mockedSpawn.mock.calls.find(
+        ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'echo repo-specific-install',
+      )).toBeDefined();
+    });
+
+    expect(mockedSpawn.mock.calls.find(
+      ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile',
+    )).toBeUndefined();
+
+    provisionProcess.emit('close', 0, null);
+    await startPromise;
+
+    taskProcess.emit('close', 0, null);
+  });
+  it.each([
+    ['https repoUrl with trailing slash after .git', 'https://github.com/test/repo.git/'],
+    ['ssh URI repoUrl with git user', 'ssh://git@github.com/test/repo.git'],
+  ])('uses the repo-specific provision command for %s', async (_name, repoUrl) => {
+    const { taskProcess } = setupSpawnMock();
+    const baseImpl = mockedSpawn.getMockImplementation();
+    const provisionProcess = createMockProcess();
+    mockedSpawn.mockImplementation((cmd: string, args?: readonly string[], options?: { signal?: AbortSignal }) => {
+      if (cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'echo repo-specific-install') {
+        return provisionProcess;
+      }
+      return baseImpl!(cmd, args, options);
+    });
+
+    const provisionedExecutor = new WorktreeExecutor({
+      cacheDir: '/fake/cache',
+      worktreeBaseDir: '/fake/worktrees',
+      provisionCommand: 'pnpm install --frozen-lockfile',
+      repoProvisionCommands: {
+        'git@github.com:test/repo.git': 'echo repo-specific-install',
+      },
+    });
+    mockPool(provisionedExecutor);
+
+    const startPromise = provisionedExecutor.start(makeRequest({ inputs: { repoUrl } }));
+    await vi.waitFor(() => {
+      expect(mockedSpawn.mock.calls.find(
+        ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'echo repo-specific-install',
+      )).toBeDefined();
+    });
+
+    expect(mockedSpawn.mock.calls.find(
+      ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile',
+    )).toBeUndefined();
+
+    provisionProcess.emit('close', 0, null);
+    await startPromise;
+
+    taskProcess.emit('close', 0, null);
+  });
+  it('skips provisioning when repoProvisionCommands maps the repo to an empty command', async () => {
+    const { taskProcess } = setupSpawnMock();
+
+    const provisionedExecutor = new WorktreeExecutor({
+      cacheDir: '/fake/cache',
+      worktreeBaseDir: '/fake/worktrees',
+      provisionCommand: 'pnpm install --frozen-lockfile',
+      repoProvisionCommands: {
+        'git@github.com:test/repo.git': '',
+      },
+    });
+    mockPool(provisionedExecutor);
+
+    await provisionedExecutor.start(makeRequest());
+
+    expect(mockedSpawn.mock.calls.find(
+      ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile',
+    )).toBeUndefined();
+    const taskCall = mockedSpawn.mock.calls.find(([cmd]) => cmd !== 'git');
+    expect(taskCall).toBeDefined();
+
+    taskProcess.emit('close', 0, null);
+  });
+  it('times out hung provision commands and terminates their process group', async () => {
+    vi.useFakeTimers();
+    const previousTimeout = process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS;
+    process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS = '25';
+    setupSpawnMock();
+    const baseImpl = mockedSpawn.getMockImplementation();
+    const provisionProcess = createMockProcess();
+    mockedSpawn.mockImplementation((cmd: string, args?: readonly string[], options?: { signal?: AbortSignal }) => {
+      if (cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile') {
+        return provisionProcess;
+      }
+      return baseImpl!(cmd, args, options);
+    });
+
+    const provisionedExecutor = new WorktreeExecutor({
+      cacheDir: '/fake/cache',
+      worktreeBaseDir: '/fake/worktrees',
+      provisionCommand: 'pnpm install --frozen-lockfile',
+    });
+    mockPool(provisionedExecutor);
+
+    try {
+      const startPromise = provisionedExecutor.start(makeRequest());
+      const rejection = expect(startPromise).rejects.toThrow('provision command timed out after 25ms');
+      await vi.waitFor(() => {
+        expect(mockedSpawn.mock.calls.find(
+          ([cmd, args]) => cmd === '/bin/bash' && (args as string[] | undefined)?.[1] === 'pnpm install --frozen-lockfile',
+        )).toBeDefined();
+      });
+
+      await vi.advanceTimersByTimeAsync(25 + SIGKILL_TIMEOUT_MS);
+
+      await rejection;
+      // The mocked pid does not lead a real process group, so killProcessGroup
+      // falls back to child.kill() rather than process.kill(-pid).
+      expect(provisionProcess.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(provisionProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS;
+      } else {
+        process.env.INVOKER_EXECUTOR_START_TIMEOUT_MS = previousTimeout;
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains only a bounded provisioning output tail', () => {
+    const tailingExecutor = new WorktreeExecutor({
+      cacheDir: '/fake/cache',
+      worktreeBaseDir: '/fake/worktrees',
+      provisionCommand: 'pnpm install --frozen-lockfile',
+    });
+    const appendProvisionOutputTail = Reflect.get(
+      tailingExecutor,
+      'appendProvisionOutputTail',
+    ) as (tail: string, text: string) => string;
+
+    let tail = '';
+    for (let index = 0; index < 75; index += 1) {
+      tail = appendProvisionOutputTail(tail, `line-${index}\n`);
+    }
+
+    expect(tail).not.toContain('line-0');
+    expect(tail).toContain('line-74');
+    expect(tail.trim().split('\n')).toHaveLength(50);
+
+    const oversized = appendProvisionOutputTail('', `${'x'.repeat(40_000)}\n`);
+    expect(oversized.length).toBeLessThanOrEqual(32_000);
+  });
+
 
   it('completion captures branch and commit hash in summary', async () => {
     const { taskProcess } = setupSpawnMock();
@@ -374,10 +708,10 @@ describe('WorktreeExecutor', () => {
       executor.onComplete(handle, (res) => resolve(res));
     });
 
-    // When kill sends SIGTERM, simulate process exit
-    const origKill = process.kill;
-    vi.spyOn(process, 'kill').mockImplementation((_pid, _signal?) => {
-      // Simulate the process closing after receiving the signal
+    // When kill sends SIGTERM, simulate process exit. The mocked pid does
+    // not lead a real process group, so killProcessGroup falls back to
+    // child.kill() rather than process.kill(-pid) — mock that fallback.
+    vi.mocked(taskProcess.kill).mockImplementation((_signal?) => {
       setTimeout(() => taskProcess.emit('close', null, 'SIGTERM'), 0);
       return true;
     });
@@ -392,8 +726,6 @@ describe('WorktreeExecutor', () => {
         (call[1] as string[])?.includes('remove'),
     );
     expect(removeCalls.length).toBe(0);
-
-    vi.mocked(process.kill).mockRestore();
   });
 
   it('kill returns when process close already fired during finalization', async () => {
@@ -442,16 +774,15 @@ describe('WorktreeExecutor', () => {
 
     expect(taskProcesses).toHaveLength(2);
 
-    // Simulate processes closing when SIGTERM is sent
-    vi.spyOn(process, 'kill').mockImplementation((_pid, _signal?) => {
-      for (const tp of taskProcesses) {
-        if (!(tp as any)._closed) {
-          (tp as any)._closed = true;
-          setTimeout(() => tp.emit('close', null, 'SIGTERM'), 0);
-        }
-      }
-      return true;
-    });
+    // Simulate processes closing when SIGTERM is sent. The mocked pids do
+    // not lead real process groups, so killProcessGroup falls back to
+    // child.kill() rather than process.kill(-pid) — mock that fallback.
+    for (const tp of taskProcesses) {
+      vi.mocked(tp.kill).mockImplementation((_signal?) => {
+        setTimeout(() => tp.emit('close', null, 'SIGTERM'), 0);
+        return true;
+      });
+    }
 
     await executor.destroyAll();
 
@@ -463,8 +794,6 @@ describe('WorktreeExecutor', () => {
         (call[1] as string[])?.includes('remove'),
     );
     expect(removeCalls.length).toBe(0);
-
-    vi.mocked(process.kill).mockRestore();
   });
 
 
@@ -537,6 +866,22 @@ describe('WorktreeExecutor', () => {
 
     executor.sendInput(handle, 'hello\n');
     expect((taskProcess.stdin as any).write).toHaveBeenCalledWith('hello\n');
+
+    // Cleanup
+    taskProcess.emit('close', 0, null);
+  });
+
+  it('sendInput maps terminal Ctrl-D to stdin EOF for command processes', async () => {
+    const { taskProcess } = setupSpawnMock();
+
+    const request = makeRequest({ inputs: { command: 'cat' } });
+    const handle = await executor.start(request);
+
+    executor.sendInput(handle, 'hello\n\x04');
+
+    expect((taskProcess.stdin as any).write).toHaveBeenCalledWith('hello\n');
+    expect((taskProcess.stdin as any).write).not.toHaveBeenCalledWith('\x04');
+    expect((taskProcess.stdin as any).end).toHaveBeenCalledTimes(1);
 
     // Cleanup
     taskProcess.emit('close', 0, null);
@@ -617,31 +962,64 @@ describe('WorktreeExecutor', () => {
         expect.any(String),
         expect.any(String),
         'action-1',
-        { forceFresh: true },
+        { forceFresh: true, leaseHolderId: 'action-1' },
       );
 
       taskProcess.emit('close', 0, null);
     });
 
-    it('merges upstream branches into the worktree after creation', async () => {
+    it('branches from upstreamBase commit without re-merging the parent branch', async () => {
       const { taskProcess } = setupSpawnMock();
+      const pool = mockPool(executor);
+      const parentCommit = '1111111111111111111111111111111111111111';
 
       const request = makeRequest({
         inputs: {
           command: 'echo hello',
-          upstreamBranches: ['experiment/dep-1', 'experiment/dep-2'],
+          upstreamBranches: ['experiment/dep-parent'],
+          upstreamBase: {
+            branch: 'experiment/dep-parent',
+            commitHash: parentCommit,
+          },
         },
       });
       await executor.start(request);
 
-      // setupTaskBranch uses runBash for merging. Verify the merge script contains both branches.
+      expect(pool.acquireWorktree.mock.calls[0][2]).toBe(parentCommit);
+      const runBashMock = vi.mocked((BaseExecutor.prototype as any).runBash);
+      const mergeCall = runBashMock.mock.calls.find(
+        (call) => call[0].includes('Invoker: merge'),
+      );
+      expect(mergeCall).toBeUndefined();
+
+      taskProcess.emit('close', 0, null);
+    });
+
+    it('merges only the remaining parent branches after branching from upstreamBase', async () => {
+      const { taskProcess } = setupSpawnMock();
+      const pool = mockPool(executor);
+      const parentCommit = '2222222222222222222222222222222222222222';
+
+      const request = makeRequest({
+        inputs: {
+          command: 'echo hello',
+          upstreamBranches: ['experiment/dep-parent', 'experiment/dep-sibling'],
+          upstreamBase: {
+            branch: 'experiment/dep-parent',
+            commitHash: parentCommit,
+          },
+        },
+      });
+      await executor.start(request);
+
+      expect(pool.acquireWorktree.mock.calls[0][2]).toBe(parentCommit);
       const runBashMock = vi.mocked((BaseExecutor.prototype as any).runBash);
       const mergeCall = runBashMock.mock.calls.find(
         (call) => call[0].includes('Invoker: merge'),
       );
       expect(mergeCall).toBeDefined();
-      expect(mergeCall![0]).toContain('experiment/dep-1');
-      expect(mergeCall![0]).toContain('experiment/dep-2');
+      expect(mergeCall![0]).not.toContain('experiment/dep-parent');
+      expect(mergeCall![0]).toContain('experiment/dep-sibling');
 
       taskProcess.emit('close', 0, null);
     });
@@ -743,7 +1121,11 @@ describe('WorktreeExecutor', () => {
       const request = makeRequest({
         inputs: {
           command: 'echo hello',
-          upstreamBranches: ['experiment/conflicting'],
+          upstreamBranches: ['experiment/dep-parent', 'experiment/conflicting'],
+          upstreamBase: {
+            branch: 'experiment/dep-parent',
+            commitHash: '3333333333333333333333333333333333333333',
+          },
         },
       });
 
@@ -782,7 +1164,11 @@ describe('WorktreeExecutor', () => {
       const request = makeRequest({
         inputs: {
           command: 'echo hello',
-          upstreamBranches: ['experiment/conflicting'],
+          upstreamBranches: ['experiment/dep-parent', 'experiment/conflicting'],
+          upstreamBase: {
+            branch: 'experiment/dep-parent',
+            commitHash: '4444444444444444444444444444444444444444',
+          },
         },
       });
 
@@ -817,11 +1203,55 @@ describe('WorktreeExecutor', () => {
       const request = makeRequest({
         inputs: {
           command: 'echo hello',
-          upstreamBranches: ['experiment/nonexistent-branch'],
+          upstreamBranches: ['experiment/dep-parent', 'experiment/nonexistent-branch'],
+          upstreamBase: {
+            branch: 'experiment/dep-parent',
+            commitHash: '5555555555555555555555555555555555555555',
+          },
         },
       });
 
       await expect(executor.start(request)).rejects.toThrow();
+    });
+
+    it('releases the acquired worktree slot when the upstream merge fails for a non-conflict reason', async () => {
+      setupSpawnMock();
+      const pool = mockPool(executor);
+
+      vi.mocked((BaseExecutor.prototype as any).runBash).mockImplementation(
+        async (script: string) => {
+          if (script.includes('PRESERVED=')) {
+            return 'PRESERVED=0\nBASE_SHA=abc123\n';
+          }
+          if (script.includes('Invoker: merge')) {
+            const err = new Error('bash exited with code 30: missing ref');
+            (err as any).exitCode = 30;
+            (err as any).stderr = 'MISSING_REF=experiment/nonexistent-branch';
+            throw err;
+          }
+          return '';
+        },
+      );
+
+      const request = makeRequest({
+        inputs: {
+          command: 'echo hello',
+          upstreamBranches: ['experiment/dep-parent', 'experiment/nonexistent-branch'],
+          upstreamBase: {
+            branch: 'experiment/dep-parent',
+            commitHash: '5555555555555555555555555555555555555555',
+          },
+        },
+      });
+
+      await expect(executor.start(request)).rejects.toThrow();
+
+      // Regression test: start() throws here before any WorktreeEntry is
+      // registered, so the only way the acquired worktree slot gets freed is
+      // the try/catch around mergeRequestUpstreamBranches releasing it
+      // directly. Without that fix, this slot leaks for the life of the process.
+      const acquired = await pool.acquireWorktree.mock.results[0]!.value;
+      expect(acquired.softRelease).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -879,7 +1309,9 @@ describe('WorktreeExecutor', () => {
       expect(args).toContain('--session-id');
       expect(args).toContain('--dangerously-skip-permissions');
       expect(args).toContain('-p');
-      expect(args).toContain('test prompt');
+      const promptArg = args[args.indexOf('-p') + 1];
+      expect(promptArg).toContain('Owning package');
+      expect(promptArg).toContain('test prompt');
 
       // Verify session ID is set on handle
       expect(handle.agentSessionId).toBeDefined();
@@ -1006,6 +1438,21 @@ describe('WorktreeExecutor', () => {
       expect(spec!.args).toContain('--resume');
       expect(spec!.args).toContain(handle.agentSessionId);
       expect(spec!.cwd).toMatch(/^\/fake\/worktrees\//);
+
+      taskProcess.emit('close', 0, null);
+    });
+
+    it('getTerminalSpec preserves caller-supplied display bridge text', async () => {
+      const { taskProcess } = setupSpawnMock();
+
+      const request = makeRequest();
+      const handle = await executor.start(request);
+      handle.displayOnlyBridgeText = 'Context: live task handoff';
+
+      expect(executor.getTerminalSpec(handle)).toEqual(expect.objectContaining({
+        cwd: expect.stringMatching(/^\/fake\/worktrees\//),
+        displayOnlyBridgeText: 'Context: live task handoff',
+      }));
 
       taskProcess.emit('close', 0, null);
     });
@@ -1242,6 +1689,23 @@ describe('WorktreeExecutor', () => {
       const spec = executor.getRestoredTerminalSpec(baseMeta);
       expect(spec).toEqual({ cwd: undefined });
     });
+
+    it('preserves caller-supplied display bridge text on restored specs', () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      const spec = executor.getRestoredTerminalSpec({
+        ...baseMeta,
+        workspacePath: '/home/user/.invoker/worktrees/wt-abc',
+        agentSessionId: 'session-wt-1',
+        displayOnlyBridgeText: 'Context: restored task handoff',
+      });
+
+      expect(spec).toEqual({
+        command: 'claude',
+        args: ['--resume', 'session-wt-1', '--dangerously-skip-permissions'],
+        cwd: '/home/user/.invoker/worktrees/wt-abc',
+        displayOnlyBridgeText: 'Context: restored task handoff',
+      });
+    });
   });
 
   describe('git availability pre-flight check', () => {
@@ -1473,8 +1937,8 @@ describe('WorktreeExecutor', () => {
         (taskProcess as any).exitCode = 0;
         (taskProcess as any).killed = false;
 
-        // Advance past heartbeat interval
-        await vi.advanceTimersByTimeAsync(150);
+        // Advance past the heartbeat grace interval
+        await vi.advanceTimersByTimeAsync(250);
 
         // Heartbeat should detect orphaned process
         const orphanOutput = outputLines.find(line => line.includes('Heartbeat detected orphaned process'));
@@ -1487,6 +1951,30 @@ describe('WorktreeExecutor', () => {
         expect(responses[0].outputs.error).toContain('heartbeat recovery');
 
         await vi.runAllTimersAsync();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not recover before a delayed close event can report completion', async () => {
+      vi.useFakeTimers();
+      try {
+        const { taskProcess } = setupSpawnMock();
+        const responses: WorkResponse[] = [];
+        const request = makeRequest();
+        const handle = await executor.start(request);
+        executor.onComplete(handle, (response) => { responses.push(response); });
+
+        // Node can expose exitCode before it delivers the close event.
+        (taskProcess as any).exitCode = 0;
+        await vi.advanceTimersByTimeAsync(100);
+
+        expect(responses).toHaveLength(0);
+
+        taskProcess.emit('close', 0, null);
+        await vi.runAllTimersAsync();
+        expect(responses).toHaveLength(1);
+        expect(responses[0].status).toBe('completed');
       } finally {
         vi.useRealTimers();
       }
@@ -1507,7 +1995,7 @@ describe('WorktreeExecutor', () => {
         (taskProcess as any).exitCode = 42;
         (taskProcess as any).killed = false;
 
-        await vi.advanceTimersByTimeAsync(150);
+        await vi.advanceTimersByTimeAsync(250);
 
         const diagnosticOutput = outputLines.find(line => line.includes('Heartbeat detected orphaned process'));
         expect(diagnosticOutput).toBeDefined();
@@ -1590,6 +2078,18 @@ describe('WorktreeExecutor', () => {
 
       finalizeDeferred.resolve('abc123');
       await waitForCondition(() => completed);
+    });
+
+    it('isHeartbeatAliveDuringFinalize reflects finalizingAfterClose regardless of process exit state', () => {
+      const exitedChild = createMockProcess();
+      (exitedChild as any).exitCode = 0;
+      const runningChild = createMockProcess();
+
+      expect(isHeartbeatAliveDuringFinalize({ finalizingAfterClose: true }, exitedChild)).toBe(true);
+      expect(isHeartbeatAliveDuringFinalize({ finalizingAfterClose: true }, runningChild)).toBe(true);
+      expect(isHeartbeatAliveDuringFinalize({ finalizingAfterClose: false }, exitedChild)).toBe(false);
+      expect(isHeartbeatAliveDuringFinalize({ finalizingAfterClose: false }, runningChild)).toBe(false);
+      expect(isHeartbeatAliveDuringFinalize({}, exitedChild)).toBe(false);
     });
 
     it('heartbeat stops after completion to prevent duplicate events', async () => {

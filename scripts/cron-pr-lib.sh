@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
-# Shared helpers for the two PR-maintenance cron jobs that run co-located with
-# the Invoker owner:
+# Shared helpers for the two surviving PR-maintenance cron jobs that run
+# co-located with the Invoker owner:
 #
-#   scripts/cron-coderabbit-address.sh  (Job 1) — address new CodeRabbit reviews
-#   scripts/cron-pr-conflict-rebase.sh  (Job 2) — rebase-recreate conflicting PRs
-#
+#   scripts/cron-pr-admin-bypass-land.sh
+#   scripts/cron-pr-orphan-repair.sh
 # Source this AFTER `set -euo pipefail`:
 #   source "$(dirname "$0")/cron-pr-lib.sh"
 #
 # Provides:
 #   Variables: REPO_ROOT, RUNNER, IPC_HELPER (from headless-lib.sh),
-#              TARGET_REPO, PR_AUTHOR, CODERABBIT_LOGIN, CRON_LOCK, DRY_RUN
+#              TARGET_REPO, PR_AUTHOR, CRON_LOCK, DRY_RUN
 #   Functions: log_line, cron_lock, ledger_init, ledger_record, ledger_count,
 #              ledger_marker_seen, ledger_max_marker, gh_json,
 #              resolve_workflow_for_pr, prune_stale_pr_workdirs
 #
-# Both jobs run their mutating operation SYNCHRONOUSLY while holding a single
-# shared lock, so only one PR cron operation runs at a time (the other exits
-# this tick and retries in 5 min). The lock prefers flock (Linux owner host)
-# and falls back to an atomic mkdir lock where flock is absent (e.g. macOS).
+# Each job runs its scan or submission pass while holding a single shared lock,
+# so only one PR-maintenance operation runs at a time (the others exit this tick
+# and retry in 5 min). The lock prefers flock (Linux owner host) and falls back
+# to an atomic mkdir lock where flock is absent (e.g. macOS).
+
+export INVOKER_HEADLESS_FORCE_OWNER_IPC="${INVOKER_HEADLESS_FORCE_OWNER_IPC:-1}"
 
 # headless-lib.sh: REPO_ROOT, RUNNER, IPC_HELPER, headless_query, ... It keys
 # off ${BASH_SOURCE[0]} so it resolves correctly no matter the caller's cwd.
@@ -31,8 +32,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/headless-lib.sh"
 
 TARGET_REPO="${INVOKER_GITHUB_TARGET_REPO:-Neko-Catpital-Labs/Invoker}"
 PR_AUTHOR="${INVOKER_PR_CRON_AUTHOR:-EdbertChan}"
-CODERABBIT_LOGIN="${INVOKER_CODERABBIT_LOGIN:-coderabbitai[bot]}"
 CRON_LOCK="${INVOKER_PR_CRON_LOCK:-${TMPDIR:-/tmp}/invoker-pr-crons.lock}"
+CRON_LOCK_WAIT_SECS="${INVOKER_PR_CRON_LOCK_WAIT_SECS:-60}"
 DRY_RUN="${INVOKER_PR_CRON_DRY_RUN:-0}"
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,11 @@ DRY_RUN="${INVOKER_PR_CRON_DRY_RUN:-0}"
 
 log_line() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+shell_quote() {
+  # Single-quote a value for a generated shell command.
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 # ---------------------------------------------------------------------------
@@ -59,7 +65,7 @@ _cron_lock_reap_stale() {
   local holder=""
   [ -f "$pid_file" ] && holder="$(cat "$pid_file" 2>/dev/null || true)"
   if [ -n "$holder" ]; then
-    kill -0 "$holder" 2>/dev/null && return 0   # holder alive — do not reap
+    kill -0 "$holder" 2>/dev/null && return 0   # holder alive; do not reap
     rm -rf "$lockdir" 2>/dev/null || true
     return 0
   fi
@@ -77,7 +83,7 @@ _cron_lock_reap_stale() {
 cron_lock() {
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$CRON_LOCK"
-    if ! flock -n 9; then
+    if ! flock -w "$CRON_LOCK_WAIT_SECS" 9; then
       log_line "another PR cron operation in progress; exiting"
       exit 0
     fi
@@ -86,11 +92,16 @@ cron_lock() {
 
   # Portable fallback: atomic mkdir lock, reaped only on a dead holder PID.
   local lockdir="${CRON_LOCK}.d"
+  local deadline=$(( $(date +%s) + CRON_LOCK_WAIT_SECS ))
   [ -d "$lockdir" ] && _cron_lock_reap_stale "$lockdir"
-  if ! mkdir "$lockdir" 2>/dev/null; then
-    log_line "another PR cron operation in progress; exiting"
-    exit 0
-  fi
+  until mkdir "$lockdir" 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      log_line "another PR cron operation in progress; exiting"
+      exit 0
+    fi
+    sleep 1
+    [ -d "$lockdir" ] && _cron_lock_reap_stale "$lockdir"
+  done
   printf '%s\n' "$$" > "$lockdir/pid"
   CRON_LOCK_DIR="$lockdir"
   # shellcheck disable=SC2064
@@ -182,8 +193,8 @@ resolve_workflow_for_pr() {
 
 # ---------------------------------------------------------------------------
 # Local disk guardrail: prune stale PR checkout workdirs.
-# This is only used by Job 1 (cron-coderabbit-address) today, but lives here so
-# both jobs share the same policy when/if Job 2 needs checkouts later.
+# Shared helper for whichever surviving PR-maintenance path needs a temporary
+# checkout.
 # ---------------------------------------------------------------------------
 
 PR_CRON_WORKDIR_STAMP_NAME=".invoker-pr-cron-last-used"

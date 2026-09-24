@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "NODE_OPTIONS='--max-old-space-size=4096' vite build && tsup src/lib/workflow-core-activity.ts --format esm --out-dir dist/lib --clean false",
-    "test": "node scripts/run-vitest.mjs"
+    "test": "node scripts/run-vitest.mjs",
+    "typecheck": "node scripts/typecheck-baseline.mjs"
   },
   "dependencies": {
     "@invoker/contracts": "workspace:*",
@@ -23,6 +24,7 @@
     "lucide-react": "^1.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
     "rxjs": "^7.8.2",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",

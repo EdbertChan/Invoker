@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildFixPrompt, resolveConflictImpl, fixWithAgentImpl, spawnRemoteAgentFixImpl, remoteAgentShellInvocation } from '../conflict-resolver.js';
+import { buildFixPrompt, buildRemoteAgentCommand, resolveConflictImpl, fixWithAgentImpl, spawnRemoteAgentFixImpl, remoteAgentShellInvocation } from '../conflict-resolver.js';
 import type { ConflictResolverHost } from '../conflict-resolver.js';
 import type { Orchestrator } from '@invoker/workflow-core';
 import { registerBuiltinAgents } from '../agents/index.js';
@@ -463,6 +463,28 @@ describe('agent dispatch — codex vs claude', () => {
   });
 });
 
+describe('buildRemoteAgentCommand unresolvable agent', () => {
+  it('raises naming the requested agent when no agent registry is available', () => {
+    expect(() => buildRemoteAgentCommand('fix it', undefined, 'codex')).toThrow(
+      /requested execution agent "codex"/,
+    );
+  });
+
+  it('raises naming the requested agent when the registry lacks that name', () => {
+    const registry = registerBuiltinAgents();
+    expect(() => buildRemoteAgentCommand('fix it', registry, 'no-such-agent')).toThrow(
+      /requested execution agent "no-such-agent"/,
+    );
+  });
+
+  it('still builds the command when the registry resolves the requested agent', () => {
+    const registry = registerBuiltinAgents();
+    const { shellCommand, sessionId } = buildRemoteAgentCommand('fix it', registry, 'codex');
+    expect(shellCommand).toContain('codex');
+    expect(sessionId).toBeTruthy();
+  });
+});
+
 describe('remote agent dispatch via registry', () => {
   // We can't easily test actual SSH spawning, but we can verify the exported
   // function signature accepts the new agentRegistry parameter. The real
@@ -762,7 +784,7 @@ describe('conflict-resolver fail-fast workspace invariant', () => {
       const host: ConflictResolverHost = {
         ...makeHost(task),
         persistence: {
-          getEvents: () => [
+          getRecentEventsOfType: () => [
             {
               id: 1,
               taskId: task.id,
@@ -785,13 +807,7 @@ describe('conflict-resolver fail-fast workspace invariant', () => {
 });
 
 describe('remoteAgentShellInvocation', () => {
-  it('forwards PATH so a bare agent binary resolves on the remote, like task execution', () => {
-    expect(remoteAgentShellInvocation('/opt/stub:/usr/bin')).toEqual([
-      'env', 'PATH=/opt/stub:/usr/bin', 'bash', '-s',
-    ]);
-  });
-
-  it('falls back to a bare bash invocation when no PATH is available', () => {
-    expect(remoteAgentShellInvocation('')).toEqual(['bash', '-s']);
+  it('uses a non-login shell because remote scripts source ~/.invoker/env.sh explicitly', () => {
+    expect(remoteAgentShellInvocation()).toEqual(['bash', '-s']);
   });
 });

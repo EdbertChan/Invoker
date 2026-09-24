@@ -19,7 +19,8 @@
  *
  * Write endpoints:
  *   POST   /api/tasks/:id/cancel
- *   POST   /api/tasks/:id/restart
+ *   POST   /api/tasks/:id/retry
+ *   POST   /api/tasks/:id/recreate
  *   POST   /api/tasks/:id/recreate-downstream
  *   POST   /api/tasks/:id/resolve-conflict  body: { agent? }
  *   POST   /api/tasks/:id/approve
@@ -29,10 +30,11 @@
  *   POST   /api/tasks/:id/edit-prompt  body: { prompt }
  *   POST   /api/tasks/:id/edit-type    body: { runnerKind, poolMemberId? }
  *   POST   /api/tasks/:id/edit-agent   body: { agent }
- *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy }] }
+ *   POST   /api/tasks/:id/gate-policy  body: { updates: [{ workflowId, taskId?, gatePolicy: completed|review_ready|ci_failed }] }
  *   DELETE /api/tasks/:id
  *   POST   /api/workflows/:id/detach  body: { upstreamWorkflowId }
- *   POST   /api/workflows/:id/restart
+ *   POST   /api/workflows/:id/recreate
+ *   POST   /api/workflows/:id/retry
  *   POST   /api/workflows/:id/rebase-retry
  *   POST   /api/workflows/:id/rebase-recreate
  *   POST   /api/workflows/:id/cancel
@@ -42,6 +44,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import type { Logger } from '@invoker/contracts';
+import { resolveInvokerInstanceProfile, validateTaskFilter, type TaskFilterNode } from '@invoker/contracts';
 import {
   OrchestratorError,
   OrchestratorErrorCode,
@@ -78,6 +81,7 @@ export interface ApiMutationFacade {
   editTaskPrompt(taskId: string, newPrompt: string): Promise<MutationResult>;
   editTaskType(taskId: string, runnerKind: string, poolMemberId?: string): Promise<MutationResult>;
   editTaskAgent(taskId: string, agentName: string): Promise<MutationResult>;
+  editTaskModel(taskId: string, executionModel: string | null): Promise<MutationResult>;
   setTaskExternalGatePolicies(
     taskId: string,
     updates: ExternalGatePolicyUpdate[],
@@ -96,6 +100,7 @@ export interface ApiMutationFacade {
   retryWorkflow(workflowId: string): Promise<MutationResult>;
   rebaseRetry(target: string): Promise<MutationResult>;
   rebaseRecreate(target: string): Promise<MutationResult>;
+  spawnRepairWorkflow(payload: unknown): Promise<MutationResult>;
   forkWorkflow(workflowId: string): Promise<ForkMutationResult>;
   cancelWorkflow(workflowId: string): Promise<CancelMutationResult>;
   setWorkflowMergeMode(workflowId: string, mergeMode: string): Promise<void>;
@@ -206,6 +211,21 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// An explicit INVOKER_API_PORT is a synthetic override and always wins; otherwise the
+// selected profile decides, so a source-development launch never falls back to the
+// production port.
+function resolveApiPort(): number {
+  if (process.env.INVOKER_API_PORT !== undefined) {
+    return parseInt(process.env.INVOKER_API_PORT, 10);
+  }
+  const profile = resolveInvokerInstanceProfile({
+    kind: process.env.INVOKER_RUNTIME_KIND ?? 'packaged',
+    sourceRoot: process.env.INVOKER_SOURCE_ROOT,
+    env: process.env,
+  });
+  return profile.ports.apiPort;
+}
+
 export function startApiServer(deps: ApiServerDeps): ApiServer {
   const {
     logger: apiLogger,
@@ -215,7 +235,7 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
     deleteWorkflow,
     detachWorkflow,
   } = deps;
-  const port = parseInt(process.env.INVOKER_API_PORT ?? '4100', 10);
+  const port = resolveApiPort();
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
@@ -284,26 +304,17 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         return;
       }
 
-      // POST /api/tasks/:id/retry  (legacy: /api/tasks/:id/restart)
+      // POST /api/tasks/:id/retry
       const retryMatch = path.match(/^\/api\/tasks\/([^/]+)\/retry$/);
-      const restartMatch = path.match(/^\/api\/tasks\/([^/]+)\/restart$/);
-      if (method === 'POST' && (retryMatch || restartMatch)) {
-        const isLegacy = !!restartMatch;
-        const taskId = decodeURIComponent((retryMatch ?? restartMatch)![1]);
+      if (method === 'POST' && retryMatch) {
+        const taskId = decodeURIComponent(retryMatch[1]);
         try {
           const result = await mutations.retryTask(taskId);
-          if (isLegacy) {
-            res.setHeader(
-              'Deprecation',
-              'true; reason="Use /api/tasks/:id/retry or /api/tasks/:id/recreate"',
-            );
-          }
           json(res, 200, {
             ok: true,
             taskId,
-            action: isLegacy ? 'restarted' : 'retried',
+            action: 'retried',
             tasksStarted: result.runnable.length,
-            ...(isLegacy ? { deprecated: true, replacement: '/api/tasks/:id/retry' } : {}),
           });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });
@@ -424,32 +435,58 @@ export function startApiServer(deps: ApiServerDeps): ApiServer {
         const type = query.type === 'workflows' || query.type === 'tasks' ? query.type : 'all';
         const limit = query.limit ? Math.min(parseInt(query.limit, 10), 50) : 20;
         const offset = query.offset ? parseInt(query.offset, 10) : 0;
+        if (type === 'tasks' && query.filter !== undefined) {
+          if (!Number.isFinite(limit) || limit < 0 || !Number.isFinite(offset) || offset < 0) {
+            json(res, 400, { error: 'limit and offset must be non-negative integers' });
+            return;
+          }
+          let parsedFilter: unknown;
+          try {
+            parsedFilter = JSON.parse(query.filter);
+          } catch (error) {
+            json(res, 400, { error: `filter: invalid JSON (${error instanceof Error ? error.message : String(error)})` });
+            return;
+          }
+          const validation = validateTaskFilter(parsedFilter);
+          if (!validation.valid) {
+            json(res, 400, { error: `filter: ${validation.error}` });
+            return;
+          }
+          const tasks = persistence.queryTasksByFilter(parsedFilter as TaskFilterNode, { limit, offset });
+          const results = tasks.map((task) => {
+            const workflowId = task.config.workflowId;
+            const workflow = workflowId ? persistence.loadWorkflow(workflowId) : undefined;
+            const workflowName = workflow?.name || 'Unnamed workflow';
+            return {
+              kind: 'task' as const,
+              id: task.id,
+              workflowId: workflowId || undefined,
+              title: task.description || 'Unnamed task',
+              subtitle: `Task · ${workflowName}`,
+              status: task.status,
+              createdAt: task.createdAt instanceof Date ? task.createdAt.toISOString() : task.createdAt,
+            };
+          });
+          json(res, 200, results);
+          return;
+        }
         const results = persistence.searchWorkflowsAndTasks(q, { type, limit, offset });
         json(res, 200, results);
         return;
       }
 
-      // POST /api/workflows/:id/recreate  (legacy: /api/workflows/:id/restart)
+      // POST /api/workflows/:id/recreate
       const wfRecreateMatch = path.match(/^\/api\/workflows\/([^/]+)\/recreate$/);
-      const wfRestartMatch = path.match(/^\/api\/workflows\/([^/]+)\/restart$/);
-      if (method === 'POST' && (wfRecreateMatch || wfRestartMatch)) {
-        const isLegacy = !!wfRestartMatch;
-        const workflowId = decodeURIComponent((wfRecreateMatch ?? wfRestartMatch)![1]);
+      if (method === 'POST' && wfRecreateMatch) {
+        const workflowId = decodeURIComponent(wfRecreateMatch[1]);
         try {
           const result = await mutations.recreateWorkflow(workflowId);
-          if (isLegacy) {
-            res.setHeader(
-              'Deprecation',
-              'true; reason="Use /api/workflows/:id/recreate"',
-            );
-          }
           const tasksStarted = result.runnable.length;
           json(res, 200, {
             ok: true,
             workflowId,
-            action: isLegacy ? 'restarted' : 'recreated',
+            action: 'recreated',
             tasksStarted,
-            ...(isLegacy ? { deprecated: true, replacement: '/api/workflows/:id/recreate' } : {}),
           });
         } catch (err) {
           json(res, httpStatusForError(err), { error: errorMessage(err) });

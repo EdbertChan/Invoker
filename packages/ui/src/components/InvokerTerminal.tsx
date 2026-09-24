@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { Terminal as XTermTerminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import type { TerminalSessionDescriptor } from '@invoker/contracts';
+import type { PlanningConfirmationMode } from '@invoker/contracts';
 import { SendIcon } from './icons/index.js';
 
 export interface InvokerTerminalLine {
@@ -19,12 +20,74 @@ export interface InvokerTerminalPlanningStream {
   status: 'streaming' | 'failed';
 }
 
-interface PlanningPresetOptionView {
+export interface PlanningPresetOptionView {
   key: string;
   label: string;
+  tool: string;
+  model?: string;
+}
+
+export interface PlanningHarnessChoice {
+  tool: string;
+  label: string;
+  directPreset?: PlanningPresetOptionView;
+  modelPresets: PlanningPresetOptionView[];
+}
+
+function titleCaseIdentifier(value: string): string {
+  return value
+    .split(/[-_\s/]+/)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(' ');
+}
+
+function formatPlanningHarnessLabel(tool: string, options: PlanningPresetOptionView[]): string {
+  const directPreset = options.find((option) => option.tool === tool && !option.model);
+  return directPreset?.label ?? titleCaseIdentifier(tool);
+}
+
+function formatPlanningModelLabel(model: string): string {
+  return titleCaseIdentifier(model);
+}
+
+export function buildPlanningHarnessChoices(options: PlanningPresetOptionView[]): PlanningHarnessChoice[] {
+  const byTool = new Map<string, PlanningPresetOptionView[]>();
+  for (const option of options) {
+    const existing = byTool.get(option.tool) ?? [];
+    existing.push(option);
+    byTool.set(option.tool, existing);
+  }
+
+  return Array.from(byTool.entries()).map(([tool, toolOptions]) => ({
+    tool,
+    label: formatPlanningHarnessLabel(tool, toolOptions),
+    directPreset: toolOptions.find((option) => !option.model),
+    modelPresets: toolOptions.filter((option) => Boolean(option.model)),
+  }));
+}
+
+function findPresetOption(options: PlanningPresetOptionView[], presetKey: string): PlanningPresetOptionView | undefined {
+  return options.find((option) => option.key === presetKey);
+}
+
+function resolvePresetForHarness(
+  harness: PlanningHarnessChoice,
+  preferredModel: string | undefined,
+): PlanningPresetOptionView | undefined {
+  if (preferredModel) {
+    const matchingModel = harness.modelPresets.find((option) => option.model === preferredModel);
+    if (matchingModel) return matchingModel;
+  }
+  return harness.directPreset ?? harness.modelPresets[0];
 }
 
 const TRANSCRIPT_BOTTOM_TOLERANCE_PX = 32;
+const MIN_PLANNING_TMUX_COLS = 20;
+const MIN_PLANNING_TMUX_ROWS = 5;
+const PLANNING_TMUX_FIT_SETTLE_FRAMES = 2;
+const PLANNING_TMUX_RECONCILE_MAX_ATTEMPTS = 6;
+const PLANNING_TMUX_RECONCILE_INTERVAL_MS = 500;
 
 function isTranscriptNearBottom(element: HTMLDivElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= TRANSCRIPT_BOTTOM_TOLERANCE_PX;
@@ -45,10 +108,13 @@ function reportPlanningChatPerf(metric: string, data: Record<string, unknown>): 
 interface InvokerTerminalProps {
   lines: InvokerTerminalLine[];
   busy: boolean;
+  binding?: boolean;
   value: string;
   selectedPresetKey: string;
   presetOptions: PlanningPresetOptionView[];
+  selectedConfirmationMode: PlanningConfirmationMode;
   draftPlanAvailable: boolean;
+  draftReviewOpen?: boolean;
   draftPlanSummary?: {
     name: string;
     taskCount: number;
@@ -57,18 +123,31 @@ interface InvokerTerminalProps {
   };
   planningStream?: InvokerTerminalPlanningStream | null;
   readOnly?: boolean;
+  readOnlyReason?: 'submitted' | 'window';
   expanded?: boolean;
   mode?: PlanningTerminalMode;
   terminalSession?: TerminalSessionDescriptor | null;
   terminalBusy?: boolean;
   terminalError?: string | null;
+  terminalActive?: boolean;
+  workflowRunning?: boolean;
+  repoValue?: string;
+  repoLocked?: boolean;
+  repoSuggestions?: string[];
+  repoError?: string | null;
+  turnError?: string | null;
+  onRetryTurn?: () => void;
   onValueChange: (value: string) => void;
   onSubmit: () => void;
   onPresetChange: (presetKey: string) => void;
+  onConfirmationModeChange: (confirmationMode: PlanningConfirmationMode) => void;
+  onRepoInputChange?: (value: string) => void;
+  onRepoCommit?: () => void;
   onModeChange?: (mode: PlanningTerminalMode) => void;
   onExpand: () => void;
   onCloseExpanded?: () => void;
   onOpenGraph?: () => void;
+  onReviewDraft?: () => void;
   submittedPlanName?: string;
   activeConversationKey: string;
 }
@@ -133,7 +212,6 @@ function MessageBody({ text, toneClass }: { text: string; toneClass: string }): 
 
 type SeededOutputSnapshot = {
   sessionId: string;
-  snapshot: string;
   term: XTermTerminal;
 };
 
@@ -145,27 +223,32 @@ function seedTerminalOutputSnapshot(
   const outputSnapshot = session.outputSnapshot;
   const seededSnapshot = seededSnapshotRef.current;
   if (
-    outputSnapshot &&
-    (
-      !seededSnapshot ||
-      seededSnapshot.sessionId !== session.sessionId ||
-      seededSnapshot.snapshot !== outputSnapshot ||
-      seededSnapshot.term !== term
-    )
+    seededSnapshot &&
+    seededSnapshot.sessionId === session.sessionId &&
+    seededSnapshot.term === term
   ) {
-    try {
-      term.write(outputSnapshot);
-      seededSnapshotRef.current = {
-        sessionId: session.sessionId,
-        snapshot: outputSnapshot,
-        term,
-      };
-    } catch (err) {
-      console.warn(
-        `Failed to seed output snapshot for planning terminal session ${session.sessionId}:`,
-        err,
-      );
-    }
+    return;
+  }
+
+  if (!outputSnapshot) {
+    seededSnapshotRef.current = {
+      sessionId: session.sessionId,
+      term,
+    };
+    return;
+  }
+
+  try {
+    term.write(outputSnapshot);
+    seededSnapshotRef.current = {
+      sessionId: session.sessionId,
+      term,
+    };
+  } catch (err) {
+    console.warn(
+      `Failed to seed output snapshot for planning terminal session ${session.sessionId}:`,
+      err,
+    );
   }
 }
 
@@ -174,17 +257,21 @@ interface PlanningTmuxPaneProps {
   busy: boolean;
   error?: string | null;
   readOnly?: boolean;
+  terminalActive?: boolean;
+  /** Whether this pane is the visible one in the chat/tmux toggle (CSS-hidden, not unmounted, when false). */
+  visible?: boolean;
 }
 
-function PlanningTmuxPane({ session, busy, error, readOnly = false }: PlanningTmuxPaneProps): JSX.Element {
+function PlanningTmuxPane({ session, busy, error, readOnly = false, terminalActive = true, visible = true }: PlanningTmuxPaneProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTermTerminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const seededSnapshotRef = useRef<SeededOutputSnapshot | null>(null);
+  const scheduleFitRef = useRef<((opts?: { focus?: boolean }) => void) | null>(null);
 
   useEffect(() => {
     const host = containerRef.current;
-    if (!host || !session) return;
+    if (!terminalActive || !host || !session) return;
 
     let term: XTermTerminal;
     let fit: FitAddon;
@@ -205,6 +292,7 @@ function PlanningTmuxPane({ session, busy, error, readOnly = false }: PlanningTm
     }
     termRef.current = term;
     fitRef.current = fit;
+    window.__INVOKER_TEST_ACTIVE_PLANNING_TMUX_TERMINAL__ = term;
 
     seedTerminalOutputSnapshot(term, session, seededSnapshotRef);
 
@@ -223,24 +311,144 @@ function PlanningTmuxPane({ session, busy, error, readOnly = false }: PlanningTm
       }
     });
 
-    const tryFit = () => {
+    let disposed = false;
+    let scheduledFitHandle: number | null = null;
+    let scheduledFitKind: 'raf' | 'timeout' | null = null;
+    let pendingFocus = false;
+    let lastSentSize: { cols: number; rows: number } | null = null;
+    let reconcileTimeoutHandle: number | null = null;
+
+    const cancelReconcile = () => {
+      if (reconcileTimeoutHandle === null) return;
+      window.clearTimeout(reconcileTimeoutHandle);
+      reconcileTimeoutHandle = null;
+    };
+
+    // A resize the main process reported as applied may still not have
+    // stuck (e.g. it raced another in-flight resize, or the report itself
+    // was wrong). Re-check the PTY's own authoritative size for a bounded
+    // number of attempts and retry if it drifted, rather than trusting a
+    // single confirmation forever. The attempt counter is owned entirely by
+    // this loop — a "successful" retry must not reset it, or a main process
+    // that always claims success without the size actually sticking would
+    // retry every interval forever instead of eventually giving up.
+    const runReconcileCheck = async (attempt: number): Promise<void> => {
+      if (disposed || attempt >= PLANNING_TMUX_RECONCILE_MAX_ATTEMPTS) return;
+      const applied = await window.invoker?.planningTerminalAppliedSize?.(session.sessionId);
+      if (disposed || !applied || !lastSentSize) return;
+      if (applied.cols === lastSentSize.cols && applied.rows === lastSentSize.rows) return;
+
+      // The PTY's real size doesn't match what we believe was confirmed —
+      // force a resend rather than relying on tryFit's own dedupe, which is
+      // keyed on the very value that just proved unreliable. Skip having
+      // tryFit reschedule its own fresh reconcile window; this loop keeps
+      // governing the bounded cadence itself.
+      lastSentSize = null;
+      tryFit(false, { skipReconcileSchedule: true });
+      reconcileTimeoutHandle = window.setTimeout(() => {
+        reconcileTimeoutHandle = null;
+        void runReconcileCheck(attempt + 1);
+      }, PLANNING_TMUX_RECONCILE_INTERVAL_MS);
+    };
+
+    const scheduleReconcileCheck = () => {
+      if (disposed) return;
+      cancelReconcile();
+      reconcileTimeoutHandle = window.setTimeout(() => {
+        reconcileTimeoutHandle = null;
+        void runReconcileCheck(0);
+      }, PLANNING_TMUX_RECONCILE_INTERVAL_MS);
+    };
+
+    const cancelScheduledFit = () => {
+      if (scheduledFitHandle === null) return;
+      if (scheduledFitKind === 'raf' && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(scheduledFitHandle);
+      } else {
+        window.clearTimeout(scheduledFitHandle);
+      }
+      scheduledFitHandle = null;
+      scheduledFitKind = null;
+    };
+
+    const tryFit = (focusAfterFit: boolean, options: { skipReconcileSchedule?: boolean } = {}): boolean => {
       try {
+        if (disposed || !host.isConnected) return false;
+        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return false;
+        const rect = host.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const proposedDimensions = fit.proposeDimensions();
+        if (
+          !proposedDimensions ||
+          !Number.isFinite(proposedDimensions.cols) ||
+          !Number.isFinite(proposedDimensions.rows) ||
+          proposedDimensions.cols < MIN_PLANNING_TMUX_COLS ||
+          proposedDimensions.rows < MIN_PLANNING_TMUX_ROWS
+        ) {
+          return false;
+        }
+
         fit.fit();
-        void window.invoker?.planningTerminalResize?.(session.sessionId, term.cols, term.rows);
+        if (term.rows > 0) {
+          term.refresh?.(0, term.rows - 1);
+        }
+        const nextSize = { cols: term.cols, rows: term.rows };
+        if (!lastSentSize || lastSentSize.cols !== nextSize.cols || lastSentSize.rows !== nextSize.rows) {
+          const resizeCall = window.invoker?.planningTerminalResize?.(session.sessionId, nextSize.cols, nextSize.rows);
+          void resizeCall
+            ?.then((result) => {
+              if (disposed || !result?.ok) return;
+              lastSentSize = nextSize;
+              if (!options.skipReconcileSchedule) scheduleReconcileCheck();
+            })
+            .catch(() => {
+              /* leave lastSentSize unset so the next fit opportunity retries the same size */
+            });
+        }
+        if (focusAfterFit) term.focus();
+        return true;
       } catch {
         /* host has zero size or fit unsupported */
+        return false;
       }
     };
 
-    const raf = typeof requestAnimationFrame === 'function'
-      ? requestAnimationFrame(tryFit)
-      : null;
+    const scheduleFit = ({ focus = false }: { focus?: boolean } = {}) => {
+      if (disposed) return;
+      pendingFocus = pendingFocus || focus;
+      cancelScheduledFit();
+
+      const runAfterFrames = (remainingFrames: number) => {
+        if (typeof window.requestAnimationFrame === 'function') {
+          scheduledFitKind = 'raf';
+          scheduledFitHandle = window.requestAnimationFrame(() => {
+            scheduledFitHandle = null;
+            scheduledFitKind = null;
+            if (remainingFrames > 0) {
+              runAfterFrames(remainingFrames - 1);
+              return;
+            }
+            if (tryFit(pendingFocus)) pendingFocus = false;
+          });
+          return;
+        }
+
+        scheduledFitKind = 'timeout';
+        scheduledFitHandle = window.setTimeout(() => {
+          scheduledFitHandle = null;
+          scheduledFitKind = null;
+          if (tryFit(pendingFocus)) pendingFocus = false;
+        }, 0);
+      };
+
+      runAfterFrames(PLANNING_TMUX_FIT_SETTLE_FRAMES);
+    };
 
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
       try {
         resizeObserver = new ResizeObserver(() => {
-          tryFit();
+          scheduleFit();
         });
         resizeObserver.observe(host);
       } catch {
@@ -248,10 +456,24 @@ function PlanningTmuxPane({ session, busy, error, readOnly = false }: PlanningTm
       }
     }
 
+    const handleVisibilityChange = () => {
+      scheduleFit();
+    };
+    const handleWindowFocus = () => {
+      scheduleFit({ focus: true });
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+    scheduleFitRef.current = scheduleFit;
+    scheduleFit({ focus: true });
+
     return () => {
-      if (raf !== null && typeof cancelAnimationFrame === 'function') {
-        cancelAnimationFrame(raf);
-      }
+      disposed = true;
+      cancelScheduledFit();
+      cancelReconcile();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
       resizeObserver?.disconnect();
       inputDisposable.dispose();
       unsubscribeOutput?.();
@@ -262,27 +484,24 @@ function PlanningTmuxPane({ session, busy, error, readOnly = false }: PlanningTm
       }
       termRef.current = null;
       fitRef.current = null;
+      scheduleFitRef.current = null;
+      if (window.__INVOKER_TEST_ACTIVE_PLANNING_TMUX_TERMINAL__ === term) {
+        window.__INVOKER_TEST_ACTIVE_PLANNING_TMUX_TERMINAL__ = null;
+      }
     };
-  }, [readOnly, session?.sessionId]);
+  }, [readOnly, session?.sessionId, terminalActive]);
 
   useEffect(() => {
+    if (!visible) return;
+    scheduleFitRef.current?.({ focus: true });
+  }, [visible]);
+
+  useEffect(() => {
+    if (!terminalActive) return;
     const term = termRef.current;
     if (!term || !session) return;
     seedTerminalOutputSnapshot(term, session, seededSnapshotRef);
-  }, [session?.outputSnapshot, session?.sessionId]);
-
-  useEffect(() => {
-    const term = termRef.current;
-    const fit = fitRef.current;
-    if (!term || !fit || !session) return;
-    try {
-      fit.fit();
-      void window.invoker?.planningTerminalResize?.(session.sessionId, term.cols, term.rows);
-      term.focus();
-    } catch {
-      /* fit failed (e.g., hidden) */
-    }
-  }, [session?.sessionId]);
+  }, [session?.outputSnapshot, session?.sessionId, terminalActive]);
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
@@ -322,25 +541,41 @@ function PlanningTmuxPane({ session, busy, error, readOnly = false }: PlanningTm
 export function InvokerTerminal({
   lines,
   busy,
+  binding = false,
   value,
   selectedPresetKey,
   presetOptions,
+  selectedConfirmationMode,
   draftPlanAvailable,
+  draftReviewOpen = false,
   draftPlanSummary,
   planningStream,
   readOnly = false,
+  readOnlyReason = 'submitted',
   expanded = false,
   mode = 'chat',
   terminalSession = null,
   terminalBusy = false,
   terminalError = null,
+  terminalActive = true,
+  workflowRunning = false,
   onValueChange,
   onSubmit,
+  repoValue = '',
+  repoLocked = true,
+  repoSuggestions = [],
+  repoError = null,
+  turnError = null,
+  onRetryTurn,
   onPresetChange,
+  onConfirmationModeChange,
+  onRepoInputChange,
+  onRepoCommit,
   onModeChange,
   onExpand,
   onCloseExpanded,
   onOpenGraph,
+  onReviewDraft,
   submittedPlanName,
   activeConversationKey,
 }: InvokerTerminalProps): JSX.Element {
@@ -454,9 +689,36 @@ export function InvokerTerminal({
     inputRef.current?.focus();
   };
 
-  const composerDisabledCursorClass = busy ? 'disabled:cursor-wait' : readOnly ? 'disabled:cursor-not-allowed' : '';
-  const sendButtonDisabled = busy || readOnly || !value.trim();
-  const sendButtonDisabledCursorClass = busy ? 'disabled:cursor-wait' : 'disabled:cursor-not-allowed';
+  const composerDisabledCursorClass = busy || readOnly ? 'disabled:cursor-not-allowed' : '';
+  const sendButtonDisabled = busy || binding || readOnly || !value.trim();
+  const sendButtonDisabledCursorClass = 'disabled:cursor-not-allowed';
+  const harnessChoices = useMemo(() => buildPlanningHarnessChoices(presetOptions), [presetOptions]);
+  const selectedPreset = useMemo(
+    () => findPresetOption(presetOptions, selectedPresetKey) ?? presetOptions[0],
+    [presetOptions, selectedPresetKey],
+  );
+  const selectedHarness = useMemo(
+    () => harnessChoices.find((choice) => choice.tool === selectedPreset?.tool) ?? harnessChoices[0],
+    [harnessChoices, selectedPreset?.tool],
+  );
+  const selectedHarnessValue = selectedHarness?.tool ?? '';
+  const modelSelectOptions = selectedHarness
+    ? [
+        ...(selectedHarness.directPreset ? [selectedHarness.directPreset] : []),
+        ...selectedHarness.modelPresets,
+      ]
+    : [];
+  const showModelSelect = Boolean(selectedHarness && selectedHarness.modelPresets.length > 0);
+  const selectedModelPresetKey = selectedPreset && modelSelectOptions.some((option) => option.key === selectedPreset.key)
+    ? selectedPreset.key
+    : modelSelectOptions[0]?.key ?? '';
+
+  const handleHarnessChange = useCallback((event: ChangeEvent<HTMLSelectElement>): void => {
+    const nextHarness = harnessChoices.find((choice) => choice.tool === event.target.value);
+    if (!nextHarness) return;
+    const nextPreset = resolvePresetForHarness(nextHarness, selectedPreset?.model);
+    if (nextPreset) onPresetChange(nextPreset.key);
+  }, [harnessChoices, onPresetChange, selectedPreset?.model]);
 
   const handleValueChange = (event: ChangeEvent<HTMLTextAreaElement>): void => {
     const startedAt = nowMs();
@@ -504,7 +766,7 @@ export function InvokerTerminal({
   };
 
   const handleInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !busy && !readOnly && value.trim()) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !busy && !binding && !readOnly && value.trim()) {
       event.preventDefault();
       submitFromComposer('enter');
     }
@@ -536,22 +798,25 @@ export function InvokerTerminal({
           </div>
         );
       })}
-      {planningStream && planningStream.text ? (
+      {busy || planningStream ? (
         <div
           data-testid="invoker-terminal-planner-stream"
-          data-state={planningStream.status}
+          data-state={planningStream?.status ?? 'working'}
           className={`flex items-center gap-2 text-xs ${
-            planningStream.status === 'failed'
+            planningStream?.status === 'failed'
               ? 'text-destructive'
               : 'text-muted-foreground'
           }`}
         >
-          <span aria-hidden="true" className={planningStream.status === 'failed' ? '' : 'animate-pulse'}>●</span>
-          <span>{planningStream.status === 'failed' ? 'Planning stopped. Try again when ready.' : 'Drafting your plan…'}</span>
+          <span
+            aria-hidden="true"
+            className="inline-block h-2.5 w-2.5 shrink-0 animate-spin rounded-full border border-muted-foreground border-t-foreground"
+          />
+          <span>{planningStream ? (planningStream.status === 'failed' ? 'Planning stopped. Try again when ready.' : 'Drafting your plan…') : 'Working…'}</span>
         </div>
       ) : null}
     </>
-  ), [lines, planningStream]);
+  ), [busy, lines, planningStream]);
   return (
     <section className="flex h-full min-h-0 flex-col bg-background">
       <div className="flex items-center justify-end gap-2 border-b border-border bg-background px-4 py-2.5">
@@ -605,17 +870,30 @@ export function InvokerTerminal({
         </div>
       </div>
 
-      {mode === 'tmux' ? (
-        <PlanningTmuxPane session={terminalSession} busy={terminalBusy} error={terminalError} readOnly={readOnly} />
-      ) : (
-        <>
+      <div
+        className="flex min-h-0 flex-1 flex-col"
+        style={{ display: mode === 'tmux' ? 'flex' : 'none' }}
+      >
+        <PlanningTmuxPane
+          session={terminalSession}
+          busy={terminalBusy}
+          error={terminalError}
+          readOnly={readOnly}
+          terminalActive={terminalActive}
+          visible={mode === 'tmux'}
+        />
+      </div>
+      <div
+        className="flex min-h-0 flex-1 flex-col"
+        style={{ display: mode === 'tmux' ? 'none' : 'flex' }}
+      >
           <div
             ref={transcriptRef}
             data-testid="invoker-terminal-transcript"
             onScroll={handleTranscriptScroll}
             className="min-h-0 flex-1 space-y-5 overflow-y-auto bg-background px-5 py-5 font-sans text-[13.5px] leading-6"
           >
-            {lines.length === 0 && !planningStream?.text ? (
+            {lines.length === 0 && !planningStream?.text && !busy ? (
               <div data-testid="invoker-terminal-empty-hero" className="flex h-full min-h-[220px] flex-col justify-center gap-4">
                 <div>
                   <h3 className="text-lg font-semibold tracking-tight text-foreground">What do you want to build?</h3>
@@ -628,7 +906,7 @@ export function InvokerTerminal({
                     <button
                       key={chip}
                       type="button"
-                      disabled={busy || readOnly}
+                      disabled={busy || binding || readOnly}
                       onClick={() => {
                         onValueChange(chip);
                         focusComposer();
@@ -645,7 +923,28 @@ export function InvokerTerminal({
             )}
           </div>
 
-          {draftPlanAvailable && !readOnly && (
+          {turnError && !readOnly && (
+            <div
+              data-testid="invoker-terminal-turn-error"
+              role="alert"
+              className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-card/80 px-4 py-3.5 backdrop-blur-sm"
+            >
+              <span className="min-w-0 flex-1 text-xs text-red-400">{turnError}</span>
+              {onRetryTurn && (
+                <button
+                  type="button"
+                  data-testid="invoker-terminal-retry-turn"
+                  disabled={busy}
+                  onClick={onRetryTurn}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
+
+          {draftPlanAvailable && !draftReviewOpen && !readOnly && (
             <div
               data-testid="invoker-terminal-ready-bar"
               className="sticky bottom-0 z-10 border-t border-border bg-card/80 px-4 py-3.5 text-sm text-foreground backdrop-blur-sm"
@@ -656,11 +955,11 @@ export function InvokerTerminal({
                   : 'Draft ready'}
               </p>
               <div className="flex flex-wrap items-center gap-2">
-                {onOpenGraph && (
+                {(onReviewDraft ?? onOpenGraph) && (
                   <button
                     type="button"
-                    data-testid="invoker-terminal-open-graph"
-                    onClick={onOpenGraph}
+                    data-testid="invoker-terminal-review-draft"
+                    onClick={onReviewDraft ?? onOpenGraph}
                     className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
                   >
                     Review draft
@@ -683,9 +982,21 @@ export function InvokerTerminal({
               className="sticky bottom-0 z-10 border-t border-border bg-card/80 px-4 py-3.5 text-sm text-foreground backdrop-blur-sm"
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <span className="text-xs text-muted-foreground">
-                  Plan ready · &quot;{submittedPlanName}&quot; · review the graph, then Start ready work
-                </span>
+                {workflowRunning ? (
+                  <span className="inline-flex min-w-0 items-center gap-2 text-xs text-foreground">
+                    <span
+                      className="inline-block h-3 w-3 shrink-0 animate-spin rounded-full border border-primary/30 border-t-primary"
+                      aria-hidden="true"
+                    />
+                    <span className="min-w-0 truncate">
+                      Workflow running... · &quot;{submittedPlanName}&quot; · open the graph to monitor progress
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">
+                    Plan ready · &quot;{submittedPlanName}&quot; · review the graph, then Start ready work
+                  </span>
+                )}
                 <button
                   type="button"
                   data-testid="invoker-terminal-open-graph"
@@ -707,11 +1018,15 @@ export function InvokerTerminal({
                 ref={inputRef}
                 data-testid="invoker-terminal-input"
                 value={value}
-                disabled={busy || readOnly}
+                disabled={busy || binding || readOnly}
                 rows={expanded ? 5 : 1}
                 onChange={handleValueChange}
                 onKeyDown={handleInputKeyDown}
-                placeholder={readOnly ? 'This planning session was already submitted.' : 'Describe what you want to build'}
+                placeholder={readOnly
+                  ? readOnlyReason === 'window'
+                    ? 'This window is read-only.'
+                    : 'This planning session was already submitted.'
+                  : 'Describe what you want to build'}
                 className={`min-h-9 w-full resize-none border-0 bg-transparent py-1 font-sans text-[13.5px] leading-6 text-foreground outline-none placeholder:text-muted-foreground focus:ring-0 ${composerDisabledCursorClass}`}
               />
               <div className="mt-1 flex flex-wrap items-center justify-between gap-3 pt-2">
@@ -725,20 +1040,79 @@ export function InvokerTerminal({
                     Options
                   </button>
                   {showComposerOptions && (
-                    <label className="ml-3 text-xs text-muted-foreground">
-                      Agent
-                      <select
-                        data-testid="invoker-terminal-harness"
-                        value={selectedPresetKey}
-                        onChange={(event) => onPresetChange(event.target.value)}
-                        disabled={readOnly}
-                        className="ml-2 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground outline-none hover:border-border-strong focus:border-ring"
-                      >
-                        {presetOptions.map((option) => (
-                          <option key={option.key} value={option.key}>{option.label}</option>
-                        ))}
-                      </select>
-                    </label>
+                    <div className="ml-3 flex flex-wrap items-center gap-3">
+                      <label className="text-xs text-muted-foreground">
+                        Harness
+                        <select
+                          data-testid="invoker-terminal-harness"
+                          value={selectedHarnessValue}
+                          onChange={handleHarnessChange}
+                          disabled={readOnly}
+                          className="ml-2 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground outline-none hover:border-border-strong focus:border-ring"
+                        >
+                          {harnessChoices.map((option) => (
+                            <option key={option.tool} value={option.tool}>{option.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {showModelSelect && (
+                        <label className="text-xs text-muted-foreground">
+                          Model
+                          <select
+                            data-testid="invoker-terminal-model"
+                            value={selectedModelPresetKey}
+                            onChange={(event) => onPresetChange(event.target.value)}
+                            disabled={readOnly}
+                            className="ml-2 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground outline-none hover:border-border-strong focus:border-ring"
+                          >
+                            {modelSelectOptions.map((option) => (
+                              <option key={option.key} value={option.key}>
+                                {option.model ? formatPlanningModelLabel(option.model) : 'Default'}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                      <label className="text-xs text-muted-foreground">
+                        Review
+                        <select
+                          data-testid="invoker-terminal-confirmation-mode"
+                          value={selectedConfirmationMode}
+                          onChange={(event) => onConfirmationModeChange(event.target.value as PlanningConfirmationMode)}
+                          disabled={readOnly}
+                          className="ml-2 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground outline-none hover:border-border-strong focus:border-ring"
+                        >
+                          <option value="require">Ask first</option>
+                        </select>
+                      </label>
+                      {!repoLocked && (
+                        <label className="text-xs text-muted-foreground">
+                          Repo
+                          <input
+                            data-testid="invoker-terminal-repo"
+                            list="invoker-terminal-repo-suggestions"
+                            value={repoValue}
+                            disabled={readOnly || binding}
+                            placeholder="path or URL (default if empty)"
+                            onChange={(event) => onRepoInputChange?.(event.target.value)}
+                            onBlur={() => onRepoCommit?.()}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault();
+                                onRepoCommit?.();
+                              }
+                            }}
+                            className="ml-2 w-56 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground outline-none hover:border-border-strong focus:border-ring"
+                          />
+                          <datalist id="invoker-terminal-repo-suggestions">
+                            {repoSuggestions.map((repo) => <option key={repo} value={repo} />)}
+                          </datalist>
+                        </label>
+                      )}
+                      {repoError && !repoLocked && (
+                        <span data-testid="invoker-terminal-repo-error" className="text-xs text-red-400">{repoError}</span>
+                      )}
+                    </div>
                   )}
                 </div>
                 <button
@@ -747,16 +1121,23 @@ export function InvokerTerminal({
                   disabled={sendButtonDisabled}
                   className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-sm bg-amber-400 text-white shadow-sm transition-colors hover:bg-amber-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-300 disabled:bg-gray-700 disabled:text-gray-400 disabled:shadow-none disabled:hover:bg-gray-700 disabled:opacity-50 ${sendButtonDisabledCursorClass}`}
                 >
-                  <SendIcon
-                    data-testid="invoker-terminal-send-icon"
-                    className="h-4 w-4"
-                  />
+                  {busy || binding ? (
+                    <span
+                      data-testid="invoker-terminal-send-spinner"
+                      aria-hidden="true"
+                      className="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-gray-500 border-t-gray-100"
+                    />
+                  ) : (
+                    <SendIcon
+                      data-testid="invoker-terminal-send-icon"
+                      className="h-4 w-4"
+                    />
+                  )}
                 </button>
               </div>
             </div>
           </form>
-        </>
-      )}
+      </div>
     </section>
   );
 }

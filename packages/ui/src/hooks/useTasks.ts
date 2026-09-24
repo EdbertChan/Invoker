@@ -24,6 +24,9 @@ export interface UseTasksResult {
 export interface UseTasksOptions {
   onTaskGraphSnapshotApplied?: () => void;
 }
+/** Consecutive gap-resync round trips that don't close the gap before we
+ * stop auto-retrying and fast-forward the watermark instead of looping. */
+const MAX_CONSECUTIVE_RESYNC_FAILURES = 3;
 function normalizeWorkflowMeta(workflow: WorkflowMeta): WorkflowMeta {
   return {
     ...workflow,
@@ -123,6 +126,12 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
   const traceTaskDeltas =
     typeof window !== 'undefined' &&
     window.location.search.includes('traceTaskDeltas=1');
+  const traceRendererTaskGraphEvents =
+    typeof window !== 'undefined' &&
+    window.__INVOKER_TRACE_RENDERER_TASK_GRAPH__ === true;
+  const traceRendererWorkflowEvents =
+    typeof window !== 'undefined' &&
+    window.__INVOKER_TRACE_RENDERER_WORKFLOW_EVENTS__ === true;
   const bootstrapState =
     typeof window !== 'undefined' ? window.__INVOKER_BOOTSTRAP__ : undefined;
   const [tasks, setTasks] = useState<Map<string, TaskState>>(() => {
@@ -170,6 +179,9 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
   const reportedStartupSnapshotRef = useRef(false);
   const uiTaskGraphStreamWatermarkRef = useRef<number>(bootstrapState?.streamSequence ?? 0);
   const isResyncInFlightRef = useRef<boolean>(false);
+  const consecutiveResyncFailuresRef = useRef<number>(0);
+  /** The sequence the in-flight resync needs to reach to actually close its gap. */
+  const resyncTargetSeqRef = useRef<number>(0);
   const workflowMetadataRefreshInFlightRef = useRef<boolean>(false);
   const workflowMetadataRefreshPendingRef = useRef<boolean>(false);
 
@@ -214,6 +226,9 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
       });
       if (typeof result.streamSequence === 'number') {
         uiTaskGraphStreamWatermarkRef.current = result.streamSequence;
+        if (result.streamSequence >= resyncTargetSeqRef.current) {
+          consecutiveResyncFailuresRef.current = 0;
+        }
       }
       isResyncInFlightRef.current = false;
       const replaceDurationMs = performance.now() - replaceStartedAt;
@@ -335,8 +350,20 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
         const t0 = performance.now();
 
         if (firstEvent?.type === 'snapshot') {
+          const previousTasks = nextTasks;
           nextTasks = new Map<string, TaskState>();
-          for (const task of firstEvent.tasks) nextTasks.set(task.id, task);
+          for (const task of firstEvent.tasks) {
+            const existingTask = previousTasks.get(task.id);
+            // A snapshot can race a delta in flight and arrive with data
+            // captured before that delta landed; never let it regress a
+            // task backward from state the renderer has already applied.
+            nextTasks.set(
+              task.id,
+              existingTask && existingTask.taskStateVersion > task.taskStateVersion
+                ? existingTask
+                : task,
+            );
+          }
           nextWorkflows = replaceWorkflowMapPreservingTaskBackedEntries(
             nextWorkflows,
             firstEvent.workflows,
@@ -344,6 +371,16 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
           );
           uiTaskGraphStreamWatermarkRef.current = Math.max(uiTaskGraphStreamWatermarkRef.current, firstEvent.streamSequence);
           isResyncInFlightRef.current = false;
+          // Only a resync snapshot that actually reaches the sequence its
+          // gap needed counts as closing that gap. Reset here (not just on
+          // the next in-order delta) so a later, unrelated gap starts its
+          // own count instead of inheriting this one's -- but a snapshot
+          // that's still stuck behind the target must NOT reset the count,
+          // or the cap could never trip and a real stuck-resync loop would
+          // retry forever.
+          if (firstEvent.streamSequence >= resyncTargetSeqRef.current) {
+            consecutiveResyncFailuresRef.current = 0;
+          }
           onTaskGraphSnapshotApplied?.();
           void window.invoker.reportUiPerf?.('useTasks_snapshot_replace', {
             taskCount: firstEvent.tasks.length,
@@ -442,6 +479,12 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
 
     const handleTaskGraphEvent = (event: TaskGraphEvent) => {
       invalidateStartupSnapshot();
+      if (traceRendererTaskGraphEvents) {
+        const traceRendererTaskGraphEvent = window.invoker.traceRendererTaskGraphEvent;
+        if (traceRendererTaskGraphEvent) {
+          void traceRendererTaskGraphEvent(event).catch(() => undefined);
+        }
+      }
       deltaPerfRef.current.received += 1;
       if (event.type === 'snapshot') {
         const snapshotStreamSequence = event.streamSequence;
@@ -487,18 +530,38 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
             actual: seq,
             gapSize,
           });
+          consecutiveResyncFailuresRef.current += 1;
+          if (consecutiveResyncFailuresRef.current > MAX_CONSECUTIVE_RESYNC_FAILURES) {
+            // The last N resyncs each came back without actually closing the
+            // gap that triggered them — retrying again would just repeat the
+            // same cycle forever. Stop, report it so it's observable instead
+            // of a silent infinite loop, and fast-forward the watermark so
+            // live updates can resume; the skipped deltas are lost, same as
+            // they would be in a failed resync, but the UI stops being stuck.
+            window.invoker.reportUiPerf?.('ui_delta_stream_resync_exhausted', {
+              attempts: consecutiveResyncFailuresRef.current,
+              expected: lastSeen + 1,
+              actual: seq,
+            });
+            consecutiveResyncFailuresRef.current = 0;
+            uiTaskGraphStreamWatermarkRef.current = seq;
+            graphEventPipelineRef.current?.push(event);
+            return;
+          }
           isResyncInFlightRef.current = true;
+          resyncTargetSeqRef.current = seq;
           graphEventPipelineRef.current?.clear();
           refreshTaskGraph();
           return;
         }
         uiTaskGraphStreamWatermarkRef.current = seq;
+        consecutiveResyncFailuresRef.current = 0;
       }
 
       graphEventPipelineRef.current?.push(event);
-      if (delta.type === 'removed') {
-        // Removals are rare, user-initiated, and destructive: flush the batch
-        // window so the graph reflects them immediately instead of ~100ms later.
+      if (delta.type === 'removed' || (delta.type === 'updated' && delta.changes.status !== undefined)) {
+        // Status changes drive the visible execution counters; flush them like
+        // removals so the task map and queue chips move in the same paint turn.
         graphEventPipelineRef.current?.flushNow();
       }
     };
@@ -507,6 +570,12 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
 
     const unsubWf = window.invoker.onWorkflowsChanged?.((wfList: any[]) => {
       invalidateStartupSnapshot();
+      if (traceRendererWorkflowEvents) {
+        const traceRendererWorkflowEvent = window.invoker.traceRendererWorkflowEvent;
+        if (traceRendererWorkflowEvent) {
+          void traceRendererWorkflowEvent(wfList).catch(() => undefined);
+        }
+      }
       if (Array.isArray(wfList)) {
         setWorkflows((previous) => {
           const nextWorkflows = replaceWorkflowMapPreservingTaskBackedEntries(
@@ -543,7 +612,7 @@ export function useTasks({ onTaskGraphSnapshotApplied }: UseTasksOptions = {}): 
       unsub();
       unsubWf?.();
     };
-  }, [invalidateStartupSnapshot, loadStartupSnapshot, onTaskGraphSnapshotApplied, refreshTaskGraph, refreshWorkflowMetadata]);
+  }, [invalidateStartupSnapshot, loadStartupSnapshot, onTaskGraphSnapshotApplied, refreshTaskGraph, refreshWorkflowMetadata, traceRendererTaskGraphEvents, traceRendererWorkflowEvents]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.invoker) return;

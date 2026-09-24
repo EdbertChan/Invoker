@@ -1,13 +1,24 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CODERABBIT_ADDRESS_WORKER_KIND,
-  PR_CI_FAILURE_SCAN_WORKER_KIND,
-  PR_CONFLICT_REBASE_WORKER_KIND,
+  PR_ADMIN_BYPASS_LAND_WORKER_KIND,
+  PR_ORPHAN_REPAIR_WORKER_KIND,
+  WORKER_SESSION_MINE_WORKER_KIND,
+  SELF_DEPLOY_WORKER_KIND,
   createWorkerRegistry,
   registerBuiltinWorkers,
   type WorkerRuntimeDependencies,
 } from '@invoker/execution-engine';
-import { resolvePrMaintenanceWorkerConfig, type InvokerConfig } from '../config.js';
+import {
+  DEFAULT_PR_MAINTENANCE_TARGET_REPO,
+  resolvePrMaintenanceWorkerConfig,
+  type InvokerConfig,
+} from '../config.js';
+import { ALWAYS_AUTO_STARTED_OWNER_WORKER_KINDS, BUILT_IN_WORKER_KINDS } from '../worker-control.js';
+
+const DEFAULT_TARGET_REPO_ENV = {
+  INVOKER_GITHUB_TARGET_REPOS: DEFAULT_PR_MAINTENANCE_TARGET_REPO,
+  INVOKER_GITHUB_TARGET_REPO: DEFAULT_PR_MAINTENANCE_TARGET_REPO,
+};
 
 const silentLogger = {
   debug: () => {},
@@ -38,27 +49,21 @@ function buildOwnerWorkerDeps(config: InvokerConfig): WorkerRuntimeDependencies 
 }
 
 describe('resolvePrMaintenanceWorkerConfig', () => {
-  it('returns undefined when prMaintenance is absent (disabled by default)', () => {
+  it('returns undefined when prMaintenance is absent', () => {
     expect(resolvePrMaintenanceWorkerConfig({})).toBeUndefined();
   });
 
-  it('returns undefined when prMaintenance is present but not enabled', () => {
+  it('returns launch fields without an enabled gate', () => {
     expect(
       resolvePrMaintenanceWorkerConfig({
         prMaintenance: { repoRoot: '/srv/invoker', intervalMs: 60000 },
       }),
-    ).toBeUndefined();
-    expect(
-      resolvePrMaintenanceWorkerConfig({
-        prMaintenance: { enabled: false, repoRoot: '/srv/invoker' },
-      }),
-    ).toBeUndefined();
+    ).toEqual({ repoRoot: '/srv/invoker', intervalMs: 60000, env: DEFAULT_TARGET_REPO_ENV });
   });
 
-  it('builds the launch config and drops the enabled gate when enabled', () => {
+  it('builds the launch config from present fields', () => {
     const resolved = resolvePrMaintenanceWorkerConfig({
       prMaintenance: {
-        enabled: true,
         repoRoot: '/srv/invoker',
         env: { INVOKER_PR_CRON_LOCK: '/tmp/pr.lock' },
         intervalMs: 120000,
@@ -68,7 +73,7 @@ describe('resolvePrMaintenanceWorkerConfig', () => {
     });
     expect(resolved).toEqual({
       repoRoot: '/srv/invoker',
-      env: { INVOKER_PR_CRON_LOCK: '/tmp/pr.lock' },
+      env: { INVOKER_PR_CRON_LOCK: '/tmp/pr.lock', ...DEFAULT_TARGET_REPO_ENV },
       intervalMs: 120000,
       lockPath: '/tmp/pr.lock',
       shell: '/bin/bash',
@@ -76,42 +81,77 @@ describe('resolvePrMaintenanceWorkerConfig', () => {
     expect(resolved).not.toHaveProperty('enabled');
   });
 
-  it('omits unset launch fields', () => {
-    expect(
-      resolvePrMaintenanceWorkerConfig({
-        prMaintenance: { enabled: true, repoRoot: '/srv/invoker' },
-      }),
-    ).toEqual({ repoRoot: '/srv/invoker' });
+  it('returns only the target-repo env when the block has no launch fields', () => {
+    expect(resolvePrMaintenanceWorkerConfig({ prMaintenance: {} })).toEqual({ env: DEFAULT_TARGET_REPO_ENV });
   });
 });
 
 describe('registered owner PR-maintenance worker dependencies', () => {
-  it('leaves prMaintenance deps unset when config is disabled', () => {
+  it('leaves prMaintenance deps unset when config block is absent', () => {
     expect(buildOwnerWorkerDeps({}).prMaintenance).toBeUndefined();
   });
 
-  it('threads the resolved launch config into owner worker deps when enabled', () => {
+  it('threads the resolved launch config into owner worker deps', () => {
     const deps = buildOwnerWorkerDeps({
-      prMaintenance: { enabled: true, intervalMs: 90000, shell: '/bin/bash' },
+      prMaintenance: { intervalMs: 90000, shell: '/bin/bash' },
     });
-    expect(deps.prMaintenance).toEqual({ intervalMs: 90000, shell: '/bin/bash' });
+    expect(deps.prMaintenance).toEqual({
+      intervalMs: 90000,
+      shell: '/bin/bash',
+      env: DEFAULT_TARGET_REPO_ENV,
+    });
   });
 
-  it('builds all PR-maintenance workers from the owner deps without starting them', () => {
+  it('builds the surviving PR-maintenance workers from the owner deps without starting them', () => {
     const registry = registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>());
     const deps = buildOwnerWorkerDeps({
-      prMaintenance: { enabled: true, intervalMs: 90000 },
+      prMaintenance: { intervalMs: 90000 },
     });
 
-    const coderabbit = registry.get(CODERABBIT_ADDRESS_WORKER_KIND)?.factory(deps);
-    const rebase = registry.get(PR_CONFLICT_REBASE_WORKER_KIND)?.factory(deps);
-    const ciScan = registry.get(PR_CI_FAILURE_SCAN_WORKER_KIND)?.factory(deps);
+    const adminBypass = registry.get(PR_ADMIN_BYPASS_LAND_WORKER_KIND)?.factory(deps);
+    const orphanRepair = registry.get(PR_ORPHAN_REPAIR_WORKER_KIND)?.factory(deps);
 
-    expect(coderabbit?.identity.kind).toBe(CODERABBIT_ADDRESS_WORKER_KIND);
-    expect(coderabbit?.isRunning()).toBe(false);
-    expect(rebase?.identity.kind).toBe(PR_CONFLICT_REBASE_WORKER_KIND);
-    expect(rebase?.isRunning()).toBe(false);
-    expect(ciScan?.identity.kind).toBe(PR_CI_FAILURE_SCAN_WORKER_KIND);
-    expect(ciScan?.isRunning()).toBe(false);
+    expect(adminBypass?.identity.kind).toBe(PR_ADMIN_BYPASS_LAND_WORKER_KIND);
+    expect(adminBypass?.isRunning()).toBe(false);
+    expect(orphanRepair?.identity.kind).toBe(PR_ORPHAN_REPAIR_WORKER_KIND);
+    expect(orphanRepair?.isRunning()).toBe(false);
+  });
+});
+
+describe('registered worker-session-mine worker', () => {
+  it('registers the off-by-default session miner and builds a stopped runtime', () => {
+    const registry = registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>());
+    const entry = registry.get(WORKER_SESSION_MINE_WORKER_KIND);
+    expect(entry).toBeDefined();
+
+    const runtime = entry!.factory({
+      store: emptyStore,
+      submitter: noopSubmitter,
+      logger: silentLogger,
+      workerSessionMine: { intervalMs: 60_000 },
+    });
+    expect(runtime.identity.kind).toBe(WORKER_SESSION_MINE_WORKER_KIND);
+    expect(runtime.isRunning()).toBe(false);
+    expect([...ALWAYS_AUTO_STARTED_OWNER_WORKER_KINDS]).not.toContain(WORKER_SESSION_MINE_WORKER_KIND);
+    expect(BUILT_IN_WORKER_KINDS.has(WORKER_SESSION_MINE_WORKER_KIND)).toBe(true);
+  });
+});
+
+describe('registered self-deploy worker', () => {
+  it('registers the off-by-default DO1 self-deploy worker and builds a stopped runtime', () => {
+    const registry = registerBuiltinWorkers(createWorkerRegistry<WorkerRuntimeDependencies>());
+    const entry = registry.get(SELF_DEPLOY_WORKER_KIND);
+    expect(entry).toBeDefined();
+
+    const runtime = entry!.factory({
+      store: emptyStore,
+      submitter: noopSubmitter,
+      logger: silentLogger,
+      selfDeploy: { intervalMs: 60_000, tickOnStart: false },
+    });
+    expect(runtime.identity.kind).toBe(SELF_DEPLOY_WORKER_KIND);
+    expect(runtime.isRunning()).toBe(false);
+    expect([...ALWAYS_AUTO_STARTED_OWNER_WORKER_KINDS]).not.toContain(SELF_DEPLOY_WORKER_KIND);
+    expect(BUILT_IN_WORKER_KINDS.has(SELF_DEPLOY_WORKER_KIND)).toBe(true);
   });
 });

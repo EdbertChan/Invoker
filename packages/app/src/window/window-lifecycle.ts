@@ -15,6 +15,11 @@ export interface MainWindowLifecycleDeps {
   setUiInteractive: (uiInteractive: boolean) => void;
   startDeferredStartupWork: () => void;
   setMainWindow: (window: BrowserWindow | null) => void;
+  rendererRecoveryState?: MainWindowRendererRecoveryState;
+}
+
+export interface MainWindowRendererRecoveryState {
+  lastRecoveryAt: number | null;
 }
 
 export interface MainWindowSecondInstanceDeps {
@@ -47,13 +52,20 @@ export function registerMainWindowActivateHandler(deps: MainWindowActivateDeps):
   });
 }
 
-const FALLBACK_WINDOW_HTML = 'data:text/html,<html><body style="background:#1a1a2e;color:#eee;font-family:system-ui;padding:2rem"><h1>Invoker</h1><p>The UI failed to load. Restart Invoker. If this keeps happening, reinstall Invoker or rebuild the UI from a source checkout.</p></body></html>';
+const FALLBACK_WINDOW_DOCUMENT = '<html><body style="background:#1a1a2e;color:#eee;font-family:system-ui;padding:2rem"><h1>Invoker</h1><p>The UI failed to load. Restart Invoker. If this keeps happening, reinstall Invoker or rebuild the UI from a source checkout.</p></body></html>';
+const FALLBACK_WINDOW_HTML = `data:text/html;charset=utf-8,${encodeURIComponent(FALLBACK_WINDOW_DOCUMENT)}`;
+const RENDERER_RECOVERY_WINDOW_MS = 60_000;
 
 export function createMainWindow(deps: MainWindowLifecycleDeps): BrowserWindow {
   deps.recordStartupMark('createWindow.begin');
   const iconPath = path.join(deps.appRootDir, 'assets', 'icons', 'png', '256x256.png');
   const icon = nativeImage.createFromPath(iconPath);
-  const keepE2eWindowHidden = deps.hideE2eWindow && !deps.enableTestCompositor;
+  const captureMode = process.env.CAPTURE_MODE;
+  // Visual proof capture should stay off-screen unless a maintainer explicitly
+  // opts into watching it with INVOKER_VISUAL_PROOF_SHOW_UI=1.
+  const showVisualProofWindow = captureMode !== undefined && process.env.INVOKER_VISUAL_PROOF_SHOW_UI === '1';
+  const keepE2eWindowHidden = deps.hideE2eWindow
+    && (!deps.enableTestCompositor || (captureMode !== undefined && !showVisualProofWindow));
   const mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -82,6 +94,7 @@ export function createMainWindow(deps: MainWindowLifecycleDeps): BrowserWindow {
   }
 
   let fallbackShown = false;
+  const rendererRecoveryState = deps.rendererRecoveryState ?? { lastRecoveryAt: null };
   const showFallbackWindow = (reason: string): void => {
     if (mainWindow.isDestroyed() || fallbackShown) return;
     fallbackShown = true;
@@ -119,32 +132,75 @@ export function createMainWindow(deps: MainWindowLifecycleDeps): BrowserWindow {
   });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    const reason = `render-process-gone reason=${details.reason} exitCode=${details.exitCode}`;
     deps.logger.error(
       `main window render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`,
       { module: 'window' },
     );
-    showFallbackWindow(`render-process-gone reason=${details.reason} exitCode=${details.exitCode}`);
+    const now = Date.now();
+    if (rendererRecoveryState.lastRecoveryAt === null || now - rendererRecoveryState.lastRecoveryAt >= RENDERER_RECOVERY_WINDOW_MS) {
+      rendererRecoveryState.lastRecoveryAt = now;
+      deps.logger.warn(`main window renderer recovery: ${reason}`, { module: 'window' });
+      try {
+        mainWindow.once('closed', () => createMainWindow({ ...deps, rendererRecoveryState }));
+        mainWindow.destroy();
+        return;
+      } catch (err) {
+        deps.logger.error(
+          `main window renderer recovery reload failed: ${err instanceof Error ? err.message : String(err)}`,
+          { module: 'window' },
+        );
+      }
+    }
+    showFallbackWindow(reason);
   });
 
   const shouldShowWindow = process.env.NODE_ENV !== 'test' || deps.enableTestCompositor;
   if (shouldShowWindow) {
+    let windowMapped = false;
     let showTriggered = false;
-    const showWindow = (): void => {
-      if (mainWindow.isDestroyed() || showTriggered) return;
-      showTriggered = true;
-      deps.logger.info(keepE2eWindowHidden ? 'main window ready while hidden' : 'main window show()', { module: 'window' });
-      deps.recordStartupMark(keepE2eWindowHidden ? 'window.hidden-ready' : 'window.show');
-      if (!keepE2eWindowHidden) {
+    let showFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    const mapWindow = (): void => {
+      if (mainWindow.isDestroyed() || windowMapped) return;
+      windowMapped = true;
+      if (deps.hideE2eWindow && deps.enableTestCompositor && !showVisualProofWindow) {
+        mainWindow.showInactive();
+      } else if (!keepE2eWindowHidden) {
         mainWindow.show();
         mainWindow.focus();
       }
+    };
+    const recordWindowReady = (): void => {
+      deps.logger.info(keepE2eWindowHidden ? 'main window ready while hidden' : 'main window show()', { module: 'window' });
+      deps.recordStartupMark(keepE2eWindowHidden ? 'window.hidden-ready' : 'window.show');
+      mapWindow();
+    };
+    const showWindow = (): void => {
+      if (mainWindow.isDestroyed() || showTriggered) return;
+      showTriggered = true;
+      if (showFallbackTimer) {
+        clearTimeout(showFallbackTimer);
+        showFallbackTimer = null;
+      }
+      recordWindowReady();
       deps.setUiInteractive(true);
       deps.recordStartupMark('ui.interactive');
       deps.startDeferredStartupWork();
     };
 
+    if (deps.enableTestCompositor && !keepE2eWindowHidden) {
+      deps.logger.info('main window mapped early for e2e compositor', { module: 'window' });
+      deps.recordStartupMark('window.mapped');
+      mapWindow();
+    }
     mainWindow.once('ready-to-show', showWindow);
-    setTimeout(showWindow, 1500).unref?.();
+    showFallbackTimer = setTimeout(showWindow, 1500);
+    mainWindow.on('closed', () => {
+      if (showFallbackTimer) {
+        clearTimeout(showFallbackTimer);
+        showFallbackTimer = null;
+      }
+    });
   } else {
     deps.setUiInteractive(true);
     deps.recordStartupMark('ui.interactive');

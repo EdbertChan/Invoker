@@ -26,7 +26,6 @@ if [[ -z "${INVOKER_DB_DIR:-}" ]]; then
   CREATED_TMP_DB_DIR=1
 fi
 export INVOKER_HEADLESS_STANDALONE=1
-export INVOKER_ALLOW_DELETE_ALL=1
 export INVOKER_UNSAFE_DISABLE_DB_WRITER_LOCK=1
 export INVOKER_API_PORT="${INVOKER_API_PORT:-$((4300 + (RANDOM % 1000)))}"
 export INVOKER_IPC_SOCKET="${INVOKER_IPC_SOCKET:-$INVOKER_DB_DIR/ipc-transport.sock}"
@@ -39,7 +38,19 @@ PLAN_FILE="$REPO_ROOT/plans/test-docker-comprehensive.yaml"
 PATCHED_PLAN_FILE=""
 FIXTURE_IMAGE_TAG="${FIXTURE_IMAGE_TAG:-invoker-docker-comprehensive:latest}"
 
+cleanup_docker_resources() {
+  local containers
+  containers="$(docker ps -aq --filter "ancestor=$FIXTURE_IMAGE_TAG" 2>/dev/null || true)"
+  if [[ -n "$containers" ]]; then
+    # Use rm -f so restored tail containers do not each wait for Docker's
+    # default stop timeout on persistent CI runners.
+    docker rm -f $containers >/dev/null 2>&1 || true
+  fi
+  docker image rm "$FIXTURE_IMAGE_TAG" >/dev/null 2>&1 || true
+}
+
 cleanup() {
+  cleanup_docker_resources
   if [[ -n "$PATCHED_PLAN_FILE" ]]; then
     rm -f "$PATCHED_PLAN_FILE" 2>/dev/null || true
   fi
@@ -101,14 +112,18 @@ FROM invoker-agent:latest
 ARG CURRENT_BRANCH
 
 USER root
-RUN cd /app \
-    && git init . \
-    && git config --global --add safe.directory /app \
-    && printf '# docker comprehensive fixture\n' > README.md \
-    && git add . \
-    && git -c user.email="test@invoker.local" -c user.name="Invoker Docker Test" commit -m "seed" \
-    && git checkout -B "${CURRENT_BRANCH}" \
-    && chown -R invoker:invoker /app
+RUN set -eu; \
+    git config --global --add safe.directory /app; \
+    git init --bare /tmp/invoker-docker-comprehensive-origin.git; \
+    cd /app; \
+    git init .; \
+    printf '# docker comprehensive fixture\n' > README.md; \
+    git add .; \
+    git -c user.email="test@invoker.local" -c user.name="Invoker Docker Test" commit -m "seed"; \
+    git checkout -B "${CURRENT_BRANCH}"; \
+    git remote add origin /tmp/invoker-docker-comprehensive-origin.git; \
+    git push -u origin "${CURRENT_BRANCH}"; \
+    chown -R invoker:invoker /app /tmp/invoker-docker-comprehensive-origin.git
 
 USER invoker
 WORKDIR /app
@@ -403,13 +418,7 @@ fi
 
 echo ""
 echo "==> Cleaning up test containers"
-for TASK_ID in $RESTORABLE_TASKS; do
-  CID=$(task_container_id "$TASK_ID")
-  if [ -n "$CID" ] && [ "$CID" != "null" ]; then
-    docker stop "$CID" >/dev/null 2>&1 || true
-    docker rm "$CID" >/dev/null 2>&1 || true
-  fi
-done
+cleanup_docker_resources
 
 echo "==> Clearing Invoker state"
 ./run.sh --headless delete-all 2>/dev/null || true

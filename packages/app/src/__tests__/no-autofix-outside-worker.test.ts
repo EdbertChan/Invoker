@@ -71,31 +71,24 @@ const TRIGGER_SIGNALS: ReadonlyArray<{ name: string; pattern: RegExp }> = [
 /**
  * The ONLY files permitted to contain auto-fix trigger signals. Two categories:
  *
- *  (A) the shared auto-fix worker engine in `@invoker/execution-engine`,
+ *  (A) the shared auto-fix worker engine in `@invoker/execution-engine`, and
  *  (B) the shared fix action / operator-facing `fix ... --auto-fix` command
- *      route in `@invoker/app`, and
- *  (C) one legacy helper module that is no longer wired into `main.ts`.
+ *      route in `@invoker/app`.
  *
- * Adding an entry here is a deliberate act: it either declares a sanctioned
- * auto-fix site or documents an unreachable legacy file that still needs its
- * own cleanup slice. Anything not listed here that trips a signal fails the
- * build.
+ * Adding an entry here is a deliberate act: it declares a sanctioned auto-fix
+ * site. Anything not listed here that trips a signal fails the build.
  */
 const ALLOWLIST: ReadonlySet<string> = new Set([
   // (A) shared worker engine — now extracted into @invoker/execution-engine
   'packages/execution-engine/src/auto-fix-recovery.ts',
   'packages/execution-engine/src/worker-runtime.ts',
   'packages/execution-engine/src/auto-fix-intents.ts',
-  'packages/execution-engine/src/workers/ci-failure-worker.ts',
+  'packages/execution-engine/src/review-gate-ci-repair.ts',
   // (B) shared fix action + operator command route in @invoker/app
   // (`workers/auto-fix-recovery.ts` is the thin re-export shim for the engine).
   'packages/app/src/workers/auto-fix-recovery.ts',
   'packages/app/src/workflow-actions.ts',
   'packages/app/src/headless.ts',
-  // (C) dead legacy helper not imported by main.ts; tracked separately so this
-  // guard still catches any new live in-app auto-fix path.
-  'packages/app/src/ipc/gui-mutation-handlers.ts',
-  'packages/execution-engine/src/review-gate-ci-repair.ts',
 ]);
 
 /** Locate the monorepo root by walking up to the `pnpm-workspace.yaml` marker. */
@@ -160,7 +153,7 @@ function collectRepoSourceFiles(root: string): SourceFile[] {
 }
 
 /** Return every trigger-signal hit across the given files. */
-function scanForAutoFixTriggers(files: ReadonlyArray<SourceFile>): TriggerHit[] {
+export function scanForAutoFixTriggers(files: ReadonlyArray<SourceFile>): TriggerHit[] {
   const hits: TriggerHit[] = [];
   for (const file of files) {
     const lines = file.content.split('\n');
@@ -177,7 +170,7 @@ function scanForAutoFixTriggers(files: ReadonlyArray<SourceFile>): TriggerHit[] 
 }
 
 /** Trigger hits that fall outside the sanctioned allowlist — i.e. violations. */
-function findAutoFixViolations(
+export function findAutoFixViolations(
   files: ReadonlyArray<SourceFile>,
   allowlist: ReadonlySet<string>,
 ): TriggerHit[] {

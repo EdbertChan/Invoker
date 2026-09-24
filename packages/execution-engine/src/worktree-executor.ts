@@ -1,13 +1,15 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, unlinkSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { resolve, join, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import type { WorkRequest, WorkResponse } from '@invoker/contracts';
-import type { ExecutorHandle, PersistedTaskMeta, TerminalSpec } from './executor.js';
+import type { ExecutorStartup, ExecutorHandle, PersistedTaskMeta, TerminalSpec } from './executor.js';
 import { BaseExecutor, MergeConflictError, type BaseEntry } from './base-executor.js';
-import { RepoPool } from './repo-pool.js';
+import { RepoPool, type AcquiredWorktree, type RepoPoolLeasePersistence } from './repo-pool.js';
 import { killProcessGroup, cleanElectronEnv, resolveExecutableOnCurrentPath, SIGKILL_TIMEOUT_MS } from './process-utils.js';
+import { agentUsesNativeMaxTurns, createTurnBudgetWatcher } from './agent-turn-budget.js';
 import { DEFAULT_WORKTREE_PROVISION_COMMAND } from './default-worktree-provision-command.js';
+import { getExecutorStartTimeoutMs } from './task-runner-launch-support.js';
 import {
   computeContentHash,
   buildExperimentBranchName,
@@ -15,18 +17,41 @@ import {
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
 import { createExecutionBench } from './execution-bench.js';
 import {
-  syncPlanBaseRemote,
   syncPlanBaseRemoteForRef,
   resolvePlanBaseRevision,
-  resolvePreferredTrackingRemote,
-  shouldResolveViaOriginTracking,
+  ensureRequiredCommitResolvable,
 } from './plan-base-remote.js';
 import { remoteFetchForPool } from './remote-fetch-policy.js';
 import { DEFAULT_EXECUTION_AGENT } from './agent.js';
 import { sanitizeBranchForPath } from './git-utils.js';
+import { loadLinearEnv } from './remote-agent-env.js';
+import { inspectTaskFreshness } from './task-specification-preflight.js';
 
 // Re-export for backward compatibility
 export { computeContentHash, buildExperimentBranchName } from './branch-utils.js';
+
+const HTTPS_PREFIX = 'https://';
+const HTTP_PREFIX = 'http://';
+const SSH_PREFIX = 'ssh://';
+const FILE_PREFIX = 'file://';
+const GIT_AT_PATTERN = /^git@[\w.-]+:/;
+const GITHUB_SHORTHAND_PATTERN = /^[\w.-]+\/[\w.-]+$/;
+
+export function isCloneableRepoUrl(repoUrl: string): boolean {
+  const trimmed = repoUrl.trim();
+  if (!trimmed) return false;
+  if (trimmed === '.' || trimmed === '..') return false;
+  if (trimmed.startsWith('./') || trimmed.startsWith('../')) return false;
+  if (!trimmed.includes('/') && !trimmed.includes(':')) return false;
+  if (trimmed.startsWith(HTTPS_PREFIX)) return true;
+  if (trimmed.startsWith(HTTP_PREFIX)) return true;
+  if (GIT_AT_PATTERN.test(trimmed)) return true;
+  if (trimmed.startsWith(SSH_PREFIX)) return true;
+  if (trimmed.startsWith(FILE_PREFIX)) return true;
+  if (GITHUB_SHORTHAND_PATTERN.test(trimmed)) return true;
+  if (isAbsolute(trimmed)) return true;
+  return false;
+}
 
 export interface WorktreeExecutorConfig {
   /** Directory where worktrees are created. */
@@ -39,10 +64,26 @@ export interface WorktreeExecutorConfig {
   claudeCommand?: string;
   /** Agent registry for pluggable AI agents. When set, overrides claudeCommand. */
   agentRegistry?: import('./agent-registry.js').AgentRegistry;
+  /** Optional dependency/bootstrap command run before the task command in local worktrees. */
+  provisionCommand?: string;
+  /**
+   * Per-repo override for `provisionCommand`, keyed by `repoUrl` (normalized —
+   * see `normalizeRepoUrlForProvisionLookup`). A workflow whose `repoUrl` has
+   * an entry here uses that command (including `''` to run no install step)
+   * instead of the pool's default `provisionCommand`.
+   */
+  repoProvisionCommands?: Record<string, string>;
   /** Heartbeat interval in milliseconds. Default: 30000. */
   heartbeatIntervalMs?: number;
   /** Maximum task duration in milliseconds. Default: 4 hours. */
   maxDurationMs?: number;
+  /** Optional DB-backed lease authority for worktree slots (see RepoPoolConfig). */
+  leasePersistence?: RepoPoolLeasePersistence;
+  /**
+   * Optional secrets file. LINEAR_API_KEY / INVOKER_LINEAR_API_KEY are merged
+   * into local task env whenever set (independent of agent API-key export).
+   */
+  secretsFile?: string;
 }
 
 
@@ -51,8 +92,6 @@ interface WorktreeEntry extends BaseEntry {
   worktreeDir: string;
   branch: string;
   phase: 'preparing' | 'provisioning' | 'running' | 'completed';
-  /** Full pool release: git worktree remove (used on provision failure, not on destroyAll). */
-  poolRelease?: () => Promise<void>;
   /** Soft-release: frees the pool slot without removing the worktree from disk. */
   poolSoftRelease?: () => void;
   /** Agent session ID for resuming sessions. */
@@ -61,6 +100,9 @@ interface WorktreeEntry extends BaseEntry {
   agentName?: string;
   rawStdout?: string;
   poolSlotReleased?: boolean;
+  /** Set only when the acquired worktree claimed a DB-backed lease. */
+  leaseResourceKey?: string;
+  leaseHolderId?: string;
 }
 
 /**
@@ -75,20 +117,28 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
   private readonly worktreeBaseDir: string;
   private readonly claudeCommand: string;
   private readonly agentRegistry?: import('./agent-registry.js').AgentRegistry;
+  private readonly secretsFile: string | undefined;
   private pool: RepoPool;
-
   constructor(config: WorktreeExecutorConfig) {
     super(config.heartbeatIntervalMs, config.maxDurationMs);
     this.claudeCommand = config.claudeCommand ?? 'claude';
     this.agentRegistry = config.agentRegistry;
+    this.secretsFile = config.secretsFile
+      ?? (existsSync(join(homedir(), '.config', 'invoker', 'secrets.env'))
+        ? join(homedir(), '.config', 'invoker', 'secrets.env')
+        : undefined);
+    this.setProvisionCommand(config.provisionCommand, DEFAULT_WORKTREE_PROVISION_COMMAND);
+    this.setRepoProvisionCommands(config.repoProvisionCommands);
     this.worktreeBaseDir =
       config.worktreeBaseDir ?? resolve(homedir(), '.invoker', 'worktrees');
     this.pool = new RepoPool({
       cacheDir: config.cacheDir,
       maxWorktrees: config.maxWorktrees,
       worktreeBaseDir: this.worktreeBaseDir,
+      leasePersistence: config.leasePersistence,
     });
   }
+
 
   /** Pool mirror used for this executor (rebase-and-retry / tests). */
   getRepoPool(): RepoPool {
@@ -115,12 +165,53 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     entry.poolSoftRelease?.();
   }
 
-  async start(request: WorkRequest): Promise<ExecutorHandle> {
+  async start(request: WorkRequest, startup?: ExecutorStartup): Promise<ExecutorHandle> {
+    const state: { handle: ExecutorHandle; acquired?: AcquiredWorktree } = { handle: this.createHandle(request) };
+    try {
+      return await this.startAttempt(request, state, startup);
+    } catch (error) {
+      const entry = this.entries.get(state.handle.executionId);
+      if (entry) {
+        entry.completed = true;
+        entry.phase = 'completed';
+        this.softReleasePoolSlot(entry);
+        this.entries.delete(state.handle.executionId);
+      } else {
+        state.acquired?.softRelease();
+      }
+      if (error instanceof Error && state.acquired) {
+        Object.assign(error, { workspacePath: state.acquired.worktreePath, branch: state.acquired.branch });
+      }
+      throw error;
+    }
+  }
+
+  private async startAttempt(
+    request: WorkRequest,
+    state: { handle: ExecutorHandle; acquired?: AcquiredWorktree },
+    startup?: ExecutorStartup,
+  ): Promise<ExecutorHandle> {
+    startup?.check();
+    // Test-only fault injection: hang before doing any real work, so e2e
+    // tests can exercise a launch that genuinely never completes handoff
+    // (mirrors INVOKER_E2E_BREAK_TERMINAL_SPAWN's pattern). Never set
+    // outside a controlled test process.
+    const hangMs = Number.parseInt(process.env.INVOKER_E2E_HANG_LAUNCH_STARTUP_MS ?? '', 10);
+    if (Number.isFinite(hangMs) && hangMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, hangMs));
+    }
+    startup?.check();
     const repoUrl = request.inputs.repoUrl;
     if (!repoUrl) {
       throw new Error(
         `WorktreeExecutor.start(): missing repoUrl for task "${request.actionId}". ` +
         `Plans must declare a repoUrl.`,
+      );
+    }
+    if (!isCloneableRepoUrl(repoUrl)) {
+      throw new Error(
+        `WorktreeExecutor.start(): invalid repoUrl "${repoUrl}" for task "${request.actionId}". ` +
+        `Expected a valid git URL (e.g. https://github.com/owner/repo or git@github.com:owner/repo.git).`,
       );
     }
     traceExecution(
@@ -135,19 +226,22 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
         repoUrl,
       },
     });
-    bench('WorktreeExecutor.start.begin');
-    await this.ensureGitAvailable();
-    bench('WorktreeExecutor.ensureGitAvailable.done');
-    const handle = this.createHandle(request);
+    const handle = state.handle;
     const executionId = handle.executionId;
+    bench('WorktreeExecutor.start.begin');
+    await this.ensureGitAvailable(startup);
+    startup?.check();
+    bench('WorktreeExecutor.ensureGitAvailable.done');
     const t0 = Date.now();
     const log = (step: string) => traceExecution(`[WorktreeExecutor] start task=${request.actionId} step=${step} elapsed=${Date.now() - t0}ms`);
+    const startupDeadlineMs = startup?.deadlineMs ?? Date.now() + getExecutorStartTimeoutMs();
 
     bench('RepoPool.ensureCloneThroughRepoQueue.before');
-    const clonePath = await this.pool.ensureCloneThroughRepoQueue(repoUrl);
+    const clonePath = await this.pool.ensureCloneThroughRepoQueue(repoUrl, startup);
+    startup?.check();
     bench('RepoPool.ensureCloneThroughRepoQueue.after', { clonePath });
     const baseRef = request.inputs.baseBranch ?? 'HEAD';
-    const runGit = (args: string[]) => this.execGitSimple(args, clonePath);
+    const runGit = (args: string[]) => this.execGitSimple(args, clonePath, { startup });
     let baseHead = request.inputs.baseCommit?.trim();
     if (baseHead) {
       bench('WorktreeExecutor.resolveBase.skipped', {
@@ -159,12 +253,7 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     } else {
       log(`resolve base ${baseRef} begin`);
       bench('WorktreeExecutor.resolveBase.before', { baseRef });
-      if (remoteFetchForPool.enabled && shouldResolveViaOriginTracking(baseRef)) {
-        const preferredRemote = await resolvePreferredTrackingRemote(runGit, baseRef.trim());
-        bench('WorktreeExecutor.resolvePreferredTrackingRemote.done', { baseRef, preferredRemote });
-        await syncPlanBaseRemote(runGit, baseRef.trim(), preferredRemote);
-        bench('WorktreeExecutor.syncPlanBaseRemote.done', { baseRef, preferredRemote });
-      } else if (remoteFetchForPool.enabled) {
+      if (remoteFetchForPool.enabled) {
         await syncPlanBaseRemoteForRef(runGit, baseRef.trim());
         bench('WorktreeExecutor.syncPlanBaseRemoteForRef.done', { baseRef });
       }
@@ -172,6 +261,17 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       bench('WorktreeExecutor.resolveBase.after', { baseRef, baseHead });
       log(`resolve base ${baseRef} done → ${baseHead}`);
     }
+    startup?.check();
+    const upstreamBaseCommit = request.inputs.upstreamBase?.commitHash?.trim();
+    if (upstreamBaseCommit && remoteFetchForPool.enabled) {
+      log(`verify dependency commit ${upstreamBaseCommit} begin`);
+      bench('WorktreeExecutor.ensureRequiredCommitResolvable.before', { upstreamBaseCommit });
+      await ensureRequiredCommitResolvable(runGit, upstreamBaseCommit);
+      bench('WorktreeExecutor.ensureRequiredCommitResolvable.after', { upstreamBaseCommit });
+      log(`verify dependency commit ${upstreamBaseCommit} done`);
+    }
+    startup?.check();
+    const startupBaseHead = upstreamBaseCommit || baseHead;
     const upstreamCommits = (request.inputs.upstreamContext ?? [])
       .map(c => c.commitHash)
       .filter((h): h is string => !!h);
@@ -180,7 +280,7 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       request.inputs.command,
       request.inputs.prompt,
       upstreamCommits,
-      baseHead,
+      startupBaseHead,
     );
     const branch = buildExperimentBranchName(
       request.actionId,
@@ -191,6 +291,7 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     bench('WorktreeExecutor.branchComputed', { branch, contentHash });
     // Notify the orchestrator before any `git worktree add` so a leaked
     // worktree (process killed mid-acquire) can still be reconciled.
+    startup?.check();
     try {
       request.onBranchResolved?.(branch);
       bench('WorktreeExecutor.onBranchResolved.done', { branch });
@@ -204,24 +305,29 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       });
     }
 
+    startup?.check();
     // -- Reconciliation: real pool worktree at plan base (no upstream merges), then needs_input --
     if (request.actionType === 'reconciliation') {
       traceExecution(
         `${RESTART_TO_BRANCH_TRACE} WorktreeExecutor.start() actionId=${request.actionId} reconciliation → acquireWorktree (skip upstream merge)`,
       );
-      bench('RepoPool.acquireWorktree.reconciliation.before', { branch, baseHead });
+      bench('RepoPool.acquireWorktree.reconciliation.before', { branch, baseHead: startupBaseHead });
       const acquired = await this.pool.acquireWorktree(
         repoUrl,
         branch,
-        baseHead,
+        startupBaseHead,
         request.actionId,
         {
+          startup,
           forceFresh: request.inputs.freshWorkspace === true,
+          leaseHolderId: request.attemptId ?? request.actionId,
           ...(request.inputs.reusableWorktree
             ? { reusableWorktree: request.inputs.reusableWorktree }
             : {}),
         },
       );
+      state.acquired = acquired;
+      startup?.check();
       bench('RepoPool.acquireWorktree.reconciliation.after', {
         branch: acquired.branch,
         worktreePath: acquired.worktreePath,
@@ -241,12 +347,15 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
         completeListeners: new Set(),
         heartbeatListeners: new Set(),
         completed: false,
-        poolRelease: acquired.release,
         poolSoftRelease: acquired.softRelease,
+        leaseResourceKey: acquired.leaseResourceKey,
+        leaseHolderId: acquired.leaseHolderId,
       };
       this.registerEntry(handle, entry);
       handle.workspacePath = acquired.worktreePath;
       handle.branch = acquired.branch;
+      handle.leaseResourceKey = acquired.leaseResourceKey;
+      handle.leaseHolderId = acquired.leaseHolderId;
       bench('WorktreeExecutor.registerEntry.reconciliation.done', {
         workspacePath: handle.workspacePath,
         branch: handle.branch,
@@ -277,19 +386,23 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     bench('WorktreeExecutor.reconcilePoolSlots.before');
     this.reconcilePoolSlots(repoUrl);
     bench('WorktreeExecutor.reconcilePoolSlots.after');
-    bench('RepoPool.acquireWorktree.before', { branch, baseHead });
+    bench('RepoPool.acquireWorktree.before', { branch, baseHead: startupBaseHead });
     const acquired = await this.pool.acquireWorktree(
       repoUrl,
       branch,
-      baseHead,
+      startupBaseHead,
       request.actionId,
       {
+        startup,
         forceFresh: request.inputs.freshWorkspace === true,
+        leaseHolderId: request.attemptId ?? request.actionId,
         ...(request.inputs.reusableWorktree
           ? { reusableWorktree: request.inputs.reusableWorktree }
           : {}),
       },
     );
+    state.acquired = acquired;
+    startup?.check();
     bench('RepoPool.acquireWorktree.after', {
       branch: acquired.branch,
       worktreePath: acquired.worktreePath,
@@ -302,9 +415,11 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     if (poolUpstreams.length > 0) {
       try {
         bench('WorktreeExecutor.mergeRequestUpstreamBranches.before', { upstreamCount: poolUpstreams.length });
-        await this.mergeRequestUpstreamBranches(request, acquired.worktreePath, baseHead);
+        await this.mergeRequestUpstreamBranches(request, acquired.worktreePath, startupBaseHead, startup);
+        startup?.check();
         bench('WorktreeExecutor.mergeRequestUpstreamBranches.after', { upstreamCount: poolUpstreams.length });
       } catch (err: any) {
+        startup?.check();
         if (err instanceof MergeConflictError) {
           const entry: WorktreeEntry = {
             process: null, request, worktreeDir: acquired.worktreePath, branch,
@@ -313,12 +428,15 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
             outputBufferBytes: 0, evictedChunkCount: 0,
             completeListeners: new Set(), heartbeatListeners: new Set(),
             completed: true,
-            poolRelease: acquired.release,
             poolSoftRelease: acquired.softRelease,
+            leaseResourceKey: acquired.leaseResourceKey,
+            leaseHolderId: acquired.leaseHolderId,
           };
           this.registerEntry(handle, entry);
           handle.workspacePath = acquired.worktreePath;
           handle.branch = acquired.branch;
+          handle.leaseResourceKey = acquired.leaseResourceKey;
+          handle.leaseHolderId = acquired.leaseHolderId;
           const response: WorkResponse = {
             requestId: request.requestId,
             actionId: request.actionId,
@@ -345,6 +463,61 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       }
     }
 
+    if (request.actionType === 'ai_task') {
+      const freshness = await inspectTaskFreshness({
+        cwd: acquired.worktreePath,
+        snapshotCommit: request.inputs.specificationSnapshotCommit,
+        freshness: request.inputs.freshness,
+        runGit: args => this.execGitSimple(args, acquired.worktreePath, { startup }),
+      });
+      startup?.check();
+      if (freshness.status === 'stale') {
+        const entry: WorktreeEntry = {
+          process: null,
+          request,
+          worktreeDir: acquired.worktreePath,
+          branch: acquired.branch,
+          phase: 'completed',
+          outputListeners: new Set(),
+          outputBuffer: [],
+          outputBufferBytes: 0,
+          evictedChunkCount: 0,
+          completeListeners: new Set(),
+          heartbeatListeners: new Set(),
+          completed: false,
+          poolSoftRelease: acquired.softRelease,
+          leaseResourceKey: acquired.leaseResourceKey,
+          leaseHolderId: acquired.leaseHolderId,
+        };
+        this.registerEntry(handle, entry);
+        handle.workspacePath = acquired.worktreePath;
+        handle.branch = acquired.branch;
+        handle.leaseResourceKey = acquired.leaseResourceKey;
+        handle.leaseHolderId = acquired.leaseHolderId;
+        setTimeout(() => {
+          const liveEntry = this.entries.get(executionId);
+          if (!liveEntry || liveEntry.completed) return;
+          liveEntry.completed = true;
+          this.emitComplete(executionId, {
+            requestId: request.requestId,
+            actionId: request.actionId,
+            executionGeneration: request.executionGeneration,
+            status: 'stale',
+            outputs: {
+              exitCode: 1,
+              error: freshness.message,
+              summary: freshness.message,
+              branch: acquired.branch,
+              workspacePath: acquired.worktreePath,
+            },
+          });
+          this.softReleasePoolSlot(liveEntry);
+        }, 0);
+        return handle;
+      }
+    }
+
+    startup?.check();
     // No-command tasks: complete immediately after branch setup
     if (!request.inputs.command && !request.inputs.prompt) {
       const entry: WorktreeEntry = {
@@ -354,12 +527,15 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
         outputBufferBytes: 0, evictedChunkCount: 0,
         completeListeners: new Set(), heartbeatListeners: new Set(),
         completed: false,
-        poolRelease: acquired.release,
         poolSoftRelease: acquired.softRelease,
+        leaseResourceKey: acquired.leaseResourceKey,
+        leaseHolderId: acquired.leaseHolderId,
       };
       this.registerEntry(handle, entry);
       handle.workspacePath = acquired.worktreePath;
       handle.branch = acquired.branch;
+      handle.leaseResourceKey = acquired.leaseResourceKey;
+      handle.leaseHolderId = acquired.leaseHolderId;
       bench('WorktreeExecutor.registerEntry.noCommand.done', {
         workspacePath: handle.workspacePath,
         branch: handle.branch,
@@ -384,31 +560,34 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       completeListeners: new Set(),
       heartbeatListeners: new Set(),
       completed: false,
-      poolRelease: acquired.release,
       poolSoftRelease: acquired.softRelease,
+      leaseResourceKey: acquired.leaseResourceKey,
+      leaseHolderId: acquired.leaseHolderId,
     };
     this.registerEntry(handle, entry);
     handle.workspacePath = acquired.worktreePath;
     handle.branch = acquired.branch;
+    handle.leaseResourceKey = acquired.leaseResourceKey;
+    handle.leaseHolderId = acquired.leaseHolderId;
     bench('WorktreeExecutor.registerEntry.provisioning.done', {
       workspacePath: handle.workspacePath,
       branch: handle.branch,
     });
 
-    const provisioning = this.provisionWorktree(acquired.worktreePath, executionId);
+    this.setLocalProvisioningTimeout(executionId, Math.max(1, startupDeadlineMs - Date.now()));
+    const provisioning = this.provisionWorktree(
+      acquired.worktreePath,
+      executionId,
+      this.resolveProvisionCommand(repoUrl),
+      startup,
+    );
     entry.process = provisioning.child;
     try {
       await provisioning.completion;
+      startup?.check();
       entry.process = null;
       entry.phase = 'running';
     } catch (err) {
-      // Keep the failed workspace on disk for post-failure debugging/fix flows.
-      // Only free the in-memory pool slot so retries are not blocked.
-      entry.process = null;
-      entry.phase = 'completed';
-      entry.completed = true;
-      this.softReleasePoolSlot(entry);
-      this.entries.delete(executionId);
       const startupErr = err instanceof Error ? err : new Error(String(err));
       (startupErr as Error & { workspacePath?: string; branch?: string }).workspacePath = acquired.worktreePath;
       (startupErr as Error & { workspacePath?: string; branch?: string }).branch = acquired.branch;
@@ -438,11 +617,19 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
       : (usesAgent ? 'ignore' : 'pipe');
     const spawnCmd = request.actionType === 'ai_task' ? (resolveExecutableOnCurrentPath(cmd) ?? cmd) : cmd;
     bench('WorktreeExecutor.spawn.before', { cmd: spawnCmd, argCount: args.length, cwd: acquired.worktreePath });
+    const agentEnv = usesAgent && this.agentRegistry
+      ? this.agentRegistry.getOrThrow(executionAgent).getContainerRequirements?.()?.env
+      : undefined;
+    startup?.check();
     const child = spawn(spawnCmd, args, {
       stdio: [stdinMode, 'pipe', 'pipe'],
       cwd: acquired.worktreePath,
       detached: true,
-      env: cleanElectronEnv(),
+      env: {
+        ...cleanElectronEnv(),
+        ...loadLinearEnv(this.secretsFile),
+        ...(agentEnv ?? {}),
+      },
     });
     bench('WorktreeExecutor.spawn.after');
 
@@ -472,8 +659,22 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     }
 
     const driver = usesAgent ? this.agentRegistry?.getSessionDriver(executionAgent) : undefined;
+    const maxTurns = request.inputs.maxTurns;
+    const needsExecutorBudget = usesAgent
+      && typeof maxTurns === 'number'
+      && maxTurns > 0
+      && !agentUsesNativeMaxTurns(executionAgent);
+    const turnBudget = needsExecutorBudget ? createTurnBudgetWatcher(maxTurns!) : null;
+    if (needsExecutorBudget && !driver) {
+      traceExecution(`[WorktreeExecutor] turn-budget-unenforced agent=${executionAgent} (no countable stream driver)`);
+    }
     child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
+      if (turnBudget?.push(text)) {
+        traceExecution(`[WorktreeExecutor] turn budget exhausted agent=${executionAgent} turns=${turnBudget.turns}`);
+        this.emitOutput(executionId, `\n[Invoker] Agent turn budget exhausted (maxTurns=${maxTurns}).\n`);
+        killProcessGroup(child, 'SIGTERM');
+      }
       if (driver) {
         entry.rawStdout = (entry.rawStdout ?? '') + text;
       } else {
@@ -557,21 +758,21 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
 
   sendInput(handle: ExecutorHandle, input: string): void {
     const entry = this.entries.get(handle.executionId);
-    if (!entry || entry.completed) return;
-    entry.process?.stdin?.write(input);
+    this.writeProcessInput(entry, input);
   }
 
   getTerminalSpec(handle: ExecutorHandle): TerminalSpec | null {
     const entry = this.entries.get(handle.executionId);
     if (!entry) return null;
+    const displayBridge = getDisplayOnlyBridgeSpec(handle);
     if (entry.agentSessionId) {
       const agentName = entry.request.inputs.executionAgent ?? DEFAULT_EXECUTION_AGENT;
       const resume = this.agentRegistry
         ? this.agentRegistry.getOrThrow(agentName).buildResumeArgs(entry.agentSessionId)
         : { cmd: 'claude', args: ['--resume', entry.agentSessionId, '--dangerously-skip-permissions'] };
-      return { command: resume.cmd, args: resume.args, cwd: entry.worktreeDir };
+      return { command: resume.cmd, args: resume.args, cwd: entry.worktreeDir, ...displayBridge };
     }
-    return { cwd: entry.worktreeDir };
+    return { cwd: entry.worktreeDir, ...displayBridge };
   }
 
   getRestoredTerminalSpec(meta: PersistedTaskMeta): TerminalSpec {
@@ -592,6 +793,7 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     if (meta.workspacePath) {
       traceExecution(`[WorktreeExecutor] getRestoredTerminalSpec task="${meta.taskId}" — worktree path exists: ${meta.workspacePath}`);
     }
+    const displayBridge = getDisplayOnlyBridgeSpec(meta);
     if (meta.agentSessionId) {
       const resume = this.agentRegistry
         ? this.agentRegistry.getOrThrow(meta.executionAgent ?? DEFAULT_EXECUTION_AGENT).buildResumeArgs(meta.agentSessionId)
@@ -600,6 +802,7 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
         command: resume.cmd,
         args: resume.args,
         cwd: meta.workspacePath,
+        ...displayBridge,
       };
       traceExecution(
         `[agent-session-trace] WorktreeExecutor.getRestoredTerminalSpec: task="${meta.taskId}" resume with agentSessionId=${meta.agentSessionId}`,
@@ -614,12 +817,13 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
         command: sh,
         args: ['-c', `git checkout '${meta.branch}' 2>/dev/null; exec ${sh}`],
         cwd: meta.workspacePath,
+        ...displayBridge,
       };
       traceExecution(`[WorktreeExecutor] getRestoredTerminalSpec task="${meta.taskId}" → checkout branch spec, branch="${meta.branch}" cwd="${spec.cwd}"`);
       return spec;
     }
     traceExecution(`[WorktreeExecutor] getRestoredTerminalSpec task="${meta.taskId}" → cwd-only spec, cwd="${meta.workspacePath}"`);
-    return { cwd: meta.workspacePath };
+    return { cwd: meta.workspacePath, ...displayBridge };
   }
 
   /**
@@ -693,8 +897,28 @@ export class WorktreeExecutor extends BaseExecutor<WorktreeEntry> {
     }
   }
 
-  private provisionWorktree(dir: string, _executionId?: string): { child: ChildProcess | null; completion: Promise<void> } {
-    traceExecution(`[WorktreeExecutor] provisionWorktree skipped dir=${dir}`);
-    return { child: null, completion: Promise.resolve() };
+  private provisionWorktree(
+    dir: string,
+    executionId: string | undefined,
+    command: string,
+    startup?: ExecutorStartup,
+  ): { child: ChildProcess | null; completion: Promise<void> } {
+    return this.spawnLocalProvisioningProcess({
+      command,
+      startup,
+      cwd: dir,
+      executionId,
+      traceLabel: 'WorktreeExecutor.provisionWorktree',
+      startMessage: `[worktree] Provisioning worktree dependencies in ${dir}\n`,
+      failurePrefix: 'Worktree provisioning failed:',
+    });
   }
+}
+
+function getDisplayOnlyBridgeSpec(
+  source: { displayOnlyBridgeText?: string },
+): Pick<TerminalSpec, 'displayOnlyBridgeText'> {
+  return source.displayOnlyBridgeText === undefined
+    ? {}
+    : { displayOnlyBridgeText: source.displayOnlyBridgeText };
 }

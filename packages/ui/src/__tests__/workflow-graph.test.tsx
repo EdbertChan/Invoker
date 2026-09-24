@@ -735,7 +735,32 @@ describe('WorkflowGraph', () => {
     expect((viewport as HTMLElement).style.transform).toBe('');
   });
 
-  it('centers the selected workflow on a centerSelection command, preserving the current zoom', async () => {
+  it('keeps pane-pan inline transforms when a drag ends at the starting viewport', async () => {
+    getViewportMock.mockReturnValue({ x: 10, y: 20, zoom: 0.75 });
+
+    await renderAndSettleInitialFit({
+      workflows: new Map([['wf-a', wf('wf-a', 'running')]]),
+      selectedWorkflowId: 'wf-a',
+      statusFilters: new Set(),
+      onSelectWorkflow: () => {},
+      onWorkflowContextMenu: () => {},
+    });
+
+    const viewport = screen.getByTestId('workflow-graph-react-flow').querySelector('.react-flow__viewport');
+    expect(viewport).not.toBeNull();
+
+    const pane = screen.getByTestId('rf__pane');
+    fireEvent.mouseDown(pane, { clientX: 100, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { clientX: 130, clientY: 88, buttons: 1 });
+    await waitFor(() => expect((viewport as HTMLElement).style.transform).not.toBe(''));
+    fireEvent.mouseMove(window, { clientX: 100, clientY: 100, buttons: 1 });
+    fireEvent.mouseUp(window, { clientX: 100, clientY: 100, button: 0 });
+
+    expect(setViewportMock).toHaveBeenCalledWith({ x: 10, y: 20, zoom: 0.75 }, { duration: 0 });
+    expect((viewport as HTMLElement).style.transform).toBe('translate(10px, 20px) scale(0.75)');
+  });
+
+  it('centers the selected workflow on a centerTarget command, preserving the current zoom', async () => {
     const issuer = createGraphCameraCommandIssuer();
     getZoomMock.mockReturnValue(1.75);
 
@@ -751,7 +776,7 @@ describe('WorkflowGraph', () => {
       <WorkflowGraph
         workflows={new Map([['wf-a', wf('wf-a', 'running')]])}
         selectedWorkflowId="wf-a"
-        cameraCommand={issuer.centerSelection('workflow', 'wf-a')}
+        cameraCommand={issuer.centerTarget('workflow', 'wf-a')}
         statusFilters={new Set()}
         onSelectWorkflow={() => {}}
         onWorkflowContextMenu={() => {}}
@@ -807,7 +832,7 @@ describe('WorkflowGraph', () => {
       <WorkflowGraph
         workflows={new Map([['wf-a', wf('wf-a', 'running')]])}
         selectedWorkflowId="wf-a"
-        cameraCommand={issuer.centerSelection('task', 't1')}
+        cameraCommand={issuer.centerTarget('task', 't1')}
         statusFilters={new Set()}
         onSelectWorkflow={() => {}}
         onWorkflowContextMenu={() => {}}
@@ -821,7 +846,7 @@ describe('WorkflowGraph', () => {
 
   it('consumes each command once by sequence, not on every re-render', async () => {
     const issuer = createGraphCameraCommandIssuer();
-    const command = issuer.centerSelection('workflow', 'wf-a');
+    const command = issuer.centerTarget('workflow', 'wf-a');
 
     const { rerender } = await renderAndSettleInitialFit({
       workflows: new Map([['wf-a', wf('wf-a', 'running')]]),

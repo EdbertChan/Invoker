@@ -17,10 +17,12 @@ import { recordWorkerDecisionRow, type WorkerDecisionStore } from './worker-deci
  * This counter is stored in the durable `worker_actions` table under a key that
  * is stable across generations, attempts, and process restarts, so the total
  * number of worker-initiated retries for a task can never exceed the config.
- * Both automatic retry kinds (bare `restart-task` and `fix-with-agent`) count,
+ * Both automatic retry kinds (bare `retry-task` and `fix-with-agent`) count,
  * and every worker shares the one counter so the cap is per-task, not
- * per-worker. It is a hard cap with no automatic reset; a human who wants more
- * attempts uses the explicit `fix` command, which bypasses the worker entirely.
+ * per-worker. It is a hard cap across restarts and generation bumps. Recreate-
+ * class lifecycle resets deliberately clear it for the affected task; a human
+ * who wants more attempts can also use the explicit `fix` command, which
+ * bypasses the worker entirely.
  */
 export const AUTO_FIX_RETRY_CAP_ACTION_TYPE = 'auto-retry-cap';
 
@@ -29,10 +31,16 @@ export const AUTO_FIX_RETRY_CAP_ACTION_TYPE = 'auto-retry-cap';
  * task's retries are counted together rather than once per worker kind.
  */
 const RETRY_CAP_WORKER_KIND = 'autofix';
+const BARE_RETRY_ACTION_TYPE = 'auto-retry';
 
 /** Stable per-task external key — deliberately free of generation/attempt. */
 export function autoFixRetryCapExternalKey(taskId: string): string {
   return `retry-cap:${taskId}`;
+}
+
+/** Stable per-task external key for the once-per-task bare retry marker. */
+export function autoFixBareRetryExternalKey(taskId: string): string {
+  return `${RETRY_CAP_WORKER_KIND}:retry:${taskId}`;
 }
 
 export interface AutoFixRetryCapDecision {
@@ -47,8 +55,8 @@ export interface AutoFixRetryCapDecision {
 /**
  * Decide whether a worker may submit one more automatic retry for `taskId`
  * without exceeding the configured budget. Read-only: callers must invoke
- * {@link recordAutoFixRetryConsumed} after a submission actually happens so the
- * durable counter advances.
+ * {@link recordAutoFixRetryConsumed} after the queue acknowledges submission so
+ * the durable counter advances.
  */
 export function checkAutoFixRetryCap(
   store: WorkerDecisionStore,
@@ -61,7 +69,51 @@ export function checkAutoFixRetryCap(
   return { allowed, consumed, budget };
 }
 
-/** Advance the durable per-task retry counter by one after a submission. */
+export function recordAutoFixRetryPending(
+  store: WorkerDecisionStore,
+  taskId: string,
+  fields: { workflowId?: string; summary?: string } = {},
+): void {
+  recordWorkerDecisionRow(store, {
+    workerKind: RETRY_CAP_WORKER_KIND,
+    actionType: AUTO_FIX_RETRY_CAP_ACTION_TYPE,
+    externalKey: autoFixRetryCapExternalKey(taskId),
+    subjectType: 'task',
+    subjectId: taskId,
+    ...(fields.workflowId !== undefined ? { workflowId: fields.workflowId } : {}),
+    taskId,
+    status: 'pending',
+    summary: fields.summary ?? 'Automatic retry request awaiting queue acknowledgement',
+    incrementAttempt: false,
+    payload: { dispatchState: 'pending' },
+  });
+}
+
+export function recordAutoFixRetryUnacknowledged(
+  store: WorkerDecisionStore,
+  taskId: string,
+  error: unknown,
+  fields: { workflowId?: string; summary?: string } = {},
+): void {
+  recordWorkerDecisionRow(store, {
+    workerKind: RETRY_CAP_WORKER_KIND,
+    actionType: AUTO_FIX_RETRY_CAP_ACTION_TYPE,
+    externalKey: autoFixRetryCapExternalKey(taskId),
+    subjectType: 'task',
+    subjectId: taskId,
+    ...(fields.workflowId !== undefined ? { workflowId: fields.workflowId } : {}),
+    taskId,
+    status: 'failed',
+    summary: fields.summary ?? 'Automatic retry request was not acknowledged',
+    incrementAttempt: false,
+    payload: {
+      dispatchState: 'not-acknowledged',
+      failurePhase: 'submission',
+      error: error instanceof Error ? error.message : String(error),
+    },
+  });
+}
+
 export function recordAutoFixRetryConsumed(
   store: WorkerDecisionStore,
   taskId: string,
@@ -78,5 +130,54 @@ export function recordAutoFixRetryConsumed(
     status: 'queued',
     summary: fields.summary ?? 'Durable per-task auto-fix retry counter',
     incrementAttempt: true,
+    payload: { dispatchState: 'acknowledged' },
   });
+}
+
+/** Clear the durable retry cap after a recreate-class task reset. */
+export function resetAutoFixRetryCap(store: WorkerDecisionStore, taskId: string): void {
+  const externalKey = autoFixRetryCapExternalKey(taskId);
+  const existing = store.getWorkerAction?.(RETRY_CAP_WORKER_KIND, externalKey);
+  store.upsertWorkerAction?.({
+    id: existing?.id ?? `${RETRY_CAP_WORKER_KIND}:${externalKey}`,
+    workerKind: RETRY_CAP_WORKER_KIND,
+    actionType: AUTO_FIX_RETRY_CAP_ACTION_TYPE,
+    ...(existing?.workflowId !== undefined ? { workflowId: existing.workflowId } : {}),
+    taskId,
+    subjectType: 'task',
+    subjectId: taskId,
+    externalKey,
+    status: 'queued',
+    attemptCount: 0,
+    summary: 'Durable per-task auto-fix retry counter',
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/** Clear the once-per-task bare retry marker after a recreate-class task reset. */
+export function resetAutoFixBareRetry(store: WorkerDecisionStore, taskId: string): void {
+  const externalKey = autoFixBareRetryExternalKey(taskId);
+  const existing = store.getWorkerAction?.(RETRY_CAP_WORKER_KIND, externalKey);
+  store.upsertWorkerAction?.({
+    id: existing?.id ?? `${RETRY_CAP_WORKER_KIND}:${externalKey}`,
+    workerKind: RETRY_CAP_WORKER_KIND,
+    actionType: BARE_RETRY_ACTION_TYPE,
+    ...(existing?.workflowId !== undefined ? { workflowId: existing.workflowId } : {}),
+    taskId,
+    subjectType: 'task',
+    subjectId: taskId,
+    externalKey,
+    status: 'queued',
+    attemptCount: 0,
+    summary: 'Once-per-task auto-fix bare retry marker',
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/** Reset all automatic recovery budget state for recreated tasks. */
+export function resetAutoFixBudgetForTasks(store: WorkerDecisionStore, taskIds: readonly string[]): void {
+  for (const taskId of taskIds) {
+    resetAutoFixRetryCap(store, taskId);
+    resetAutoFixBareRetry(store, taskId);
+  }
 }

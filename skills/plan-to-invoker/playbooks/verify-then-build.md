@@ -18,6 +18,21 @@ Also use this playbook when the source is an architecture or policy document wit
 
 Fast checks: paths exist, `rg`/`grep` for patterns, read source. **Not sufficient alone** if the plan asserts runtime behavior (UI state, orchestrator output, persistence, headless CLI).
 
+#### 0. Class-search and open plan-intake PRs
+
+Before extracting assumptions, run the class-search from the repo `CLAUDE.md` (`git log --grep`, `git log -S`, `gh pr list --search <symptom> --state all`). Then report, under its own heading and regardless of relevance to the bug:
+
+**Open PRs touching plan intake / validation / freshness / preflight**
+
+```bash
+gh pr list --search "freshness" --state open
+gh pr list --search "preflight" --state open
+gh pr list --search "validate-plan" --state open
+gh pr list --search "plan-parser" --state open
+```
+
+List every hit with one line on what it means for this submission (for example "replaces the prose anchor gate the owner still runs; until it lands, `existing` on a create line blocks the task"). Do not collapse this list to "zero relevant".
+
 #### 1. Extract assumptions
 
 ```bash
@@ -81,7 +96,7 @@ For policy-matrix inputs, `skill-doctor` now fails if the coverage map or stack 
 #### Phase 1b-invoker — Headless Invoker (`submit-plan.sh`)
 
 - **Actually execute** `./submit-plan.sh plans/verify-<slug>.yaml` after `pnpm --filter @invoker/app build` if `packages/app/dist/main.js` is missing.
-- Optionally wrap with `./run.sh --headless delete-all` first to avoid duplicate task IDs.
+- Optionally wrap with `invoker-ui --headless delete-all` first to avoid duplicate task IDs.
 - **Record** exit code and relevant log lines (e.g. `tee /tmp/invoker-verify.txt`).
 - **Authoring** a verify YAML or running **`validate-plan.sh` only** does **not** satisfy Phase 1b-invoker — those do not run the orchestrator or write SQLite.
 
@@ -112,7 +127,7 @@ Must exit 0. This validates schema + dependency wiring + deterministic **atomici
 #### Agent must run Invoker (Phase 1b-invoker)
 
 ```bash
-./run.sh --headless delete-all   # optional: avoid PlanConflictError on duplicate task IDs
+invoker-ui --headless delete-all   # optional: avoid PlanConflictError on duplicate task IDs
 ./submit-plan.sh plans/verify-<slug>.yaml 2>&1 | tee /tmp/invoker-verify.txt
 ```
 
@@ -134,7 +149,7 @@ bash skills/plan-to-invoker/scripts/parse-results.sh < /tmp/invoker-verify.txt
 #### Clean up before implementation
 
 ```bash
-./run.sh --headless delete-all
+invoker-ui --headless delete-all
 ```
 
 Remove verification workflows before submitting the **implementation** plan if you need a clean graph.

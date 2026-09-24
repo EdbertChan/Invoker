@@ -125,6 +125,24 @@ describe('workflow resume worker tick', () => {
     expect(args).toEqual([{}]);
   });
 
+  it('defers draining each independent workflow intent during a batch scan', async () => {
+    const h = harness({
+      workflows: [
+        { id: 'wf-1', tasks: [makeTask({ id: 'wf-1/task', status: 'pending' as TaskState['status'] })] },
+        { id: 'wf-2', tasks: [makeTask({ id: 'wf-2/task', status: 'pending' as TaskState['status'] })] },
+      ],
+    });
+
+    await h.tick(POLL_CTX);
+
+    expect(h.submit).toHaveBeenCalledTimes(2);
+    expect(h.submit.mock.calls.map((call) => call[0])).toEqual(['wf-1', 'wf-2']);
+    expect(h.submit.mock.calls.map((call) => call[4])).toEqual([
+      { deferDrain: true },
+      { deferDrain: true },
+    ]);
+  });
+
   it('skips pending work whose local dependencies are not completed', async () => {
     const h = harness({
       workflows: [
@@ -163,6 +181,25 @@ describe('workflow resume worker tick', () => {
     });
     await h.tick(POLL_CTX);
     expect(h.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not submit pending work whose dependency id is missing from the locally loaded task set', async () => {
+    const h = harness({
+      workflows: [
+        {
+          id: 'wf-1',
+          tasks: [
+            makeTask({
+              id: 'wf-1/b',
+              status: 'pending' as TaskState['status'],
+              dependencies: ['wf-1/ghost'],
+            }),
+          ],
+        },
+      ],
+    });
+    await h.tick(POLL_CTX);
+    expect(h.submit).not.toHaveBeenCalled();
   });
 
   it('skips workflows whose tasks are all terminal', async () => {
@@ -295,7 +332,7 @@ describe('workflow resume worker tick', () => {
     expect(h.submit).toHaveBeenCalledTimes(1);
   });
 
-  it('logs a recovery.worker.submit event with the workflow id and intent id', async () => {
+  it('logs a recovery.worker.submit event keyed by the ready task id', async () => {
     const h = harness({
       workflows: [
         {
@@ -306,7 +343,7 @@ describe('workflow resume worker tick', () => {
     });
     await h.tick(POLL_CTX);
     expect(h.logEvent).toHaveBeenCalledWith(
-      'wf-1',
+      'wf-1/task',
       'recovery.worker.submit',
       expect.objectContaining({
         worker: 'workflow-resume',

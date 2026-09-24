@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { PlanConversation, buildPlanSystemPrompt, extractYamlPlan, globToRegex, isDangerousCommand, isConfirmation } from '../slack/plan-conversation.js';
+import { PlanConversation, buildPlanSystemPrompt, extractYamlPlan, globToRegex, isDangerousCommand, isConfirmation, redactEmbeddedPlanFence } from '../slack/plan-conversation.js';
 import { parse as parseYaml } from 'yaml';
 import * as child_process from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -138,7 +138,7 @@ describe('extractYamlPlan', () => {
     expect(plan.onFinish).toBeUndefined();
   });
 
-  it('preserves explicit supported fields and strips legacy auto-fix fields from planner YAML', () => {
+  it('preserves legacy auto-fix fields so the doctor can reject instead of silently sanitizing them', () => {
     const text = `\`\`\`yaml
 name: "Full"
 onFinish: merge
@@ -162,14 +162,14 @@ tasks:
     expect(plan.baseBranch).toBe('develop');
     expect(plan.featureBranch).toBe('feature/test');
     expect(plan.mergeMode).toBe('automatic');
-    expect(plan.autoFixRetries).toBeUndefined();
+    expect(plan.autoFixRetries).toBe(3);
     expect(plan.tasks[0].pivot).toBe(true);
-    expect(plan.tasks[0].autoFix).toBeUndefined();
-    expect(plan.tasks[0].autoFixRetries).toBeUndefined();
+    expect(plan.tasks[0].autoFix).toBe(true);
+    expect(plan.tasks[0].autoFixRetries).toBe(2);
     expect(plan.tasks[0].requiresManualApproval).toBe(true);
   });
 
-  it('accepts stacked workflow YAML and strips legacy fields recursively', () => {
+  it('preserves stacked legacy fields for recursive doctor diagnostics', () => {
     const text = `\`\`\`yaml
 name: "Workers Surface"
 repoUrl: git@github.com:test/repo.git
@@ -203,9 +203,9 @@ workflows:
       'Workers Surface Contracts',
       'Workers Surface UI',
     ]);
-    expect(plan.autoFixRetries).toBeUndefined();
-    expect(plan.workflows[0].autoFixRetries).toBeUndefined();
-    expect(plan.workflows[0].tasks[0].autoFix).toBeUndefined();
+    expect(plan.autoFixRetries).toBe(3);
+    expect(plan.workflows[0].autoFixRetries).toBe(2);
+    expect(plan.workflows[0].tasks[0].autoFix).toBe(true);
   });
 
   it('preserves discovered repo commands without rewriting them', () => {
@@ -527,6 +527,13 @@ describe('PlanConversation', () => {
     );
   });
 
+  it('refuses to silently fall back to cursor for a selected non-cursor tool', async () => {
+    const conv = new PlanConversation({ tool: 'omp', cursorCommand: 'cursor' });
+
+    await expect(conv.sendMessage('Hello')).rejects.toThrow('Planner command builder is required for selected tool "omp"');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it('falls back to cursor --print shape when no builder is injected', async () => {
     const conv = new PlanConversation({ cursorCommand: 'agent', model: 'sonnet' });
     mockCursorResponse('Hi');
@@ -559,7 +566,7 @@ describe('PlanConversation', () => {
   });
 
   it('conversational planning asks for scope before drafting', async () => {
-    const conversational = new PlanConversation({ conversationalPlanning: true });
+    const conversational = new PlanConversation({ conversationalPlanning: true, planningSurface: 'in_app' });
     mockCursorResponse('What behavior should change first?');
 
     await conversational.sendMessage('Build better planning');
@@ -575,8 +582,37 @@ describe('PlanConversation', () => {
     expect(prompt).not.toContain('Generate a YAML task plan');
   });
 
+  it('requires conversational callers to identify their review host', () => {
+    expect(() => new PlanConversation({ conversationalPlanning: true })).toThrow(
+      'Conversational planning requires an explicit planningSurface.',
+    );
+  });
+
   it('conversational planning treats confirmation without YAML as draft approval', async () => {
-    const conversational = new PlanConversation({ conversationalPlanning: true });
+    const conversational = new PlanConversation({ conversationalPlanning: true, planningSurface: 'in_app' });
+    (conversational as any).messages.push({
+      role: 'assistant',
+      content: 'I understand the scope. Would you like me to draft the YAML plan?',
+    });
+    mockCursorResponse(VALID_YAML_PLAN);
+
+    await conversational.sendMessage('yes');
+
+    expect(conversational.lastTurnDraftPlanText).toContain('Test Plan');
+    expect(conversational.planSubmitted).toBe(false);
+    expect(conversational.submittedPlanText).toBeNull();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const prompt = mockSpawn.mock.calls[0][1][1] as string;
+    expect(prompt).toContain('The user has explicitly approved drafting');
+    expect(prompt).toContain('plan-to-invoker');
+    expect(prompt).toContain('Harness handoff mode');
+    expect(prompt).toContain('skills/plan-to-invoker/SKILL.md');
+    expect(prompt).not.toContain('name: "Plan Name"');
+    expect(prompt).not.toContain('tasks:\n  - id: task-1');
+  });
+
+  it('redacts the raw yaml fence from the conversational reply once a draft is captured', async () => {
+    const conversational = new PlanConversation({ conversationalPlanning: true, planningSurface: 'in_app' });
     (conversational as any).messages.push({
       role: 'assistant',
       content: 'I understand the scope. Would you like me to draft the YAML plan?',
@@ -585,15 +621,11 @@ describe('PlanConversation', () => {
 
     const reply = await conversational.sendMessage('yes');
 
-    expect(reply).toBe(VALID_YAML_PLAN);
-    expect(conversational.planSubmitted).toBe(false);
-    expect(conversational.submittedPlanText).toBeNull();
-    expect(mockSpawn).toHaveBeenCalledTimes(1);
-    const prompt = mockSpawn.mock.calls[0][1][1] as string;
-    expect(prompt).toContain('The user has explicitly approved drafting');
-    expect(prompt).toContain('name: "Plan Name"');
-    expect(prompt).toContain('Generate a YAML task plan');
-    expect(prompt).toContain('Reply `submit` to submit it.');
+    // The review-card flow reads the draft from lastTurnDraftPlanText
+    // directly, so the raw ```yaml fence would be pure duplication if left
+    // in the chat reply that Slack posts verbatim.
+    expect(reply).toBe(redactEmbeddedPlanFence(VALID_YAML_PLAN));
+    expect(conversational.lastTurnDraftPlanText).toContain('Test Plan');
   });
 
   it('submittedPlanText is null before confirmation', async () => {
@@ -639,7 +671,7 @@ describe('PlanConversation', () => {
     expect(conversation.planSubmitted).toBe(false);
   });
 
-  it('getDraftedPlan does not pick up illustrative YAML from earlier assistant messages', async () => {
+  it('getDraftedPlan falls back to the last known-good plan when the latest turn has none', async () => {
     const illustrativeYaml = '```yaml\nname: "Example Plan"\ntasks:\n  - id: example\n    description: "illustrative example"\n    dependencies: []\n```';
     mockCursorResponse(`Here is an example of the format:\n\n${illustrativeYaml}\n\nWant me to generate a real plan?`);
     await conversation.sendMessage('How do plans work?');
@@ -647,8 +679,11 @@ describe('PlanConversation', () => {
     mockCursorResponse('Sure, what feature would you like to build?');
     await conversation.sendMessage('Tell me more');
 
-    // The latest assistant message has no plan, so nothing complete is drafted.
-    expect(conversation.getDraftedPlan()).toBeNull();
+    // The latest assistant message has no plan, so getDraftedPlan falls back to
+    // the last plan-shaped YAML seen in the conversation instead of returning null.
+    const drafted = conversation.getDraftedPlan();
+    expect(typeof drafted).toBe('string');
+    expect(parsePlanText(drafted!).name).toBe('Example Plan');
     expect(conversation.planSubmitted).toBe(false);
   });
 
@@ -857,6 +892,54 @@ describe('PlanConversation prompt construction', () => {
     expect(prompt).toContain('Every implementation task MUST have a corresponding test task');
   });
 
+  it('describes optional typed freshness and preserves meaning across wording and ordering', () => {
+    const prompt = buildPlanSystemPrompt('main');
+
+    expect(prompt).toContain('freshness:');
+    expect(prompt).toContain('watchPaths: [packages/example/src/index.ts]');
+    expect(prompt).toContain('expected: present # or absent; only explicit assumptions');
+    expect(prompt).toContain('guardedBehaviorIds: [example-behavior-id]');
+    expect(prompt).toContain('watch changes to X” and “invalidate if X changes”');
+    expect(prompt).toContain('“X must exist” becomes `pathPreconditions: [{ path: X, expected: present }]`');
+    expect(prompt).toContain('“X must be gone” becomes `expected: absent`');
+    expect(prompt).toContain('omit `freshness` entirely');
+    expect(prompt).toContain('exact normalized repo-relative paths');
+    expect(prompt).toContain('do not invent a precondition');
+  });
+
+  it('buildPlanSystemPrompt direct mode is unchanged when explicitly non-conversational', () => {
+    const prompt = buildPlanSystemPrompt('main', undefined, { conversationalPlanning: false });
+    expect(prompt).toContain('Generate a YAML task plan');
+    expect(prompt).toContain('name: "Plan Name"');
+    expect(prompt).toContain('tasks:\n  - id: task-1');
+  });
+
+  it('buildPlanSystemPrompt conversational mode without drafting authorization is unchanged', () => {
+    const prompt = buildPlanSystemPrompt('main', undefined, {
+      conversationalPlanning: true,
+      draftingAuthorized: false,
+      planningSurface: 'in_app',
+    });
+    expect(prompt).toContain('Drafting is not authorized yet.');
+    expect(prompt).toContain('Ask scoping questions first');
+    expect(prompt).not.toContain('name: "Plan Name"');
+  });
+
+  it('buildPlanSystemPrompt conversational mode with drafting authorized points at the plan-to-invoker skill instead of embedding the ad hoc contract', () => {
+    const prompt = buildPlanSystemPrompt('main', undefined, {
+      conversationalPlanning: true,
+      draftingAuthorized: true,
+      planningSurface: 'in_app',
+    });
+    expect(prompt).toContain('plan-to-invoker');
+    expect(prompt).toContain('skills/plan-to-invoker/SKILL.md');
+    expect(prompt).toContain('Harness handoff mode');
+    expect(prompt).toContain('Never include `autoFix` or `autoFixRetries`');
+    expect(prompt).toContain('will not present the draft until every check passes');
+    expect(prompt).not.toContain('tasks:\n  - id: task-1');
+    expect(prompt).not.toContain('name: "Plan Name"');
+  });
+
   it('buildCursorPrompt includes system prompt for first message', () => {
     const conv = new PlanConversation({ defaultBranch: 'master' });
     (conv as any).messages.push({ role: 'user', content: 'Hello' });
@@ -908,16 +991,15 @@ describe('PlanConversation prompt construction', () => {
     expect(prompt).not.toContain('repoUrl: "git@github.com:user/repo.git"');
   });
 
-  it('requires the submit instruction as a standalone post-plan summary line', () => {
+  it('routes post-yaml approval through the Slack review flow', () => {
     const conv = new PlanConversation({});
     (conv as any).messages.push({ role: 'user', content: 'Build a feature' });
     const prompt = conv.buildCursorPrompt();
-    const submitLine = 'Reply `submit` to submit it.';
 
-    expect(prompt.split('\n').filter((line) => line === submitLine)).toHaveLength(1);
-    expect(prompt.match(/Reply `submit` to submit it\./g)).toHaveLength(1);
-    expect(prompt).toContain('short post-plan summary');
-    expect(prompt).toContain('Do NOT place that line inline in a sentence.');
+    expect(prompt).not.toContain('Reply `submit` to submit it.');
+    expect(prompt).toContain('Slack orchestrator reads that exact YAML');
+    expect(prompt).toContain('wait for approval before any submission step');
+    expect(prompt).toContain('Do not tell the user to reply `submit`');
   });
 
   it('keeps existing plan delivery, stack, and merge mode guidance', () => {
@@ -927,7 +1009,7 @@ describe('PlanConversation prompt construction', () => {
 
     expect(prompt).toContain('mergeMode: external_review');
     expect(prompt).toContain('Prefer small reviewable slices');
-    expect(prompt).toContain('The Slack orchestrator validates and executes the plan after the user replies `submit` and approves it.');
+    expect(prompt).toContain('Only the Slack orchestrator may submit the plan after approval from its review flow.');
   });
 
   it('delegates Slack plan submission to the orchestrator', () => {
@@ -935,13 +1017,12 @@ describe('PlanConversation prompt construction', () => {
     (conv as any).messages.push({ role: 'user', content: 'Build a feature' });
     const prompt = conv.buildCursorPrompt();
 
-    expect(prompt).toContain('Do NOT invoke `invoker-cli` (with any flags)');
+    expect(prompt).toContain('`invoker-cli`');
     expect(prompt).toContain('`invoker_submit_plan`');
     expect(prompt).toContain('`invoker_validate_plan`');
     expect(prompt).toContain('`submit-plan.sh`');
     expect(prompt).toContain('Harness handoff mode');
-    expect(prompt).toContain('This rule overrides that skill\'s handoff instructions in this Slack thread');
-    expect(prompt).toContain('remind them to reply with `submit`; never run it yourself');
+    expect(prompt).toContain('This rule overrides the plan-to-invoker skill\'s Harness handoff mode in this Slack thread');
   });
 
   it('system prompt requires discovered verification commands for target repos', () => {
@@ -962,15 +1043,14 @@ describe('PlanConversation prompt construction', () => {
     // The canonical GitHub review gate must be named explicitly for reviewable plans.
     expect(prompt).toContain('mergeMode: external_review');
     expect(prompt).toContain('GitHub-backed review gate');
-    // Manual remains the verification-only default; automatic still documented.
-    expect(prompt).toContain('"manual" (default)');
+    // Pull-request plans now default to external_review; manual stays available for verification-only plans.
+    expect(prompt).toContain('default for pull_request plans');
     expect(prompt).toContain('"automatic"');
   });
 
-  it('buildCursorPrompt can prefer stacked workflows', () => {
+  it('buildCursorPrompt prefers stacked workflows by default', () => {
     const conv = new PlanConversation({
       repoUrl: 'git@github.com:test/repo.git',
-      preferStackedWorkflows: true,
     });
     (conv as any).messages.push({ role: 'user', content: 'Build the Workers Surface' });
     const prompt = conv.buildCursorPrompt();
@@ -981,31 +1061,278 @@ describe('PlanConversation prompt construction', () => {
     expect(prompt).toContain('Build the Workers Surface');
   });
 
-  it('agent mode refuses Invoker YAML and redirects within the same thread', () => {
-    // Agent threads can never submit a plan — handleLobbySubmit rejects a submit
-    // unless conversationMode === 'plan'. So the agent prompt must not offer to
-    // draft Invoker YAML (which would be an un-submittable dead end); it must
-    // steer the user to a `plan:` thread instead.
+  it('buildCursorPrompt can opt out of stacked workflows', () => {
+    const conv = new PlanConversation({
+      preferStackedWorkflows: false,
+    });
+    (conv as any).messages.push({ role: 'user', content: 'Implement a small feature' });
+
+    expect(conv.buildCursorPrompt()).not.toContain('prefer a workflow stack');
+  });
+
+  it('agent mode refuses Invoker YAML and redirects to /plan when there is no thread to signal from', () => {
     const conv = new PlanConversation({ mode: 'agent' });
     (conv as any).messages.push({ role: 'user', content: 'Make me an Invoker plan to add a REST API' });
     const prompt = conv.buildCursorPrompt();
 
     // Never the plan-mode system prompt in an agent thread.
     expect(prompt).not.toContain('Invoker orchestrator');
-    // Agent mode must refuse YAML unconditionally and point at `plan:`.
-    expect(prompt).toContain('Do NOT generate Invoker YAML');
-    expect(prompt).toContain('plan:');
-    expect(prompt).toContain('same thread');
-    expect(prompt).not.toContain('start a new plan thread');
+    expect(prompt).toContain('Do NOT generate or submit Invoker YAML yourself');
+    // No auto-promotion claim: nothing implements that, and it's the bug this replaces.
+    expect(prompt).not.toContain('automatically');
+    expect(prompt).not.toContain('promotes planning requests');
+    expect(prompt).toContain('type `/plan <request>`');
     expect(prompt).toContain('only the final user-facing message');
-    // The old loophole permitted YAML "unless the user explicitly asks" — that
-    // produced drafts Slack silently rejects on submit.
     expect(prompt).not.toContain('unless the user explicitly asks');
-    expect(prompt).toContain('Do NOT invoke `invoker-cli`');
-    expect(prompt).toContain('`invoker_submit_plan`');
-    expect(prompt).toContain('`invoker_validate_plan`');
-    expect(prompt).toContain('`submit-plan.sh`');
-    expect(prompt).toContain('Harness handoff mode');
+  });
+
+  it('agent mode tells the model to signal plan-intent via file when a thread is pinned', () => {
+    const conv = new PlanConversation({ mode: 'agent', workingDir: '/tmp/worktree', threadTs: 'thread-abc' });
+    (conv as any).messages.push({ role: 'user', content: 'submit it' });
+    const prompt = conv.buildCursorPrompt();
+
+    expect(prompt).not.toContain('automatically');
+    expect(prompt).not.toContain('promotes planning requests');
+    expect(prompt).toContain('wantsPlan');
+    expect(prompt).toContain(String(conv.planIntentSignalFilePath()));
+    expect(prompt).toContain('type `/plan <request>`');
+    expect(prompt).toContain('a false positive interrupts the conversation');
+  });
+});
+
+describe('PlanConversation harness session driver', () => {
+  beforeEach(() => {
+    mockSpawn.mockReset();
+  });
+
+  function createMockDriver(opts: { supportsSessionContinuity: boolean }) {
+    let nextSessionId = 0;
+    const start = vi.fn((_prompt: string, _options?: { model?: string }) => ({
+      command: 'harness',
+      args: ['start'],
+      sessionId: `session-${++nextSessionId}`,
+    }));
+    // Mirrors ReplayHarnessSessionDriver.append: when the driver has no real
+    // continuity, append mints a fresh session rather than resuming the old one.
+    const append = vi.fn((sessionId: string, _prompt: string, _options?: { model?: string }) => ({
+      command: 'harness',
+      args: ['append', sessionId],
+      sessionId: opts.supportsSessionContinuity ? sessionId : `session-${++nextSessionId}`,
+    }));
+    return {
+      harness: 'mock-harness',
+      supportsSessionContinuity: opts.supportsSessionContinuity,
+      start,
+      append,
+    };
+  }
+
+  it('starts a session on the first turn and appends only the latest message on later turns', async () => {
+    const driver = createMockDriver({ supportsSessionContinuity: true });
+    const conv = new PlanConversation({ harnessSessionDriver: driver });
+
+    mockCursorResponse('Turn one reply');
+    await conv.sendMessage('First message');
+    expect(driver.start).toHaveBeenCalledTimes(1);
+    expect(driver.start.mock.calls[0][0]).toContain('First message');
+    expect(driver.append).not.toHaveBeenCalled();
+    expect(conv.harnessSessionId).toBe('session-1');
+
+    mockCursorResponse('Turn two reply');
+    await conv.sendMessage('Second message');
+    expect(driver.append).toHaveBeenCalledTimes(1);
+    expect(driver.append.mock.calls[0][0]).toBe('session-1');
+    expect(driver.append.mock.calls[0][1]).toBe('Second message');
+    expect(driver.start).toHaveBeenCalledTimes(1);
+
+    const secondSpawnArgs = mockSpawn.mock.calls[1][1] as string[];
+    expect(secondSpawnArgs).toEqual(['append', 'session-1']);
+  });
+
+  it('promotes the provider session id before appending later turns', async () => {
+    const resolveSessionId = vi.fn((raw: string, command: { sessionId: string }, options: { startedNewSession: boolean }) => {
+      if (!options.startedNewSession) return command.sessionId;
+      const match = raw.match(/"thread_id":"([^"]+)"/);
+      return match?.[1] ?? command.sessionId;
+    });
+    const driver = {
+      ...createMockDriver({ supportsSessionContinuity: true }),
+      harness: 'codex',
+      resolveSessionId,
+    };
+    const onHarnessSessionId = vi.fn();
+    const log = vi.fn();
+    const conv = new PlanConversation({ harnessSessionDriver: driver, onHarnessSessionId, log });
+
+    mockCursorResponse([
+      JSON.stringify({ type: 'thread.started', thread_id: 'real-codex-thread-id' }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Turn one reply' } }),
+      JSON.stringify({ type: 'turn.completed' }),
+    ].join('\n'));
+    await conv.sendMessage('First message');
+
+    expect(conv.harnessSessionId).toBe('real-codex-thread-id');
+    expect(onHarnessSessionId).toHaveBeenCalledWith('real-codex-thread-id');
+    expect(log.mock.calls.some((call) => String(call[2]).includes('planner_session_id_promoted'))).toBe(true);
+
+    mockCursorResponse('Turn two reply');
+    await conv.sendMessage('Second message');
+
+    expect(driver.append).toHaveBeenCalledTimes(1);
+    expect(driver.append.mock.calls[0][0]).toBe('real-codex-thread-id');
+    expect(driver.append.mock.calls[0][1]).toBe('Second message');
+  });
+
+  it('does not persist a provisional session id when session resolution rejects it', async () => {
+    const driver = {
+      ...createMockDriver({ supportsSessionContinuity: true }),
+      harness: 'codex',
+      resolveSessionId: vi.fn(() => {
+        throw new Error('missing thread.started.thread_id');
+      }),
+    };
+    const onHarnessSessionId = vi.fn();
+    const conv = new PlanConversation({ harnessSessionDriver: driver, onHarnessSessionId });
+
+    mockCursorResponse('Turn one reply');
+    await expect(conv.sendMessage('First message')).rejects.toThrow(/thread\.started\.thread_id/);
+
+    expect(conv.harnessSessionId).toBeUndefined();
+    expect(onHarnessSessionId).not.toHaveBeenCalled();
+  });
+
+  it('fires onHarnessSessionId once when a new session id is established', async () => {
+    const driver = createMockDriver({ supportsSessionContinuity: true });
+    const onHarnessSessionId = vi.fn();
+    const conv = new PlanConversation({ harnessSessionDriver: driver, onHarnessSessionId });
+
+    mockCursorResponse('Turn one reply');
+    await conv.sendMessage('First message');
+    expect(onHarnessSessionId).toHaveBeenCalledTimes(1);
+    expect(onHarnessSessionId).toHaveBeenCalledWith('session-1');
+
+    mockCursorResponse('Turn two reply');
+    await conv.sendMessage('Second message');
+    expect(onHarnessSessionId).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes from a restored harnessSessionId instead of starting fresh', async () => {
+    const driver = createMockDriver({ supportsSessionContinuity: true });
+    const conv = new PlanConversation({ harnessSessionDriver: driver, harnessSessionId: 'restored-session' });
+
+    mockCursorResponse('Reply after restart');
+    await conv.sendMessage('Continue where we left off');
+    expect(driver.start).not.toHaveBeenCalled();
+    expect(driver.append).toHaveBeenCalledTimes(1);
+    expect(driver.append.mock.calls[0][0]).toBe('restored-session');
+    expect(conv.harnessSessionId).toBe('restored-session');
+  });
+
+  it('overrides stale Slack context on a resumed in-app planning turn', async () => {
+    const driver = createMockDriver({ supportsSessionContinuity: true });
+    const conv = new PlanConversation({
+      conversationalPlanning: true,
+      planningSurface: 'in_app',
+      harnessSessionDriver: driver,
+      harnessSessionId: 'restored-in-app-session',
+    });
+
+    mockCursorResponse('Reply after restart');
+    await conv.sendMessage('Continue where we left off');
+
+    expect(driver.append).toHaveBeenCalledTimes(1);
+    const prompt = driver.append.mock.calls[0][1];
+    expect(prompt).toContain('Current planning host: Invoker in-app planner.');
+    expect(prompt).toContain('Never direct the user to Slack');
+    expect(prompt).toContain('User message:\nContinue where we left off');
+    expect(prompt).not.toContain('Current planning host: Invoker Slack planner.');
+  });
+
+  it('restates Slack ownership on a resumed Slack planning turn', async () => {
+    const driver = createMockDriver({ supportsSessionContinuity: true });
+    const conv = new PlanConversation({
+      conversationalPlanning: true,
+      planningSurface: 'slack',
+      harnessSessionDriver: driver,
+      harnessSessionId: 'restored-slack-session',
+    });
+
+    mockCursorResponse('Reply after restart');
+    await conv.sendMessage('Continue where we left off');
+
+    const prompt = driver.append.mock.calls[0][1];
+    expect(prompt).toContain('Current planning host: Invoker Slack planner.');
+    expect(prompt).toContain('Approve/Cancel review card');
+  });
+
+  // Real incident: on a long Slack planning thread, once a continuity harness
+  // (e.g. claude) resumes an existing session, only the latest user message
+  // plus host-ownership context was sent -- the turn-1 instruction to write
+  // the plan to the sidecar file and keep chat short was never repeated. The
+  // model drifted to pasting the full YAML inline, which a downstream
+  // word-count guard then truncated, and the plan was never captured.
+  it('repeats the plan-draft-file reminder on a resumed plan-mode turn, not just turn one', async () => {
+    const driver = createMockDriver({ supportsSessionContinuity: true });
+    const conv = new PlanConversation({
+      mode: 'plan',
+      conversationalPlanning: true,
+      planningSurface: 'slack',
+      workingDir: '/tmp/worktree',
+      threadTs: 'thread-abc',
+      harnessSessionDriver: driver,
+      harnessSessionId: 'restored-slack-session',
+    });
+
+    mockCursorResponse('Reply after restart');
+    await conv.sendMessage('Continue where we left off');
+
+    const prompt = driver.append.mock.calls[0][1];
+    expect(prompt).toContain(String(conv.planDraftFilePath()));
+    expect(prompt).toContain('Never paste the YAML into chat');
+  });
+
+  it('does not add the plan-draft-file reminder to a resumed agent-mode turn', async () => {
+    const driver = createMockDriver({ supportsSessionContinuity: true });
+    const conv = new PlanConversation({
+      mode: 'agent',
+      conversationalPlanning: true,
+      planningSurface: 'slack',
+      workingDir: '/tmp/worktree',
+      threadTs: 'thread-abc',
+      harnessSessionDriver: driver,
+      harnessSessionId: 'restored-slack-session',
+    });
+
+    mockCursorResponse('Reply after restart');
+    await conv.sendMessage('Continue where we left off');
+
+    const prompt = driver.append.mock.calls[0][1];
+    expect(prompt).not.toContain('Never paste the YAML into chat');
+  });
+
+  it('keeps sending full conversation history to a driver without session continuity', async () => {
+    const driver = createMockDriver({ supportsSessionContinuity: false });
+    const conv = new PlanConversation({ harnessSessionDriver: driver });
+
+    mockCursorResponse('Turn one reply');
+    await conv.sendMessage('First message');
+    mockCursorResponse('Turn two reply');
+    await conv.sendMessage('Second message');
+
+    expect(driver.start).toHaveBeenCalledTimes(1);
+    expect(driver.append).toHaveBeenCalledTimes(1);
+    expect(driver.append.mock.calls[0][1]).toContain('Conversation History');
+    expect(driver.append.mock.calls[0][1]).toContain('First message');
+    expect(driver.append.mock.calls[0][1]).toContain('Second message');
+    expect(conv.harnessSessionId).toBe('session-2');
+  });
+
+  it('falls back to the legacy planningCommandBuilder path when no driver is configured', async () => {
+    mockCursorResponse('Legacy reply');
+    const conv = new PlanConversation({});
+    const reply = await conv.sendMessage('Hello');
+    expect(reply).toBe('Legacy reply');
+    expect(conv.harnessSessionId).toBeUndefined();
   });
 });
 

@@ -68,6 +68,15 @@ describe('metadata-setter', () => {
     expect(deps.orchestrator.syncFromDb).toHaveBeenCalledWith('wf-1');
   });
 
+  it('preserves explicit workflow baseBranch metadata writes', async () => {
+    const deps = makeDeps();
+    await setWorkflowMetadata(deps, 'wf-1', 'baseBranch', 'release');
+
+    expect(deps.persistence.updateWorkflow).toHaveBeenCalledWith('wf-1', {
+      baseBranch: 'release',
+    });
+  });
+
   it('sets allowed task config metadata through serialized workflow mutation', async () => {
     const deps = makeDeps();
     await setTaskMetadata(deps, 'task-1', 'config.poolId', 'some-pool');
@@ -92,7 +101,7 @@ describe('metadata-setter', () => {
 
   it('rejects invalid enum and type values', async () => {
     const deps = makeDeps();
-    await expect(setWorkflowMetadata(deps, 'wf-1', 'mergeMode', 'sometimes')).rejects.toThrow(/manual, automatic, external_review/);
+    await expect(setWorkflowMetadata(deps, 'wf-1', 'mergeMode', 'sometimes')).rejects.toThrow(/manual, automatic, external_review, no_op/);
     await expect(setTaskMetadata(deps, 'task-1', 'dependencies', 'task-a')).rejects.toThrow(/array of strings/);
     await expect(setTaskMetadata(deps, 'task-1', 'config.requiresManualApproval', 'true')).rejects.toThrow(/boolean/);
   });

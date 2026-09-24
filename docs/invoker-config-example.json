@@ -2,7 +2,7 @@
   "comment": "Example Invoker configuration file",
   "description": "Default location: ~/.invoker/config.json. For repo-specific configs, set INVOKER_REPO_CONFIG_PATH when launching Invoker.",
   "maxConcurrency": 6,
-  "defaultExecutionAgent": "codex",
+  "defaultExecutionHarness": "codex",
 
 
   "executors": {
@@ -16,7 +16,7 @@
       "comment": "DockerExecutor configuration"
     },
     "ssh": {
-      "comment": "SshExecutor uses per-target settings from remoteTargets"
+      "comment": "SshExecutor uses per-target settings from remoteTargets; local worktrees use worktreeTargets"
     }
   },
 
@@ -46,6 +46,13 @@
       "remoteHeartbeatIntervalSeconds": 30
     }
   },
+  "worktreeTargets": {
+    "local-fallback": {
+      "comment": "Named local worktree target with target-owned provisioning",
+      "provisionCommand": "pnpm install --frozen-lockfile",
+      "maxConcurrentTasks": 2
+    }
+  },
 
   "executionPools": {
     "mixed-local-ssh": {
@@ -53,7 +60,7 @@
       "members": [
         { "type": "ssh", "id": "staging-server" },
         { "type": "ssh", "id": "build-server-b" },
-        { "type": "worktree", "id": "local-fallback", "maxConcurrentTasks": 2 }
+        { "type": "worktree", "id": "local-fallback" }
       ],
       "selectionStrategy": "roundRobin",
       "maxConcurrentTasksPerMember": 1
@@ -87,7 +94,7 @@
   },
   "defaultSlackHarnessPreset": "cursor+claude",
   "slackRepos": {
-    "comment": "Slack repo aliases: alias -> git URL, resolved from a [repo:<alias>] tag",
+    "comment": "Slack repo aliases: alias -> git URL, selected with [repo:<alias>] in a tagged request",
     "web": "git@github.com:acme/web.git",
     "api": "git@github.com:acme/api.git"
   },
@@ -98,15 +105,26 @@
   "autoFixCi": false,
 
   "prMaintenance": {
-    "comment": "Built-in owner-host PR maintenance workers. Enable on the host that owns the Invoker database; start/stop from Workers or run one scan with ./run.sh --headless worker <kind>.",
+    "comment": "Built-in owner-host PR maintenance workers. Enable on the host that owns the Invoker database; start/stop from Workers or run one scan with ./run.sh --headless worker <kind>. Set targetRepos to every GitHub owner/repo to scan for admin-bypass (and related) PR maintenance; omit to scan only Neko-Catpital-Labs/Invoker.",
     "enabled": true,
     "repoRoot": "/srv/invoker",
     "intervalMs": 300000,
     "lockPath": "/tmp/invoker-pr-maintenance.lock",
+    "targetRepos": [
+      "Neko-Catpital-Labs/Invoker",
+      "EdbertChan/catstack"
+    ],
     "env": {
-      "INVOKER_GITHUB_TARGET_REPO": "acme/web",
       "INVOKER_CODERABBIT_LOGIN": "coderabbitai[bot]"
     }
+  },
+
+  "catstackDeploy": {
+    "comment": "Opt-in worker: every intervalMinutes, clone-or-ff-only-pull catstack and run ./install.sh on the owner machine plus every remoteTargets host. Start from Workers UI; process on/off is worker_desired_states, not this block.",
+    "intervalMinutes": 15,
+    "repoUrl": "https://github.com/EdbertChan/catstack.git",
+    "localRepoPath": "~/Documents/GitHub/catstack",
+    "remoteRepoPath": "~/Documents/GitHub/catstack"
   },
 
   "webToken": "change-me-to-a-long-random-secret",

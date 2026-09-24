@@ -5,17 +5,20 @@
  * Uses the `yaml` npm package for parsing.
  */
 
-import { execSync } from 'node:child_process';
+import { execFile, execFileSync, execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import type { PlanDefinition } from '@invoker/workflow-core';
+import { normalizeWorkflowBaseBranch, parseTaskFreshnessSpec, planPublicationAuthorityViolation } from '@invoker/workflow-core';
+import { isInvokerRepoUrl, reviewClaimSlices } from '@invoker/execution-engine';
 import { loadConfig, resolveDefaultExecutionAgent } from './config.js';
 import { normalizeMergeModeForPersistence } from './merge-mode.js';
 
-/** Empty / whitespace `baseBranch` in YAML (`baseBranch:`) must fall through to config + remote detection like a missing key. */
+/** Workflow base branches default to master, while explicit stack bases are preserved. */
 function resolveDefaultBaseBranch(plan: PlanDefinition): string {
-  const b = plan.baseBranch;
-  if (typeof b === 'string' && b.trim() !== '') return b.trim();
-  return loadConfig().defaultBranch ?? (plan.repoUrl ? detectDefaultBranchRemote(plan.repoUrl) : 'main');
+  return normalizeWorkflowBaseBranch(plan.baseBranch);
 }
 
 /**
@@ -59,6 +62,17 @@ export function applyConfiguredPlanDefaults(plan: PlanDefinition): PlanDefinitio
   return applyPlanExecutionAgentDefault(plan, resolveDefaultExecutionAgent(loadConfig()));
 }
 
+export const WORKER_SUBMITTED_TASK_PRIORITY = -10;
+
+export function applyWorkerSubmittedTaskPriorityDefault(plan: PlanDefinition): PlanDefinition {
+  return {
+    ...plan,
+    tasks: plan.tasks.map((task) => (
+      task.priority === undefined ? { ...task, priority: WORKER_SUBMITTED_TASK_PRIORITY } : task
+    )),
+  };
+}
+
 
 export interface RawExperimentVariant {
   id?: string;
@@ -87,6 +101,9 @@ export interface RawPlanTask {
   poolId?: string;
   executionAgent?: string;
   executionModel?: string;
+  maxTurns?: number;
+  priority?: number;
+  freshness?: unknown;
 }
 
 export interface RawPlan {
@@ -99,6 +116,8 @@ export interface RawPlan {
   mergeMode?: string;
   reviewProvider?: string;
   repoUrl?: string;
+  scratch?: boolean;
+  poolId?: string;
   intermediateRepoUrl?: string;
   externalDependencies?: Array<{
     workflowId?: string;
@@ -159,6 +178,115 @@ export function detectDefaultBranchRemote(repoUrl: string): string {
   return 'main';
 }
 
+const REMOTE_CLONE_PROBE_ATTEMPTS = 2;
+const REMOTE_CLONE_PROBE_RETRY_DELAY_MS = 500;
+const REMOTE_CLONE_PROBE_TIMEOUT_MS = 30_000;
+
+function describeCloneProbeError(err: unknown): string {
+  const stderr = (err as { stderr?: Buffer | string })?.stderr;
+  const stderrText = stderr ? stderr.toString().trim() : '';
+  if (stderrText) return stderrText.split('\n')[0]!;
+  const message = err instanceof Error ? err.message : String(err);
+  return message.split('\n')[0]!;
+}
+
+function assertLocalGitRepoReadable(localPath: string): void {
+  if (!existsSync(localPath)) throw new Error('Path does not exist');
+  execFileSync('git', ['-c', 'safe.directory=*', '-C', localPath, 'rev-parse', '--git-dir'], {
+    stdio: ['ignore', 'ignore', 'ignore'],
+    timeout: 10_000,
+  });
+}
+
+function classifyRepoUrl(repoUrl: string): {
+  trimmed: string;
+  kind: 'localPath' | 'fileUrl' | 'remoteUrl';
+} {
+  const trimmed = repoUrl.trim();
+  const isLocalPath = trimmed.startsWith('/') || trimmed.startsWith('./') || trimmed.startsWith('../');
+  const isFileUrl = trimmed.startsWith('file://');
+  const isRemoteUrl = /^(?:git@|https?:\/\/|ssh:\/\/)/.test(trimmed);
+
+  if (!isLocalPath && !isFileUrl && !isRemoteUrl) {
+    throw new PlanParseError(
+      `repoUrl "${repoUrl}" is not a valid git repository. Use a full clone URL or a configured Slack alias.`,
+    );
+  }
+  return {
+    trimmed,
+    kind: isLocalPath ? 'localPath' : isFileUrl ? 'fileUrl' : 'remoteUrl',
+  };
+}
+
+export function isRemoteRepoUrl(repoUrl: string | undefined): repoUrl is string {
+  if (typeof repoUrl !== 'string') return false;
+  try {
+    return classifyRepoUrl(repoUrl).kind === 'remoteUrl';
+  } catch {
+    return false;
+  }
+}
+
+export function assertRepoUrlCloneable(repoUrl: string): void {
+  const { trimmed, kind } = classifyRepoUrl(repoUrl);
+
+  if (kind === 'localPath') {
+    try {
+      assertLocalGitRepoReadable(trimmed);
+      return;
+    } catch (err) {
+      throw new PlanParseError(
+        `repoUrl "${repoUrl}" is not a readable git repository. Check its clone URL and credentials. (${describeCloneProbeError(err)})`,
+      );
+    }
+  }
+  if (kind === 'fileUrl') {
+    try {
+      assertLocalGitRepoReadable(fileURLToPath(trimmed));
+      return;
+    } catch (err) {
+      throw new PlanParseError(
+        `repoUrl "${repoUrl}" is not a readable git repository. Check its clone URL and credentials. (${describeCloneProbeError(err)})`,
+      );
+    }
+  }
+}
+
+function execFilePromise(file: string, args: string[], options: Parameters<typeof execFile>[2]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, options, (err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+export async function assertRemoteRepoUrlCloneable(repoUrl: string): Promise<void> {
+  const { trimmed, kind } = classifyRepoUrl(repoUrl);
+  if (kind !== 'remoteUrl') return;
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= REMOTE_CLONE_PROBE_ATTEMPTS; attempt += 1) {
+    try {
+      await execFilePromise('git', ['ls-remote', '--exit-code', '--', trimmed, 'HEAD'], {
+        timeout: REMOTE_CLONE_PROBE_TIMEOUT_MS,
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt < REMOTE_CLONE_PROBE_ATTEMPTS) {
+        await sleep(REMOTE_CLONE_PROBE_RETRY_DELAY_MS);
+      }
+    }
+  }
+  throw new PlanParseError(
+    `repoUrl "${repoUrl}" is not a readable git repository. Check network reachability, its clone URL, and credentials. (${describeCloneProbeError(lastError)}, after ${REMOTE_CLONE_PROBE_ATTEMPTS} attempts)`,
+  );
+}
+
 export class PlanParseError extends Error {
   constructor(message: string) {
     super(message);
@@ -170,7 +298,7 @@ type ParsedExternalDependency = {
   workflowId: string;
   taskId: string;
   requiredStatus: 'completed';
-  gatePolicy: 'completed' | 'review_ready';
+  gatePolicy: 'completed' | 'review_ready' | 'ci_failed';
 };
 
 function parseExternalDependencies(
@@ -194,23 +322,28 @@ function parseExternalDependencies(
         `${ownerLabel} externalDependencies[${depIndex}] "requiredStatus" must be "completed"`,
       );
     }
-    if (dep.gatePolicy !== undefined && dep.gatePolicy !== 'completed' && dep.gatePolicy !== 'review_ready') {
+    if (
+      dep.gatePolicy !== undefined
+      && dep.gatePolicy !== 'completed'
+      && dep.gatePolicy !== 'review_ready'
+      && dep.gatePolicy !== 'ci_failed'
+    ) {
       if (dep.gatePolicy === 'approved') {
         throw new PlanParseError(
           `gatePolicy value 'approved' is no longer supported. Use 'completed' instead.`,
         );
       }
       throw new PlanParseError(
-        `${ownerLabel} externalDependencies[${depIndex}] "gatePolicy" must be "completed" or "review_ready"`,
+        `${ownerLabel} externalDependencies[${depIndex}] "gatePolicy" must be "completed", "review_ready", or "ci_failed"`,
       );
     }
     const taskId = dep.taskId?.trim() || '__merge__';
-    const defaultGatePolicy: 'completed' | 'review_ready' = 'review_ready';
+    const defaultGatePolicy: 'completed' | 'review_ready' | 'ci_failed' = 'review_ready';
     return {
       workflowId: dep.workflowId,
       taskId,
       requiredStatus: 'completed' as const,
-      gatePolicy: (dep.gatePolicy ?? defaultGatePolicy) as 'completed' | 'review_ready',
+      gatePolicy: (dep.gatePolicy ?? defaultGatePolicy) as 'completed' | 'review_ready' | 'ci_failed',
     };
   });
 }
@@ -249,6 +382,16 @@ function assertNoLegacyRoutingKeys(ownerLabel: string, value: object): void {
   }
 }
 
+export function assertNoDuplicateTaskIds(tasks: { id: string }[]): void {
+  const seenTaskIds = new Set<string>();
+  for (const task of tasks) {
+    if (seenTaskIds.has(task.id)) {
+      throw new PlanParseError(`Duplicate task id "${task.id}". Task ids must be unique within a plan.`);
+    }
+    seenTaskIds.add(task.id);
+  }
+}
+
 /**
  * Parse a YAML string into a validated PlanDefinition.
  * Throws PlanParseError if validation fails.
@@ -281,21 +424,40 @@ function parseRawPlan(raw: RawPlan, ownerLabel = 'Plan'): PlanDefinition {
   }
   assertNoLegacyRoutingKeys(ownerLabel, raw as object);
 
+  if (raw.scratch !== undefined && typeof raw.scratch !== 'boolean') {
+    throw new PlanParseError(`${ownerLabel} "scratch" must be a boolean when provided.`);
+  }
+  const scratch = raw.scratch === true;
+
   const validOnFinishValues = ['none', 'merge', 'pull_request'] as const;
   if (raw.onFinish !== undefined && !validOnFinishValues.includes(raw.onFinish as any)) {
     throw new PlanParseError(
       `"onFinish" must be one of: ${validOnFinishValues.join(', ')}. Got: "${raw.onFinish}"`,
     );
   }
-  const onFinish = (raw.onFinish as (typeof validOnFinishValues)[number]) ?? 'pull_request';
+  if (scratch && raw.onFinish !== undefined && raw.onFinish !== 'none') {
+    throw new PlanParseError(
+      `${ownerLabel} with "scratch: true" must use onFinish: "none" (or omit it) — there is no branch/PR to finish.`,
+    );
+  }
+  const onFinish = (raw.onFinish as (typeof validOnFinishValues)[number]) ?? (scratch ? 'none' : 'pull_request');
 
-  const validMergeModes = ['manual', 'automatic', 'external_review'] as const;
+  const validMergeModes = ['manual', 'automatic', 'external_review', 'no_op'] as const;
   if (raw.mergeMode !== undefined && !validMergeModes.includes(raw.mergeMode as any)) {
     throw new PlanParseError(
       `"mergeMode" must be one of: ${validMergeModes.join(', ')}. Got: "${raw.mergeMode}"`,
     );
   }
-  const rawMergeMode = raw.mergeMode as (typeof validMergeModes)[number] | undefined;
+  if (scratch && raw.mergeMode !== undefined && raw.mergeMode !== 'no_op') {
+    throw new PlanParseError(
+      `${ownerLabel} with "scratch: true" must use mergeMode: "no_op" (or omit it) — there is no repo/branch to merge.`,
+    );
+  }
+  const rawMergeMode = (raw.mergeMode as (typeof validMergeModes)[number] | undefined) ?? (scratch ? 'no_op' : undefined);
+  const publicationAuthorityViolation = planPublicationAuthorityViolation(onFinish, rawMergeMode);
+  if (publicationAuthorityViolation) {
+    throw new PlanParseError(publicationAuthorityViolation);
+  }
   const mergeMode = rawMergeMode !== undefined
     ? normalizeMergeModeForPersistence(rawMergeMode)
     : undefined;
@@ -308,9 +470,14 @@ function parseRawPlan(raw: RawPlan, ownerLabel = 'Plan'): PlanDefinition {
     raw.featureBranch = `plan/${slug}`;
   }
 
-  if (!raw.repoUrl || typeof raw.repoUrl !== 'string') {
+  if (scratch && raw.repoUrl !== undefined) {
     throw new PlanParseError(
-      `${ownerLabel} must have a "repoUrl" field (e.g. repoUrl: git@github.com:user/repo.git).`,
+      `${ownerLabel} cannot set both "scratch: true" and "repoUrl" — scratch plans run with no git repo.`,
+    );
+  }
+  if (!scratch && (!raw.repoUrl || typeof raw.repoUrl !== 'string')) {
+    throw new PlanParseError(
+      `${ownerLabel} must have either a "repoUrl" field (e.g. repoUrl: git@github.com:user/repo.git) or "scratch: true" (no-repo mode).`,
     );
   }
   if (raw.intermediateRepoUrl !== undefined) {
@@ -322,20 +489,27 @@ function parseRawPlan(raw: RawPlan, ownerLabel = 'Plan'): PlanDefinition {
     raw.intermediateRepoUrl = raw.intermediateRepoUrl.trim();
   }
 
+  if (scratch && raw.poolId) {
+    throw new PlanParseError(
+      `${ownerLabel} sets "poolId" but has "scratch: true" — scratch plans never use execution pools.`,
+    );
+  }
+  if (raw.poolId !== undefined && (typeof raw.poolId !== 'string' || raw.poolId.trim() === '')) {
+    throw new PlanParseError(`${ownerLabel} "poolId" must be a non-empty string when provided.`);
+  }
+  const planPoolId = typeof raw.poolId === 'string' ? raw.poolId.trim() : undefined;
+
   const topLevelExternalDependencies = parseExternalDependencies(ownerLabel, raw.externalDependencies);
 
-  const seenTaskIds = new Set<string>();
-  const tasks = raw.tasks.map((task, index) => {
+  const rawTasks = raw.tasks;
+  const tasks = rawTasks.map((task, index) => {
     if (!task || typeof task !== 'object' || Array.isArray(task)) {
       throw new PlanParseError(`Task at index ${index} must be an object with an "id" field`);
     }
     if (!task.id || typeof task.id !== 'string') {
       throw new PlanParseError(`Task at index ${index} must have an "id" field`);
     }
-    if (seenTaskIds.has(task.id)) {
-      throw new PlanParseError(`Duplicate task id "${task.id}". Task ids must be unique within a plan.`);
-    }
-    seenTaskIds.add(task.id);
+    assertNoDuplicateTaskIds(rawTasks.slice(0, index + 1) as { id: string }[]);
 
     if (!task.description || typeof task.description !== 'string') {
       throw new PlanParseError(`Task "${task.id}" must have a "description" field`);
@@ -362,6 +536,17 @@ function parseRawPlan(raw: RawPlan, ownerLabel = 'Plan'): PlanDefinition {
       );
     }
 
+    if (scratch && (task.dockerImage || task.poolId)) {
+      throw new PlanParseError(
+        `Task "${task.id}" sets "dockerImage"/"poolId" but ${ownerLabel.toLowerCase()} has "scratch: true" — scratch tasks always run in a plain temp directory.`,
+      );
+    }
+    if (task.dockerImage && (planPoolId !== undefined || task.poolId !== undefined)) {
+      throw new PlanParseError(
+        `Task "${task.id}" sets "dockerImage" but its plan/task also sets "poolId" — Docker tasks do not run in execution pools.`,
+      );
+    }
+
     if (task.externalDependencies !== undefined) {
       throw new PlanParseError(
         `Task "${task.id}" uses task-level "externalDependencies", which is no longer supported. ` +
@@ -379,6 +564,24 @@ function parseRawPlan(raw: RawPlan, ownerLabel = 'Plan'): PlanDefinition {
     if (task.executionModel !== undefined && typeof task.executionModel !== 'string') {
       throw new PlanParseError(`Task "${task.id}" field "executionModel" must be a string when provided`);
     }
+    if (task.maxTurns !== undefined) {
+      if (typeof task.maxTurns !== 'number' || !Number.isInteger(task.maxTurns) || task.maxTurns < 1) {
+        throw new PlanParseError(`Task "${task.id}" field "maxTurns" must be a positive integer when provided`);
+      }
+    }
+    if (task.priority !== undefined) {
+      if (typeof task.priority !== 'number' || !Number.isInteger(task.priority)) {
+        throw new PlanParseError(`Task "${task.id}" field "priority" must be an integer when provided`);
+      }
+    }
+
+    const freshness = (() => {
+      try {
+        return parseTaskFreshnessSpec(task.freshness, `Task "${task.id}"`);
+      } catch (error) {
+        throw new PlanParseError(error instanceof Error ? error.message : String(error));
+      }
+    })();
 
     return {
       id: task.id,
@@ -394,8 +597,25 @@ function parseRawPlan(raw: RawPlan, ownerLabel = 'Plan'): PlanDefinition {
       poolId: task.poolId,
       executionAgent: task.executionAgent?.trim() || undefined,
       executionModel: task.executionModel?.trim() || undefined,
+      maxTurns: task.maxTurns,
+      priority: task.priority,
+      ...(freshness !== undefined ? { freshness } : {}),
     };
   });
+
+  if (
+    !scratch
+    && mergeMode !== 'no_op'
+    && (onFinish === 'pull_request' || mergeMode === 'external_review')
+    && !isInvokerRepoUrl(raw.repoUrl)
+  ) {
+    const claims = reviewClaimSlices(tasks.map((t) => ({ description: t.description, command: t.command })));
+    if (claims.length > 1) {
+      throw new PlanParseError(
+        `${ownerLabel} carries ${claims.length} review claims, but it would publish as one PR; split the plan into a workflow chain with one claim per workflow: ${claims.map((claim) => `"${claim}"`).join('; ')}`,
+      );
+    }
+  }
 
   return applyPlanDefinitionDefaults({
     name: raw.name,
@@ -407,6 +627,8 @@ function parseRawPlan(raw: RawPlan, ownerLabel = 'Plan'): PlanDefinition {
     mergeMode,
     reviewProvider,
     repoUrl: raw.repoUrl,
+    scratch: scratch || undefined,
+    poolId: planPoolId,
     intermediateRepoUrl: raw.intermediateRepoUrl,
     externalDependencies: topLevelExternalDependencies,
     tasks,
@@ -436,6 +658,8 @@ function inheritStackWorkflowDefaults(stack: RawPlanBundle, workflow: RawPlan): 
   return {
     ...workflow,
     repoUrl: workflow.repoUrl ?? stack.repoUrl,
+    scratch: workflow.scratch ?? stack.scratch,
+    poolId: workflow.poolId ?? stack.poolId,
     intermediateRepoUrl: workflow.intermediateRepoUrl ?? stack.intermediateRepoUrl,
     onFinish: workflow.onFinish ?? stack.onFinish,
     baseBranch: workflow.baseBranch ?? stack.baseBranch,
@@ -446,8 +670,83 @@ function inheritStackWorkflowDefaults(stack: RawPlanBundle, workflow: RawPlan): 
   };
 }
 
+function parseSimpleScalar(rawValue: string): string | number | boolean {
+  const value = rawValue.trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (/^-?\d+$/.test(value)) return Number(value);
+  return value;
+}
+
+function isFlowCollection(rawValue: string): boolean {
+  return /^[[{]/.test(rawValue.trim());
+}
+
+function parseSimpleStringList(rawValue: string): string[] | undefined {
+  const value = rawValue.trim();
+  if (!value.startsWith('[') || !value.endsWith(']')) return undefined;
+  const inner = value.slice(1, -1).trim();
+  if (!inner) return [];
+  return inner.split(',').map((item) => {
+    const parsed = parseSimpleScalar(item.trim());
+    return typeof parsed === 'string' ? parsed : undefined;
+  }).filter((item): item is string => item !== undefined);
+}
+
+function parseSimplePlanSubmissionBundle(yamlContent: string): RawPlanBundle | undefined {
+  const raw: RawPlanBundle = {};
+  const tasks: RawPlanTask[] = [];
+  let inTasks = false;
+  let currentTask: RawPlanTask | undefined;
+
+  for (const line of yamlContent.split(/\r?\n/)) {
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
+    if (line.includes('\t')) return undefined;
+
+    if (!inTasks) {
+      if (line === 'tasks:') {
+        inTasks = true;
+        continue;
+      }
+      if (line === 'workflows:') return undefined;
+      const match = /^([A-Za-z][A-Za-z0-9]*):\s+(.+)$/.exec(line);
+      if (!match) return undefined;
+      const [, key, value] = match;
+      if (isFlowCollection(value)) return undefined;
+      Reflect.set(raw, key, parseSimpleScalar(value));
+      continue;
+    }
+
+    const taskStart = /^  - id:\s+(.+)$/.exec(line);
+    if (taskStart) {
+      currentTask = { id: String(parseSimpleScalar(taskStart[1])) };
+      tasks.push(currentTask);
+      continue;
+    }
+    const taskField = /^    ([A-Za-z][A-Za-z0-9]*):\s+(.+)$/.exec(line);
+    if (!taskField || !currentTask) return undefined;
+    const [, key, value] = taskField;
+    if (key === 'dependencies') {
+      const dependencies = parseSimpleStringList(value);
+      if (!dependencies) return undefined;
+      currentTask.dependencies = dependencies;
+      continue;
+    }
+    if (isFlowCollection(value)) return undefined;
+    Reflect.set(currentTask, key, parseSimpleScalar(value));
+  }
+
+  if (!inTasks) return undefined;
+  raw.tasks = tasks;
+  return raw;
+}
+
 export function parsePlanSubmissionBundle(yamlContent: string): PlanSubmissionBundle {
-  const raw = parseYaml(yamlContent) as RawPlanBundle;
+  const raw = parseSimplePlanSubmissionBundle(yamlContent)
+    ?? parseYaml(yamlContent, { prettyErrors: false }) as RawPlanBundle;
 
   if (!raw || typeof raw !== 'object') {
     throw new PlanParseError('Plan must be a YAML object');
@@ -505,5 +804,17 @@ export function parsePlan(yamlContent: string): PlanDefinition {
 export async function parsePlanFile(filePath: string): Promise<PlanDefinition> {
   const { readFile } = await import('node:fs/promises');
   const content = await readFile(filePath, 'utf-8');
-  return parsePlan(content);
+  const plan = parsePlan(content);
+  if (!plan.scratch) assertRepoUrlCloneable(plan.repoUrl!);
+  return plan;
+}
+
+export async function parsePlanSubmissionBundleFile(filePath: string): Promise<PlanSubmissionBundle> {
+  const { readFile } = await import('node:fs/promises');
+  const content = await readFile(filePath, 'utf-8');
+  const submission = parsePlanSubmissionBundle(content);
+  for (const plan of submission.plans) {
+    if (!plan.scratch) assertRepoUrlCloneable(plan.repoUrl!);
+  }
+  return submission;
 }

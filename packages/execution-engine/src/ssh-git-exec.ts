@@ -6,6 +6,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { buildPortableBase64DecodeFunction } from './remote-shell-fragments.js';
 
 export interface SshRemoteErrorMetadata {
   exitCode?: number;
@@ -64,7 +65,7 @@ export function base64Encode(s: string): string {
 
 /**
  * Bash fragment to expand leading ~ in a variable after base64 decode.
- * After `WT=$(echo … | base64 -d)`, this ensures `cd "$WT"` works with tilde paths.
+ * After `WT=$(printf '%s' … | invoker_base64_decode)`, this ensures `cd "$WT"` works with tilde paths.
  *
  * NOTE: Do NOT use `case ~/*)` — bash tilde-expands case patterns, so `~/*` becomes
  * `/root/*` and never matches literal `~/.invoker/…`.
@@ -101,6 +102,14 @@ export interface GitMirrorCloneOpts {
   baseRef: string;
   /** Remote invoker home directory (e.g., ~/.invoker). Default: $HOME/.invoker */
   invokerHome?: string;
+  /**
+   * A specific commit (typically a dependency task's just-pushed result)
+   * that must be resolvable in the shared mirror clone after fetching.
+   * The shared clone is reused across tasks, so a single `fetch --all` can
+   * race a dependency's push; when the commit isn't resolvable yet, the
+   * script retries the fetch with backoff before giving up.
+   */
+  requiredCommit?: string;
 }
 
 /**
@@ -111,7 +120,8 @@ export interface GitMirrorCloneOpts {
  *   __INVOKER_BASE_REF__=<resolved-ref>
  *   __INVOKER_BASE_HEAD__=<sha>
  *
- * On base ref not found, attempts fallback to origin/HEAD and outputs:
+ * When the requested base is main or master and missing, falls back to the
+ * origin/<alternate> default branch (master or main) and outputs:
  *   __INVOKER_BASE_WARNING__=Requested base '<ref>' not found; falling back to '<fallback>'.
  *   __INVOKER_BASE_REF__=<fallback>
  *   __INVOKER_BASE_HEAD__=<sha>
@@ -120,21 +130,41 @@ export interface GitMirrorCloneOpts {
  *   __INVOKER_FETCH_FAILED__=1
  *   [WARNING] messages to stderr
  *
- * Exits 128 if base ref and fallback both missing.
+ * When `requiredCommit` is set and isn't resolvable after the initial
+ * fetch, retries fetching with backoff before giving up. Exits 33 (and
+ * prints REQUIRED_COMMIT_UNRESOLVED=<sha> to stderr) if it's still
+ * unresolvable after retries.
+ *
+ * Exits 128 if any other named base ref was not found on the remote.
+ *
+ * This shared/reused clone (one per repo hash, fetched once at task start,
+ * never recreated) has repeatedly produced "downstream task can't resolve
+ * a commit" incidents since the design was introduced: 2026-04-07
+ * (4df97a3d0c, fetch failures silently swallowed from day one), 2026-04-08
+ * (ed5f9d0552, made visible via warnings but kept non-blocking), 2026-04-17
+ * (56eb3e872c, a different symptom of the same drifted mirror), 2026-07-30
+ * (#6836, a wrong-ref-selected-for-push variant), 2026-08-15 (this
+ * `requiredCommit` retry, the first fix that actually verifies and retries
+ * instead of trusting or warning). If a new instance of this symptom shows
+ * up, it is very likely the same architectural hazard again -- check here
+ * first before re-deriving the history from `git log`.
  */
 export function buildMirrorCloneScript(opts: GitMirrorCloneOpts): string {
   const repoB64 = base64Encode(opts.repoUrl);
   const branchRepoB64 = base64Encode(opts.branchRepoUrl?.trim() ?? '');
   const baseB64 = base64Encode(opts.baseRef);
+  const requiredCommitB64 = base64Encode(opts.requiredCommit?.trim() ?? '');
   const { repoHash, invokerHome = '$HOME/.invoker' } = opts;
   const homeB64 = base64Encode(invokerHome);
 
   return `set -euo pipefail
-REPO=$(echo ${repoB64} | base64 -d)
-BRANCH_REPO=$(echo ${branchRepoB64} | base64 -d)
-BASE=$(echo ${baseB64} | base64 -d)
+${buildPortableBase64DecodeFunction()}
+REPO=$(printf '%s' ${shellPosixSingleQuote(repoB64)} | invoker_base64_decode)
+BRANCH_REPO=$(printf '%s' ${shellPosixSingleQuote(branchRepoB64)} | invoker_base64_decode)
+BASE=$(printf '%s' ${shellPosixSingleQuote(baseB64)} | invoker_base64_decode)
+REQUIRED_COMMIT=$(printf '%s' ${shellPosixSingleQuote(requiredCommitB64)} | invoker_base64_decode)
 H="${repoHash}"
-INVOKER_HOME=$(echo ${homeB64} | base64 -d)
+INVOKER_HOME=$(printf '%s' ${shellPosixSingleQuote(homeB64)} | invoker_base64_decode)
 if [[ "$INVOKER_HOME" == '~' ]]; then
   INVOKER_HOME="$HOME"
 elif [[ "\${INVOKER_HOME:0:2}" == '~/' ]]; then
@@ -147,7 +177,76 @@ mkdir -p "$(dirname "$CLONE")"
 # safe.directory "*" wildcard covers the check on $REPO/.git (the -c form and a
 # specific path do not), so set it in the remote global config before cloning.
 git config --global --add safe.directory '*' >/dev/null 2>&1 || true
-if [ ! -d "$CLONE/.git" ]; then git clone "$REPO" "$CLONE"; fi
+if [ ! -d "$CLONE/.git" ]; then
+  # $CLONE only appears via an atomic rename made under $LOCK, so no run ever fetches from a half-made clone.
+  LOCK="$CLONE.lock"
+  TMP_CLONE="$CLONE.tmp.$$"
+  MAIN_PID=$$
+  WAITED=0
+  HEARTBEAT_PID=""
+  LAST_HEARTBEAT=""
+  release_mirror_lock() {
+    if [ -n "$HEARTBEAT_PID" ]; then
+      kill "$HEARTBEAT_PID" 2>/dev/null || true
+      HEARTBEAT_PID=""
+    fi
+    # Releasing a lock this run no longer owns would hand $CLONE to two cloners at once.
+    if [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$MAIN_PID" ]; then rm -rf "$LOCK"; fi
+  }
+  until mkdir "$LOCK" 2>/dev/null; do
+    HOLDER_PID=$(cat "$LOCK/pid" 2>/dev/null || true)
+    HOLDER_HEARTBEAT=$(cat "$LOCK/heartbeat" 2>/dev/null || true)
+    HOLDER_STOPPED=1
+    if [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null; then HOLDER_STOPPED=0; fi
+    LOCK_IDLE=0
+    case "$HOLDER_HEARTBEAT" in
+      '' | *[!0-9]*)
+        if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then LOCK_IDLE=1; fi
+        ;;
+      *)
+        if [ "$(($(date +%s) - HOLDER_HEARTBEAT))" -ge 600 ]; then LOCK_IDLE=1; fi
+        if [ "$HOLDER_HEARTBEAT" != "$LAST_HEARTBEAT" ]; then
+          LAST_HEARTBEAT="$HOLDER_HEARTBEAT"
+          WAITED=0
+        fi
+        ;;
+    esac
+    # A running clone keeps renewing its heartbeat, so age alone never breaks a lock:
+    # only one whose owner has both stopped renewing and exited is removed.
+    if [ "$LOCK_IDLE" = 1 ] && [ "$HOLDER_STOPPED" = 1 ] && mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null; then
+      rm -rf "$LOCK.stale.$$"
+      continue
+    fi
+    if [ "$WAITED" -ge 900 ]; then
+      echo "ERROR: timed out after $WAITED seconds waiting for mirror clone lock $LOCK" >&2
+      exit 34
+    fi
+    sleep 1
+    WAITED=$((WAITED + 1))
+  done
+  printf '%s\\n' "$MAIN_PID" > "$LOCK/pid"
+  date +%s > "$LOCK/heartbeat"
+  (
+    while kill -0 "$MAIN_PID" 2>/dev/null && [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$MAIN_PID" ]; do
+      sleep 30
+      date +%s > "$LOCK/heartbeat" 2>/dev/null || exit 0
+    done
+  ) >/dev/null 2>&1 </dev/null &
+  HEARTBEAT_PID=$!
+  trap 'rm -rf "$TMP_CLONE"; release_mirror_lock' EXIT
+  if [ ! -d "$CLONE/.git" ]; then
+    rm -rf "$TMP_CLONE"
+    git clone "$REPO" "$TMP_CLONE"
+    # Renaming into a surviving $CLONE would nest the new clone inside it instead of publishing it.
+    if [ -e "$CLONE" ] && ! rmdir "$CLONE" 2>/dev/null; then
+      echo "ERROR: cannot publish mirror clone; $CLONE already exists and is not an empty directory" >&2
+      exit 35
+    fi
+    mv "$TMP_CLONE" "$CLONE"
+  fi
+  release_mirror_lock
+  trap - EXIT
+fi
 if ! git -C "$CLONE" fetch --all --prune; then
   echo "[WARNING] Git fetch failed for $CLONE" >&2
   echo "[WARNING] Continuing with existing refs. Tasks may use stale commits." >&2
@@ -161,6 +260,20 @@ if [ -n "$BRANCH_REPO" ]; then
     exit 32
   fi
 fi
+if [ -n "$REQUIRED_COMMIT" ]; then
+  ATTEMPT=1
+  MAX_ATTEMPTS=4
+  while ! git -C "$CLONE" rev-parse --verify "$REQUIRED_COMMIT^{commit}" >/dev/null 2>&1; do
+    if [ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+      echo "REQUIRED_COMMIT_UNRESOLVED=$REQUIRED_COMMIT" >&2
+      exit 33
+    fi
+    echo "[WARNING] Required commit $REQUIRED_COMMIT not yet resolvable in $CLONE; retrying fetch (attempt $ATTEMPT/$MAX_ATTEMPTS)" >&2
+    sleep $((ATTEMPT * 2))
+    git -C "$CLONE" fetch --all --prune >/dev/null 2>&1 || true
+    ATTEMPT=$((ATTEMPT + 1))
+  done
+fi
 RESOLVED_BASE="$BASE"
 ORIGIN_HEAD=$(git -C "$CLONE" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
 if [ "$BASE" = "HEAD" ] && [ -n "$ORIGIN_HEAD" ] && git -C "$CLONE" rev-parse --verify "$ORIGIN_HEAD^{commit}" >/dev/null 2>&1; then
@@ -168,19 +281,24 @@ if [ "$BASE" = "HEAD" ] && [ -n "$ORIGIN_HEAD" ] && git -C "$CLONE" rev-parse --
 elif git -C "$CLONE" rev-parse --verify "origin/$BASE^{commit}" >/dev/null 2>&1; then
   RESOLVED_BASE="origin/$BASE"
 elif git -C "$CLONE" rev-parse --verify "$RESOLVED_BASE^{commit}" >/dev/null 2>&1; then
-  :
+  RESOLVED_BASE="$BASE"
 else
-  if [ -n "$ORIGIN_HEAD" ] && git -C "$CLONE" rev-parse --verify "$ORIGIN_HEAD^{commit}" >/dev/null 2>&1; then
-    RESOLVED_BASE="$ORIGIN_HEAD"
+  ALTERNATE_BASE=""
+  if [ "$BASE" = "main" ]; then
+    ALTERNATE_BASE="master"
+  elif [ "$BASE" = "master" ]; then
+    ALTERNATE_BASE="main"
+  fi
+  if [ -n "$ALTERNATE_BASE" ] && git -C "$CLONE" rev-parse --verify "origin/$ALTERNATE_BASE^{commit}" >/dev/null 2>&1; then
+    RESOLVED_BASE="origin/$ALTERNATE_BASE"
     printf "__INVOKER_BASE_WARNING__=Requested base '%s' not found; falling back to '%s'.\\n" "$BASE" "$RESOLVED_BASE"
   else
-    echo "Requested base '$BASE' does not exist and origin/HEAD is unavailable." >&2
+    echo "ERROR: base ref '$BASE' was not found on the remote" >&2
     exit 128
   fi
 fi
-BASE_HEAD=$(git -C "$CLONE" rev-parse "$RESOLVED_BASE")
 printf "__INVOKER_BASE_REF__=%s\\n" "$RESOLVED_BASE"
-printf "__INVOKER_BASE_HEAD__=%s\\n" "$BASE_HEAD"
+printf "__INVOKER_BASE_HEAD__=%s\\n" "$(git -C "$CLONE" rev-parse "$RESOLVED_BASE^{commit}")"
 `;
 }
 
@@ -231,8 +349,9 @@ export function buildWorktreeListScript(opts: GitWorktreeListOpts): string {
   const homeB64 = base64Encode(invokerHome);
 
   return `set -euo pipefail
+${buildPortableBase64DecodeFunction()}
 H="${repoHash}"
-INVOKER_HOME=$(echo ${homeB64} | base64 -d)
+INVOKER_HOME=$(printf '%s' ${shellPosixSingleQuote(homeB64)} | invoker_base64_decode)
 if [[ "$INVOKER_HOME" == '~' ]]; then
   INVOKER_HOME="$HOME"
 elif [[ "\${INVOKER_HOME:0:2}" == '~/' ]]; then
@@ -264,6 +383,7 @@ export interface GitWorktreeCleanupOpts {
 export function buildWorktreeCleanupScript(opts: GitWorktreeCleanupOpts): string {
   const worktreesB64 = base64Encode(`${opts.worktreePaths.join('\n')}\n`);
   return `set -euo pipefail
+${buildPortableBase64DecodeFunction()}
 CLONE="${opts.remoteClone}"
 ${bashNormalizeTildePath('CLONE')}
 WORKTREES_B64="${worktreesB64}"
@@ -278,7 +398,7 @@ while IFS= read -r WT; do
     rm -rf "$WT"
     git -C "$CLONE" worktree prune 2>/dev/null || true
   fi
-done < <(echo "$WORKTREES_B64" | base64 -d)
+done < <(printf '%s' "$WORKTREES_B64" | invoker_base64_decode)
 `;
 }
 
@@ -307,8 +427,9 @@ export function buildWorktreeSandboxResetScript(opts: GitWorktreeSandboxResetOpt
   const wtB64 = base64Encode(opts.worktreePath);
   const refB64 = base64Encode(opts.toRef);
   return `set -euo pipefail
-WT=$(echo ${wtB64} | base64 -d)
-REF=$(echo ${refB64} | base64 -d)
+${buildPortableBase64DecodeFunction()}
+WT=$(printf '%s' ${shellPosixSingleQuote(wtB64)} | invoker_base64_decode)
+REF=$(printf '%s' ${shellPosixSingleQuote(refB64)} | invoker_base64_decode)
 ${bashNormalizeTildePath('WT')}
 git -C "$WT" reset --hard "$REF"
 git -C "$WT" clean -fd
@@ -326,9 +447,10 @@ export function buildWorktreeRenameBranchScript(opts: GitWorktreeRenameBranchOpt
   const fromB64 = base64Encode(opts.fromBranch);
   const toB64 = base64Encode(opts.toBranch);
   return `set -euo pipefail
-WT=$(echo ${wtB64} | base64 -d)
-FROM=$(echo ${fromB64} | base64 -d)
-TO=$(echo ${toB64} | base64 -d)
+${buildPortableBase64DecodeFunction()}
+WT=$(printf '%s' ${shellPosixSingleQuote(wtB64)} | invoker_base64_decode)
+FROM=$(printf '%s' ${shellPosixSingleQuote(fromB64)} | invoker_base64_decode)
+TO=$(printf '%s' ${shellPosixSingleQuote(toB64)} | invoker_base64_decode)
 ${bashNormalizeTildePath('WT')}
 git -C "$WT" branch -m "$FROM" "$TO"
 git -C "$WT" rev-parse --abbrev-ref HEAD
@@ -343,6 +465,7 @@ export interface GitRecordAndPushOpts {
   gitUserName: string;
   gitUserEmail: string;
   pushRemoteUrl?: string;
+  idempotencyKey?: string;
 }
 
 /**
@@ -360,32 +483,70 @@ export function buildRecordAndPushScript(opts: GitRecordAndPushOpts): string {
   const userNameB = base64Encode(opts.gitUserName);
   const userEmailB = base64Encode(opts.gitUserEmail);
   const pushRemoteUrlB = base64Encode(opts.pushRemoteUrl ?? '');
+  const idempotencyKeyB = base64Encode(opts.idempotencyKey ?? '');
 
   return `set -euo pipefail
-WT=$(echo ${wtB} | base64 -d)
+${buildPortableBase64DecodeFunction()}
+WT=$(printf '%s' ${shellPosixSingleQuote(wtB)} | invoker_base64_decode)
 ${bashNormalizeTildePath()}
 cd "$WT"
+IDEMPOTENCY_KEY=$(printf '%s' ${shellPosixSingleQuote(idempotencyKeyB)} | invoker_base64_decode)
+MARKER=''
+IDEMPOTENCY_FOOTER=''
+if [ -n "$IDEMPOTENCY_KEY" ]; then
+  IDEMPOTENCY_FOOTER="Invoker-Finalize-Id: $IDEMPOTENCY_KEY"
+  SAFE_IDEMPOTENCY_KEY=$(printf '%s' "$IDEMPOTENCY_KEY" | tr -c 'A-Za-z0-9_.-' '_')
+  STATE_DIR=$(git rev-parse --git-path invoker-record-and-push)
+  MARKER="$STATE_DIR/$SAFE_IDEMPOTENCY_KEY.hash"
+  if [ -s "$MARKER" ]; then
+    RECORDED_HASH=$(cat "$MARKER")
+    if git rev-parse --verify --quiet "$RECORDED_HASH^{commit}" >/dev/null; then
+      printf "%s" "$RECORDED_HASH"
+      exit 0
+    fi
+  fi
+fi
+GIT_NAME=$(printf '%s' ${shellPosixSingleQuote(userNameB)} | invoker_base64_decode)
+GIT_EMAIL=$(printf '%s' ${shellPosixSingleQuote(userEmailB)} | invoker_base64_decode)
+BR=$(printf '%s' ${shellPosixSingleQuote(brB)} | invoker_base64_decode)
+PUSH_URL=$(printf '%s' ${shellPosixSingleQuote(pushRemoteUrlB)} | invoker_base64_decode)
+if [ -n "$PUSH_URL" ]; then
+  PUSH_REMOTE="$PUSH_URL"
+else
+  PUSH_REMOTE=origin
+fi
+push_recorded_head() {
+  HASH=$(git rev-parse HEAD)
+  REMOTE_EXPECTED=$(git ls-remote "$PUSH_REMOTE" "refs/heads/$BR" | awk 'NR == 1 { print $1 }')
+  if [ -n "$REMOTE_EXPECTED" ]; then
+    git push --force-with-lease="refs/heads/$BR:$REMOTE_EXPECTED" "$PUSH_REMOTE" "$HASH:refs/heads/$BR"
+  else
+    git push "$PUSH_REMOTE" "$HASH:refs/heads/$BR"
+  fi
+  if [ -n "$MARKER" ]; then
+    mkdir -p "$(dirname "$MARKER")"
+    printf "%s" "$HASH" > "$MARKER.tmp"
+    mv "$MARKER.tmp" "$MARKER"
+  fi
+  printf "%s" "$HASH"
+}
+if [ -n "$IDEMPOTENCY_FOOTER" ] && git log -1 --format=%B | grep -Fqx "$IDEMPOTENCY_FOOTER"; then
+  push_recorded_head
+  exit 0
+fi
 git add -A
 M=$(mktemp)
 trap 'rm -f "$M"' EXIT
-GIT_NAME=$(echo ${userNameB} | base64 -d)
-GIT_EMAIL=$(echo ${userEmailB} | base64 -d)
 if git diff --cached --quiet; then
-  echo ${emB} | base64 -d > "$M"
+  printf '%s' ${shellPosixSingleQuote(emB)} | invoker_base64_decode > "$M"
+  if [ -n "$IDEMPOTENCY_FOOTER" ]; then printf '\\n%s\\n' "$IDEMPOTENCY_FOOTER" >> "$M"; fi
   GIT_AUTHOR_NAME="$GIT_NAME" GIT_AUTHOR_EMAIL="$GIT_EMAIL" GIT_COMMITTER_NAME="$GIT_NAME" GIT_COMMITTER_EMAIL="$GIT_EMAIL" git commit --allow-empty -F "$M"
 else
-  echo ${chB} | base64 -d > "$M"
+  printf '%s' ${shellPosixSingleQuote(chB)} | invoker_base64_decode > "$M"
+  if [ -n "$IDEMPOTENCY_FOOTER" ]; then printf '\\n%s\\n' "$IDEMPOTENCY_FOOTER" >> "$M"; fi
   GIT_AUTHOR_NAME="$GIT_NAME" GIT_AUTHOR_EMAIL="$GIT_EMAIL" GIT_COMMITTER_NAME="$GIT_NAME" GIT_COMMITTER_EMAIL="$GIT_EMAIL" git commit -F "$M"
 fi
-HASH=$(git rev-parse HEAD)
-BR=$(echo ${brB} | base64 -d)
-PUSH_URL=$(echo ${pushRemoteUrlB} | base64 -d)
-if [ -n "$PUSH_URL" ]; then
-  git push "$PUSH_URL" "$BR:refs/heads/$BR"
-else
-  git push origin "$BR:refs/heads/$BR"
-fi
-printf "%s" "$HASH"
+push_recorded_head
 `;
 }
 

@@ -6,47 +6,182 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ startsWith(github.head_ref, 'mergify/merge-queue/') && format('merge-queue-{0}', github.head_ref) || format('pr-{0}', github.event.pull_request.number) }}
-  cancel-in-progress: true
+  # Mergify treats cancelled required checks as failed checks. Merge-queue
+  # wrapper PRs can emit several pull_request_target events for the same head,
+  # so let those runs finish instead of cancelling an earlier PR Body check
+  # that Mergify may already be watching.
+  cancel-in-progress: ${{ !startsWith(github.head_ref, 'mergify/merge-queue/') }}
 
 permissions:
   contents: read
   pull-requests: read
 
 env:
-  NODE_VERSION: '26'
+  NODE_VERSION: '24'
   PR_BODY_ENFORCE_ALL: ${{ vars.PR_BODY_ENFORCE_ALL || 'false' }}
   PR_BODY_ENFORCED_AUTHORS: ${{ vars.PR_BODY_ENFORCED_AUTHORS || 'EdbertChan' }}
 
 jobs:
   validate:
     name: PR Body
-    runs-on:
-      labels: Github_Runner
+    runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
+      - name: Reclaim runner paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          owner="$(id -u):$(id -g)"
+          sudo chown -R "${owner}" "$GITHUB_WORKSPACE"
+
+          if [[ -d "$RUNNER_TOOL_CACHE" ]]; then
+            sudo chown "${owner}" "$RUNNER_TOOL_CACHE"
+          fi
+
+          if [[ -d "$RUNNER_TOOL_CACHE/node" ]]; then
+            sudo chown -R "${owner}" "$RUNNER_TOOL_CACHE/node"
+          fi
+
       - name: Checkout trusted base
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.ref }}
           persist-credentials: false
 
-      - name: Decide selective rollout
-        id: rollout
+      - name: Resolve PR Body targets
+        # On an ordinary PR run this just resolves back to the PR itself.
+        # On a Mergify merge-queue run (author mergify[bot], head ref
+        # mergify/merge-queue/...) the event's own PR is a synthetic
+        # wrapper Mergify opens to batch-test real PRs; this fetches the
+        # real underlying PR(s) it names so the rollout decision and the
+        # validation below run against them, not against mergify[bot]'s
+        # identity or the wrapper's boilerplate body. See
+        # scripts/test-resolve-pr-body-targets.mjs.
+        id: targets
         env:
-          PR_BODY_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: node scripts/pr-body-rollout.mjs
+          PR_BODY_ENFORCE_ALL: ${{ env.PR_BODY_ENFORCE_ALL }}
+          PR_BODY_ENFORCED_AUTHORS: ${{ env.PR_BODY_ENFORCED_AUTHORS }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { resolveTargetPrNumbers, shouldEnforcePrBodyForTargets } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/resolve-pr-body-targets.mjs`);
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+
+            const numbers = resolveTargetPrNumbers({
+              author: pr.user.login,
+              headRef: pr.head.ref,
+              prNumber: pr.number,
+              body: pr.body,
+            });
+
+            if (numbers.length === 0) {
+              core.setFailed(`PR Body: could not resolve an underlying PR to validate for head ref "${pr.head.ref}" (reported author ${pr.user.login}). Failing closed instead of skipping validation.`);
+              return;
+            }
+
+            const targets = [];
+            for (const number of numbers) {
+              const { data: target } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+              targets.push({
+                number,
+                author: target.user.login,
+                body: target.body || '',
+                baseRef: target.base.ref,
+                headSha: target.head.sha,
+              });
+            }
+
+            const enabled = shouldEnforcePrBodyForTargets({
+              targets,
+              enforceAll: process.env.PR_BODY_ENFORCE_ALL,
+              enforcedAuthors: process.env.PR_BODY_ENFORCED_AUTHORS,
+            });
+
+            fs.writeFileSync('pr-body-targets.json', JSON.stringify(targets));
+            core.setOutput('enabled', String(enabled));
+            core.setOutput('authors', targets.map((target) => target.author).join(', '));
 
       - name: Skip unenforced author
-        if: steps.rollout.outputs.enabled != 'true'
-        run: echo "PR body validation is not enforced for ${{ github.event.pull_request.user.login }} yet."
+        if: steps.targets.outputs.enabled != 'true'
+        env:
+          TARGET_AUTHORS: ${{ steps.targets.outputs.authors }}
+        run: echo "PR body validation is not enforced for ${TARGET_AUTHORS} yet."
 
       - name: Install pnpm
-        if: steps.rollout.outputs.enabled == 'true'
+        if: steps.targets.outputs.enabled == 'true'
         uses: pnpm/action-setup@v4
 
+      - name: Install Node.js runtime dependency
+        if: steps.targets.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ldconfig -p 2>/dev/null | grep -q 'libatomic\.so\.1'; then
+            exit 0
+          fi
+
+          if ! command -v apt-get >/dev/null 2>&1; then
+            echo "::error::libatomic.so.1 is required for Node.js ${NODE_VERSION}, but apt-get is not available to install libatomic1."
+            exit 1
+          fi
+
+          apt_get=(apt-get)
+          if [[ "${EUID}" -ne 0 ]]; then
+            if ! sudo -n true 2>/dev/null; then
+              if ldconfig -p 2>/dev/null | grep -q 'libatomic\.so\.1'; then
+                exit 0
+              fi
+
+              echo "::error::libatomic.so.1 is required for Node.js ${NODE_VERSION}, but installing libatomic1 requires passwordless sudo on this runner."
+              exit 1
+            fi
+
+            apt_get=(sudo apt-get)
+          fi
+
+          "${apt_get[@]}" update
+          "${apt_get[@]}" install -y --no-install-recommends libatomic1
+
+      - name: Reclaim Node.js tool cache
+        if: steps.targets.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RUNNER_TOOL_CACHE:-}" ]]; then
+            echo "::error::RUNNER_TOOL_CACHE is not set; cannot prepare the Node.js tool cache."
+            exit 1
+          fi
+
+          if ! sudo -n true 2>/dev/null; then
+            echo "::error::Making RUNNER_TOOL_CACHE writable requires passwordless sudo on this runner."
+            exit 1
+          fi
+
+          if ! sudo -n mkdir -p -- "${RUNNER_TOOL_CACHE}" ||
+            ! sudo -n chown "$(id -u):$(id -g)" -- "${RUNNER_TOOL_CACHE}"; then
+            echo "::error::Could not assign RUNNER_TOOL_CACHE to the current runner account."
+            exit 1
+          fi
+
+          if [[ -e "${RUNNER_TOOL_CACHE}/node" || -L "${RUNNER_TOOL_CACHE}/node" ]] &&
+            ! sudo -n chown -R -h -P "$(id -u):$(id -g)" -- "${RUNNER_TOOL_CACHE}/node"; then
+            echo "::error::Could not assign the existing Node.js tool-cache subtree to the current runner account."
+            exit 1
+          fi
+
+          if [[ ! -d "${RUNNER_TOOL_CACHE}" || ! -w "${RUNNER_TOOL_CACHE}" ]]; then
+            echo "::error::RUNNER_TOOL_CACHE is not writable by the current runner account."
+            exit 1
+          fi
+
       - name: Use Node.js ${{ env.NODE_VERSION }}
-        if: steps.rollout.outputs.enabled == 'true'
+        if: steps.targets.outputs.enabled == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -56,38 +191,9 @@ jobs:
             .node-version
 
       - name: Install validator dependencies
-        if: steps.rollout.outputs.enabled == 'true'
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        if: steps.targets.outputs.enabled == 'true'
+        run: pnpm install --no-frozen-lockfile --ignore-scripts
 
-      - name: Fetch live PR body
-        if: steps.rollout.outputs.enabled == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('node:fs');
-            const { owner, repo } = context.repo;
-            const pull_number = context.payload.pull_request.number;
-            const { data: pull } = await github.rest.pulls.get({ owner, repo, pull_number });
-            fs.writeFileSync('pr-body.md', pull.body || '', 'utf8');
-
-      - name: Fetch PR diff metadata
-        if: steps.rollout.outputs.enabled == 'true'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          git fetch --no-tags --depth=1 origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/pull/${PR_NUMBER}/head"
-          fetched_head_sha="$(git rev-parse "refs/remotes/pull/${PR_NUMBER}/head^{commit}")"
-          if [ "$fetched_head_sha" != "$HEAD_SHA" ]; then
-            echo "Fetched PR head ${fetched_head_sha} did not match event head ${HEAD_SHA}." >&2
-            exit 1
-          fi
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
-          git diff --find-renames --unified=200000 --diff-filter=ACMRTD "$BASE_SHA" "$HEAD_SHA" -- > pr.diff
-
-      - name: Validate PR body
-        if: steps.rollout.outputs.enabled == 'true'
-        run: node scripts/validate-pr-body.mjs --body-file pr-body.md --changed-files-file changed-files.txt --diff-file pr.diff
+      - name: Validate each target PR body
+        if: steps.targets.outputs.enabled == 'true'
+        run: node scripts/validate-pr-body-targets.mjs --targets-file pr-body-targets.json

@@ -19,6 +19,7 @@ import {
   resolveDiskCleanupCooldownMs,
   resolveDiskCleanupEnabled,
   type DiskCleanupResult,
+  type DiskHeadroomWorkerStore,
 } from './disk-headroom-reclaim.js';
 import {
   runDiskHeadroomCheck,
@@ -46,6 +47,8 @@ export interface DiskHeadroomWorkerConfig {
 
   /** Optional decision ledger for cleanup act/skip rows. */
   store?: WorkerDecisionStore;
+  /** Optional workflow/task state reader used to protect in-use local paths from cleanup. */
+  workflowStore?: DiskHeadroomWorkerStore;
   /** Optional activity-log sink (wired from owner persistence). */
   writeActivityLog?: (level: ActivityLogLevel, message: string) => void;
 
@@ -69,6 +72,7 @@ export interface DiskHeadroomWorkerOptions {
   cleanupEnabled?: boolean;
   cleanupCooldownMs?: number;
   store?: WorkerDecisionStore;
+  workflowStore?: DiskHeadroomWorkerStore;
   writeActivityLog?: (level: ActivityLogLevel, message: string) => void;
   runCheck?: (deps: DiskHeadroomMonitorDeps) => Promise<DiskHeadroomEvaluation[] | unknown>;
   cleanupLocal?: typeof cleanupLocalInvokerHome;
@@ -80,15 +84,34 @@ function isEvaluationList(value: unknown): value is DiskHeadroomEvaluation[] {
   return Array.isArray(value);
 }
 
+const UNKNOWN_ALERT_STREAK = 2;
+
+class DiskUnknownStreakTracker {
+  private readonly streaks = new Map<string, number>();
+
+  recordAndShouldAlert(targetKey: string, isUnknown: boolean): boolean {
+    if (!isUnknown) {
+      this.streaks.delete(targetKey);
+      return false;
+    }
+    const next = (this.streaks.get(targetKey) ?? 0) + 1;
+    this.streaks.set(targetKey, next);
+    return next === UNKNOWN_ALERT_STREAK;
+  }
+}
+
 function recordCleanupDecision(
   store: WorkerDecisionStore | undefined,
   result: DiskCleanupResult,
+  externalKey = `cleanup:${result.targetKey}:${result.reason}`,
 ): void {
   if (!store) return;
+  const protectedSkipCount = result.protectedSkipCount ?? 0;
+  const protectedSkipBytes = result.protectedSkipBytes ?? 0;
   recordWorkerDecisionRow(store, {
     workerKind: DISK_HEADROOM_WORKER_KIND,
     actionType: 'disk-cleanup',
-    externalKey: `cleanup:${result.targetKey}:${result.reason}`,
+    externalKey,
     subjectType: 'disk-target',
     subjectId: result.targetKey,
     status: result.ok ? 'completed' : result.reason === 'cooldown' || result.reason === 'disabled'
@@ -98,9 +121,20 @@ function recordCleanupDecision(
       ? `Cleaned ${result.targetKey}`
       : `Cleanup ${result.reason} for ${result.targetKey}`,
     reason: result.reason,
-    payload: result.detail ? { detail: result.detail } : undefined,
+    payload: {
+      ...(result.detail ? { detail: result.detail } : {}),
+      protectedSkipCount,
+      protectedSkipBytes,
+      ...(result.protectedSkipBytesTruncated ? { protectedSkipBytesTruncated: true } : {}),
+    },
     incrementAttempt: result.ok,
   });
+}
+
+const WARN_PACED_STREAK = 2;
+
+function warnPacedCooldownKey(targetKey: string): string {
+  return `cleanup:${targetKey}:warn-paced`;
 }
 
 export function createDiskHeadroomWorker(options: DiskHeadroomWorkerOptions): WorkerRuntime {
@@ -111,6 +145,8 @@ export function createDiskHeadroomWorker(options: DiskHeadroomWorkerOptions): Wo
   const cooldown = new DiskCleanupCooldownTracker(
     options.cleanupCooldownMs ?? resolveDiskCleanupCooldownMs(),
   );
+  const unknownStreaks = new DiskUnknownStreakTracker();
+  const warnStreaks = new Map<string, number>();
 
   return createWorkerRuntime({
     kind: DISK_HEADROOM_WORKER_KIND,
@@ -131,8 +167,115 @@ export function createDiskHeadroomWorker(options: DiskHeadroomWorkerOptions): Wo
         writeActivityLog: options.writeActivityLog,
       });
       if (ctx.signal?.aborted) return;
-      if (!cleanupEnabled) return;
       if (!isEvaluationList(evaluationsRaw)) return;
+
+      for (const evaluation of evaluationsRaw) {
+        const shouldAlert = unknownStreaks.recordAndShouldAlert(
+          evaluation.label,
+          evaluation.level === 'unknown',
+        );
+        if (!shouldAlert) continue;
+        const message = `[disk-headroom] ${evaluation.label} has failed its last ${UNKNOWN_ALERT_STREAK} disk checks — usage can no longer be verified`;
+        options.logger.error(message, { module: 'disk-headroom', targetKey: evaluation.label });
+        options.writeActivityLog?.('error', message);
+        if (options.store) {
+          recordWorkerDecisionRow(options.store, {
+            workerKind: DISK_HEADROOM_WORKER_KIND,
+            actionType: 'disk-check-unknown',
+            externalKey: `unknown:${evaluation.label}`,
+            subjectType: 'disk-target',
+            subjectId: evaluation.label,
+            status: 'skipped',
+            summary: message,
+            reason: evaluation.level === 'unknown' ? evaluation.error : undefined,
+          });
+        }
+      }
+
+      if (!cleanupEnabled) return;
+
+      const warnPacedTargets: DiskHeadroomEvaluation[] = [];
+      for (const evaluation of evaluationsRaw) {
+        const targetKey = evaluation.label;
+        if (evaluation.level !== 'warn') {
+          warnStreaks.delete(targetKey);
+          continue;
+        }
+        const next = (warnStreaks.get(targetKey) ?? 0) + 1;
+        warnStreaks.set(targetKey, next);
+        if (next >= WARN_PACED_STREAK) {
+          warnPacedTargets.push(evaluation);
+        }
+      }
+
+      for (const evaluation of warnPacedTargets) {
+        if (ctx.signal?.aborted) return;
+        const targetKey = evaluation.label;
+        const cooldownKey = warnPacedCooldownKey(targetKey);
+        if (!cooldown.canCleanup(cooldownKey)) {
+          const skipped: DiskCleanupResult = {
+            targetKey,
+            ok: false,
+            reason: 'cooldown',
+            protectedSkipCount: 0,
+            protectedSkipBytes: 0,
+          };
+          options.logger.info?.(
+            `[disk-headroom-cleanup] skip ${targetKey}: warn-paced cooldown`,
+            { module: 'disk-headroom', targetKey },
+          );
+          recordCleanupDecision(options.store, skipped, cooldownKey);
+          continue;
+        }
+
+        options.logger.info?.(
+          `[disk-headroom-cleanup] warn-paced begin ${targetKey}`,
+          { module: 'disk-headroom', targetKey },
+        );
+        let result: DiskCleanupResult;
+        if (targetKey.startsWith('ssh:')) {
+          const target = options.remoteTargets.find(
+            (t) => `ssh:${t.name} ${t.remotePath}` === targetKey,
+          );
+          result = target
+            ? await cleanupRemote({
+              target,
+              logger: options.logger,
+              store: options.workflowStore,
+              mode: 'stale-only',
+            })
+            : {
+              targetKey,
+              ok: false,
+              reason: 'cleanup-error',
+              detail: `remote target not found for ${targetKey}`,
+              protectedSkipCount: 0,
+              protectedSkipBytes: 0,
+            };
+        } else {
+          result = await cleanupLocal({
+            invokerHome: options.localPath,
+            targetKey,
+            logger: options.logger,
+            store: options.workflowStore,
+            mode: 'stale-only',
+          });
+        }
+        const recordedResult: DiskCleanupResult = result.ok
+          ? { ...result, reason: 'warn-paced' }
+          : result;
+        cooldown.markCleaned(cooldownKey);
+        options.logger.info?.(
+          `[disk-headroom-cleanup] warn-paced done ${targetKey}`,
+          { module: 'disk-headroom', targetKey, result: recordedResult },
+        );
+        recordCleanupDecision(options.store, recordedResult, cooldownKey);
+        options.writeActivityLog?.(
+          recordedResult.ok ? 'warn' : 'error',
+          `[disk-headroom-cleanup] ${recordedResult.reason}: ${recordedResult.targetKey}`
+            + (recordedResult.detail ? ` (${recordedResult.detail.slice(0, 200)})` : ''),
+        );
+      }
 
       const critical = evaluationsRaw.filter((e) => e.level === 'critical');
       for (const evaluation of critical) {
@@ -143,6 +286,8 @@ export function createDiskHeadroomWorker(options: DiskHeadroomWorkerOptions): Wo
             targetKey,
             ok: false,
             reason: 'cooldown',
+            protectedSkipCount: 0,
+            protectedSkipBytes: 0,
           };
           options.logger.info?.(
             `[disk-headroom-cleanup] skip ${targetKey}: cooldown`,
@@ -163,11 +308,14 @@ export function createDiskHeadroomWorker(options: DiskHeadroomWorkerOptions): Wo
               ok: false,
               reason: 'cleanup-error',
               detail: `remote target not found for ${targetKey}`,
+              protectedSkipCount: 0,
+              protectedSkipBytes: 0,
             };
           } else {
             result = await cleanupRemote({
               target,
               logger: options.logger,
+              store: options.workflowStore,
             });
           }
         } else {
@@ -175,6 +323,7 @@ export function createDiskHeadroomWorker(options: DiskHeadroomWorkerOptions): Wo
             invokerHome: options.localPath,
             targetKey,
             logger: options.logger,
+            store: options.workflowStore,
           });
         }
 
@@ -214,6 +363,7 @@ export function registerDiskHeadroomWorker(
         cleanupEnabled: config?.cleanupEnabled,
         cleanupCooldownMs: config?.cleanupCooldownMs,
         store: config?.store ?? deps.store,
+        workflowStore: config?.workflowStore ?? deps.store,
         writeActivityLog: config?.writeActivityLog,
         runCheck: config?.runCheck as DiskHeadroomWorkerOptions['runCheck'],
         cleanupLocal: config?.cleanupLocal,

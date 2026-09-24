@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { WorkRequest, WorkResponse } from '@invoker/contracts';
+import { cancelOwnedStartupChild, type ExecutorStartup } from './executor.js';
 import type { Executor, ExecutorHandle, PersistedTaskMeta, TerminalSpec, Unsubscribe } from './executor.js';
 import { bashPreserveOrReset, bashMergeUpstreams, bashFetchNodeRemotes, parsePreserveResult, parseMergeError } from './branch-utils.js';
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
@@ -8,7 +9,10 @@ import type { AgentRegistry } from './agent-registry.js';
 import { assertExecutionModelSupported, DEFAULT_EXECUTION_AGENT } from './agent.js';
 import { checkStaleness } from './git-staleness-detector.js';
 import { assertNotGitConfigMutation, ensureRemoteUrl } from './git-config-mutation.js';
-import { childProcessHasExited, terminateChildProcessGroup } from './process-utils.js';
+import { isGitRefLockRace } from './git-utils.js';
+import { childProcessHasExited, cleanElectronEnv, cleanGitRepositoryEnv, killProcessGroup, SIGKILL_TIMEOUT_MS, terminateChildProcessGroup } from './process-utils.js';
+import { getExecutorStartTimeoutMs } from './task-runner-launch-support.js';
+import { appendProvisionOutputTail, spawnLocalProvisioning } from './local-provisioning.js';
 
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
@@ -17,6 +21,135 @@ const DEFAULT_MAX_BUFFER_CHUNKS = 1000;
 const DEFAULT_MAX_BUFFER_BYTES = 5 * 1024 * 1024; // 5MB
 /** Default cap for `git fetch` / `git push` (network-bound). Override via INVOKER_GIT_NETWORK_TIMEOUT_MS; use 0 for unbounded. */
 const DEFAULT_GIT_NETWORK_TIMEOUT_MS = 15 * 60 * 1000;
+const FAILED_TASK_ERROR_TAIL_LINE_LIMIT = 50;
+const FAILED_TASK_ERROR_CHAR_LIMIT = 3000;
+
+const FAILED_TASK_ERROR_LINE_PATTERNS = [
+  /^Traceback \(most recent call last\):$/,
+  /^\s*(?:error|fatal error):\s+\S/i,
+  /^\s*(?:AssertionError|SyntaxError|TypeError|ReferenceError|RangeError|ValueError|RuntimeError|ModuleNotFoundError|ImportError|KeyError|Exception):\s*\S/i,
+  /^\s*(?:FAIL|FAILED)\s+\S/i,
+  /^\s*\S.*\berror\s+TS\d+:/i,
+  /^\s*\S.*:\d+:\d+:\s+(?:error|fatal error):\s+\S/i,
+  /^\s*(?:command failed|error command failed|failed with|exited with).*\b(?:exit code|exit status|code|status)\s*[=:]?\s*[1-9]\d*\b/i,
+  /^\s*(?:exit code|exit status)\s*[=:]?\s*[1-9]\d*\b/i,
+  /\bELIFECYCLE\b.*\bCommand failed with exit code [1-9]\d*\b/i,
+];
+
+const PACKAGE_PATH_RE = /\bpackages\/[A-Za-z0-9._-]+(?=\/|\b)/g;
+const EMBEDDED_JOB_LOG_RE = /^Job log \(tail\):[ \t]*$/m;
+const HEAD_SHA_RE = /^[ \t]*Head SHA:[ \t]*([0-9a-f]{7,40})[ \t]*$/im;
+
+function withoutEmbeddedJobLog(part: string): string {
+  const marker = part.search(EMBEDDED_JOB_LOG_RE);
+  return marker === -1 ? part : part.slice(0, marker);
+}
+
+function taskTextWithoutJobLogs(request: WorkRequest): string {
+  return [
+    request.actionId,
+    request.inputs.description,
+    request.inputs.prompt,
+    request.inputs.command,
+  ]
+    .filter((part): part is string => typeof part === 'string' && part.length > 0)
+    .map(withoutEmbeddedJobLog)
+    .join('\n');
+}
+
+function inferOwningPackage(request: WorkRequest): string {
+  const haystack = taskTextWithoutJobLogs(request);
+  const packages = [...new Set(haystack.match(PACKAGE_PATH_RE) ?? [])];
+  if (packages.length === 1) return packages[0];
+  if (packages.length > 1) return `${packages[0]} (plus explicitly named sibling paths)`;
+  return 'not specified; infer the narrowest package from the named files before editing';
+}
+
+function inferNamedHeadSha(request: WorkRequest): string | undefined {
+  return HEAD_SHA_RE.exec(taskTextWithoutJobLogs(request))?.[1];
+}
+
+function buildWorkerOrientationPack(request: WorkRequest): string {
+  const owningPackage = inferOwningPackage(request);
+  const headSha = inferNamedHeadSha(request);
+  const lines = [
+    'Worker orientation pack:',
+    `- Owning package: ${owningPackage}`,
+    '- Allowed files: stay inside the owning package and any task-named files unless the task explicitly widens scope.',
+    '- Do not start with an unscoped repository walk; inspect the named package, files, and existing tests first.',
+  ];
+  if (headSha) {
+    lines.push(
+      `- Head SHA ${headSha} is named in this task: run \`git rev-parse HEAD\` first, and if it differs,`
+      + ' reconcile before reading or editing any file.'
+      + ' A worktree can start on the default branch, where a file the task names does not exist yet.',
+      '- Reconcile without destroying work: a reused worktree can arrive with uncommitted changes, so run'
+      + ' `git status --porcelain` and, if it prints anything, `git stash push -u` to preserve that work'
+      + ` before \`git reset --hard ${headSha}\`. Never hard-reset over a dirty worktree you have not stashed.`,
+    );
+  }
+  return lines.join('\n');
+}
+
+function failedTaskErrorTail(output: string): string | undefined {
+  const lines = output.split('\n');
+  const tail = lines.slice(-FAILED_TASK_ERROR_TAIL_LINE_LIMIT).join('\n').trim();
+  if (!tail) return undefined;
+  return tail.length > FAILED_TASK_ERROR_CHAR_LIMIT
+    ? tail.slice(-FAILED_TASK_ERROR_CHAR_LIMIT)
+    : tail;
+}
+
+function findFirstErrorShapedLineStart(output: string): number | undefined {
+  let lineStart = 0;
+  for (const line of output.split('\n')) {
+    const matchLine = line.endsWith('\r') ? line.slice(0, -1) : line;
+    if (FAILED_TASK_ERROR_LINE_PATTERNS.some((pattern) => pattern.test(matchLine))) {
+      return lineStart;
+    }
+    lineStart += line.length + 1;
+  }
+  return undefined;
+}
+
+export function selectFailedTaskStoredError(output: string): string | undefined {
+  const errorStart = findFirstErrorShapedLineStart(output);
+  if (errorStart !== undefined) {
+    const errorSpan = output.slice(errorStart).trim();
+    if (!errorSpan) return undefined;
+    return errorSpan.length > FAILED_TASK_ERROR_CHAR_LIMIT
+      ? errorSpan.slice(0, FAILED_TASK_ERROR_CHAR_LIMIT)
+      : errorSpan;
+  }
+  return failedTaskErrorTail(output);
+}
+
+/**
+ * Canonicalizes a repoUrl for `repoProvisionCommands` lookups so
+ * `git@github.com:org/repo.git`, `https://github.com/org/repo.git`, and
+ * `https://github.com/org/repo` (any trailing slash, any case) all resolve to
+ * the same config entry.
+ */
+export function normalizeRepoUrlForProvisionLookup(repoUrl: string): string {
+  let normalized = repoUrl.trim().toLowerCase();
+  const schemeSeparatorIndex = normalized.indexOf('://');
+  if (schemeSeparatorIndex >= 0) {
+    normalized = normalized.slice(schemeSeparatorIndex + '://'.length);
+  }
+  if (normalized.startsWith('git@')) {
+    const withoutGitUser = normalized.slice('git@'.length);
+    const scpPathSeparatorIndex = withoutGitUser.indexOf(':');
+    normalized = scpPathSeparatorIndex >= 0
+      ? `${withoutGitUser.slice(0, scpPathSeparatorIndex)}/${withoutGitUser.slice(scpPathSeparatorIndex + 1)}`
+      : withoutGitUser;
+  }
+  let endIndex = normalized.length;
+  while (endIndex > 0 && normalized[endIndex - 1] === '/') {
+    endIndex -= 1;
+  }
+  normalized = normalized.slice(0, endIndex);
+  return normalized.endsWith('.git') ? normalized.slice(0, -4) : normalized;
+}
 
 export interface BaseEntry {
   request: WorkRequest;
@@ -36,6 +169,7 @@ export interface BaseEntry {
   heartbeatTimer?: ReturnType<typeof setInterval>;
   /** Timestamp when the heartbeat was started, for max duration enforcement. */
   heartbeatStartedAt?: number;
+  exitObservedAt?: number;
   /**
    * True while the child process has already closed but completion is intentionally
    * deferred (for example, remote finalize/push). Keeps heartbeats alive so the
@@ -48,6 +182,18 @@ export interface BaseEntry {
 
 interface HeartbeatOptions {
   emitIntervalHeartbeat?: boolean;
+}
+
+/**
+ * True while the child has closed but completion is intentionally deferred
+ * (e.g. remote finalize/push), so the heartbeat should keep firing instead of
+ * declaring the process an orphan.
+ */
+export function isHeartbeatAliveDuringFinalize(
+  entry: Pick<BaseEntry, 'finalizingAfterClose'>,
+  child: ChildProcess,
+): boolean {
+  return Boolean(entry.finalizingAfterClose);
 }
 
 export interface ClaudeSessionParams {
@@ -108,6 +254,9 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
   protected maxDurationMs: number;
   protected maxBufferChunks: number;
   protected maxBufferBytes: number;
+  protected provisionCommand = '';
+  private repoProvisionCommands: Record<string, string> = {};
+  private readonly localProvisioningTimeoutsMs = new Map<string, number>();
 
   constructor(
     heartbeatIntervalMs?: number,
@@ -119,6 +268,47 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     this.maxDurationMs = maxDurationMs ?? DEFAULT_MAX_DURATION_MS;
     this.maxBufferChunks = maxBufferChunks ?? DEFAULT_MAX_BUFFER_CHUNKS;
     this.maxBufferBytes = maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
+  }
+  protected setProvisionCommand(command: string | undefined, fallback: string): void {
+    const trimmed = command?.trim();
+    this.provisionCommand = trimmed ? trimmed : fallback;
+  }
+
+  /**
+   * `repoUrl` keys are normalized with {@link normalizeRepoUrlForProvisionLookup}
+   * so config authors don't need to match the exact string form a workflow's
+   * `repoUrl` happens to use.
+   */
+  protected setRepoProvisionCommands(commands: Record<string, string> | undefined): void {
+    this.repoProvisionCommands = {};
+    for (const [repoUrl, command] of Object.entries(commands ?? {})) {
+      this.repoProvisionCommands[normalizeRepoUrlForProvisionLookup(repoUrl)] = command;
+    }
+  }
+
+  /**
+   * A pool's `provisionCommand` (e.g. `pnpm install --frozen-lockfile`) is
+   * tuned for the repo the pool was set up for, not for whatever `repoUrl` a
+   * given task happens to check out. `repoProvisionCommands` lets config map
+   * a specific repo to its own command (including an explicit empty string
+   * for repos that need no install step at all), taking priority over the
+   * pool's default when the task's `repoUrl` has an entry.
+   */
+  protected resolveProvisionCommand(repoUrl: string | undefined): string {
+    return this.findRepoProvisionCommand(repoUrl) ?? this.provisionCommand;
+  }
+
+  protected findRepoProvisionCommand(repoUrl: string | undefined): string | undefined {
+    if (!repoUrl) return undefined;
+    return this.repoProvisionCommands[normalizeRepoUrlForProvisionLookup(repoUrl)];
+  }
+
+  protected setLocalProvisioningTimeout(executionId: string, timeoutMs: number): void {
+    this.localProvisioningTimeoutsMs.set(executionId, timeoutMs);
+  }
+
+  protected appendProvisionOutputTail(tail: string, text: string): string {
+    return appendProvisionOutputTail(tail, text);
   }
 
   protected createHandle(request: WorkRequest): ExecutorHandle {
@@ -200,6 +390,40 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       });
     }
   }
+  protected spawnLocalProvisioningProcess(options: {
+    command: string;
+    cwd: string;
+    executionId?: string;
+    traceLabel: string;
+    startMessage?: string;
+    failurePrefix: string;
+    startup?: ExecutorStartup;
+  }): { child: ChildProcess | null; completion: Promise<void> } {
+    const executionId = options.executionId;
+    const hasCommand = options.command.trim().length > 0;
+    if (hasCommand && executionId && options.startMessage) {
+      this.emitOutput(executionId, options.startMessage);
+    }
+    const timeoutMs = executionId
+      ? this.localProvisioningTimeoutsMs.get(executionId) ?? getExecutorStartTimeoutMs()
+      : getExecutorStartTimeoutMs();
+    const run = spawnLocalProvisioning({
+      command: options.command,
+      cwd: options.cwd,
+      traceLabel: options.traceLabel,
+      failurePrefix: options.failurePrefix,
+      timeoutMs,
+      startup: options.startup,
+      onOutput: executionId ? (text) => this.emitOutput(executionId, text) : undefined,
+    });
+    if (hasCommand && executionId) {
+      const clearTimeoutEntry = (): void => {
+        this.localProvisioningTimeoutsMs.delete(executionId);
+      };
+      run.completion.then(clearTimeoutEntry, clearTimeoutEntry);
+    }
+    return run;
+  }
 
   /**
    * Start a periodic heartbeat that detects orphaned processes: the child
@@ -215,6 +439,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     const emitIntervalHeartbeat = opts.emitIntervalHeartbeat ?? true;
 
     entry.heartbeatStartedAt = Date.now();
+    entry.exitObservedAt = undefined;
 
     entry.heartbeatTimer = setInterval(() => {
       if (entry.completed) {
@@ -224,7 +449,12 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       }
 
       if (childProcessHasExited(child) || child.killed) {
-        if (entry.finalizingAfterClose) {
+        if (isHeartbeatAliveDuringFinalize(entry, child)) {
+          this.emitHeartbeat(executionId);
+          return;
+        }
+        if (entry.exitObservedAt === undefined) {
+          entry.exitObservedAt = Date.now();
           this.emitHeartbeat(executionId);
           return;
         }
@@ -395,12 +625,14 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     BaseExecutor.gitAvailableChecked = false;
   }
 
-  protected async ensureGitAvailable(): Promise<void> {
+  protected async ensureGitAvailable(startup?: ExecutorStartup): Promise<void> {
+    startup?.check();
     if (BaseExecutor.gitAvailableChecked) return;
     try {
-      await this.execGitSimple(['--version'], process.cwd());
+      await this.execGitSimple(['--version'], process.cwd(), { startup });
       BaseExecutor.gitAvailableChecked = true;
     } catch (err) {
+      startup?.check();
       throw new Error(
         `git is not available on PATH. Install git and ensure it is in your shell PATH.\n` +
         `${err instanceof Error ? err.message : String(err)}`,
@@ -450,8 +682,9 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
   protected execGitSimple(
     args: string[],
     cwd: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; startup?: ExecutorStartup },
   ): Promise<string> {
+    opts?.startup?.check();
     assertNotGitConfigMutation(args, `${this.type}.execGitSimple`);
     const stack = new Error().stack;
     const callerFrames = stack?.split('\n').slice(1, 5).map(l => l.trim()).join('\n    ') ?? '(no stack)';
@@ -464,8 +697,11 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       const child = spawn('git', args, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: cleanGitRepositoryEnv(),
         signal: opts?.signal,
+        detached: !!opts?.startup,
       });
+      cancelOwnedStartupChild(child, opts?.startup);
       let stdout = '';
       let stderr = '';
       child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
@@ -474,6 +710,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
         reject(new Error(`Failed to spawn git: ${err.message}`));
       });
       child.on('close', (code) => {
+        try { opts?.startup?.check(); } catch (error) { reject(error); return; }
         if (code === 0) resolve(stdout.trim());
         else {
           const details = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n');
@@ -504,13 +741,16 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
    * transport (e.g., DockerExecutor routes through docker exec, SshExecutor
    * routes through SSH).
    */
-  protected runBash(script: string, cwd: string): Promise<string> {
+  protected runBash(script: string, cwd: string, startup?: ExecutorStartup): Promise<string> {
+    startup?.check();
     return new Promise((resolve, reject) => {
       const child = spawn('bash', ['-c', script], {
         cwd,
+        detached: !!startup,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
+      cancelOwnedStartupChild(child, startup);
       let stdout = '';
       let stderr = '';
       child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
@@ -521,6 +761,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       });
 
       child.on('close', (code) => {
+        try { startup?.check(); } catch (error) { reject(error); return; }
         if (code === 0) {
           resolve(stdout);
         } else {
@@ -550,14 +791,17 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     request: WorkRequest,
     mergeCwd: string,
     setupBranchExplicitBase?: string,
+    startup?: ExecutorStartup,
   ): Promise<void> {
+    startup?.check();
     const upstreams = request.inputs.upstreamBranches ?? [];
-    const upstreamsToMerge = this.selectUpstreamBranchesToMerge(
-      upstreams,
-      request.inputs.baseBranch,
-      setupBranchExplicitBase,
-    );
-    const baseFromUpstream = !setupBranchExplicitBase && upstreams.length > 0;
+    const upstreamsToMerge = this.selectUpstreamBranchesToMerge({
+      upstreamBranches: upstreams,
+      requestBaseBranch: request.inputs.baseBranch,
+      upstreamBaseBranch: request.inputs.upstreamBase?.branch,
+      baseAlreadyApplied: Boolean(setupBranchExplicitBase || request.inputs.upstreamBase?.commitHash),
+    });
+    const baseFromUpstream = !setupBranchExplicitBase && !request.inputs.upstreamBase?.commitHash && upstreams.length > 0;
     traceExecution(
       `${RESTART_TO_BRANCH_TRACE} [mergeRequestUpstreamBranches] upstreamsToMerge=${JSON.stringify(upstreamsToMerge)} ` +
         `(baseFromUpstream=${baseFromUpstream}) mergeCwd=${mergeCwd}`,
@@ -572,6 +816,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
         branchRepoUrl: request.inputs.branchRepoUrl,
       }),
       mergeCwd,
+      startup,
     );
     const mergeScript = bashMergeUpstreams({
       worktreeDir: mergeCwd,
@@ -580,7 +825,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       missingRefMode: 'fail',
     });
     try {
-      await this.runBash(mergeScript, mergeCwd);
+      await this.runBash(mergeScript, mergeCwd, startup);
       traceExecution(
         `${RESTART_TO_BRANCH_TRACE} [mergeRequestUpstreamBranches] merge OK (${upstreamsToMerge.length} branch(es))`,
       );
@@ -599,24 +844,30 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     }
   }
 
-  private selectUpstreamBranchesToMerge(
-    upstreamBranches: string[],
-    requestBaseBranch?: string,
-    setupBranchExplicitBase?: string,
-  ): string[] {
-    const requestBase = requestBaseBranch?.trim();
+  private selectUpstreamBranchesToMerge(opts: {
+    upstreamBranches: string[];
+    requestBaseBranch?: string;
+    upstreamBaseBranch?: string;
+    baseAlreadyApplied: boolean;
+  }): string[] {
+    const requestBase = opts.requestBaseBranch?.trim();
+    const upstreamBaseBranch = opts.upstreamBaseBranch?.trim();
+    let branches = opts.upstreamBranches;
+
     // Contract: upstreamBranches may be shaped as
-    // [workflowBase, dependencyBranch, ...]. When the workflow base was already
-    // resolved and supplied explicitly, do not merge that marker again.
-    if (setupBranchExplicitBase && requestBase && upstreamBranches[0] === requestBase) {
-      return upstreamBranches.slice(1);
+    // [workflowBase, dependencyBranch, ...]. When the branch already starts from
+    // an explicit base ref/commit, do not merge that workflow-base marker again.
+    if (opts.baseAlreadyApplied && requestBase && branches[0] === requestBase) {
+      branches = branches.slice(1);
+    } else if (!opts.baseAlreadyApplied && !upstreamBaseBranch && branches.length > 0) {
+      branches = branches.slice(1);
     }
 
-    if (!setupBranchExplicitBase && upstreamBranches.length > 0) {
-      return upstreamBranches.slice(1);
+    if (!upstreamBaseBranch) {
+      return branches;
     }
 
-    return upstreamBranches;
+    return branches.filter((branch) => branch !== upstreamBaseBranch);
   }
 
   protected async setupTaskBranch(
@@ -628,9 +879,14 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     try {
       const branchName = opts?.branchName ?? `invoker/${request.actionId}`;
       const upstreams = request.inputs.upstreamBranches ?? [];
-      // When opts.base is provided, all upstreams need merging.
-      // When not provided, upstreams[0] becomes the base and the rest are merged.
-      const base = opts?.base ?? upstreams[0] ?? request.inputs.baseBranch ?? 'HEAD';
+      // When opts.base is provided, or upstreamBase is available, the branch
+      // starts from that explicit ref/commit and only the remaining upstreams
+      // are merged. Otherwise upstreams[0] becomes the base.
+      const base = opts?.base
+        ?? request.inputs.upstreamBase?.commitHash?.trim()
+        ?? upstreams[0]
+        ?? request.inputs.baseBranch
+        ?? 'HEAD';
       const mergeCwd = opts?.worktreeDir ?? cwd;
 
       traceExecution(
@@ -736,7 +992,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     if (!commitHash) {
       return { error: 'commit approved fix failed' };
     }
-    const pushError = await this.pushBranchToRemote(cwd, branch, undefined, request.inputs.branchRepoUrl);
+    const pushError = await this.pushBranchToRemote(cwd, branch, undefined, request.inputs.branchRepoUrl, commitHash);
     if (pushError) {
       return { error: pushError };
     }
@@ -852,6 +1108,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     branch: string,
     executionId?: string,
     branchRepoUrlOverride?: string,
+    sourceCommitHash?: string,
   ): Promise<string | undefined> {
     try {
       const requestBranchRepoUrl = branchRepoUrlOverride ?? (executionId
@@ -867,24 +1124,41 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
           context: { caller: `${this.type}.pushBranchToRemote`, detail: branch },
         });
       }
-      const branchRef = `${branch}:refs/heads/${branch}`;
+      const destinationRef = `refs/heads/${branch}`;
+      const explicitSourceRef = sourceCommitHash?.trim();
+      let sourceRef: string;
+      if (explicitSourceRef) {
+        sourceRef = explicitSourceRef;
+      } else {
+        const currentBranch = (await this.execGitSimple(['branch', '--show-current'], cwd)).trim();
+        sourceRef = !currentBranch || currentBranch === branch
+          ? 'HEAD'
+          : `refs/heads/${branch}`;
+      }
+      const sourceSha = (await this.execGitSimple(['rev-parse', '--verify', `${sourceRef}^{commit}`], cwd)).trim();
+      const branchRef = `${sourceSha}:${destinationRef}`;
       try {
         await this.execGitSimpleWithNetworkTimeout(
           ['push', '--force-with-lease', remoteName, branchRef],
           cwd,
         );
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const missingLocalRef = message.includes('src refspec ')
-          && message.includes(' does not match any');
-        const currentBranch = (await this.execGitSimple(['branch', '--show-current'], cwd)).trim();
-        if (!missingLocalRef || currentBranch.length > 0) {
+        if (!this.isRetryableLeasePublishError(err)) {
           throw err;
         }
+        await this.fetchRemoteBranchForLease(cwd, remoteName, branch);
         await this.execGitSimpleWithNetworkTimeout(
-          ['push', '--force-with-lease', remoteName, `HEAD:refs/heads/${branch}`],
+          ['push', '--force-with-lease', remoteName, branchRef],
           cwd,
         );
+      }
+      const verified = await this.pushedBranchMatchesSha(cwd, remoteName, branch, sourceSha);
+      if (!verified) {
+        await this.execGitSimpleWithNetworkTimeout(
+          ['push', '--force', remoteName, branchRef],
+          cwd,
+        );
+        await this.assertPushedBranchMatchesSha(cwd, remoteName, branch, sourceSha);
       }
       return undefined;
     } catch (err) {
@@ -893,6 +1167,70 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
       if (executionId) this.emitOutput(executionId, msg);
       return err instanceof Error ? err.message : String(err);
     }
+  }
+
+  private isRetryableLeasePublishError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return isGitRefLockRace(err) || /\bstale info\b/i.test(message);
+  }
+
+  private async fetchRemoteBranchForLease(
+    cwd: string,
+    remoteName: string,
+    branch: string,
+  ): Promise<void> {
+    await this.execGitSimpleWithNetworkTimeout(
+      ['fetch', remoteName, `+refs/heads/${branch}:refs/remotes/${remoteName}/${branch}`],
+      cwd,
+    );
+  }
+
+  private async pushedBranchMatchesSha(
+    cwd: string,
+    remoteName: string,
+    branch: string,
+    sourceSha: string,
+  ): Promise<boolean> {
+    const remoteSha = await this.readRemoteBranchSha(cwd, remoteName, branch);
+    return remoteSha === sourceSha;
+  }
+
+  private async assertPushedBranchMatchesSha(
+    cwd: string,
+    remoteName: string,
+    branch: string,
+    sourceSha: string,
+  ): Promise<void> {
+    const remoteSha = await this.readRemoteBranchSha(cwd, remoteName, branch);
+    const destinationRef = `refs/heads/${branch}`;
+    if (!remoteSha) {
+      throw new Error(
+        `Push verification failed: branch "${branch}" is not on ${remoteName} after push. ` +
+        `Expected ${sourceSha.slice(0, 12)} at ${destinationRef}.`,
+      );
+    }
+    if (remoteSha !== sourceSha) {
+      throw new Error(
+        `Push verification failed: ${remoteName} has "${branch}" at ${remoteSha.slice(0, 12)}, ` +
+        `but the task result is ${sourceSha.slice(0, 12)}.`,
+      );
+    }
+  }
+
+  private async readRemoteBranchSha(
+    cwd: string,
+    remoteName: string,
+    branch: string,
+  ): Promise<string | undefined> {
+    const destinationRef = `refs/heads/${branch}`;
+    const lsRemote = (await this.execGitSimpleWithNetworkTimeout(
+      ['ls-remote', '--heads', remoteName, '--', branch],
+      cwd,
+    )).trim();
+    return lsRemote
+      .split('\n')
+      .map((line) => line.trim().split(/\s+/))
+      .find((parts) => parts[1] === destinationRef)?.[0] ?? '';
   }
 
   protected isTransientGitTransportError(error: string): boolean {
@@ -928,10 +1266,18 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
         const agent = opts.agentRegistry.getOrThrow(agentName);
         assertExecutionModelSupported(agent, request.inputs.executionModel);
         const fullPrompt = this.buildFullPrompt(request);
-        const spec = agent.buildCommand(fullPrompt, { executionModel: request.inputs.executionModel });
+        const spec = agent.buildCommand(fullPrompt, {
+          executionModel: request.inputs.executionModel,
+          maxTurns: request.inputs.maxTurns,
+        });
         return { cmd: spec.cmd, args: spec.args, agentSessionId: spec.sessionId, fullPrompt: spec.fullPrompt };
       }
-      // Fallback: use prepareClaudeSession when no agent registry is available
+      const requestedAgent = request.inputs.executionAgent;
+      if (requestedAgent) {
+        throw new Error(
+          `Cannot resolve requested execution agent "${requestedAgent}": no configured agent set was supplied`,
+        );
+      }
       const claudeCommand = opts?.claudeCommand ?? 'claude';
       const session = this.prepareClaudeSession(request);
       return { cmd: claudeCommand, args: session.cliArgs, agentSessionId: session.sessionId, fullPrompt: session.fullPrompt };
@@ -1010,7 +1356,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
 
     let pushError: string | undefined;
     if (opts?.branch) {
-      pushError = await this.pushBranchToRemote(cwd, opts.branch, executionId);
+      pushError = await this.pushBranchToRemote(cwd, opts.branch, executionId, undefined, commitHash);
     }
     if (effectiveExitCode === 0 && pushError !== undefined && opts?.branch) {
       if (this.isTransientGitTransportError(pushError)) {
@@ -1037,11 +1383,7 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     let error: string | undefined;
     if (effectiveExitCode !== 0 && entry) {
       const allOutput = entry.outputBuffer.join('');
-      const lines = allOutput.split('\n');
-      const tail = lines.slice(-50).join('\n').trim();
-      if (tail) {
-        error = tail.length > 3000 ? tail.slice(-3000) : tail;
-      }
+      error = selectFailedTaskStoredError(allOutput);
     }
     if (semanticFailure) {
       error = semanticFailure.message;
@@ -1112,6 +1454,9 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
    */
   protected buildFullPrompt(request: WorkRequest): string {
     let fullPrompt = request.inputs.prompt ?? '';
+    if (request.actionType === 'ai_task') {
+      fullPrompt = `${buildWorkerOrientationPack(request)}\n\n${fullPrompt}`;
+    }
     if (request.inputs.upstreamContext?.length) {
       const contextLines = request.inputs.upstreamContext.map(ctx => {
         let line = `[Upstream task: ${ctx.taskId}]\nDescription: ${ctx.description}\nSummary: ${ctx.summary ?? 'N/A'}`;
@@ -1127,12 +1472,20 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
   /**
    * Build CLI args for invoking `claude` with a session ID and prompt.
    */
-  protected buildClaudeArgs(sessionId: string, fullPrompt: string, executionModel?: string): string[] {
+  protected buildClaudeArgs(
+    sessionId: string,
+    fullPrompt: string,
+    executionModel?: string,
+    maxTurns?: number,
+  ): string[] {
     return [
       '--session-id',
       sessionId,
       '--dangerously-skip-permissions',
       ...(executionModel ? ['--model', executionModel] : []),
+      ...(typeof maxTurns === 'number' && Number.isFinite(maxTurns) && maxTurns > 0
+        ? ['--max-turns', String(maxTurns)]
+        : []),
       '-p',
       fullPrompt,
     ];
@@ -1145,7 +1498,12 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
   protected prepareClaudeSession(request: WorkRequest): ClaudeSessionParams {
     const sessionId = randomUUID();
     const fullPrompt = this.buildFullPrompt(request);
-    const cliArgs = this.buildClaudeArgs(sessionId, fullPrompt, request.inputs.executionModel);
+    const cliArgs = this.buildClaudeArgs(
+      sessionId,
+      fullPrompt,
+      request.inputs.executionModel,
+      request.inputs.maxTurns,
+    );
     return { sessionId, cliArgs, fullPrompt };
   }
 
@@ -1154,6 +1512,22 @@ export abstract class BaseExecutor<TEntry extends BaseEntry> implements Executor
     if (!entry || entry.completed || !entry.process) return;
 
     await terminateChildProcessGroup(entry.process, () => entry.completed);
+  }
+
+  protected writeProcessInput(entry: TEntry | undefined, input: string): void {
+    if (!entry || entry.completed) return;
+    const stdin = entry.process?.stdin;
+    if (!stdin) return;
+
+    const eofIndex = input.indexOf('\x04');
+    if (eofIndex === -1) {
+      stdin.write(input);
+      return;
+    }
+
+    const beforeEof = input.slice(0, eofIndex);
+    if (beforeEof) stdin.write(beforeEof);
+    stdin.end();
   }
 
   // Abstract methods that subclasses must implement

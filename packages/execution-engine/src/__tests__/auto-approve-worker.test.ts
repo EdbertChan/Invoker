@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   collectValidatedAutoApproveCandidates,
+  compareCandidateSnapshot,
   createAutoApproveTick,
   isApproveIntentForTask,
   listAutoApproveScanCandidates,
@@ -74,13 +75,13 @@ function wakeup(overrides: Partial<RecoveryWorkerWakeupHint> = {}): RecoveryWork
 function makeStore(
   tasks: TaskState[],
   openIntents: WorkflowMutationIntent[] = [],
-  workflows: Array<{ id: string; mergeMode?: string | null; onFinish?: string | null }> = [{ id: 'wf-1' }],
+  workflows: Array<{ id: string; name?: string; mergeMode?: string | null; onFinish?: string | null }> = [{ id: 'wf-1' }],
 ) {
   const workflowMap = new Map(workflows.map((workflow) => [workflow.id, workflow]));
   const actions = new Map<string, WorkerActionRecord>();
   const writes: WorkerActionWrite[] = [];
   const store: AutoApproveWorkerStore = {
-    listWorkflows: vi.fn(() => workflows.map(({ id }) => ({ id }))),
+    listWorkflows: vi.fn(() => workflows.map(({ id, name }) => ({ id, name }))),
     loadWorkflow: vi.fn((workflowId: string) => workflowMap.get(workflowId)),
     loadTasks: vi.fn(() => tasks),
     loadTask: vi.fn((taskId: string) => tasks.find((candidate) => candidate.id === taskId)),
@@ -196,6 +197,24 @@ describe('autoapprove worker', () => {
     }
   });
 
+  it('compareCandidateSnapshot detects each staleness reason directly', () => {
+    const cases: Array<[string, TaskState, AutoApproveCandidate]> = [
+      ['stale-workflow', task({ config: { workflowId: 'wf-2' } }), candidate()],
+      ['stale-generation', task({ execution: { generation: 2 } }), candidate()],
+      ['stale-task-state-version', task({ taskStateVersion: 5 }), candidate()],
+      ['stale-attempt', task({ execution: { selectedAttemptId: 'attempt-2' } }), candidate()],
+    ];
+
+    for (const [reason, latest, snapshot] of cases) {
+      expect(compareCandidateSnapshot(snapshot, latest)).toMatchObject({ ok: false, reason });
+    }
+
+    expect(compareCandidateSnapshot(candidate(), task())).toMatchObject({
+      ok: true,
+      ref: { taskId: 'wf-1/task-1', workflowId: 'wf-1', generation: 1, taskStateVersion: 4, attemptId: 'attempt-1' },
+    });
+  });
+
   it('dedupes duplicate wakeups for the same snapshot', async () => {
     const { store } = makeStore([task()]);
     const submitter = { submit: vi.fn(() => 42) };
@@ -263,5 +282,19 @@ describe('autoapprove worker', () => {
 
     expect(store.listWorkflows).not.toHaveBeenCalled();
     expect(submitter.submit).not.toHaveBeenCalled();
+  });
+
+  it('skips admin-bypass-* workflows even with pending fix errors', () => {
+    const { store, writes } = makeStore(
+      [task()],
+      [],
+      [{ id: 'wf-1', name: 'admin-bypass-repair-check-pr-10514-typescript-d1f1cf5' }],
+    );
+
+    expect(collectValidatedAutoApproveCandidates({ store, submitter: { submit: vi.fn() }, logger, enabled: true }, [candidate()])).toEqual([]);
+    expect(writes[0]).toMatchObject({
+      status: 'skipped',
+      summary: 'Skipped AI fix approval: admin-bypass-excluded',
+    });
   });
 });

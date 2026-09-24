@@ -4,6 +4,105 @@ All notable changes to Invoker will be documented in this file.
 
 ## Unreleased
 
+- Document the new terminal `skipped` task status: it marks tasks skipped
+  because an upstream task failed, and retrying that upstream task resurrects
+  the skipped task for execution.
+
+## 0.1.0
+
+- 0.0.14 through 0.0.19 were version-bumped but never merged into `master`'s
+  release lineage (0.0.14/0.0.15 landed on a branch that diverged before
+  `master` moved on; 0.0.16-0.0.19 were never tagged at all), so the guard
+  that enforces a minor bump from the last real release (`v0.0.13`) is what
+  this version number reflects. This release catches up the published
+  channels to the current `master` and covers the changes accumulated since
+  `v0.0.13`.
+- Fix PR-authoring publication always using Codex regardless of a workflow's
+  declared execution agent: `publishReviewStackWithMakePrSkill()` now
+  resolves and publishes through the same single declared agent the rest of
+  the workflow's tasks use, instead of a hardcoded Codex lookup (#11892,
+  #11894).
+- Let a merge node's own pool, execution agent, and execution model be
+  edited at runtime, with PR authoring honoring a merge node's own declared
+  agent over its upstream tasks' (#11893, #11895, #11896, #11900).
+- Add an optional per-task priority field and wire it through parsing and
+  the dispatch queue, defaulting worker-submitted tasks to lower priority
+  than user-submitted ones (#11966, #11967, #11968, #11995).
+- Add `invoker-cli run-worker <kind> -- <args...>` for one-shot worker runs,
+  `invoker-cli query capacity` for pool/member slot usage and queue depth,
+  and `invoker-cli delete` as a first-class subcommand (#11943, #11944,
+  #11957, #11937).
+- Add an off-by-default spend circuit breaker worker and a self-deploy
+  worker (opt-in) for DO1 (#11948, #11927-#11930).
+- Widen the Codex OAuth proactive-refresh window from 5 minutes to a day to
+  reduce mid-task auth expiry (#11942).
+- Fix a cancel-cascade bug where an already-skipped dependent task was
+  treated as never-started, and fix resurrection of a skipped descendant's
+  launch outbox entry after its blocking task is fixed and approved
+  (#11833-#11835, #11994).
+
+## 0.0.14
+
+- Fix packaged desktop owner-serve: bundle `@invoker/surfaces` and `@slack/bolt` into the Electron main bundle so loading the in-app planner no longer depends on pnpm-nested asar deps (npm 0.0.13 died with `Cannot find module 'form-data'`).
+
+## 0.0.13
+
+- Bring planning chat to the web surfaces: bind a repo before the conversation starts, wire planning and task terminals through web dispatch, persist and retry turns, and keep Send from racing a repo bind or an in-flight turn (#9955-#9981, #9995).
+- Let the in-app planning chat switch harness and model per turn, and keep first-draft plan-doctor repair running until the draft passes (#8543-#8546, #10217). Persist approved drafts and bind review identity in-app and in Slack so a restart no longer burns the repair budget (#10244-#10249).
+- Stop Slack plan review from breaking on size or formatting: clamp the review card to Slack's 3000-character block limit, stop dumping full plan YAML as raw chat text, and stage doctor-approved plan bytes so Approve still works after YAML stringify (#9882, #9883, #10242, #10465, #10466). Standalone `invoker-cli` / `invoker-slack` installs now ship plan-doctor skills (#9688-#9722).
+- Make owner workers boot from an always-on set plus SQLite desired state instead of start booleans in config (#10276-#10279). Add `autoApproveAuthors` (fail closed when the mapped PR author is not allowlisted) and `prMaintenance.targetRepos` for multi-repo PR scans (#10408-#10412, #10422-#10424).
+- Add idle-task cleanup (`closeIdleTask` / `close-task`), infra-repair hardening for SSH/disk-full failures, a default-on Claude OAuth refresh worker, and `install-skills` always-on harness helpers with an uninstall mode (#9251-#9257, #9376-#9378, #9834, #10071-#10078, #10358-#10369).
+- Recover a crashed Electron renderer instead of leaving a blank window (#8564-#8567). Reap expired-lease headless tasks without a BrowserWindow, yield during stale worktree cleanup so the owner stays responsive, fail fast on a build-mismatched owner, and stop `@Invoker restart` from spawning a duplicate owner-serve (#8605, #8606, #9151, #9179, #10260).
+- Add a general alert channel (headless query plus Slack lobby posts) and register a `ClaudePlanningAgent` so Slack's `claude` preset resolves (#8547-#8551, #10253). Unvendor the personal `/reflect` skill from this repo; CI reflect is an opt-in to catstack (#9887, #9888).
+
+## 0.0.12
+
+- Fix an owner-startup incident: the scheduler reloaded every active workflow's tasks from the database once per ready task on every scheduling pass instead of once per pass, so a large ready-task backlog could make the owner process's boot effectively never finish (confirmed live: the same query firing thousands of times with zero deceleration). A cold boot against a real 900-task/300-workflow database dropped from 12.4s to well under a second. Covered by a repro test and a real cold-boot-against-a-large-persisted-DB test (#8502, #8504, INV-279).
+- Add `Orchestrator.attachWorkflow`, the dynamic mirror of `detachWorkflow`, plus its headless CLI surface, so a workflow left with a lasting Detached badge after a recreate can be relinked without a full workflow recreate (#8494-8496).
+
+## 0.0.11
+
+- Add scratch execution mode: a `scratch: true` plan runs its tasks in a plain temp directory with no git repo involved at all, for benchmark/direct-output plans that never touch a real checkout (#8243-8249, #8256, #8257).
+- Add opt-in gating for owner workers: `infra-repair`, `autofix`, `reaper`, `workflow-resume`, and `requeue` now each require an explicit config field to auto-start, instead of running unconditionally or only because of an undocumented persisted database row (#8221-8224, #8230, #8312).
+- Fix a live incident where large piped stdout from headless queries and the e2e-autofix sweep could be truncated before the process exited, silently corrupting downstream JSON parsing; both paths now flush stdout/stderr before exit, and the sweep fails closed instead of crashing on a bad query response (#8266, #8268-8270).
+- Fix a planning-chat resync loop: a delegated resync used to trust a remote owner's own streamSequence, which belongs to a different process's counter and could never satisfy the caller's watermark; the client now also caps consecutive resync failures and only resets the counter when a resync snapshot actually closes the gap that triggered it (#8238-8242).
+- Fix several SSH/worktree pool and lease bugs: a worktree lease could leak on a non-conflict upstream-merge failure (#8168-8174); SSH pool load is now counted only from durable, unexpired lease rows, claimed at pool-member selection time, with `maxConcurrentTasks` enforced as a hard cap (#8328, #8330, #8332); a lease with no expiry is no longer treated as permanently active, and an orphaned execution slot is now reclaimed across tasks (#8317, #8324, #8325); and abandoning a stuck launch now releases every resource lease it was holding (#8338).
+- Fix a benign foreign-key race: `--headless delete <id>` could report a foreign key failure and exit 1 even though the workflow row was already removed by a concurrent write (#8241).
+- Fix launch-dispatch `enqueued_at` comparisons to use `julianday` instead of a raw string comparison that broke on timestamp format drift (#8153).
+- Fix SQLite corruption recovery: a failed snapshot restore could leave the database partially overwritten instead of falling back to a clean empty database; restores now write to a staging file and rename atomically into place (#8265). Also extracted the corruption-recovery eligibility decision, the exclusive-locking WAL guard, and the owner-capability write gate into named, independently-tested functions (#8223, #8227, #8308).
+- Compress hourly DB snapshots to shrink `db-backups` disk usage (#8265).
+- Point README, docs, and bundled agent skills at `invoker-cli setup` and `invoker-ui --headless`/`invoker-ui`, replacing stale `./run.sh` and `invoker-ui --install-skills` references that don't exist outside a repo checkout (#8275, #8276, #8280).
+- Add a real-git end-to-end proof that a structurally stale-based failing check skips agent repair instead of looping forever, and wire it into the required CI suite (#8161-8163).
+- Continued CI and worker-safety hardening: `invoker-cli standalone` skill install and Linux Electron launch flags (#8196-8205), bare-restart worker actions now keyed by task id alone (#8313), a dedicated regression test for the durable auto-fix retry cap (#8311), and dozens of extract-and-cover-with-a-direct-test hardening slices across the owner, orchestrator, and execution-engine layers.
+
+## 0.0.10
+
+- Add a machine-onboarding wizard: config/domain layer, CLI wizard, app bridge, GUI wizard, and docs (#7794, #7415, #7813, #7822, #7828, #7842, #7850). Hardened today with real skill installation and MCP server registration during setup, consolidated into a shared `@invoker/shell` package so both the CLI and the desktop app use one implementation instead of two (#8112, #8110, #8115, #8114).
+- Add remote data sync: a sync schema/change journal and a delta-exchange merge engine (#6504, #6542).
+- Add read-only and mutating `invoker-cli` ops commands (`query workflows`, `query tasks`, guarded mutations with a delete-all guard) (#7739, #7741).
+- Fix the workflow graph: clicking empty background on the DAG no longer dismisses the mini-DAG panel or moves the camera (regression reintroduced after #4982, now covered by a required source guard, an e2e regression test on a 15-workflow graph, and a camera-viewport assertion) (#7222, #7223, #8092, #8093, #8130, #8131). App-driven selection changes also no longer recenter the graph camera (#6418).
+- Add a paced disk-reclaim path: cleanup now starts at the warn threshold instead of waiting for critical, sweeps asar-safe, and reports unreapable bytes; lease-aware disk-headroom reaping was also extended to remote/headless stores (#7757-7762, #7667, #7815, #7816, #7894).
+- Fix several Slack surface bugs: a stored empty `channelId` could match the wrong session and bleed messages across channels (now persisted and refused on mismatch) (#7514, #7515, #7518); the plan-review card could stall on a nested `files.uploadV2` response (#7507, #7509); and conversational Slack-mention planning now shares one submission path with the terminal instead of two diverging ones (#7444-7450). A related cross-thread contamination incident was audited and locked down with a regression test (#7638, #7639, #8062).
+- Fix owner/process reliability: a split-brain owner now probes the lock holder over IPC and self-heals its socket instead of dying or refusing to bind (#7423-7426); `headless_query()` is now bounded by a real, killable timeout instead of hanging forever on a dead owner, with an independent CI-side backstop (#7606-7611); a lost web-port bind race no longer crashes the app on an uncaught `EADDRINUSE` (#7528, #7529); and the GUI start-ready IPC deadline was extended to stop legitimate slow starts from timing out (#7416).
+- Fix stdout truncation: piped stdout from the autofix worker and from headless read-only/delegated queries could be cut off before the process exited; both now flush before exit (#7428-7430, #7438, #7439, #7714-7716, #7723).
+- Fix worker/dispatch gaps: `invoker:retry-task` had no owner-worker dispatcher (#7642, #7643); `invoker:approve` and `invoker:requeue-escalate` shared a silent-failure gap in their mutation channel wiring, now fixed via a shared builder (#8087-8089); a stalled worker now says so at error level instead of going quiet (#7534, #7535, #7539, #7540); and permanently-stuck external-dependency gates from a cascade invalidation are now detected and detached (#7704, #8058, #8078, #8079).
+- Fix cache/state drift: workflow delete+resubmit could leave the queue-status UI cache stale (#7414, #8000-8002, #7655, #7656); the workflow-completion touch sweep was scoped to only the affected workflow instead of touching every active one (#7717, #7727); and the file logger was silently dropping `Error` message/stack when serializing log records (#7513).
+- Fix Mergify/PR-maintenance tooling: stack branches are now looked up by SHA/Change-Id instead of by name (#7277); a stale-based PR's content is now rebased after `retarget_base`, not just its pointer, via new real-git rebase-onto-base primitives (#8149, #8150, #8154, #8157); the admin-bypass repair retry cap now records before submit instead of after (#7652); a merge gate now approves only once PR state is actually `MERGED` (#7663); and cron uninstall no longer aborts on a sole-entry crontab (#7748).
+- Fix miscellaneous bugs: guarded tmux resize against non-finite geometry (#6613, #6614); refuse an IPC socket path that's too long instead of failing opaquely (#8116); fixed `create-pr.mjs` treating an open helper-base PR as stale (#8139); fixed `parseWorkflowStatusQuery` false-positives by anchoring it to short, single-line text (#7776, #7777); and worktree provisioning no longer fails a task outright for a repo with no `package.json` (#8034, #8035, #8044, #8045).
+- Add PR-review process guardrails: a mechanical gate now requires proof of manual inspection in PR bodies, and tooling-policy files are classified accordingly (#8134, #8135, #8136).
+- Continued CI stability work: rebalanced and de-duplicated Playwright shards, repaired several `required-fast` jobs (Vitest Workspace, Reset Rulebook, Mergify Admin Requeue, Guardrails), and hardened dozens of internal invariants (heartbeat liveness, lease expiry, launch-dispatch fencing, FK delete ordering, SQLite write validation, and more) with direct regression tests across the owner, orchestrator, and worker layers.
+
+## 0.0.9
+
+- Remove the overlapping `coderabbit-address`, `pr-conflict-rebase`, and `pr-ci-failure-scan` PR-maintenance workers. The built-in PR-maintenance surface now narrows to `pr-admin-bypass-land` plus `pr-orphan-repair`, with only `pr-admin-bypass-land` auto-started by `prMaintenance.enabled`.
+
+- Stop stale pid locks from blocking launch after a hard kill. If Invoker died without releasing `~/.invoker/gui-window.lock` or `invoker.db.lock` (e.g. SIGKILL from `kill-all-electron.sh`) and the OS later reused the recorded pid for an unrelated process (a Chrome renderer, in the reported case), launch failed with the "only one instance of the Invoker GUI" dialog or a `[db-writer-lock] already held by PID …` error with no Invoker running. Both locks' staleness checks now also compare the holder's process start time (`ps -o etime=`, shared `process-start-time.ts`) against the lock file's mtime: a process that started after the lock was written cannot be its owner, so the lock is reclaimed. Unknown start time (Windows, `ps` failure) stays conservative and keeps the lock.
+
+- Stop SSH tasks and remote auto-fixes from failing on Bash's `pop_var_context` cleanup bug, and make the remote shell bootstrap portable across macOS and Linux. Task payloads and remote conflict/fix scripts now run under non-login `bash -s`, source `~/.invoker/env.sh` explicitly instead of relying on user dotfiles, decode base64 with a GNU/BSD-compatible helper (`--decode` / `-d` / `-D`), and remote agent commands run from temp scripts instead of `eval`. The SSH worker provisioner now installs the env hook into `.bash_profile`, `.bash_login`, `.profile`, and `.bashrc`, and the SSH e2e helper writes PATH shims into `~/.invoker/env.sh` to match the new runtime path.
+## 0.0.8
+
+- Improve Slack thread planning: promote same-thread plan requests, infer plans from conversation, share a transport-neutral planning lifecycle, pin repository/harness context across manager restarts, and approve compact plan drafts inline.
+
 - Stop graph node selection from moving the camera. Clicking a workflow or task node now changes only selection/focus; camera movement is limited to explicit fit/framing commands, Home navigation, and F1 as a one-shot center-on-selection. The persisted camera-lock preference has been removed, and stale `localStorage` entries are ignored.
 
 - Make SSH pool capacity lease-backed. Member admission for SSH hosts is decided by unexpired host-keyed rows in `execution_resource_leases` (claimed at select time, counted up to `maxConcurrentTasksPerMember`), not by in-memory `activeExecutions` / `pendingPoolSelections` ghosts. Worktree members still use in-memory load. Inspect live holders with `./run.sh --headless query execution-leases` (owner-delegated). Reclaim helpers still kill orphan executors, but they are no longer the capacity safety net. Gate regressions with `bash scripts/repro/repro-ssh-lease-capacity-battery.sh --gate`.
@@ -34,6 +133,8 @@ All notable changes to Invoker will be documented in this file.
 - Stop manual Fix with Agent from starting when a failed task has no saved workspace. It now fails fast with a recreate-this-task message instead of entering a broken fix session.
 - Make the standalone Slack manager follow `~/.invoker/config.json` for its default harness preset before it falls back to `INVOKER_SLACK_DEFAULT_PRESET`. A stale owner-env preset could silently shadow the documented `defaultSlackHarnessPreset`, so `@Invoker` threads on remote hosts could still launch OMP after the UI and CLI had been switched to Codex. The manager now treats `config.json` as the source of truth, keeping `.slack-owner.env` for credentials and env-only fallback. Guarded by a dedicated slack-manager runtime-config regression test.
 
+
+- Make workflow base refs editable and remote-aware. Plans and metadata still default blank values to `master`, but explicit refs like `origin/master`, `upstream/main`, and `refs/remotes/upstream/release` are now preserved, worktree/docker/GitHub flows honor the chosen remote, and the merge-gate inspector lets users edit the base ref directly instead of showing a read-only `Base Branch`.
 ## 0.0.7
 
 - Ship Slack as a separate npm-released SEA binary (`@neko-catpital-labs/invoker-slack` / `invoker-slack`), built and archived like the CLI, published from the release workflow, and always included in `scripts/local-macos-release-build.sh` maintainer cuts. The desktop app no longer embeds Slack; GUI relaunch from the manager resolves `INVOKER_GUI_COMMAND`, `invoker-ui`, macOS `open -a Invoker`, then the monorepo xvfb path.

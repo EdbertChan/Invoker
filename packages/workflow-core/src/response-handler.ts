@@ -23,6 +23,7 @@ function planLocalFromActionId(actionId: string): string {
 
 export interface ParsedVariantDef {
   id: string;
+  localId: string;
   description: string;
   prompt?: string;
   command?: string;
@@ -38,6 +39,7 @@ export type ParsedResponse =
       agentSessionId?: string;
       agentName?: string;
       branch?: string;
+      workspacePath?: string;
       reviewUrl?: string;
       reviewId?: string;
       reviewStatus?: string;
@@ -49,6 +51,7 @@ export type ParsedResponse =
       exitCode: number;
       summary?: string;
       branch?: string;
+      workspacePath?: string;
       reviewUrl?: string;
       reviewId?: string;
       reviewStatus?: string;
@@ -66,6 +69,13 @@ export type ParsedResponse =
       type: 'needs_input';
       taskId: string;
       prompt: string;
+    }
+  | {
+      type: 'stale';
+      taskId: string;
+      exitCode: number;
+      error?: string;
+      summary?: string;
     }
   | {
       type: 'spawn_experiments';
@@ -104,6 +114,7 @@ export class ResponseHandler {
           agentSessionId: outputs.agentSessionId,
           agentName: outputs.agentName,
           branch: outputs.branch,
+          workspacePath: outputs.workspacePath,
           reviewUrl: outputs.reviewUrl,
           reviewId: outputs.reviewId,
           reviewStatus: outputs.reviewStatus,
@@ -117,6 +128,7 @@ export class ResponseHandler {
           exitCode: outputs.exitCode ?? 0,
           summary: outputs.summary,
           branch: outputs.branch,
+          workspacePath: outputs.workspacePath,
           reviewUrl: outputs.reviewUrl,
           reviewId: outputs.reviewId,
           reviewStatus: outputs.reviewStatus,
@@ -140,6 +152,15 @@ export class ResponseHandler {
           prompt: outputs.summary ?? 'Task requires input',
         };
 
+      case 'stale':
+        return {
+          type: 'stale',
+          taskId: actionId,
+          exitCode: outputs.exitCode ?? 1,
+          error: outputs.error,
+          summary: outputs.summary,
+        };
+
       case 'spawn_experiments': {
         if (!dagMutation?.spawnExperiments) {
           return { error: 'spawn_experiments requires dagMutation.spawnExperiments' };
@@ -148,6 +169,7 @@ export class ResponseHandler {
         const variants: ParsedVariantDef[] =
           dagMutation.spawnExperiments.variants.map((v) => ({
             id: `${pivotLocal}-exp-${v.id}`,
+            localId: v.id,
             description: v.description ?? `Experiment: ${v.id}`,
             prompt: v.prompt,
             command: v.command,

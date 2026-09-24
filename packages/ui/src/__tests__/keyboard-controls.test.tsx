@@ -53,9 +53,10 @@ const tasks = [
 async function renderKeyboardFixture(mock: MockInvoker) {
   mock.setTasks(tasks, workflows);
   render(<App />);
-    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+  fireEvent.click(await screen.findByTestId('sidebar-planning'));
   await screen.findByTestId('workflow-node-wf-a');
   await screen.findByTestId('selected-workflow-mini-dag');
+  await screen.findByTestId('rf__node-wf-a/task-a');
 }
 
 function key(keyName: string, init: Partial<KeyboardEvent> = {}) {
@@ -105,7 +106,7 @@ describe('Side rail controls (component)', () => {
     });
     expect(screen.getByTestId('workflow-node-wf-a')).toBeInTheDocument();
     expect(screen.getByTestId('selected-workflow-mini-dag')).toBeInTheDocument();
-  });
+  }, 10_000);
 
   it('Clear button calls clear', async () => {
     render(<App />);
@@ -115,6 +116,100 @@ describe('Side rail controls (component)', () => {
     await waitFor(() => {
       expect(mock.api.clear).toHaveBeenCalled();
     });
+  });
+
+  it('selected task inspector edits executor pool', async () => {
+    vi.mocked(mock.api.getExecutionPools).mockResolvedValue(['pool-a', 'pool-b']);
+    const pooledTasks = [
+      makeUITask({
+        id: 'wf-a/task-a',
+        description: 'Alpha Task',
+        workflowId: 'wf-a',
+        command: 'echo alpha',
+        poolId: 'pool-a',
+      }),
+    ];
+    mock.setTasks(pooledTasks, [{ id: 'wf-a', name: 'Alpha Workflow', status: 'running' }]);
+
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+    await screen.findByTestId('selected-workflow-mini-dag');
+    fireEvent.click(await screen.findByTestId('rf__node-wf-a/task-a'));
+
+    const select = await screen.findByTestId('executor-pool-select');
+    fireEvent.change(select, { target: { value: 'pool-b' } });
+
+    await waitFor(() => {
+      expect(mock.api.editTaskPool).toHaveBeenCalledWith('wf-a/task-a', 'pool-b');
+    });
+  });
+
+  it('bulk pool reassignment moves matching loaded tasks and continues after one failure', async () => {
+    vi.mocked(mock.api.getExecutionPools).mockResolvedValue(['pool-a', 'pool-b', 'pool-c']);
+    vi.mocked(mock.api.editTaskPool).mockImplementation(async (taskId, poolId) => {
+      if (taskId === 'wf-a/source-1') throw new Error('pool edit rejected');
+      return {
+        ok: true,
+        accepted: true,
+        intentId: 42,
+        workflowId: 'wf-a',
+        channel: 'invoker:edit-task-pool',
+      };
+    });
+    const pooledTasks = [
+      makeUITask({
+        id: 'wf-a/source-1',
+        description: 'First Source Task',
+        workflowId: 'wf-a',
+        command: 'echo source 1',
+        poolId: 'pool-a',
+      }),
+      makeUITask({
+        id: 'wf-a/source-2',
+        description: 'Second Source Task',
+        workflowId: 'wf-a',
+        command: 'echo source 2',
+        dependencies: ['wf-a/source-1'],
+        poolId: 'pool-a',
+      }),
+      makeUITask({
+        id: 'wf-a/already-targeted',
+        description: 'Already Targeted Task',
+        workflowId: 'wf-a',
+        command: 'echo target',
+        poolId: 'pool-b',
+      }),
+      makeUITask({
+        id: 'wf-a/merge',
+        description: 'Merge Task',
+        workflowId: 'wf-a',
+        isMergeNode: true,
+        poolId: 'pool-a',
+      }),
+    ];
+    mock.setTasks(pooledTasks, [{ id: 'wf-a', name: 'Alpha Workflow', status: 'running' }]);
+
+    render(<App />);
+    fireEvent.click(await screen.findByTestId('sidebar-planning'));
+    fireEvent.click(await screen.findByTestId('graph-more-button'));
+    fireEvent.click(await screen.findByTestId('rail-move-tasks-between-pools'));
+
+    await screen.findByTestId('bulk-pool-reassignment-modal');
+    await waitFor(() => expect(screen.getByTestId('bulk-pool-source-select')).toHaveValue('pool-a'));
+    await waitFor(() => expect(screen.getByTestId('bulk-pool-preview-count')).toHaveTextContent('2'));
+    expect(screen.getByTestId('bulk-pool-already-targeted-count')).toHaveTextContent('1');
+    expect(screen.getByTestId('bulk-pool-merge-skipped-count')).toHaveTextContent('1');
+
+    fireEvent.click(screen.getByTestId('bulk-pool-confirm'));
+
+    await waitFor(() => {
+      expect(mock.api.editTaskPool).toHaveBeenCalledTimes(2);
+    });
+    expect(mock.api.editTaskPool).toHaveBeenNthCalledWith(1, 'wf-a/source-1', 'pool-b');
+    expect(mock.api.editTaskPool).toHaveBeenNthCalledWith(2, 'wf-a/source-2', 'pool-b');
+    expect(await screen.findByTestId('bulk-pool-result')).toHaveTextContent('Moved 1 of 2 matching tasks');
+    expect(screen.getByTestId('bulk-pool-skipped-count')).toHaveTextContent('Skipped 2 tasks');
+    expect(screen.getByTestId('bulk-pool-skipped-count')).toHaveTextContent('Failed 1');
   });
 
   it('cycles major keyboard regions with Tab', async () => {
@@ -273,7 +368,7 @@ describe('Side rail controls (component)', () => {
 
     key('ArrowDown');
     await waitFor(() => {
-      expect(screen.queryByTestId('terminal-drawer-body')).not.toBeInTheDocument();
+      expect(screen.getByTestId('terminal-drawer-body')).not.toBeVisible();
     });
   });
 
@@ -488,12 +583,13 @@ describe('Sidebar keyboard navigation (component)', () => {
 
 /**
  * Graph camera keyboard/mouse contract at the App level. These prove the App
- * owns camera intent: selection never moves the viewport, and React Flow only
- * moves when the App issues a typed command for an explicit camera action.
+ * owns camera intent: user-initiated selection moves through a typed command,
+ * while menu traversal and no-op navigation leave the viewport alone.
  */
 describe('Graph camera controls (component)', () => {
   let mock: MockInvoker;
   let localStorageSetItemMock: Mock;
+  let originalLocalStorageDescriptor: PropertyDescriptor | undefined;
   /** Active getBoundingClientRect spy, restored after each test. */
   let rectSpy: ReturnType<typeof vi.spyOn> | null = null;
 
@@ -512,6 +608,7 @@ describe('Graph camera controls (component)', () => {
   beforeEach(() => {
     // App's theme hook touches localStorage; keep a shim so F1 can assert it
     // does not perform storage writes after the initial render settles.
+    originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
     const store = new Map<string, string>();
     localStorageSetItemMock = vi.fn((k: string, v: string) => { store.set(k, String(v)); });
     Object.defineProperty(globalThis, 'localStorage', {
@@ -537,7 +634,12 @@ describe('Graph camera controls (component)', () => {
     rectSpy?.mockRestore();
     rectSpy = null;
     mock.cleanup();
-    delete (globalThis as { localStorage?: unknown }).localStorage;
+    if (originalLocalStorageDescriptor) {
+      Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDescriptor);
+    } else {
+      delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+    originalLocalStorageDescriptor = undefined;
   });
 
   /**
@@ -597,7 +699,7 @@ describe('Graph camera controls (component)', () => {
     );
   }
 
-  it('F1 issues exactly one centerSelection for the selected node in the focused region', async () => {
+  it('F1 issues exactly one centerTarget for the selected node in the focused region', async () => {
     await renderAndSettle();
 
     key('F1');
@@ -638,7 +740,7 @@ describe('Graph camera controls (component)', () => {
     expect(fitViewMock).not.toHaveBeenCalled();
   });
 
-  it('clicking a workflow node selects it without centering the camera', async () => {
+  it('clicking a workflow node selects it without moving the camera', async () => {
     await renderAndSettle();
 
     fireEvent.click(screen.getByTestId('workflow-node-wf-b'));
@@ -648,21 +750,45 @@ describe('Graph camera controls (component)', () => {
     });
     await flushFrame();
     expect(setCenterMock).not.toHaveBeenCalled();
+    expect(fitViewMock).not.toHaveBeenCalled();
   });
 
-  it('clicking a task node selects it without centering the camera', async () => {
+  it('right-clicking a workflow node opens its context menu without moving the camera', async () => {
     await renderAndSettle();
 
-    fireEvent.click(screen.getByTestId('rf__node-wf-a/task-b'));
+    fireEvent.contextMenu(screen.getByTestId('workflow-node-wf-b'));
+
+    expect(await screen.findByRole('menu')).toHaveTextContent('Open Workflow');
+    await flushFrame();
+    expect(setCenterMock).not.toHaveBeenCalled();
+    expect(fitViewMock).not.toHaveBeenCalled();
+  });
+
+  it('clicking a task node selects it without moving the camera', async () => {
+    await renderAndSettle();
+
+    fireEvent.click(await screen.findByTestId('rf__node-wf-a/task-b'));
 
     await waitFor(() => {
       expect(screen.getByTestId('workflow-inspector-title')).toHaveTextContent('Second Task');
     });
     await flushFrame();
     expect(setCenterMock).not.toHaveBeenCalled();
+    expect(fitViewMock).not.toHaveBeenCalled();
   });
 
-  it('arrow navigation selects the newly targeted node without centering the camera', async () => {
+  it('right-clicking a task node opens its context menu without moving the camera', async () => {
+    await renderAndSettle();
+
+    fireEvent.contextMenu(await screen.findByTestId('rf__node-wf-a/task-b'));
+
+    expect(await screen.findByRole('menu')).toHaveTextContent('Open Terminal');
+    await flushFrame();
+    expect(setCenterMock).not.toHaveBeenCalled();
+    expect(fitViewMock).not.toHaveBeenCalled();
+  });
+
+  it('arrow navigation selects the newly targeted node without moving the camera', async () => {
     await renderAndSettle();
 
     key('ArrowRight');
@@ -672,6 +798,30 @@ describe('Graph camera controls (component)', () => {
     });
     await flushFrame();
     expect(setCenterMock).not.toHaveBeenCalled();
+    expect(fitViewMock).not.toHaveBeenCalled();
+  });
+
+  it('Escape from the task graph deselects back to the workflow graph without moving the camera', async () => {
+    await renderAndSettle();
+
+    key('Tab');
+    await waitFor(() => {
+      expect(
+        screen.getByTestId('selected-workflow-mini-dag').querySelector('[data-keyboard-region="taskGraph"]'),
+      ).toHaveAttribute('data-keyboard-active', 'true');
+    });
+    await flushFrame();
+    fitViewMock.mockClear();
+    setCenterMock.mockClear();
+
+    key('Escape');
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('selected-workflow-mini-dag')).not.toBeInTheDocument();
+    });
+    await flushFrame();
+    expect(setCenterMock).not.toHaveBeenCalled();
+    expect(fitViewMock).not.toHaveBeenCalled();
   });
 
   it('keyboard-opened workflow menu handles arrows and restores workflow graph control', async () => {
@@ -708,6 +858,7 @@ describe('Graph camera controls (component)', () => {
     });
     await flushFrame();
     expect(setCenterMock).not.toHaveBeenCalled();
+    expect(fitViewMock).not.toHaveBeenCalled();
   });
 
   it('keyboard-opened task menu handles arrows and restores task graph control', async () => {
@@ -755,6 +906,7 @@ describe('Graph camera controls (component)', () => {
     });
     await flushFrame();
     expect(setCenterMock).not.toHaveBeenCalled();
+    expect(fitViewMock).not.toHaveBeenCalled();
   });
 
   it('arrow navigation selects the geometrically nearest node, not the alphabetical neighbor', async () => {
@@ -781,21 +933,20 @@ describe('Graph camera controls (component)', () => {
 
     // Lay nodes left→right as wf-a, wf-b, wf-c so wf-c is both the rightmost
     // node and the alphabetically-last one — the boundary where ArrowRight has
-    // nowhere to go and must not move the selection.
+    // nowhere to go and must not move the selection or camera.
     stubNodeRects({
       'workflow-node-wf-a': 0,
       'workflow-node-wf-b': 200,
       'workflow-node-wf-c': 400,
     });
 
-    // Select the rightmost node first, and drain frames so any accidental
-    // selection-driven camera move would be caught before the boundary check.
+    // Select the rightmost node first, then check that the boundary ArrowRight
+    // is a no-op — neither selection change nor camera move.
     fireEvent.click(screen.getByTestId('workflow-node-wf-c'));
     await waitFor(() => {
       expect(screen.getByTestId('selected-workflow-mini-dag')).toHaveTextContent('Gamma Workflow task DAG');
     });
     await flushFrame();
-    expect(setCenterMock).not.toHaveBeenCalled();
     setCenterMock.mockClear();
 
     key('ArrowRight');

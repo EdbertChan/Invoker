@@ -48,7 +48,7 @@ set -euo pipefail
 #     ├── task-panel.png
 #     └── walkthrough.webm
 
-SPEC="visual-proof.spec.ts"
+SPEC="e2e/visual-proof.spec.ts"
 OUTPUT_DIR="packages/app/e2e/visual-proof"
 RESULTS_DIR="packages/app/e2e/test-results"
 SUBCOMMAND=""
@@ -108,6 +108,7 @@ run_capture() {
       xvfb-run --auto-servernum npx playwright test "${spec}" || PLAYWRIGHT_EXIT=$?
   else
     cd packages/app && CAPTURE_MODE="${label}" CAPTURE_VIDEO=1 \
+      INVOKER_ALLOW_HEADED_E2E=1 \
       npx playwright test "${spec}" || PLAYWRIGHT_EXIT=$?
   fi
   cd ../..

@@ -9,47 +9,69 @@
  */
 
 import { execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import dotenv from 'dotenv';
 
 import { SlackSurface, type SlackSurfaceConfig } from '@invoker/surfaces';
-import { ConversationRepository, SQLiteAdapter, WorkflowChannelRepository } from '@invoker/data-store';
+import { ConversationRepository, SlackPlanDraftRepository, SlackSessionRepository, SQLiteAdapter, WorkflowChannelRepository } from '@invoker/data-store';
 
 import { IpcInvokerClient } from './invoker-client.js';
+import { INVOKER_LAUNCH_HEALTH_TIMEOUT_MS } from './launch-health-timeout.js';
 import { createInvokerLauncher } from './invoker-launcher.js';
-import { resolveDefaultHarnessPreset, readDefaultSlackHarnessPreset } from './runtime-config.js';
+import { readSlackRuntimeConfig, resolveDefaultHarnessPreset, resolveSlackAdminUserIds } from './runtime-config.js';
 import { createRunWorkflowOp } from './workflow-ops.js';
 import { createCommandHandler } from './command-handler.js';
 import { startEventSubscription } from './event-subscription.js';
-import { createPlanningCommandBuilder, createPrepareRepoCheckout, createGatherWorkflowContext } from './host-seams.js';
+import { createHarnessSessionDriverFactory, createPlanningCommandBuilder, createPrepareRepoCheckout, createGatherWorkflowContext } from './host-seams.js';
 import { createWatchdog } from './watchdog.js';
 import { errMessage } from './util.js';
-const VERSION = '0.0.7';
-
-const REQUIRED_ENV = ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN', 'SLACK_SIGNING_SECRET', 'SLACK_CHANNEL_ID'];
+import { acquireSlackConsumerLock } from './slack-consumer-lock.js';
+import { loadSlackOwnerEnv, runComplaintScoutDraftCommand } from './complaint-scout-bridge.js';
+import { startLocalSmokeInject } from './local-smoke-inject.js';
+const VERSION = '0.1.15';
+let runDaemon = true;
 
 if (process.argv.includes('--version') || process.argv.includes('-V')) {
   console.log(VERSION);
   process.exit(0);
 }
 
-if (process.argv.includes('--help') || process.argv.includes('-h')) {
+const stagePlanDraftArg = process.argv.indexOf('--stage-plan-draft');
+if (stagePlanDraftArg !== -1) {
+  const payloadFile = process.argv[stagePlanDraftArg + 1];
+  if (!payloadFile) {
+    console.error('[slack-manager] fatal: --stage-plan-draft requires a payload JSON file');
+    process.exit(1);
+  }
+  runDaemon = false;
+  void runComplaintScoutDraftCommand(payloadFile)
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(`[slack-manager] fatal: ${errMessage(err)}`);
+      process.exit(1);
+    });
+} else if (process.argv.includes('--help') || process.argv.includes('-h')) {
   console.log(`invoker-slack ${VERSION}
 
-Usage: invoker-slack [--version] [--help]
+Usage: invoker-slack [--version] [--help] [--stage-plan-draft payload.json]
 
 Standalone Slack manager daemon. Loads credentials from
-~/.invoker/.slack-owner.env (or INVOKER_SLACK_OWNER_ENV) and drives Invoker
+~/.invoker/.slack-owner.env, or ~/.invoker/.env when the legacy file is absent
+(or INVOKER_SLACK_OWNER_ENV), and drives Invoker
 over IPC. Install via: npm i -g @neko-catpital-labs/invoker-slack
+
+--stage-plan-draft is a bounded one-shot used by the Slack complaint scout. It
+posts an existing Approve/Cancel plan review draft and exits; it does not start
+Socket Mode or submit a workflow.
 `);
   process.exit(0);
 }
 
-function makeLog(): { log: (level: string, message: string) => void; logFn: (source: string, level: string, message: string) => void } {
+function makeLog(instanceId: string): { log: (level: string, message: string) => void; logFn: (source: string, level: string, message: string) => void } {
   const log = (level: string, message: string): void => {
-    const line = `[slack-manager] ${new Date().toISOString()} ${level.toUpperCase()} ${message}`;
+    const line = `[slack-manager] ${new Date().toISOString()} ${level.toUpperCase()} instance=${instanceId} ${message}`;
     if (level === 'error') console.error(line);
     else console.log(line);
   };
@@ -67,41 +89,49 @@ function detectRepoUrl(repoRoot: string, log: (level: string, message: string) =
 }
 
 async function main(): Promise<void> {
-  const { log, logFn } = makeLog();
+  const instanceId = randomUUID();
+  const { log, logFn } = makeLog(instanceId);
 
-  const ownerEnvPath = process.env.INVOKER_SLACK_OWNER_ENV ?? path.join(homedir(), '.invoker', '.slack-owner.env');
-  dotenv.config({ path: ownerEnvPath });
-
-  const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
-  if (missing.length > 0) {
-    log('error', `missing Slack credentials: ${missing.join(', ')} (looked in ${ownerEnvPath})`);
+  const env = loadSlackOwnerEnv();
+  if (env.missing.length > 0) {
+    log('error', `missing Slack credentials: ${env.missing.join(', ')} (looked in ${env.ownerEnvPath})`);
     process.exit(1);
   }
 
   const managerHome = process.env.INVOKER_SLACK_MANAGER_DIR ?? path.join(homedir(), '.invoker', 'slack-manager');
   mkdirSync(managerHome, { recursive: true });
+  const consumerLock = acquireSlackConsumerLock(path.join(homedir(), '.invoker'), instanceId);
   const checkoutsRoot = path.join(managerHome, 'checkouts');
   const plansDir = path.join(homedir(), '.invoker', 'plans');
 
   // Manager-owned store — survives while Invoker's DB is owned or its process is down.
   const adapter = await SQLiteAdapter.create(path.join(managerHome, 'slack-manager.db'), { ownerCapability: true });
   const conversationRepo = new ConversationRepository(adapter);
+  const slackSessionRepo = new SlackSessionRepository(adapter);
+  const slackPlanDraftRepo = new SlackPlanDraftRepository(adapter);
   const workflowChannelRepo = new WorkflowChannelRepository(adapter);
 
   const repoRoot = process.env.INVOKER_REPO_ROOT ?? process.cwd();
-  const repoUrl = detectRepoUrl(repoRoot, log);
-  const configDefaultHarnessPreset = readDefaultSlackHarnessPreset();
-  const defaultHarnessPreset = resolveDefaultHarnessPreset(process.env.INVOKER_SLACK_DEFAULT_PRESET, configDefaultHarnessPreset);
+  const runtimeConfig = readSlackRuntimeConfig();
+  const repoUrl = process.env.INVOKER_REPO_URL ?? runtimeConfig.defaultRepoUrl ?? detectRepoUrl(repoRoot, log);
+  const defaultHarnessPreset = resolveDefaultHarnessPreset(process.env.INVOKER_SLACK_DEFAULT_PRESET, runtimeConfig.defaultHarnessPreset);
+  const adminUserIds = resolveSlackAdminUserIds(process.env.INVOKER_SLACK_ADMIN_USER_IDS, runtimeConfig.adminUserIds);
 
   const launcher = createInvokerLauncher({
     repoRoot,
     logPath: path.join(homedir(), '.invoker', 'gui.log'),
     log,
   });
-  const client = new IpcInvokerClient({ spawnInvoker: launcher.spawnInvoker, log, pingTimeoutMs: 10_000 });
+  const client = new IpcInvokerClient({
+    spawnInvoker: launcher.spawnInvoker,
+    log,
+    pingTimeoutMs: 10_000,
+    launchHealthTimeoutMs: INVOKER_LAUNCH_HEALTH_TIMEOUT_MS,
+  });
 
   const runWorkflowOp = createRunWorkflowOp(client, log);
   const gatherWorkflowContext = createGatherWorkflowContext({ client, conversationRepo, workflowChannelRepo, log });
+  const planningCommandBuilder = createPlanningCommandBuilder();
 
   const config: SlackSurfaceConfig = {
     botToken: process.env.SLACK_BOT_TOKEN!,
@@ -112,19 +142,30 @@ async function main(): Promise<void> {
     cursorCommand: process.env.CURSOR_COMMAND ?? 'agent',
     model: process.env.CURSOR_MODEL,
     defaultHarnessPreset,
+    instanceId,
     workingDir: repoRoot,
     conversationRepo,
+    slackSessionRepo,
+    slackPlanDraftRepo,
     workflowChannelRepo,
-    planningCommandBuilder: createPlanningCommandBuilder(),
+    planningCommandBuilder,
+    harnessSessionDriverFactory: createHarnessSessionDriverFactory(planningCommandBuilder),
     prepareRepoCheckout: createPrepareRepoCheckout(path.join(managerHome, 'planning-clones')),
     defaultBranch: process.env.INVOKER_DEFAULT_BRANCH ?? 'master',
+    conversationalPlanning: process.env.INVOKER_SLACK_CONVERSATIONAL_PLANNING !== '0',
+    planDoctorScriptPath: path.join(repoRoot, 'skills', 'plan-to-invoker', 'scripts', 'skill-doctor.sh'),
     repoUrl,
     defaultRepoUrl: repoUrl,
+    repoAliases: runtimeConfig.repoAliases,
+    channelRepoBindings: runtimeConfig.channelRepoBindings,
+    adminUserIds,
     runWorkflowOp,
     gatherWorkflowContext,
     onRestartInvoker: async () => {
-      const healthy = await client.launch({ force: true });
-      if (!healthy) throw new Error('Invoker did not become healthy after relaunch');
+      const result = await client.launch({ force: true });
+      if (!result.healthy) {
+        throw new Error(`Invoker did not become healthy after relaunch (${result.cause ?? 'unhealthy'})`);
+      }
     },
     log: logFn,
   };
@@ -141,6 +182,10 @@ async function main(): Promise<void> {
 
   await slack.start(commandHandler);
   watchdog.start();
+  const stopSmokeInject = startLocalSmokeInject({
+    injectMention: (request) => slack.injectMention(request),
+    log,
+  });
   // Establish the IPC connection (and re-apply subscriptions) if Invoker is already up.
   void client.ping();
   log('info', `slack-manager started (store=${managerHome})`);
@@ -150,18 +195,22 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log('info', `received ${signal}, shutting down`);
+    stopSmokeInject();
     watchdog.stop();
     stopEvents();
     await slack.stop().catch((err) => log('warn', `slack.stop failed: ${errMessage(err)}`));
     client.disconnect();
     adapter.close();
+    consumerLock.release();
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-void main().catch((err) => {
-  console.error(`[slack-manager] fatal: ${errMessage(err)}`);
-  process.exit(1);
-});
+if (runDaemon) {
+  void main().catch((err) => {
+    console.error(`[slack-manager] fatal: ${errMessage(err)}`);
+    process.exit(1);
+  });
+}

@@ -8,17 +8,76 @@
  * transactions. Row mapping keeps coming from sqlite-row-mappers.ts; the
  * adapter retains one-line delegates for every method here.
  */
-import type { TaskState, TaskStateChanges, Attempt, TaskExecution } from '@invoker/workflow-core';
+import type { TaskState, TaskStateChanges, Attempt, TaskExecution, WorkflowDerivedStatus, WorkflowRollupTaskSummary } from '@invoker/workflow-core';
 import {
   assertTaskConsistent,
+  applyTaskConfigPatch,
+  computeWorkflowRollupFromSummaries,
   isDiscardedAttempt,
   normalizeRunnerKind,
+  resolveTaskConfig,
 } from '@invoker/workflow-core';
 import { mapRowToTask, mapRowToAttempt } from './sqlite-row-mappers.js';
 import type { SqliteExecutor } from './sqlite-executor.js';
 import type { CostAttributionAttempt } from './attempt-read-models.js';
+import { appendJournalEntry, appendJournalEntryWithoutReadback, LOCAL_SYNC_ORIGIN } from './sync-journal.js';
+import { SQLITE_MAX_VARIABLE_NUMBER } from './sqlite-workflow-repository.js';
 
 const ACTION_GRAPH_RECENT_ATTEMPT_LIMIT = 3;
+
+export const CLAIMABLE_ATTEMPT_WHERE_CLAUSE =
+  "status = 'pending' OR (status IN ('claimed', 'running') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)";
+
+const SAVE_TASK_COLUMNS = [
+  'id', 'workflow_id', 'description', 'status', 'blocked_by', 'dependencies',
+  'command', 'prompt', 'experiment_prompt', 'exit_code', 'error', 'protocol_error_code', 'protocol_error_message', 'input_prompt', 'external_dependencies',
+  'summary', 'problem', 'approach', 'test_plan', 'repro_command', 'fix_prompt', 'fix_context',
+  'branch', 'commit_hash', 'fixed_integration_sha', 'fixed_integration_recorded_at', 'fixed_integration_source', 'parent_task',
+  'pivot', 'experiment_variants', 'is_reconciliation', 'selected_experiment',
+  'selected_experiments', 'experiment_results', 'requires_manual_approval',
+  'repo_url', 'feature_branch',
+  'is_merge_node', 'auto_fix', 'max_fix_attempts',
+  'runner_kind', 'pool_id', 'agent_session_id', 'workspace_path', 'container_id',
+  'last_agent_session_id', 'last_agent_name',
+  'action_request_id', 'experiments',
+  'created_at', 'launch_phase', 'launch_started_at', 'launch_completed_at', 'started_at', 'completed_at', 'last_heartbeat_at',
+  'utilization', 'pending_fix_error', 'fix_session_entry_status', 'failure_class',
+  'review_url', 'review_id', 'review_status', 'review_provider_id', 'review_gate',
+  'is_fixing_with_ai',
+  'execution_generation',
+  'selected_attempt_id',
+  'pool_member_id',
+  'docker_image',
+  'execution_agent',
+  'execution_model',
+  'agent_name',
+  'freshness',
+  'task_state_version',
+] as const;
+
+const SAVE_TASK_ROW_PLACEHOLDERS = `(${SAVE_TASK_COLUMNS.map(() => '?').join(', ')})`;
+
+/**
+ * Safety invariant: saveTask's INSERT OR REPLACE must bind selected_attempt_id
+ * to exec.selectedAttemptId. Throws if the columns/values lists are edited
+ * independently and that pairing breaks.
+ */
+export function assertSaveTaskPersistsSelectedAttemptId(
+  columns: string[],
+  values: unknown[],
+  exec: { selectedAttemptId?: string | null },
+): void {
+  const index = columns.indexOf('selected_attempt_id');
+  if (index === -1) {
+    throw new Error('saveTask INSERT is missing the selected_attempt_id column');
+  }
+  const expected = exec.selectedAttemptId ?? null;
+  if (values[index] !== expected) {
+    throw new Error(
+      `saveTask binds selected_attempt_id=${JSON.stringify(values[index])} but exec.selectedAttemptId=${JSON.stringify(expected)}`,
+    );
+  }
+}
 
 /**
  * Adapter-side task/attempt mutators that {@link SqliteTaskAttemptRepository.failTaskAndAttempt}
@@ -29,11 +88,33 @@ const ACTION_GRAPH_RECENT_ATTEMPT_LIMIT = 3;
  * updateAttempt on the adapter instance).
  */
 export interface TaskAttemptMutators {
-  updateTask(taskId: string, changes: TaskStateChanges): void;
+  updateTask(
+    taskId: string,
+    changes: TaskStateChanges,
+    opts?: { skipWorkflowStatusSync?: boolean },
+  ): void;
   updateAttempt(
     attemptId: string,
     changes: Partial<Pick<Attempt, 'status' | 'claimedAt' | 'startedAt' | 'completedAt' | 'exitCode' | 'error' | 'lastHeartbeatAt' | 'leaseExpiresAt' | 'branch' | 'commit' | 'summary' | 'queuePriority' | 'workspacePath' | 'agentSessionId' | 'containerId' | 'mergeConflict'>>,
   ): void;
+}
+
+interface QueueHistoryEvent {
+  eventType: string;
+  workflowId?: string | null;
+  taskId?: string | null;
+  attemptId?: string | null;
+  dispatchId?: number | null;
+  resourceKey?: string | null;
+  resourceType?: string | null;
+  holderId?: string | null;
+  fromState?: string | null;
+  toState?: string | null;
+  queuePosition?: number | null;
+  queueSize?: number | null;
+  payload?: Record<string, unknown>;
+  unknownFields?: string[];
+  recordedAt?: string;
 }
 
 export class SqliteTaskAttemptRepository {
@@ -43,6 +124,85 @@ export class SqliteTaskAttemptRepository {
   ) {}
 
   private hasCrashPreservationTableCache: boolean | null = null;
+
+  private loadTaskJournalPayload(taskId: string): Record<string, unknown> | undefined {
+    return this.exec.queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
+  }
+
+  private loadAttemptJournalPayload(attemptId: string): Record<string, unknown> | undefined {
+    return this.exec.queryOne('SELECT * FROM attempts WHERE id = ?', [attemptId]);
+  }
+
+  private loadWorkflowJournalPayload(workflowId: string): { payload: Record<string, unknown>; status: WorkflowDerivedStatus } | undefined {
+    const workflow = this.exec.queryOne('SELECT * FROM workflows WHERE id = ?', [workflowId]);
+    if (!workflow) return undefined;
+
+    const taskRows = this.exec.queryAll(
+      `SELECT id, workflow_id, description, status, dependencies, error, protocol_error_code, protocol_error_message,
+              pending_fix_error, exit_code, completed_at, agent_session_id, agent_name,
+              review_url, input_prompt, is_fixing_with_ai
+         FROM tasks
+        WHERE workflow_id = ?
+        ORDER BY id ASC`,
+      [workflowId],
+    );
+    const summaries = taskRows.map((row) => ({
+      id: String(row.id),
+      description: String(row.description),
+      status: row.status as WorkflowRollupTaskSummary['status'],
+      dependencies: JSON.parse(String(row.dependencies || '[]')),
+      execution: {
+        error: (row.error as string) ?? undefined,
+        protocolErrorCode: (row.protocol_error_code as string) ?? undefined,
+        protocolErrorMessage: (row.protocol_error_message as string) ?? undefined,
+        pendingFixError: (row.pending_fix_error as string) ?? undefined,
+        exitCode: (row.exit_code as number) ?? undefined,
+        completedAt: (row.completed_at as string) ?? undefined,
+        agentSessionId: (row.agent_session_id as string) ?? undefined,
+        agentName: (row.agent_name as string) ?? undefined,
+        reviewUrl: (row.review_url as string) ?? undefined,
+        inputPrompt: (row.input_prompt as string) ?? undefined,
+        isFixingWithAI: row.is_fixing_with_ai === 1,
+      },
+    })) satisfies WorkflowRollupTaskSummary[];
+    const rollup = computeWorkflowRollupFromSummaries(summaries);
+    return {
+      payload: {
+        ...workflow,
+        status: rollup.status,
+        rollup,
+      },
+      status: rollup.status,
+    };
+  }
+
+  private appendQueueHistory(event: QueueHistoryEvent): void {
+    const unknownFields = event.unknownFields ?? [];
+    this.exec.execRun(
+      `INSERT INTO queue_history (
+          recorded_at, event_type, workflow_id, task_id, attempt_id, dispatch_id,
+          resource_key, resource_type, holder_id, from_state, to_state,
+          queue_position, queue_size, payload_json, unknown_fields
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        event.recordedAt ?? new Date().toISOString(),
+        event.eventType,
+        event.workflowId ?? null,
+        event.taskId ?? null,
+        event.attemptId ?? null,
+        event.dispatchId ?? null,
+        event.resourceKey ?? null,
+        event.resourceType ?? null,
+        event.holderId ?? null,
+        event.fromState ?? null,
+        event.toState ?? 'unknown',
+        event.queuePosition ?? null,
+        event.queueSize ?? null,
+        JSON.stringify(event.payload ?? {}),
+        JSON.stringify(unknownFields),
+      ],
+    );
+  }
 
   private hasCrashPreservationTable(): boolean {
     if (this.hasCrashPreservationTableCache !== null) return this.hasCrashPreservationTableCache;
@@ -110,10 +270,39 @@ export class SqliteTaskAttemptRepository {
   // ── Task CRUD ────────────────────────────────────────────
 
   saveTask(workflowId: string, task: TaskState): void {
+    const cfg = resolveTaskConfig(task.config);
+    if (cfg !== task.config) {
+      task = { ...task, config: cfg };
+    }
     assertTaskConsistent(task);
-    const cfg = task.config;
     const exec = task.execution;
-    this.exec.execRun(`
+    const columns = [
+      'id', 'workflow_id', 'description', 'status', 'blocked_by', 'dependencies',
+      'command', 'prompt', 'experiment_prompt', 'exit_code', 'error', 'protocol_error_code', 'protocol_error_message', 'input_prompt', 'external_dependencies',
+      'summary', 'problem', 'approach', 'test_plan', 'repro_command', 'fix_prompt', 'fix_context',
+      'branch', 'commit_hash', 'fixed_integration_sha', 'fixed_integration_recorded_at', 'fixed_integration_source', 'parent_task',
+      'pivot', 'experiment_variants', 'is_reconciliation', 'selected_experiment',
+      'selected_experiments', 'experiment_results', 'requires_manual_approval',
+      'repo_url', 'feature_branch',
+      'is_merge_node', 'auto_fix', 'max_fix_attempts',
+      'runner_kind', 'pool_id', 'agent_session_id', 'workspace_path', 'container_id',
+      'last_agent_session_id', 'last_agent_name',
+      'action_request_id', 'experiments',
+      'created_at', 'launch_phase', 'launch_started_at', 'launch_completed_at', 'started_at', 'completed_at', 'last_heartbeat_at',
+      'utilization', 'pending_fix_error', 'fix_session_entry_status', 'failure_class',
+      'review_url', 'review_id', 'review_status', 'review_provider_id', 'review_gate',
+      'is_fixing_with_ai',
+      'execution_generation',
+      'selected_attempt_id',
+      'pool_member_id',
+      'docker_image',
+      'execution_agent',
+      'execution_model',
+      'agent_name',
+      'freshness',
+      'task_state_version',
+    ];
+    const sql = `
       INSERT OR REPLACE INTO tasks (
         id, workflow_id, description, status, blocked_by, dependencies,
         command, prompt, experiment_prompt, exit_code, error, protocol_error_code, protocol_error_message, input_prompt, external_dependencies,
@@ -137,6 +326,7 @@ export class SqliteTaskAttemptRepository {
         execution_agent,
         execution_model,
         agent_name,
+        freshness,
         task_state_version
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
@@ -161,9 +351,11 @@ export class SqliteTaskAttemptRepository {
         ?,
         ?,
         ?,
+        ?,
         ?
       )
-    `, [
+    `;
+    const values: unknown[] = [
       task.id, workflowId, task.description, task.status,
       exec.blockedBy ?? null,
       JSON.stringify(task.dependencies),
@@ -216,19 +408,217 @@ export class SqliteTaskAttemptRepository {
       exec.isFixingWithAI ? 1 : 0,
       exec.generation ?? 0,
       exec.selectedAttemptId ?? null,
-      (cfg as { poolMemberId?: string }).poolMemberId ?? null,
+      cfg.poolMemberId ?? null,
       cfg.dockerImage ?? null,
       cfg.executionAgent ?? null,
       cfg.executionModel ?? null,
       exec.agentName ?? null,
+      cfg.freshness !== undefined ? JSON.stringify(cfg.freshness) : null,
       task.taskStateVersion ?? 1,
-    ]);
-    this.syncCrashPreservationState(task.id, undefined, task.execution);
+    ];
+    assertSaveTaskPersistsSelectedAttemptId(columns, values, exec);
+    this.exec.runTransaction(() => {
+      this.exec.execRun(sql, values);
+      this.syncCrashPreservationState(task.id, undefined, task.execution);
+      const payload = this.loadTaskJournalPayload(task.id);
+      if (!payload) {
+        throw new Error(`Failed to load task ${task.id} after insert for sync journal`);
+      }
+      appendJournalEntry(this.exec, {
+        entityType: 'task',
+        entityId: task.id,
+        op: 'upsert',
+        payload,
+      });
+      this.appendQueueHistory({
+        eventType: 'task_state_transition',
+        workflowId,
+        taskId: task.id,
+        fromState: null,
+        toState: task.status,
+        payload: { source: 'saveTask' },
+        unknownFields: ['from_state'],
+      });
+    });
   }
 
-  updateTask(taskId: string, changes: TaskStateChanges): void {
+  saveTasks(workflowId: string, tasks: TaskState[]): void {
+    if (tasks.length === 0) return;
+    const records = tasks.map((task) => this.buildSaveTaskRecord(workflowId, task));
+    this.exec.runTransaction(() => {
+      const rowsPerInsert = Math.max(1, Math.floor(SQLITE_MAX_VARIABLE_NUMBER / SAVE_TASK_COLUMNS.length));
+      for (let offset = 0; offset < records.length; offset += rowsPerInsert) {
+        const chunk = records.slice(offset, offset + rowsPerInsert);
+        this.exec.execRun(
+          `INSERT OR REPLACE INTO tasks (${SAVE_TASK_COLUMNS.join(', ')}) VALUES ${chunk.map(() => SAVE_TASK_ROW_PLACEHOLDERS).join(', ')}`,
+          chunk.flatMap((record) => record.values),
+        );
+      }
+      for (const record of records) {
+        this.syncCrashPreservationState(record.task.id, undefined, record.task.execution);
+      }
+
+      const payloads = this.loadTaskJournalPayloads(records.map((record) => record.task.id));
+      this.appendTaskJournalEntries(records.map((record) => {
+        const payload = payloads.get(record.task.id);
+        if (!payload) {
+          throw new Error(`Failed to load task ${record.task.id} after insert for sync journal`);
+        }
+        return { taskId: record.task.id, payload };
+      }));
+      for (const record of records) {
+        this.appendQueueHistory({
+          eventType: 'task_state_transition',
+          workflowId,
+          taskId: record.task.id,
+          fromState: null,
+          toState: record.task.status,
+          payload: { source: 'saveTasks' },
+          unknownFields: ['from_state'],
+        });
+      }
+    });
+  }
+
+  private buildSaveTaskRecord(workflowId: string, inputTask: TaskState): { task: TaskState; values: unknown[] } {
+    let task = inputTask;
+    const cfg = resolveTaskConfig(task.config);
+    if (cfg !== task.config) {
+      task = { ...task, config: cfg };
+    }
+    assertTaskConsistent(task);
+    const exec = task.execution;
+    const values: unknown[] = [
+      task.id, workflowId, task.description, task.status,
+      exec.blockedBy ?? null,
+      JSON.stringify(task.dependencies),
+      cfg.command ?? null, cfg.prompt ?? null, cfg.experimentPrompt ?? null,
+      exec.exitCode ?? null, exec.error ?? null, exec.protocolErrorCode ?? null, exec.protocolErrorMessage ?? null, exec.inputPrompt ?? null,
+      null,
+      cfg.summary ?? null, cfg.problem ?? null, cfg.approach ?? null,
+      cfg.testPlan ?? null, cfg.reproCommand ?? null, cfg.fixPrompt ?? null, cfg.fixContext ?? null,
+      exec.branch ?? null,
+      exec.commit ?? null,
+      exec.fixedIntegrationSha ?? null,
+      exec.fixedIntegrationRecordedAt?.toISOString() ?? null,
+      exec.fixedIntegrationSource ?? null,
+      cfg.parentTask ?? null,
+      cfg.pivot ? 1 : 0,
+      cfg.experimentVariants ? JSON.stringify(cfg.experimentVariants) : null,
+      cfg.isReconciliation ? 1 : 0,
+      exec.selectedExperiment ?? null,
+      exec.selectedExperiments ? JSON.stringify(exec.selectedExperiments) : null,
+      exec.experimentResults ? JSON.stringify(exec.experimentResults) : null,
+      cfg.requiresManualApproval ? 1 : 0,
+      null, cfg.featureBranch ?? null,
+      cfg.isMergeNode ? 1 : 0,
+      0, null,
+      cfg.runnerKind ?? null,
+      cfg.poolId ?? null,
+      exec.agentSessionId ?? null,
+      exec.workspacePath ?? null,
+      exec.containerId ?? null,
+      exec.lastAgentSessionId ?? null,
+      exec.lastAgentName ?? null,
+      exec.actionRequestId ?? null,
+      exec.experiments ? JSON.stringify(exec.experiments) : null,
+      task.createdAt.toISOString(),
+      exec.phase ?? null,
+      exec.launchStartedAt?.toISOString() ?? null,
+      exec.launchCompletedAt?.toISOString() ?? null,
+      exec.startedAt?.toISOString() ?? null,
+      exec.completedAt?.toISOString() ?? null,
+      exec.lastHeartbeatAt?.toISOString() ?? null,
+      null,
+      exec.pendingFixError ?? null,
+      exec.fixSessionEntryStatus ?? null,
+      exec.failureClass ?? null,
+      exec.reviewUrl ?? null,
+      exec.reviewId ?? null,
+      exec.reviewStatus ?? null,
+      exec.reviewProviderId ?? null,
+      exec.reviewGate ? JSON.stringify(exec.reviewGate) : null,
+      exec.isFixingWithAI ? 1 : 0,
+      exec.generation ?? 0,
+      exec.selectedAttemptId ?? null,
+      cfg.poolMemberId ?? null,
+      cfg.dockerImage ?? null,
+      cfg.executionAgent ?? null,
+      cfg.executionModel ?? null,
+      exec.agentName ?? null,
+      cfg.freshness !== undefined ? JSON.stringify(cfg.freshness) : null,
+      task.taskStateVersion ?? 1,
+    ];
+    assertSaveTaskPersistsSelectedAttemptId([...SAVE_TASK_COLUMNS], values, exec);
+    return { task, values };
+  }
+
+  private loadTaskJournalPayloads(taskIds: string[]): Map<string, Record<string, unknown>> {
+    const payloads = new Map<string, Record<string, unknown>>();
+    for (let offset = 0; offset < taskIds.length; offset += SQLITE_MAX_VARIABLE_NUMBER) {
+      const chunk = taskIds.slice(offset, offset + SQLITE_MAX_VARIABLE_NUMBER);
+      const rows = this.exec.queryAll(
+        `SELECT * FROM tasks WHERE id IN (${chunk.map(() => '?').join(', ')})`,
+        chunk,
+      );
+      for (const row of rows) {
+        payloads.set(String(row.id), row);
+      }
+    }
+    return payloads;
+  }
+
+  private appendTaskJournalEntries(entries: Array<{ taskId: string; payload: Record<string, unknown> }>): void {
+    const columnsPerRow = 6;
+    const rowsPerInsert = Math.max(1, Math.floor(SQLITE_MAX_VARIABLE_NUMBER / columnsPerRow));
+    for (let offset = 0; offset < entries.length; offset += rowsPerInsert) {
+      const chunk = entries.slice(offset, offset + rowsPerInsert);
+      const params = chunk.flatMap((entry) => [
+        'task',
+        entry.taskId,
+        'upsert',
+        JSON.stringify(entry.payload ?? null),
+        LOCAL_SYNC_ORIGIN,
+        new Date().toISOString(),
+      ]);
+      this.exec.execRun(
+        `INSERT INTO sync_journal (entity_type, entity_id, op, payload, origin, created_at)
+         VALUES ${chunk.map(() => '(?, ?, ?, ?, ?, ?)').join(', ')}`,
+        params,
+      );
+    }
+  }
+
+  updateTask(
+    taskId: string,
+    changes: TaskStateChanges,
+    opts?: { skipWorkflowStatusSync?: boolean },
+  ): void {
     const beforeTask = this.loadTask(taskId);
     if (!beforeTask) return;
+    this.updateTaskWithBefore(beforeTask, changes, opts);
+  }
+
+  updateTaskFromKnownState(
+    taskId: string,
+    beforeTask: TaskState,
+    changes: TaskStateChanges,
+    opts?: { skipWorkflowStatusSync?: boolean },
+  ): void {
+    if (beforeTask.id !== taskId) {
+      throw new Error(`updateTaskFromKnownState: task id mismatch (${beforeTask.id} !== ${taskId})`);
+    }
+    this.updateTaskWithBefore(beforeTask, changes, opts);
+  }
+
+  private updateTaskWithBefore(
+    beforeTask: TaskState,
+    changes: TaskStateChanges,
+    opts?: { skipWorkflowStatusSync?: boolean },
+  ): void {
+    const taskId = beforeTask.id;
+
+    applyTaskConfigPatch(beforeTask.config, changes.config);
 
     const setClauses: string[] = [];
     const values: unknown[] = [];
@@ -247,7 +637,7 @@ export class SqliteTaskAttemptRepository {
     }
 
     if (changes.config) {
-      const config = changes.config as Record<string, unknown>;
+      const config = changes.config;
       const configMap: Record<string, string> = {
         workflowId: 'workflow_id',
         parentTask: 'parent_task',
@@ -279,13 +669,13 @@ export class SqliteTaskAttemptRepository {
       for (const [key, col] of Object.entries(configMap)) {
         if (key in config) {
           setClauses.push(`${col} = ?`);
-          values.push(config[key] ?? null);
+          values.push(Reflect.get(config, key) ?? null);
         }
       }
       for (const [key, col] of Object.entries(configBoolMap)) {
         if (key in config) {
           setClauses.push(`${col} = ?`);
-          values.push(config[key] ? 1 : 0);
+          values.push(Reflect.get(config, key) ? 1 : 0);
         }
       }
       if ('experimentVariants' in changes.config) {
@@ -295,6 +685,10 @@ export class SqliteTaskAttemptRepository {
       if ('externalDependencies' in changes.config) {
         setClauses.push('external_dependencies = ?');
         values.push(changes.config.externalDependencies ? JSON.stringify(changes.config.externalDependencies) : null);
+      }
+      if ('freshness' in changes.config) {
+        setClauses.push('freshness = ?');
+        values.push(changes.config.freshness !== undefined ? JSON.stringify(changes.config.freshness) : null);
       }
     }
 
@@ -417,7 +811,151 @@ export class SqliteTaskAttemptRepository {
       const cols = setClauses.map((c) => c.split(/\s*=\s*/)[0]!.trim()).join(', ');
       console.log(`[persist-sql] taskId=${taskId} columns=[${cols}]`);
     }
-    this.exec.execRun(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ?`, values);
+    const statusChanged =
+      !opts?.skipWorkflowStatusSync
+      && changes.status !== undefined
+      && changes.status !== beforeTask.status;
+    const workflowId = beforeTask.config.workflowId;
+    const beforeWorkflow = statusChanged && workflowId
+      ? this.loadWorkflowJournalPayload(workflowId)
+      : undefined;
+    const updateSql = `UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ?`;
+
+    this.exec.runTransaction(() => {
+      this.exec.execRun(updateSql, values);
+      const taskPayload = this.loadTaskJournalPayload(taskId);
+      if (!taskPayload) {
+        throw new Error(`Failed to load task ${taskId} after update for sync journal`);
+      }
+      appendJournalEntry(this.exec, {
+        entityType: 'task',
+        entityId: taskId,
+        op: 'upsert',
+        payload: taskPayload,
+      });
+      if (changes.status !== undefined && changes.status !== beforeTask.status) {
+        this.appendQueueHistory({
+          eventType: 'task_state_transition',
+          workflowId,
+          taskId,
+          fromState: beforeTask.status,
+          toState: changes.status,
+          payload: { source: 'updateTask' },
+        });
+      }
+
+      if (!statusChanged || !workflowId) return;
+      const afterWorkflow = this.loadWorkflowJournalPayload(workflowId);
+      if (!afterWorkflow || beforeWorkflow?.status === afterWorkflow.status) return;
+      appendJournalEntryWithoutReadback(this.exec, {
+        entityType: 'workflow',
+        entityId: workflowId,
+        op: 'upsert',
+        payload: afterWorkflow.payload,
+      });
+      this.appendQueueHistory({
+        eventType: 'workflow_state_transition',
+        workflowId,
+        fromState: beforeWorkflow?.status ?? null,
+        toState: afterWorkflow.status,
+        payload: { source: 'taskRollup' },
+        unknownFields: beforeWorkflow ? [] : ['from_state'],
+      });
+    });
+  }
+
+  updateTaskLaunchState(taskId: string, changes: TaskStateChanges): void {
+    const unsupportedTopLevel = Object.keys(changes).filter((key) => key !== 'status' && key !== 'execution');
+    if (unsupportedTopLevel.length > 0) {
+      throw new Error(`updateTaskLaunchState received unsupported task fields: ${unsupportedTopLevel.join(', ')}`);
+    }
+
+    const execution = changes.execution as Record<string, unknown> | undefined;
+    const supportedExecutionFields = new Set([
+      'selectedAttemptId',
+      'generation',
+      'startedAt',
+      'lastHeartbeatAt',
+      'phase',
+      'launchStartedAt',
+      'launchCompletedAt',
+    ]);
+    const unsupportedExecution = execution
+      ? Object.keys(execution).filter((key) => !supportedExecutionFields.has(key))
+      : [];
+    if (unsupportedExecution.length > 0) {
+      throw new Error(`updateTaskLaunchState received unsupported execution fields: ${unsupportedExecution.join(', ')}`);
+    }
+
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+
+    if (changes.status !== undefined) {
+      setClauses.push('status = ?');
+      values.push(changes.status);
+    }
+    if (execution) {
+      const execMap: Record<string, string> = {
+        selectedAttemptId: 'selected_attempt_id',
+        generation: 'execution_generation',
+        phase: 'launch_phase',
+      };
+      const execDateMap: Record<string, string> = {
+        startedAt: 'started_at',
+        lastHeartbeatAt: 'last_heartbeat_at',
+        launchStartedAt: 'launch_started_at',
+        launchCompletedAt: 'launch_completed_at',
+      };
+      for (const [key, col] of Object.entries(execMap)) {
+        if (key in execution) {
+          setClauses.push(`${col} = ?`);
+          values.push(execution[key] ?? null);
+        }
+      }
+      for (const [key, col] of Object.entries(execDateMap)) {
+        if (key in execution) {
+          const value = execution[key];
+          setClauses.push(`${col} = ?`);
+          values.push(value instanceof Date ? value.toISOString() : value ?? null);
+        }
+      }
+    }
+
+    if (setClauses.length === 0) return;
+    setClauses.push('task_state_version = task_state_version + 1');
+    values.push(taskId);
+    const beforeRow = this.exec.queryOne(
+      'SELECT workflow_id, status FROM tasks WHERE id = ?',
+      [taskId],
+    ) as { workflow_id?: string; status?: string } | undefined;
+
+    this.exec.runTransaction(() => {
+      const taskPayload = this.exec.queryOne(
+        `UPDATE tasks SET ${setClauses.join(', ')} WHERE id = ? RETURNING *`,
+        values,
+      );
+      if (!taskPayload) {
+        throw new Error(`Failed to load task ${taskId} after launch-state update for sync journal`);
+      }
+      this.exec.markDirty();
+      appendJournalEntry(this.exec, {
+        entityType: 'task',
+        entityId: taskId,
+        op: 'upsert',
+        payload: taskPayload,
+      });
+      if (changes.status !== undefined && beforeRow?.status !== changes.status) {
+        this.appendQueueHistory({
+          eventType: 'task_state_transition',
+          workflowId: beforeRow?.workflow_id ?? String(taskPayload.workflow_id ?? ''),
+          taskId,
+          fromState: beforeRow?.status ?? null,
+          toState: changes.status,
+          payload: { source: 'updateTaskLaunchState' },
+          unknownFields: beforeRow?.status ? [] : ['from_state'],
+        });
+      }
+    });
   }
 
   loadTasks(workflowId: string): TaskState[] {
@@ -428,6 +966,44 @@ export class SqliteTaskAttemptRepository {
       [workflowId],
     );
     return rows.map((row) => this.reconcileTaskFromSelectedAttempt(mapRowToTask(row)));
+  }
+
+  /**
+   * Batched form of loadTasks: one query for many workflows instead of one
+   * query per workflow. Same row shape/reconciliation as loadTasks; callers
+   * that previously looped `workflowIds.map(loadTasks)` (e.g.
+   * Orchestrator.refreshFromDb, which does this once per activeWorkflowIds
+   * entry on every startExecution()/handleWorkerResponse() call) get
+   * identical results in one round trip instead of N.
+   *
+   * Chunks queries when workflowIds exceeds SQLITE_MAX_VARIABLE_NUMBER to
+   * avoid "too many SQL variables" errors at scale.
+   */
+  loadTasksForWorkflows(workflowIds: string[]): TaskState[] {
+    if (workflowIds.length === 0) return [];
+    if (workflowIds.length <= SQLITE_MAX_VARIABLE_NUMBER) {
+      const placeholders = workflowIds.map(() => '?').join(', ');
+      const rows = this.exec.queryAll(
+        `SELECT ${this.taskSelectColumns('t')}
+         FROM tasks t${this.taskSelectJoin('t')}
+         WHERE t.workflow_id IN (${placeholders})`,
+        workflowIds,
+      );
+      return rows.map((row) => this.reconcileTaskFromSelectedAttempt(mapRowToTask(row)));
+    }
+    const results: TaskState[] = [];
+    for (let i = 0; i < workflowIds.length; i += SQLITE_MAX_VARIABLE_NUMBER) {
+      const chunk = workflowIds.slice(i, i + SQLITE_MAX_VARIABLE_NUMBER);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = this.exec.queryAll(
+        `SELECT ${this.taskSelectColumns('t')}
+         FROM tasks t${this.taskSelectJoin('t')}
+         WHERE t.workflow_id IN (${placeholders})`,
+        chunk,
+      );
+      results.push(...rows.map((row) => this.reconcileTaskFromSelectedAttempt(mapRowToTask(row))));
+    }
+    return results;
   }
 
   loadTask(taskId: string): TaskState | undefined {
@@ -594,40 +1170,69 @@ export class SqliteTaskAttemptRepository {
   // ── Attempt CRUD ─────────────────────────────────────────
 
   saveAttempt(attempt: Attempt): void {
-    this.exec.execRun(`
-      INSERT OR REPLACE INTO attempts (
-        id, node_id, attempt_number, queue_priority, status,
-        snapshot_commit, base_branch, upstream_attempt_ids,
-        command_override, prompt_override,
-        claimed_at, started_at, completed_at, exit_code, error, last_heartbeat_at, lease_expires_at,
-        branch, commit_hash, summary, workspace_path, agent_session_id, container_id,
-        supersedes_attempt_id, created_at, merge_conflict
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?
-      )
-    `, [
-      attempt.id, attempt.nodeId, 0, attempt.queuePriority, attempt.status,
-      attempt.snapshotCommit ?? null, attempt.baseBranch ?? null,
-      JSON.stringify(attempt.upstreamAttemptIds),
-      attempt.commandOverride ?? null, attempt.promptOverride ?? null,
-      attempt.claimedAt?.toISOString() ?? null,
-      attempt.startedAt?.toISOString() ?? null,
-      attempt.completedAt?.toISOString() ?? null,
-      attempt.exitCode ?? null, attempt.error ?? null,
-      attempt.lastHeartbeatAt?.toISOString() ?? null,
-      attempt.leaseExpiresAt?.toISOString() ?? null,
-      attempt.branch ?? null, attempt.commit ?? null, attempt.summary ?? null,
-      attempt.workspacePath ?? null, attempt.agentSessionId ?? null,
-      attempt.containerId ?? null,
-      attempt.supersedesAttemptId ?? null,
-      attempt.createdAt.toISOString(),
-      attempt.mergeConflict ? JSON.stringify(attempt.mergeConflict) : null,
-    ]);
+    this.exec.runTransaction(() => {
+      this.exec.execRun(`
+        INSERT OR REPLACE INTO attempts (
+          id, node_id, attempt_number, queue_priority, status,
+          snapshot_commit, base_branch, upstream_attempt_ids,
+          command_override, prompt_override,
+          claimed_at, started_at, completed_at, exit_code, error, last_heartbeat_at, lease_expires_at,
+          branch, commit_hash, summary, workspace_path, agent_session_id, container_id,
+          supersedes_attempt_id, created_at, merge_conflict
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?,
+          ?, ?,
+          ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?
+        )
+      `, [
+        attempt.id, attempt.nodeId, 0, attempt.queuePriority, attempt.status,
+        attempt.snapshotCommit ?? null, attempt.baseBranch ?? null,
+        JSON.stringify(attempt.upstreamAttemptIds),
+        attempt.commandOverride ?? null, attempt.promptOverride ?? null,
+        attempt.claimedAt?.toISOString() ?? null,
+        attempt.startedAt?.toISOString() ?? null,
+        attempt.completedAt?.toISOString() ?? null,
+        attempt.exitCode ?? null, attempt.error ?? null,
+        attempt.lastHeartbeatAt?.toISOString() ?? null,
+        attempt.leaseExpiresAt?.toISOString() ?? null,
+        attempt.branch ?? null, attempt.commit ?? null, attempt.summary ?? null,
+        attempt.workspacePath ?? null, attempt.agentSessionId ?? null,
+        attempt.containerId ?? null,
+        attempt.supersedesAttemptId ?? null,
+        attempt.createdAt.toISOString(),
+        attempt.mergeConflict ? JSON.stringify(attempt.mergeConflict) : null,
+      ]);
+      const payload = this.loadAttemptJournalPayload(attempt.id);
+      if (!payload) {
+        throw new Error(`Failed to load attempt ${attempt.id} after insert for sync journal`);
+      }
+      appendJournalEntry(this.exec, {
+        entityType: 'attempt',
+        entityId: attempt.id,
+        op: 'upsert',
+        payload,
+      });
+      const taskRow = this.exec.queryOne(
+        'SELECT workflow_id FROM tasks WHERE id = ?',
+        [attempt.nodeId],
+      ) as { workflow_id?: string } | undefined;
+      this.appendQueueHistory({
+        eventType: 'attempt_state_transition',
+        workflowId: taskRow?.workflow_id ?? null,
+        taskId: attempt.nodeId,
+        attemptId: attempt.id,
+        fromState: null,
+        toState: attempt.status,
+        payload: { source: 'saveAttempt' },
+        unknownFields: [
+          'from_state',
+          ...(taskRow?.workflow_id ? [] : ['workflow_id']),
+        ],
+      });
+    });
   }
 
   loadAttempts(nodeId: string): Attempt[] {
@@ -689,6 +1294,13 @@ export class SqliteTaskAttemptRepository {
   }
 
   updateAttempt(attemptId: string, changes: Partial<Pick<Attempt, 'status' | 'claimedAt' | 'startedAt' | 'completedAt' | 'exitCode' | 'error' | 'lastHeartbeatAt' | 'leaseExpiresAt' | 'branch' | 'commit' | 'summary' | 'queuePriority' | 'workspacePath' | 'agentSessionId' | 'containerId' | 'mergeConflict'>>): void {
+    const beforeAttempt = this.exec.queryOne(
+      `SELECT a.id, a.node_id, a.status, t.workflow_id
+         FROM attempts a
+         LEFT JOIN tasks t ON t.id = a.node_id
+        WHERE a.id = ?`,
+      [attemptId],
+    ) as { id?: string; node_id?: string; status?: string; workflow_id?: string } | undefined;
     const setClauses: string[] = [];
     const values: unknown[] = [];
 
@@ -711,7 +1323,37 @@ export class SqliteTaskAttemptRepository {
 
     if (setClauses.length === 0) return;
     values.push(attemptId);
-    this.exec.execRun(`UPDATE attempts SET ${setClauses.join(', ')} WHERE id = ?`, values);
+    const updateSql = `UPDATE attempts SET ${setClauses.join(', ')} WHERE id = ?`;
+
+    this.exec.runTransaction(() => {
+      this.exec.execRun(updateSql, values);
+      const payload = this.loadAttemptJournalPayload(attemptId);
+      if (!payload) {
+        throw new Error(`Failed to load attempt ${attemptId} after update for sync journal`);
+      }
+      appendJournalEntry(this.exec, {
+        entityType: 'attempt',
+        entityId: attemptId,
+        op: 'upsert',
+        payload,
+      });
+      if (changes.status !== undefined && beforeAttempt?.status !== changes.status) {
+        this.appendQueueHistory({
+          eventType: 'attempt_state_transition',
+          workflowId: beforeAttempt?.workflow_id ?? null,
+          taskId: beforeAttempt?.node_id ?? null,
+          attemptId,
+          fromState: beforeAttempt?.status ?? null,
+          toState: changes.status,
+          payload: { source: 'updateAttempt' },
+          unknownFields: [
+            ...(beforeAttempt?.status ? [] : ['from_state']),
+            ...(beforeAttempt?.workflow_id ? [] : ['workflow_id']),
+            ...(beforeAttempt?.node_id ? [] : ['task_id']),
+          ],
+        });
+      }
+    });
   }
 
   claimAttemptForLaunch(
@@ -734,24 +1376,37 @@ export class SqliteTaskAttemptRepository {
     if (this.exec.readOnly) {
       throw new Error('SQLiteAdapter is read-only in this process');
     }
-    this.exec.run(
-      `UPDATE attempts SET ${setClauses.join(', ')}
-       WHERE id = ?
-         AND (
-           status = 'pending'
-           OR (
-             status IN ('claimed', 'running')
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at <= ?
-           )
-         )`,
-      values,
-    );
-    const claimed = this.exec.getRowsModified() > 0;
-    if (claimed) {
-      this.exec.markDirty();
-    }
-    return claimed;
+    return this.exec.runTransaction(() => {
+      const beforeAttempt = this.exec.queryOne(
+        `SELECT a.id, a.node_id, a.status, t.workflow_id
+           FROM attempts a
+           LEFT JOIN tasks t ON t.id = a.node_id
+          WHERE a.id = ?`,
+        [attemptId],
+      ) as { id?: string; node_id?: string; status?: string; workflow_id?: string } | undefined;
+      this.exec.execRun(
+        `UPDATE attempts SET ${setClauses.join(', ')} WHERE id = ? AND (${CLAIMABLE_ATTEMPT_WHERE_CLAUSE})`,
+        values,
+      );
+      const claimed = this.exec.getRowsModified() > 0;
+      if (claimed && changes.status !== undefined && beforeAttempt?.status !== changes.status) {
+        this.appendQueueHistory({
+          eventType: 'attempt_state_transition',
+          workflowId: beforeAttempt?.workflow_id ?? null,
+          taskId: beforeAttempt?.node_id ?? null,
+          attemptId,
+          fromState: beforeAttempt?.status ?? null,
+          toState: changes.status,
+          payload: { source: 'claimAttemptForLaunch' },
+          unknownFields: [
+            ...(beforeAttempt?.status ? [] : ['from_state']),
+            ...(beforeAttempt?.workflow_id ? [] : ['workflow_id']),
+            ...(beforeAttempt?.node_id ? [] : ['task_id']),
+          ],
+        });
+      }
+      return claimed;
+    });
   }
 
   // ── Task ↔ attempt reconciliation ────────────────────────

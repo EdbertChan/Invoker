@@ -28,6 +28,8 @@ import { buildTaskResetChanges, type TaskResetKind } from '../task-reset-policy.
 
 const TASK_DELTA_CHANNEL = 'task.delta';
 
+export const ALREADY_TERMINAL_TASK_STATUSES: readonly TaskStatus[] = ['completed', 'closed', 'stale'];
+
 function isActiveForInvalidation(status: TaskStatus): boolean {
   return (
     status === 'running' ||
@@ -94,8 +96,8 @@ export interface CancellationHost {
   ): string;
   clearQueuedSchedulerEntries(taskId: string, attemptId?: string): void;
   invalidateLaunchArtifactsForTasks(taskIds: readonly string[], reason: string, now?: Date): void;
-  checkWorkflowCompletion(): void;
-  drainScheduler(): TaskState[];
+  checkWorkflowCompletion(transitionedWorkflowId?: string): void;
+  drainScheduler(opts?: { alreadyRefreshed?: boolean }): TaskState[];
 }
 
 // ── Extracted Functions ─────────────────────────────────────
@@ -178,7 +180,7 @@ export function cancelActiveCandidatesImpl(
     const completedAt = new Date();
     const changes: TaskStateChanges = {
       status: 'failed',
-      execution: { error, completedAt },
+      execution: { error, completedAt, failureClass: 'cancelled' },
     };
     const updated = host.writeAndSync(t.id, changes);
     host.persistence.logEvent?.(t.id, 'task.cancelled', changes);
@@ -193,18 +195,23 @@ export function cancelActiveCandidatesImpl(
 /**
  * Cancel a task and cascade-cancel all downstream DAG dependents.
  * Returns cancelled task IDs and which were running (need process kill by caller).
+ *
+ * `deferInvalidation`: when true, skips `invalidateLaunchArtifactsForTasks`
+ * and returns `toCancelIds` instead, so the caller can kill the real
+ * process first and invalidate via `finalizeCancelInvalidationImpl`
+ * afterward. Defaults to false so existing callers are unaffected.
  */
 export function cancelTaskImpl(
   host: CancellationHost,
   taskId: string,
-): { cancelled: string[]; runningCancelled: string[] } {
+  opts?: { deferInvalidation?: boolean },
+): { cancelled: string[]; runningCancelled: string[]; toCancelIds: string[] } {
   host.refreshFromDb();
 
   const task = host.stateGetTask(taskId);
   if (!task) throw new OrchestratorError('TASK_NOT_FOUND', `Task "${taskId}" not found`);
 
-  const terminal: Partial<Record<TaskStatus, true>> = { completed: true, closed: true, stale: true };
-  if (terminal[task.status]) {
+  if (ALREADY_TERMINAL_TASK_STATUSES.includes(task.status)) {
     throw new OrchestratorError('TASK_ALREADY_TERMINAL', `Task "${taskId}" is already ${task.status}`);
   }
 
@@ -226,7 +233,9 @@ export function cancelTaskImpl(
   const toCancelIds = [rootId, ...descendantIds];
   const cancelled: string[] = [];
   const runningCancelled: string[] = [];
-  host.invalidateLaunchArtifactsForTasks(toCancelIds, 'task cancellation');
+  if (!opts?.deferInvalidation) {
+    host.invalidateLaunchArtifactsForTasks(toCancelIds, 'task cancellation');
+  }
 
   for (const id of toCancelIds) {
     const t = host.stateGetTask(id);
@@ -252,7 +261,7 @@ export function cancelTaskImpl(
     const neverStarted =
       id !== rootId &&
       !t.execution.startedAt &&
-      (t.status === 'pending' || (t.status as string) === 'queued' || t.status === 'blocked');
+      (t.status === 'pending' || (t.status as string) === 'queued' || t.status === 'blocked' || t.status === 'skipped');
 
     if (neverStarted) {
       const blockedChanges: TaskStateChanges = {
@@ -274,7 +283,7 @@ export function cancelTaskImpl(
         : `Terminated: upstream task "${upstreamLabel}" was terminated`;
     const changes: TaskStateChanges = {
       status: 'failed',
-      execution: { error: errorMsg, completedAt: new Date() },
+      execution: { error: errorMsg, completedAt: new Date(), failureClass: 'cancelled' },
     };
     const cancelUpdated = host.writeAndSync(id, changes);
     host.updateSelectedAttempt(id, {
@@ -289,19 +298,65 @@ export function cancelTaskImpl(
     cancelled.push(id);
   }
 
-  host.checkWorkflowCompletion();
-  return { cancelled, runningCancelled };
+  host.checkWorkflowCompletion(task.config.workflowId);
+  return { cancelled, runningCancelled, toCancelIds };
+}
+
+const CLOSABLE_STATUSES: Partial<Record<TaskStatus, true>> = {
+  failed: true,
+  completed: true,
+  review_ready: true,
+};
+
+/**
+ * Close a single idle task in a terminal-ish status (`failed` / `completed` /
+ * `review_ready`) without touching any other task.
+ *
+ * Unlike `cancelTaskImpl`, this never cascades to dependents and never
+ * inspects the DAG — it is a narrow bookkeeping transition for a stale-task
+ * sweep, not a cancellation. Dependents, ancestors, and the parent
+ * workflow's own status are left exactly as they were (beyond the routine
+ * `checkWorkflowCompletion` recheck every task write triggers).
+ */
+export function closeIdleTaskImpl(host: CancellationHost, taskId: string): TaskState {
+  host.refreshFromDb();
+
+  const task = host.stateGetTask(taskId);
+  if (!task) throw new OrchestratorError('TASK_NOT_FOUND', `Task "${taskId}" not found`);
+
+  if (!CLOSABLE_STATUSES[task.status]) {
+    throw new OrchestratorError(
+      'TASK_NOT_CLOSABLE',
+      `Task "${taskId}" is "${task.status}"; only failed, completed, or review_ready tasks can be closed`,
+    );
+  }
+
+  const changes: TaskStateChanges = {
+    status: 'closed',
+    execution: { completedAt: task.execution.completedAt ?? new Date() },
+  };
+  const updated = host.writeAndSync(taskId, changes);
+  const delta: TaskDelta = host.buildUpdateDelta(task, updated, changes);
+  host.persistence.logEvent?.(taskId, 'task.closed_idle', changes);
+  host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
+
+  host.checkWorkflowCompletion(task.config.workflowId);
+  return updated;
 }
 
 /**
  * Cancel all active tasks in a workflow.
  * Terminal tasks (completed/stale) are preserved as-is.
+ *
+ * See `cancelTaskImpl` for what `deferInvalidation` does and why.
  */
 export function cancelWorkflowImpl(
   host: CancellationHost,
   workflowId: string,
-): { cancelled: string[]; runningCancelled: string[] } {
+  opts?: { deferInvalidation?: boolean; reason?: string },
+): { cancelled: string[]; runningCancelled: string[]; toCancelIds: string[] } {
   host.refreshWorkflowFromDb(workflowId);
+  const reason = opts?.reason ?? 'Cancelled by user (workflow)';
 
   const allTasks = host.stateMachine.getAllTasks().filter(
     (t) => t.config.workflowId === workflowId,
@@ -323,10 +378,10 @@ export function cancelWorkflowImpl(
 
   const cancelled: string[] = [];
   const runningCancelled: string[] = [];
-  host.invalidateLaunchArtifactsForTasks(
-    allTasks.filter((task) => cancellable[task.status]).map((task) => task.id),
-    'workflow cancellation',
-  );
+  const toCancelIds = allTasks.filter((task) => cancellable[task.status]).map((task) => task.id);
+  if (!opts?.deferInvalidation) {
+    host.invalidateLaunchArtifactsForTasks(toCancelIds, 'workflow cancellation');
+  }
 
   for (const task of allTasks) {
     if (!cancellable[task.status]) continue;
@@ -343,14 +398,15 @@ export function cancelWorkflowImpl(
     const changes: TaskStateChanges = {
       status: 'failed',
       execution: {
-        error: 'Cancelled by user (workflow)',
+        error: reason,
         completedAt: new Date(),
+        failureClass: 'cancelled',
       },
     };
     const wfCancelUpdated = host.writeAndSync(id, changes);
     host.updateSelectedAttempt(id, {
       status: 'failed',
-      error: 'Cancelled by user (workflow)',
+      error: reason,
       completedAt: changes.execution?.completedAt,
     });
     host.persistence.logEvent?.(id, 'task.cancelled', changes);
@@ -358,8 +414,22 @@ export function cancelWorkflowImpl(
     cancelled.push(id);
   }
 
-  host.checkWorkflowCompletion();
-  return { cancelled, runningCancelled };
+  host.checkWorkflowCompletion(workflowId);
+  return { cancelled, runningCancelled, toCancelIds };
+}
+
+/**
+ * Companion to `cancelTaskImpl`/`cancelWorkflowImpl`'s `deferInvalidation`
+ * option: performs the artifact invalidation they skipped, after the
+ * caller has finished killing every id in `runningCancelled`.
+ */
+export function finalizeCancelInvalidationImpl(
+  host: CancellationHost,
+  toCancelIds: readonly string[],
+  reason: string,
+): void {
+  if (toCancelIds.length === 0) return;
+  host.invalidateLaunchArtifactsForTasks(toCancelIds, reason);
 }
 
 /**
@@ -411,5 +481,5 @@ export function deferTaskImpl(
   host.deferredTaskIds.add(id);
 
   // Let other ready tasks fill the freed slot
-  host.drainScheduler();
+  host.drainScheduler({ alreadyRefreshed: true });
 }

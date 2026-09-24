@@ -34,6 +34,7 @@ export interface WorkerTickContext {
   readonly tickNumber: number;
   /** Aborted when `stop()` is requested; ticks should check between units of work. */
   readonly signal: AbortSignal;
+  readonly args?: string[];
 }
 
 /** The unit of work a worker performs on each tick. */
@@ -57,12 +58,32 @@ export interface WorkerRuntimeOptions {
   onTick: WorkerTick;
   /** Periodic poll interval in ms. `<= 0` disables polling (wakeup-only). */
   intervalMs?: number;
+  /**
+   * Delay before the poll interval (and `tickOnStart`) begin, in ms. Default 0.
+   * Use to stagger multiple worker runtimes that share an external resource
+   * (e.g. a cross-process lock) and would otherwise all wake on the same
+   * `intervalMs` boundary every cycle.
+   */
+  startDelayMs?: number;
   /** Run a tick immediately when `start()` is called. Default `true`. */
   tickOnStart?: boolean;
+  /** Initial delay before a queued follow-up tick after a failed tick. Default 250ms. */
+  backoffBaseMs?: number;
+  /** Maximum delay before a queued follow-up tick after repeated failures. Default 30s. */
+  backoffMaxMs?: number;
   /** OS signals that trigger deterministic shutdown. Default `SIGINT`/`SIGTERM`. */
   shutdownSignals?: NodeJS.Signals[];
   /** Install process signal handlers on `start()`. Default `true`. */
   installSignalHandlers?: boolean;
+  /**
+   * When > 0 and a shutdown signal stopped this runtime but the process is
+   * still alive this many ms later, log an error and restart the runtime.
+   * A signal a long-lived owner survives must not permanently strip its
+   * workers (2026-08-05: a SIGTERM the owner outlived silently killed all
+   * PR-maintenance workers for over an hour). Default 0 (signal stop is
+   * final), preserving shutdown semantics for processes that exit.
+   */
+  restartAfterSurvivedSignalMs?: number;
 }
 
 export interface WorkerRuntime {
@@ -74,6 +95,7 @@ export interface WorkerRuntime {
   wake(reason?: WorkerTickReason): void;
   /** Run a single tick now and await it (manual/test hook). */
   tick(reason?: WorkerTickReason): Promise<void>;
+  run(args?: string[]): Promise<void>;
   /**
    * Request stop: clear the timer, drop signal handlers, abort the tick
    * signal. Resolves promptly unless `settleTimeoutMs` is set for a bounded
@@ -112,6 +134,7 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
     instanceId: options.instanceId ?? nextInstanceId(options.kind),
   };
   const intervalMs = options.intervalMs ?? 0;
+  const startDelayMs = options.startDelayMs ?? 0;
   const tickOnStart = options.tickOnStart ?? true;
   const shutdownSignals = options.shutdownSignals ?? DEFAULT_SHUTDOWN_SIGNALS;
   const installSignalHandlers = options.installSignalHandlers ?? true;
@@ -120,50 +143,78 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
   let started = false;
   let stopped = false;
   let interval: ReturnType<typeof setInterval> | null = null;
-  let inFlight: Promise<void> | null = null;
+  let startDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  let inFlight: Promise<boolean> | null = null;
   let pendingReason: WorkerTickReason | null = null;
+  let pendingArgs: string[] | undefined;
   let tickNumber = 0;
+  let lastTickActivityAt = Date.now();
+  let watchdogTimer: NodeJS.Timeout | null = null;
+  let stallLogged = false;
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
   let abortController = new AbortController();
 
-  const runOnce = async (reason: WorkerTickReason): Promise<void> => {
+  const runOnce = async (reason: WorkerTickReason, args?: string[]): Promise<boolean> => {
     tickNumber += 1;
     const ctx: WorkerTickContext = {
       identity,
       reason,
       tickNumber,
       signal: abortController.signal,
+      args,
     };
+    lastTickActivityAt = Date.now();
     try {
       await options.onTick(ctx);
+      return true;
     } catch (err) {
       if (abortController.signal.aborted) {
         options.logger.info(`[worker:${identity.kind}] tick aborted`, { ...logFields, reason });
-        return;
+        return true;
       }
       options.logger.error(`[worker:${identity.kind}] tick failed`, { ...logFields, reason, err });
+      return false;
+    } finally {
+      lastTickActivityAt = Date.now();
+      stallLogged = false;
     }
   };
 
   // Coalescing scheduler: at most one tick runs at a time. Requests that arrive
   // while a tick is in flight collapse into a single follow-up (keeping the most
   // recent reason), so a burst of wakeups never queues a backlog of ticks.
-  const schedule = (reason: WorkerTickReason): Promise<void> => {
-    if (stopped) return Promise.resolve();
+  const schedule = (reason: WorkerTickReason, args?: string[]): Promise<boolean> => {
+    if (stopped) return Promise.resolve(true);
     if (inFlight) {
       pendingReason = reason;
+      pendingArgs = args;
       return inFlight;
     }
-    const drain = async (firstReason: WorkerTickReason): Promise<void> => {
+    const drain = async (firstReason: WorkerTickReason, firstArgs?: string[]): Promise<boolean> => {
       let nextReason: WorkerTickReason | null = firstReason;
+      let nextArgs: string[] | undefined = firstArgs;
+      let consecutiveFailures = 0;
+      let succeeded = true;
       while (nextReason !== null && !stopped) {
         const current = nextReason;
+        const currentArgs = nextArgs;
         pendingReason = null;
-        await runOnce(current);
+        pendingArgs = undefined;
+        succeeded = await runOnce(current, currentArgs);
+        consecutiveFailures = succeeded ? 0 : consecutiveFailures + 1;
         nextReason = pendingReason;
+        nextArgs = pendingArgs;
+        if (nextReason !== null && !succeeded && !stopped) {
+          const backoffMs = Math.min(
+            (options.backoffBaseMs ?? 250) * 2 ** (consecutiveFailures - 1),
+            options.backoffMaxMs ?? 30_000,
+          );
+          await delay(backoffMs);
+        }
       }
+      return succeeded;
     };
-    inFlight = drain(reason).finally(() => {
+    inFlight = drain(reason, args).finally(() => {
       inFlight = null;
     });
     return inFlight;
@@ -174,7 +225,12 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
     void schedule(reason);
   };
 
-  const tick = (reason: WorkerTickReason = 'manual'): Promise<void> => schedule(reason);
+  const tick = (reason: WorkerTickReason = 'manual'): Promise<void> => schedule(reason).then(() => {});
+
+  const run = (args?: string[]): Promise<void> =>
+    schedule('manual', args).then((ok) => {
+      if (!ok) throw new Error(`Worker ${identity.kind} run failed`);
+    });
 
   const beginStop = (): void => {
     if (stopped) return;
@@ -195,6 +251,14 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
     if (interval) {
       clearInterval(interval);
       interval = null;
+    }
+    if (watchdogTimer) {
+      clearInterval(watchdogTimer);
+      watchdogTimer = null;
+    }
+    if (startDelayTimer) {
+      clearTimeout(startDelayTimer);
+      startDelayTimer = null;
     }
     for (const [signal, handler] of signalHandlers) {
       process.removeListener(signal, handler);
@@ -227,7 +291,7 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
     if (started) return;
     started = true;
     options.logger.info(
-      `[worker:${identity.kind}] started intervalMs=${intervalMs} signals=${installSignalHandlers ? shutdownSignals.join(',') : 'none'}`,
+      `[worker:${identity.kind}] started intervalMs=${intervalMs} startDelayMs=${startDelayMs} signals=${installSignalHandlers ? shutdownSignals.join(',') : 'none'}`,
       logFields,
     );
 
@@ -235,19 +299,58 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
       for (const signal of shutdownSignals) {
         const handler = (): void => {
           options.logger.info(`[worker:${identity.kind}] received ${signal}; shutting down`, logFields);
-          void stop({ settleTimeoutMs: 5_000 });
+          const stopping = stop({ settleTimeoutMs: 5_000 });
+          const restartMs = options.restartAfterSurvivedSignalMs ?? 0;
+          if (restartMs <= 0) return;
+          void stopping.then(() => {
+            const timer = setTimeout(() => {
+              options.logger.error(
+                `[worker:${identity.kind}] process survived ${signal} for ${restartMs}ms after worker stop; restarting worker`,
+                logFields,
+              );
+              stopped = false;
+              started = false;
+              abortController = new AbortController();
+              start();
+            }, restartMs);
+            timer.unref?.();
+          });
         };
         signalHandlers.set(signal, handler);
         process.once(signal, handler);
       }
     }
 
-    if (intervalMs > 0) {
-      interval = setInterval(() => wake('poll'), intervalMs);
-      interval.unref?.();
-    }
+    const beginPolling = (): void => {
+      if (intervalMs > 0) {
+        interval = setInterval(() => wake('poll'), intervalMs);
+        interval.unref?.();
+        lastTickActivityAt = Date.now();
+        stallLogged = false;
+        watchdogTimer = setInterval(() => {
+          const idleMs = Date.now() - lastTickActivityAt;
+          if (idleMs > intervalMs * 2 && !stallLogged) {
+            stallLogged = true;
+            options.logger.error(
+              `[worker:${identity.kind}] no tick activity for ${idleMs}ms (interval ${intervalMs}ms) — worker looks stalled`,
+              { ...logFields, tickNumber },
+            );
+          }
+        }, intervalMs);
+        watchdogTimer.unref?.();
+      }
+      if (tickOnStart) wake('startup');
+    };
 
-    if (tickOnStart) wake('startup');
+    if (startDelayMs > 0) {
+      startDelayTimer = setTimeout(() => {
+        startDelayTimer = null;
+        if (!stopped) beginPolling();
+      }, startDelayMs);
+      startDelayTimer.unref?.();
+    } else {
+      beginPolling();
+    }
   };
 
   const stop = async (stopOptions?: WorkerRuntimeStopOptions): Promise<void> => {
@@ -263,5 +366,5 @@ export function createWorkerRuntime(options: WorkerRuntimeOptions): WorkerRuntim
 
   const isRunning = (): boolean => started && !stopped;
 
-  return { identity, start, wake, tick, stop, isRunning };
+  return { identity, start, wake, tick, run, stop, isRunning };
 }

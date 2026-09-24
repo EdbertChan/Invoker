@@ -110,6 +110,35 @@ Keep app exposure separate from core runtime behavior.
 </details>
 `;
 
+const REFACTOR_BODY = `## Summary
+This branch moves one helper into its own module.
+## Review Claim
+Move the helper with no behavior change.
+## Review Lane
+- refactor
+## Review Unit
+- ownership-refactor
+## Safety Invariant
+Only this one helper moves; every call site is re-pointed in this same PR.
+## Slice Rationale
+One technique, one PR.
+## Non-goals
+- No behavior change.
+## Test Plan
+<details>
+<summary>Test Plan</summary>
+- [ ] \`node scripts/test-create-pr-stack-workflow.mjs\`
+</details>
+## Revert Plan
+<details>
+<summary>Revert Plan</summary>
+- Safe to revert? Yes
+- Revert command: \`git revert <sha>\`
+- Post-revert steps: None
+- Data migration? No
+</details>
+`;
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
@@ -129,6 +158,12 @@ function git(cwd, ...args) {
 
 function gitQuiet(cwd, ...args) {
   return execFileSync('git', ['-C', cwd, ...args], { stdio: 'ignore' });
+}
+
+function gitTextRefExists(cwd, ref) {
+  return spawnSync('git', ['-C', cwd, 'rev-parse', '--verify', ref], {
+    encoding: 'utf-8',
+  }).status === 0;
 }
 
 function writeExecutable(path, content) {
@@ -357,6 +392,139 @@ function testStaleBaseDetection() {
     rmSync(harness.root, { recursive: true, force: true });
   }
 }
+function testStaleMergedHelperBaseRejectsPublication() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    gitQuiet(work, 'branch', 'pr/previous', 'origin/master');
+    gitQuiet(work, 'push', 'origin', 'pr/previous');
+    createTrackedBranch(work, 'feature/on-stale-helper', 'origin/pr/previous');
+    commitFile(work, 'feature.txt', 'feature\n', 'feature change');
+
+    const result = runCreatePr(work, harness, ['--title', 'test title', '--base', 'pr/previous', '--body-file', 'pr-body.md'], {
+      GH_API_PULLS_JSON: JSON.stringify([
+        {
+          number: 86,
+          state: 'closed',
+          merged_at: '2026-07-26T07:32:31Z',
+          html_url: 'https://example.com/pull/86',
+          head: { ref: 'pr/previous', repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+    });
+
+    assert(result.status === 1, `stale merged helper base should fail\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert(
+      result.stderr.includes('Refusing to create/update PR: base branch "pr/previous" belongs to a stale helper PR.'),
+      `stale helper base error should explain the stale helper branch\nstderr:\n${result.stderr}`,
+    );
+    assert(result.stderr.includes('merged helper PR #86'), `stale helper base error should name the merged helper PR\nstderr:\n${result.stderr}`);
+    assert(result.stderr.includes('git switch -c stack/<name> origin/<live-stack-base>'), 'stale helper base error should include stack rebuild command');
+    assert(result.stderr.includes('git cherry-pick <commit> [<commit> ...]'), 'stale helper base error should include cherry-pick recovery');
+    expectNoPush(harness, 'stale merged helper base');
+    const ghCalls = readGhCalls(harness.ghLog);
+    assert(ghCalls.some((call) => call.route.includes('/pulls?')), 'stale helper base rejection should look up helper-base PRs');
+    assert(
+      !ghCalls.some((call) => /\/pulls(?:\/[0-9]+)?$/.test(call.route)),
+      `stale helper base rejection should fail before PR mutation\n${JSON.stringify(ghCalls, null, 2)}`,
+    );
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testDuplicateHelperBasePrsRejectPublication() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    gitQuiet(work, 'branch', 'pr/previous', 'origin/master');
+    gitQuiet(work, 'push', 'origin', 'pr/previous');
+    createTrackedBranch(work, 'feature/on-stale-helper', 'origin/pr/previous');
+    commitFile(work, 'feature.txt', 'feature\n', 'feature change');
+
+    const result = runCreatePr(work, harness, ['--title', 'test title', '--base', 'pr/previous', '--body-file', 'pr-body.md'], {
+      GH_API_PULLS_JSON: JSON.stringify([
+        {
+          number: 86,
+          state: 'open',
+          html_url: 'https://example.com/pull/86',
+          head: { ref: 'pr/previous', repo: { full_name: 'owner/repo' } },
+        },
+        {
+          number: 87,
+          state: 'closed',
+          html_url: 'https://example.com/pull/87',
+          head: { ref: 'pr/previous', repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+    });
+
+    assert(result.status === 1, `duplicate helper-base PRs should fail\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert(
+      result.stderr.includes('Found multiple PRs for base branch "pr/previous"'),
+      `duplicate helper-base error should name the helper base\nstderr:\n${result.stderr}`,
+    );
+    assert(result.stderr.includes('Refusing to guess. Resolve the duplicate helper-base PRs first.'), 'duplicate helper-base error should refuse to guess');
+    assert(result.stderr.includes('#86: https://example.com/pull/86'), 'duplicate helper-base error should list PR #86');
+    assert(result.stderr.includes('#87: https://example.com/pull/87'), 'duplicate helper-base error should list PR #87');
+    expectNoPush(harness, 'duplicate helper-base PRs');
+    const ghCalls = readGhCalls(harness.ghLog);
+    assert(
+      !ghCalls.some((call) => /\/pulls(?:\/[0-9]+)?$/.test(call.route)),
+      `duplicate helper-base rejection should fail before PR mutation\n${JSON.stringify(ghCalls, null, 2)}`,
+    );
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testOpenHelperBaseWithRestApiLowercaseStateAllowsPublication() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    gitQuiet(work, 'branch', 'pr/previous', 'origin/master');
+    gitQuiet(work, 'push', 'origin', 'pr/previous');
+    createTrackedBranch(work, 'feature/on-open-helper', 'origin/pr/previous');
+    commitFile(work, 'feature.txt', 'feature\n', 'feature change');
+
+    // GitHub's REST API (gh api repos/.../pulls) reports state as lowercase
+    // "open"/"closed", unlike gh pr view's GraphQL-backed "OPEN"/"CLOSED".
+    // A genuinely open, single helper-base PR must not be treated as stale.
+    const result = runCreatePr(work, harness, ['--title', '[Test Stack](2) add feature', '--base', 'pr/previous', '--body-file', 'pr-body.md'], {
+      GH_API_PULLS_JSON: JSON.stringify([
+        {
+          number: 86,
+          state: 'open',
+          merged_at: null,
+          html_url: 'https://example.com/pull/86',
+          head: { ref: 'pr/previous', repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+      GH_POST_RESPONSE: JSON.stringify({ number: 90, html_url: 'https://example.com/pull/90' }),
+      GH_API_OPEN_PULLS_JSON: JSON.stringify([
+        {
+          number: 90,
+          title: '[Test Stack](2) add feature',
+          html_url: 'https://example.com/pull/90',
+          base: { ref: 'pr/previous' },
+          head: { ref: 'feature/on-open-helper' },
+        },
+      ]),
+    });
+
+    assert(
+      result.status === 0,
+      `single open helper-base PR (lowercase REST state) should allow publication\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert(
+      !result.stderr.includes('belongs to a stale helper PR'),
+      `open helper-base PR must not be reported as stale\nstderr:\n${result.stderr}`,
+    );
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
 
 function testNoFileChangesBlockPrCreation() {
   const harness = createHarness();
@@ -606,6 +774,152 @@ function testMergifyManagedUpdateRejectsNestedTitle() {
   }
 }
 
+function testRefactorLaneTitleWithTagAccepted() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    const branch = 'stack/test-refactor-tag-accept';
+    createTrackedBranch(work, branch);
+    writeFileSync(join(work, 'pr-body-refactor.md'), REFACTOR_BODY);
+    commitFile(work, 'stack.txt', 'stack\n', 'stack update\n\nChange-Id: Irefactortag001');
+    gitQuiet(work, 'push', '-u', 'origin', branch);
+    setManagedBranchConfig(work, branch);
+
+    const result = runCreatePr(work, harness, [
+      '--title',
+      '[Test Stack](2)[REFACTOR: Move Method] move the helper',
+      '--base',
+      'master',
+      '--body-file',
+      'pr-body-refactor.md',
+      '--update-existing',
+    ], {
+      GH_API_PULLS_JSON: JSON.stringify([
+        {
+          number: 51,
+          html_url: 'https://example.com/pull/51',
+          head: { ref: branch, repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+      GH_PATCH_RESPONSE: JSON.stringify({ html_url: 'https://example.com/pull/51' }),
+    });
+
+    assert(
+      result.status === 0,
+      `refactor lane with a [REFACTOR: ...] tag should be accepted\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert(
+      result.stdout.trim() === 'https://example.com/pull/51',
+      `refactor-tagged update should print the PR URL\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testRefactorLaneTitleWithoutTagRejected() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    const branch = 'stack/test-refactor-tag-missing';
+    createTrackedBranch(work, branch);
+    writeFileSync(join(work, 'pr-body-refactor.md'), REFACTOR_BODY);
+    commitFile(work, 'stack.txt', 'stack\n', 'stack update\n\nChange-Id: Irefactortag002');
+    gitQuiet(work, 'push', '-u', 'origin', branch);
+    setManagedBranchConfig(work, branch);
+
+    const result = runCreatePr(work, harness, [
+      '--title',
+      '[Test Stack](2) move the helper',
+      '--base',
+      'master',
+      '--body-file',
+      'pr-body-refactor.md',
+      '--update-existing',
+    ]);
+
+    assert(result.status === 1, `refactor lane without a [REFACTOR: ...] tag should be rejected\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert(result.stderr.includes('REFACTOR'), `missing refactor tag error should mention REFACTOR\nstderr:\n${result.stderr}`);
+    assert(result.stderr.includes('technique'), `missing refactor tag error should mention the technique catalog\nstderr:\n${result.stderr}`);
+    expectNoPush(harness, 'refactor lane missing tag rejection');
+    assert(readGhCalls(harness.ghLog).length === 0, 'refactor lane missing tag rejection should fail before GitHub calls');
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testNonRefactorLaneTitleWithTagRejected() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    const branch = 'stack/test-refactor-tag-wrong-lane';
+    createTrackedBranch(work, branch);
+    commitFile(work, 'stack.txt', 'stack\n', 'stack update\n\nChange-Id: Irefactortag003');
+    gitQuiet(work, 'push', '-u', 'origin', branch);
+    setManagedBranchConfig(work, branch);
+
+    const result = runCreatePr(work, harness, [
+      '--title',
+      '[Test Stack](2)[REFACTOR: Move Method] move the helper',
+      '--base',
+      'master',
+      '--body-file',
+      'pr-body.md',
+      '--update-existing',
+    ]);
+
+    assert(result.status === 1, `non-refactor lane with a [REFACTOR: ...] tag should be rejected\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert(result.stderr.includes('not refactor'), `wrong-lane refactor tag error should say the lane is not refactor\nstderr:\n${result.stderr}`);
+    assert(result.stderr.includes('drop the tag'), `wrong-lane refactor tag error should suggest dropping the tag\nstderr:\n${result.stderr}`);
+    expectNoPush(harness, 'non-refactor lane tag rejection');
+    assert(readGhCalls(harness.ghLog).length === 0, 'non-refactor lane tag rejection should fail before GitHub calls');
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testNonRefactorLanePlainTitleStillAccepted() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    const branch = 'stack/test-refactor-tag-plain';
+    createTrackedBranch(work, branch);
+    commitFile(work, 'stack.txt', 'stack\n', 'stack update\n\nChange-Id: Irefactortag004');
+    gitQuiet(work, 'push', '-u', 'origin', branch);
+    setManagedBranchConfig(work, branch);
+
+    const result = runCreatePr(work, harness, [
+      '--title',
+      '[Test Stack](2) move the helper',
+      '--base',
+      'master',
+      '--body-file',
+      'pr-body.md',
+      '--update-existing',
+    ], {
+      GH_API_PULLS_JSON: JSON.stringify([
+        {
+          number: 52,
+          html_url: 'https://example.com/pull/52',
+          head: { ref: branch, repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+      GH_PATCH_RESPONSE: JSON.stringify({ html_url: 'https://example.com/pull/52' }),
+    });
+
+    assert(
+      result.status === 0,
+      `non-refactor lane with a plain title should stay accepted\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert(
+      result.stdout.trim() === 'https://example.com/pull/52',
+      `plain-title update should print the PR URL\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
 function testUnpublishedStackCommitsBlockUpdate() {
   const harness = createHarness();
   try {
@@ -622,6 +936,117 @@ function testUnpublishedStackCommitsBlockUpdate() {
     assert(result.stderr.includes('Run `mergify stack push` first'), 'managed stack update should require mergify stack push first');
     expectNoPush(harness, 'unpublished stack commits');
     assert(readGhCalls(harness.ghLog).length === 0, 'unpublished stack commits should fail before GitHub calls');
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testNestedMergifyPublishedBranchRecognizedBySha() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    const branch = 'stack/EdbertChan/owner-shutdown-signals/catch-sigterm-sigint-in-owner-serve';
+    createTrackedBranch(work, branch);
+    commitFile(work, 'stack.txt', 'stack\n', 'catch sigterm and sigint\n\nChange-Id: Ishutdown0001');
+    setManagedBranchConfig(work, branch);
+
+    const nestedRemoteBranch =
+      'stack/EdbertChan/stack/EdbertChan/owner-shutdown-signals/catch-sigterm-sigint-in-owner-serve/catch-sigterm-sigint-owner-serve-process-instead--72172374';
+    gitQuiet(work, 'push', 'origin', `HEAD:refs/heads/${nestedRemoteBranch}`);
+
+    const result = runCreatePr(work, harness, [...stackTitleArgs(), '--update-existing'], {
+      GH_API_PULLS_JSON: JSON.stringify([
+        {
+          number: 77,
+          html_url: 'https://example.com/pull/77',
+          head: { ref: branch, repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+      GH_PATCH_RESPONSE: JSON.stringify({ html_url: 'https://example.com/pull/77' }),
+    });
+
+    assert(
+      result.status === 0,
+      `nested mergify-published branch should be recognized by SHA match\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert(
+      !result.stderr.includes('unpublished local commits'),
+      `nested mergify-published branch should not report unpublished commits\nstderr:\n${result.stderr}`,
+    );
+    expectNoPush(harness, 'nested mergify-published branch update');
+
+    commitFile(work, 'stack.txt', 'stack\nmore\n', 'truly unpublished follow-up\n\nChange-Id: Ishutdown0002');
+    const secondResult = runCreatePr(work, harness, [...stackTitleArgs(), '--update-existing']);
+    assert(secondResult.status === 1, 'a genuinely unpublished follow-up commit should still be rejected');
+    assert(
+      secondResult.stderr.includes('unpublished local commits'),
+      `genuinely unpublished commit should still be reported\nstderr:\n${secondResult.stderr}`,
+    );
+    assert(
+      secondResult.stderr.includes('Run `mergify stack push` first'),
+      'genuinely unpublished commit should still require mergify stack push',
+    );
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testDeletedMergifyPublishedBranchPrunesStaleTrackingRef() {
+  const harness = createHarness();
+  try {
+    const { originBare, work } = createRepo(harness);
+    const branch = 'stack/EdbertChan/deleted-stack-ref/local-branch';
+    createTrackedBranch(work, branch);
+    commitFile(work, 'stack.txt', 'stack\n', 'deleted stack ref\n\nChange-Id: Ideletedref0001');
+    setManagedBranchConfig(work, branch);
+
+    const deletedRemoteBranch =
+      'stack/EdbertChan/stack/EdbertChan/deleted-stack-ref/local-branch/deleted-stack-ref--12345678';
+    gitQuiet(work, 'push', 'origin', `HEAD:refs/heads/${deletedRemoteBranch}`);
+    gitQuiet(
+      work,
+      'fetch',
+      'origin',
+      '+refs/heads/stack/EdbertChan/*:refs/remotes/origin/stack/EdbertChan/*',
+    );
+    gitQuiet(originBare, 'update-ref', '-d', `refs/heads/${deletedRemoteBranch}`);
+
+    const staleTrackingRef = `refs/remotes/origin/${deletedRemoteBranch}`;
+    assert(
+      git(work, 'rev-parse', '--verify', staleTrackingRef).trim(),
+      'test setup should leave a stale remote-tracking stack ref before create-pr runs',
+    );
+
+    const result = runCreatePr(work, harness, [...stackTitleArgs(), '--update-existing'], {
+      GH_API_PULLS_JSON: JSON.stringify([
+        {
+          number: 78,
+          html_url: 'https://example.com/pull/78',
+          head: { ref: branch, repo: { full_name: 'owner/repo' } },
+        },
+      ]),
+      GH_PATCH_RESPONSE: JSON.stringify({ html_url: 'https://example.com/pull/78' }),
+    });
+
+    assert(
+      result.status === 1,
+      `deleted remote stack branch should not be accepted through a stale remote-tracking ref\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert(
+      result.stderr.includes(`Current branch "${branch}" has unpublished local commits ahead of origin/master.`)
+        || result.stderr.includes(`Current branch "${branch}" has no published remote branch.`),
+      `deleted remote stack branch should be rejected as unpublished\nstderr:\n${result.stderr}`,
+    );
+    assert(
+      result.stderr.includes('Run `mergify stack push` first'),
+      `deleted remote stack branch should require republishing\nstderr:\n${result.stderr}`,
+    );
+    assert(
+      !gitTextRefExists(work, staleTrackingRef),
+      'create-pr should prune the stale remote-tracking stack ref before matching',
+    );
+    expectNoPush(harness, 'deleted stack ref update');
+    assert(readGhCalls(harness.ghLog).length === 0, 'deleted stack ref should fail before GitHub calls');
   } finally {
     rmSync(harness.root, { recursive: true, force: true });
   }
@@ -854,18 +1279,92 @@ Keep entrypoint behavior separate from routing internals.
 function testStackedDiffTitleRequiredForNonTrunkBase() {
   const harness = createHarness();
   try {
+    const branch = 'stack/stacked-diff';
     const { work } = createRepo(harness);
-    gitQuiet(work, 'branch', 'pr/previous', 'origin/master');
-    gitQuiet(work, 'push', 'origin', 'pr/previous');
-    createTrackedBranch(work, 'pr/stacked-diff', 'origin/pr/previous');
+    gitQuiet(work, 'branch', 'stack/previous', 'origin/master');
+    gitQuiet(work, 'push', 'origin', 'stack/previous');
+    createTrackedBranch(work, branch, 'origin/stack/previous');
     commitFile(work, 'stacked.txt', 'stacked\n', 'stacked diff');
+    gitQuiet(work, 'push', '-u', 'origin', branch);
 
-    const result = runCreatePr(work, harness, ['--title', 'plain title', '--base', 'pr/previous', '--body-file', 'pr-body.md']);
+    const result = runCreatePr(work, harness, ['--title', 'plain title', '--base', 'stack/previous', '--body-file', 'pr-body.md', '--update-existing']);
 
     assert(result.status === 1, 'stacked diff PR should reject a plain title');
     assert(result.stderr.includes('Stack PR titles must start with a shared idea'), 'stacked diff title error should explain format');
     expectNoPush(harness, 'stacked diff title rejection');
     assert(readGhCalls(harness.ghLog).length === 0, 'stacked diff title rejection should fail before GitHub calls');
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testStackedBaseRequiresStackHead() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    gitQuiet(work, 'branch', 'stack/previous', 'origin/master');
+    gitQuiet(work, 'push', 'origin', 'stack/previous');
+    createTrackedBranch(work, 'pr/stacked-diff', 'origin/stack/previous');
+    commitFile(work, 'stacked.txt', 'stacked\n', 'stacked diff');
+
+    const result = runCreatePr(work, harness, stackTitleArgs('stack/previous'));
+
+    assert(result.status === 1, `stacked base should require a stack head branch\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert(
+      result.stderr.includes('Refusing to create/update PR: stacked publication requires a stack/ head branch.'),
+      `stacked head guard should explain the stack branch requirement\nstderr:\n${result.stderr}`,
+    );
+    assert(result.stderr.includes('Current branch: pr/stacked-diff'), 'stacked head guard should name the current branch');
+    assert(result.stderr.includes('Requested base: stack/previous'), 'stacked head guard should name the requested base');
+    expectNoPush(harness, 'stacked base requires stack head');
+    const ghCalls = readGhCalls(harness.ghLog);
+    assert(
+      !ghCalls.some((call) => /\/pulls(?:\/[0-9]+)?$/.test(call.route)),
+      `stacked head guard should fail before PR mutation\n${JSON.stringify(ghCalls, null, 2)}`,
+    );
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+
+function testMergifyStackRejectsPlanBase() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    gitQuiet(work, 'branch', 'plan/upstream', 'origin/master');
+    gitQuiet(work, 'push', 'origin', 'plan/upstream');
+    createTrackedBranch(work, 'stack/plan-base', 'origin/plan/upstream');
+    commitFile(work, 'stacked.txt', 'stacked\n', 'stacked diff');
+
+    const result = runCreatePr(work, harness, [...stackTitleArgs('plan/upstream'), '--dry-run']);
+
+    assert(result.status === 1, `Mergify stack PR should reject plan/ base\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert(result.stderr.includes('Refusing to create or update a Mergify stack PR with a plan/ base branch.'), 'plan-base guard should explain the refusal');
+    assert(result.stderr.includes('Requested base: plan/upstream'), 'plan-base guard should name the requested base');
+    expectNoPush(harness, 'Mergify stack plan-base rejection');
+    expectNoGhCalls(harness, 'Mergify stack plan-base rejection');
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testNonMergifyPrAllowsPlanBase() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    gitQuiet(work, 'branch', 'plan/upstream', 'origin/master');
+    gitQuiet(work, 'push', 'origin', 'plan/upstream');
+    createTrackedBranch(work, 'feature/plan-base', 'origin/plan/upstream');
+    commitFile(work, 'feature.txt', 'feature\n', 'feature change');
+
+    const result = runCreatePr(work, harness, [...stackTitleArgs('plan/upstream'), '--dry-run']);
+
+    assert(result.status === 1, `non-Mergify plan/ base fixture should reach the existing stack-comment path\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert(result.stderr.includes('[dry-run] Would create PR'), 'non-Mergify plan-base PR should reach creation');
+    assert(!result.stderr.includes('Refusing to create or update a Mergify stack PR with a plan/ base branch.'), 'non-Mergify plan-base PR should bypass the Mergify-only guard');
+    expectNoPush(harness, 'non-Mergify plan-base dry run');
+    expectNoGhCalls(harness, 'non-Mergify plan-base dry run');
   } finally {
     rmSync(harness.root, { recursive: true, force: true });
   }
@@ -896,6 +1395,61 @@ function testDiffAtomicityBlocksMixedDiff() {
     );
   } finally {
     rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testCreatePrDryRunMatchesCiBodyValidation() {
+  const harness = createHarness();
+  try {
+    const { work } = createRepo(harness);
+    createTrackedBranch(work, 'feature/ci-parity');
+    commitFile(work, 'packages/app/src/refresh-route.ts', 'export const refreshRoute = true;\n', 'route refresh');
+    writeFileSync(join(work, 'pr-body.md'), ROUTING_BODY);
+
+    const validResult = runCreatePr(work, harness, [...baseArgs(), '--dry-run']);
+    assert(
+      validResult.status === 0,
+      `CI-compliant PR body should pass create-pr dry run\nstdout:\n${validResult.stdout}\nstderr:\n${validResult.stderr}`,
+    );
+    assert(validResult.stderr.includes('[dry-run] Would create PR'), 'valid body should reach the PR-create dry-run path');
+    expectNoPush(harness, 'CI-compliant create-pr dry run');
+    expectNoGhCalls(harness, 'CI-compliant create-pr dry run');
+
+    writeFileSync(join(work, 'pr-body.md'), ROUTING_BODY.replace('- behavior', '- refactor'));
+    const rejectedResult = runCreatePr(work, harness, [...baseArgs(), '--dry-run']);
+    assert(rejectedResult.status === 1, 'CI-rejected refactor body should block create-pr before dry-run publication');
+    assert(
+      rejectedResult.stderr.includes('Review lane refactor must state in ## Non-goals that behavior stays unchanged'),
+      `create-pr should return the same refactor error as CI\nstderr:\n${rejectedResult.stderr}`,
+    );
+    expectNoPush(harness, 'CI-rejected create-pr dry run');
+    expectNoGhCalls(harness, 'CI-rejected create-pr dry run');
+  } finally {
+    rmSync(harness.root, { recursive: true, force: true });
+  }
+}
+
+function testSummaryOnlyAndMissingBodiesBlockPublication() {
+  for (const body of [
+    '## Summary\n\nCursor-generated summary only.\n',
+    '',
+  ]) {
+    const harness = createHarness();
+    try {
+      const { work } = createRepo(harness);
+      createTrackedBranch(work, 'feature/invalid-body');
+      commitFile(work, 'feature.txt', 'feature\n', 'feature change');
+      writeFileSync(join(work, 'pr-body.md'), body);
+
+      const result = runCreatePr(work, harness, [...baseArgs(), '--dry-run']);
+
+      assert(result.status === 1, `invalid PR body should block publication\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+      assert(result.stderr.includes('PR body does not match the canonical review-compression schema.'), 'invalid body should report schema rejection');
+      expectNoPush(harness, 'invalid PR body');
+      expectNoGhCalls(harness, 'invalid PR body');
+    } finally {
+      rmSync(harness.root, { recursive: true, force: true });
+    }
   }
 }
 
@@ -935,6 +1489,9 @@ function testHelpMentionsStackUpdateFlow() {
 
 const tests = [
   testStaleBaseDetection,
+  testStaleMergedHelperBaseRejectsPublication,
+  testDuplicateHelperBasePrsRejectPublication,
+  testOpenHelperBaseWithRestApiLowercaseStateAllowsPublication,
   testNoFileChangesBlockPrCreation,
   testEmptyCommitAloneBlocksPrCreation,
   testEmptyCommitMixedWithRealChangeBlocksPrCreation,
@@ -943,11 +1500,22 @@ const tests = [
   testMergifyManagedUpdateAcceptsLetteredTitle,
   testMergifyManagedUpdateRejectsPlainTitle,
   testMergifyManagedUpdateRejectsNestedTitle,
+  testRefactorLaneTitleWithTagAccepted,
+  testRefactorLaneTitleWithoutTagRejected,
+  testNonRefactorLaneTitleWithTagRejected,
+  testNonRefactorLanePlainTitleStillAccepted,
   testUnpublishedStackCommitsBlockUpdate,
+  testNestedMergifyPublishedBranchRecognizedBySha,
+  testDeletedMergifyPublishedBranchPrunesStaleTrackingRef,
   testCurrentBranchPrLookupFailure,
   testNonStackedUnrelatedAreasStayWarnings,
   testStackedDiffTitleRequiredForNonTrunkBase,
+  testStackedBaseRequiresStackHead,
+  testMergifyStackRejectsPlanBase,
+  testNonMergifyPrAllowsPlanBase,
   testDiffAtomicityBlocksMixedDiff,
+  testCreatePrDryRunMatchesCiBodyValidation,
+  testSummaryOnlyAndMissingBodiesBlockPublication,
   testDiffComputationFailureBlocksPrCreation,
   testHelpMentionsStackUpdateFlow,
 ];

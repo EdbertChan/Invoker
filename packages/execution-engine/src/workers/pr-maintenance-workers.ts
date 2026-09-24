@@ -1,5 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 
@@ -7,22 +9,45 @@ import { resolveRepoRoot, type Logger } from '@invoker/contracts';
 import type { WorkerActionStatus } from '@invoker/data-store';
 
 import { recordWorkerDecisionRow, type WorkerDecisionStore } from '../worker-decision-ledger.js';
+import { terminateChildProcessGroup, SIGKILL_TIMEOUT_MS } from '../process-utils.js';
 
 import type { WorkerRuntimeDependencies } from '../worker-runtime-dependencies.js';
 import type { WorkerRegistry } from '../worker-registry.js';
 import { createWorkerRuntime, type WorkerRuntime, type WorkerTick } from '../worker-runtime.js';
 
-export const CODERABBIT_ADDRESS_WORKER_KIND = 'coderabbit-address';
-export const PR_CONFLICT_REBASE_WORKER_KIND = 'pr-conflict-rebase';
-export const PR_CI_FAILURE_SCAN_WORKER_KIND = 'pr-ci-failure-scan';
 export const PR_ADMIN_BYPASS_LAND_WORKER_KIND = 'pr-admin-bypass-land';
+export const PR_ORPHAN_REPAIR_WORKER_KIND = 'pr-orphan-repair';
+export const PR_DUPLICATE_CLOSE_WORKER_KIND = 'pr-duplicate-close';
+export const PR_JAILBREAK_LAND_WORKER_KIND = 'pr-jailbreak-land';
+export const PR_AUTO_LABEL_WORKER_KIND = 'pr-auto-label';
 export const DEFAULT_PR_MAINTENANCE_WORKER_INTERVAL_MS = 5 * 60_000;
+const DEFAULT_MERGIFY_ADMIN_REQUEUE_LEDGER_RELATIVE_PATH = '.invoker/mergify-admin-requeue-state.jsonl';
+/**
+ * Even spacing between each PR-maintenance worker's first tick, so the 4
+ * workers sharing the cron lock (scripts/cron-pr-lib.sh) don't all wake on
+ * the same intervalMs boundary and race for it every cycle.
+ */
+export const PR_MAINTENANCE_WORKER_STAGGER_STEP_MS = DEFAULT_PR_MAINTENANCE_WORKER_INTERVAL_MS / 4;
+/**
+ * Wall-clock cap on a single tick's spawned child before it is killed and the
+ * tick fails. Default four minutes: comfortably under the five-minute poll
+ * interval (with margin for the SIGTERM->SIGKILL escalation below) so a hung
+ * child never survives into -- or steals -- the next scheduled tick.
+ * worker-runtime.ts's scheduler coalesces ticks (a tick that never settles
+ * blocks every future tick of that worker kind forever), so this bound is
+ * what keeps a wedged child from permanently killing the worker. `0` disables
+ * it. Override via INVOKER_PR_MAINTENANCE_TICK_TIMEOUT_MS.
+ */
+export const DEFAULT_PR_MAINTENANCE_WORKER_TICK_TIMEOUT_MS = 4 * 60_000;
+export const DEFAULT_PR_MAINTENANCE_LOCK_WAIT_MS = 4 * 60_000;
+export const DEFAULT_PR_MAINTENANCE_LOCK_POLL_MS = 5_000;
 
 export type PrMaintenanceWorkerKind =
-  | typeof CODERABBIT_ADDRESS_WORKER_KIND
-  | typeof PR_CONFLICT_REBASE_WORKER_KIND
-  | typeof PR_CI_FAILURE_SCAN_WORKER_KIND
-  | typeof PR_ADMIN_BYPASS_LAND_WORKER_KIND;
+  | typeof PR_ADMIN_BYPASS_LAND_WORKER_KIND
+  | typeof PR_ORPHAN_REPAIR_WORKER_KIND
+  | typeof PR_DUPLICATE_CLOSE_WORKER_KIND
+  | typeof PR_JAILBREAK_LAND_WORKER_KIND
+  | typeof PR_AUTO_LABEL_WORKER_KIND;
 
 type EnvOverrides = Record<string, string | undefined>;
 
@@ -32,26 +57,30 @@ export interface PrMaintenanceEntrypoint {
   note: string;
 }
 
-const CODERABBIT_ADDRESS_ENTRYPOINT: PrMaintenanceEntrypoint = {
-  kind: CODERABBIT_ADDRESS_WORKER_KIND,
-  scriptRelativePath: 'scripts/cron-coderabbit-address.sh',
-  note: 'Runs the CodeRabbit review-address cron entrypoint under worker scheduling.',
-};
-
-const PR_CONFLICT_REBASE_ENTRYPOINT: PrMaintenanceEntrypoint = {
-  kind: PR_CONFLICT_REBASE_WORKER_KIND,
-  scriptRelativePath: 'scripts/cron-pr-conflict-rebase.sh',
-  note: 'Runs the PR conflict rebase-recreate cron entrypoint under worker scheduling.',
-};
-const PR_CI_FAILURE_SCAN_ENTRYPOINT: PrMaintenanceEntrypoint = {
-  kind: PR_CI_FAILURE_SCAN_WORKER_KIND,
-  scriptRelativePath: 'packages/execution-engine/scripts/cron-pr-ci-failure.sh',
-  note: 'Runs the mapped-PR CI scan cron entrypoint under worker scheduling.',
-};
 const PR_ADMIN_BYPASS_LAND_ENTRYPOINT: PrMaintenanceEntrypoint = {
   kind: PR_ADMIN_BYPASS_LAND_WORKER_KIND,
   scriptRelativePath: 'scripts/cron-pr-admin-bypass-land.sh',
-  note: 'Runs the admin-bypass land babysitting cron entrypoint under worker scheduling.',
+  note: 'Runs the admin-bypass requeue-only babysitting cron entrypoint under worker scheduling.',
+};
+const PR_ORPHAN_REPAIR_ENTRYPOINT: PrMaintenanceEntrypoint = {
+  kind: PR_ORPHAN_REPAIR_WORKER_KIND,
+  scriptRelativePath: 'scripts/cron-pr-orphan-repair.sh',
+  note: 'Classifies unmapped broken PRs and submits one combined Invoker repair task per PR.',
+};
+const PR_DUPLICATE_CLOSE_ENTRYPOINT: PrMaintenanceEntrypoint = {
+  kind: PR_DUPLICATE_CLOSE_WORKER_KIND,
+  scriptRelativePath: 'scripts/cron-pr-duplicate-close.sh',
+  note: 'Closes open PRs already landed on master or duplicating another open PR, via one Invoker close task per PR.',
+};
+const PR_JAILBREAK_LAND_ENTRYPOINT: PrMaintenanceEntrypoint = {
+  kind: PR_JAILBREAK_LAND_WORKER_KIND,
+  scriptRelativePath: 'scripts/cron-pr-jailbreak-land.sh',
+  note: 'Force-merges eligible jailbreak PRs via the admin-bypass land script under manual worker scheduling.',
+};
+const PR_AUTO_LABEL_ENTRYPOINT: PrMaintenanceEntrypoint = {
+  kind: PR_AUTO_LABEL_WORKER_KIND,
+  scriptRelativePath: 'scripts/cron-pr-auto-label.sh',
+  note: 'Adds admin-bypass to self-authored PRs whose title marks them refactor/bugfix/repro, or whose diff is test-only, via one submitted Invoker command per PR.',
 };
 
 export interface PrMaintenanceWorkerConfig {
@@ -59,10 +88,24 @@ export interface PrMaintenanceWorkerConfig {
   repoRoot?: string;
   /** Environment overrides passed to the shell entrypoint. `undefined` removes a variable. */
   env?: EnvOverrides;
+  jailbreakLive?: boolean;
   /** Poll cadence for PR-maintenance workers. Defaults to five minutes. */
   intervalMs?: number;
+  /**
+   * Delay before this worker's first tick/poll begins, in ms. Default 0.
+   * Every PR-maintenance worker shares one intervalMs with zero stagger by
+   * default, so without this they all wake on the same boundary every cycle
+   * and race for the shared cron lock — the same worker (typically whichever
+   * registers first) wins almost every time, starving the others. Each
+   * registerXWorker call below assigns a distinct offset to fix this.
+   */
+  startDelayMs?: number;
   /** Shared cron lock path. Defaults to the shell script's `INVOKER_PR_CRON_LOCK` behavior. */
   lockPath?: string;
+  lockWaitMs?: number;
+  lockPollMs?: number;
+  /** Per-tick wall-clock cap for the spawned child. See DEFAULT_PR_MAINTENANCE_WORKER_TICK_TIMEOUT_MS. */
+  tickTimeoutMs?: number;
   /** Shell executable used to run the existing entrypoint. Defaults to `bash`. */
   shell?: string;
   store?: WorkerDecisionStore;
@@ -87,6 +130,8 @@ export interface PrMaintenanceWorkerOptions extends PrMaintenanceWorkerConfig {
   logger: Logger;
   instanceId?: string;
   installSignalHandlers?: boolean;
+  /** See WorkerRuntimeOptions.restartAfterSurvivedSignalMs. Default 30s for PR-maintenance workers. */
+  restartAfterSurvivedSignalMs?: number;
   tickOnStart?: boolean;
   onTick?: WorkerTick;
   spawnProcess?: typeof spawn;
@@ -104,57 +149,11 @@ export interface PrMaintenanceTickOptions extends PrMaintenanceWorkerConfig {
 export function registerPrMaintenanceWorkers(
   registry: WorkerRegistry<WorkerRuntimeDependencies>,
 ): WorkerRegistry<WorkerRuntimeDependencies> {
-  registerCoderabbitAddressWorker(registry);
-  registerPrConflictRebaseWorker(registry);
-  registerPrCiFailureScanWorker(registry);
   registerPrAdminBypassLandWorker(registry);
-  return registry;
-}
-
-export function registerCoderabbitAddressWorker(
-  registry: WorkerRegistry<WorkerRuntimeDependencies>,
-): WorkerRegistry<WorkerRuntimeDependencies> {
-  registry.register({
-    kind: CODERABBIT_ADDRESS_WORKER_KIND,
-    note: CODERABBIT_ADDRESS_ENTRYPOINT.note,
-    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
-      createCoderabbitAddressWorker({
-        logger: deps.logger,
-        ...deps.prMaintenance,
-        store: deps.store,
-      }),
-  });
-  return registry;
-}
-
-export function registerPrConflictRebaseWorker(
-  registry: WorkerRegistry<WorkerRuntimeDependencies>,
-): WorkerRegistry<WorkerRuntimeDependencies> {
-  registry.register({
-    kind: PR_CONFLICT_REBASE_WORKER_KIND,
-    note: PR_CONFLICT_REBASE_ENTRYPOINT.note,
-    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
-      createPrConflictRebaseWorker({
-        logger: deps.logger,
-        ...deps.prMaintenance,
-        store: deps.store,
-      }),
-  });
-  return registry;
-}
-export function registerPrCiFailureScanWorker(
-  registry: WorkerRegistry<WorkerRuntimeDependencies>,
-): WorkerRegistry<WorkerRuntimeDependencies> {
-  registry.register({
-    kind: PR_CI_FAILURE_SCAN_WORKER_KIND,
-    note: PR_CI_FAILURE_SCAN_ENTRYPOINT.note,
-    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
-      createPrCiFailureScanWorker({
-        logger: deps.logger,
-        ...deps.prMaintenance,
-        store: deps.store,
-      }),
-  });
+  registerPrOrphanRepairWorker(registry);
+  registerPrDuplicateCloseWorker(registry);
+  registerPrJailbreakLandWorker(registry);
+  registerPrAutoLabelWorker(registry);
   return registry;
 }
 
@@ -169,25 +168,104 @@ export function registerPrAdminBypassLandWorker(
         logger: deps.logger,
         ...deps.prMaintenance,
         store: deps.store,
+        startDelayMs: 0 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS,
       }),
   });
   return registry;
 }
 
-
-export function createCoderabbitAddressWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
-  return createPrMaintenanceWorker(CODERABBIT_ADDRESS_ENTRYPOINT, options);
+export function registerPrOrphanRepairWorker(
+  registry: WorkerRegistry<WorkerRuntimeDependencies>,
+): WorkerRegistry<WorkerRuntimeDependencies> {
+  registry.register({
+    kind: PR_ORPHAN_REPAIR_WORKER_KIND,
+    note: PR_ORPHAN_REPAIR_ENTRYPOINT.note,
+    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
+      createPrOrphanRepairWorker({
+        logger: deps.logger,
+        ...deps.prMaintenance,
+        store: deps.store,
+        startDelayMs: 1 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS,
+      }),
+  });
+  return registry;
 }
 
-export function createPrConflictRebaseWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
-  return createPrMaintenanceWorker(PR_CONFLICT_REBASE_ENTRYPOINT, options);
+export function registerPrDuplicateCloseWorker(
+  registry: WorkerRegistry<WorkerRuntimeDependencies>,
+): WorkerRegistry<WorkerRuntimeDependencies> {
+  registry.register({
+    kind: PR_DUPLICATE_CLOSE_WORKER_KIND,
+    note: PR_DUPLICATE_CLOSE_ENTRYPOINT.note,
+    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
+      createPrDuplicateCloseWorker({
+        logger: deps.logger,
+        ...deps.prMaintenance,
+        store: deps.store,
+        startDelayMs: 2 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS,
+      }),
+  });
+  return registry;
 }
-export function createPrCiFailureScanWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
-  return createPrMaintenanceWorker(PR_CI_FAILURE_SCAN_ENTRYPOINT, options);
+
+export function registerPrJailbreakLandWorker(
+  registry: WorkerRegistry<WorkerRuntimeDependencies>,
+): WorkerRegistry<WorkerRuntimeDependencies> {
+  registry.register({
+    kind: PR_JAILBREAK_LAND_WORKER_KIND,
+    note: PR_JAILBREAK_LAND_ENTRYPOINT.note,
+    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
+      createPrJailbreakLandWorker({
+        logger: deps.logger,
+        ...deps.prMaintenance,
+        env: {
+          ...deps.prMaintenance?.env,
+          INVOKER_JAILBREAK_LIVE: deps.prMaintenance?.jailbreakLive
+            ? '1'
+            : deps.prMaintenance?.env?.INVOKER_JAILBREAK_LIVE,
+        },
+        store: deps.store,
+        startDelayMs: 3 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS,
+      }),
+  });
+  return registry;
+}
+
+export function registerPrAutoLabelWorker(
+  registry: WorkerRegistry<WorkerRuntimeDependencies>,
+): WorkerRegistry<WorkerRuntimeDependencies> {
+  registry.register({
+    kind: PR_AUTO_LABEL_WORKER_KIND,
+    note: PR_AUTO_LABEL_ENTRYPOINT.note,
+    factory: (deps: WorkerRuntimeDependencies): WorkerRuntime =>
+      createPrAutoLabelWorker({
+        logger: deps.logger,
+        ...deps.prMaintenance,
+        store: deps.store,
+        startDelayMs: 3 * PR_MAINTENANCE_WORKER_STAGGER_STEP_MS,
+      }),
+  });
+  return registry;
 }
 
 export function createPrAdminBypassLandWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
   return createPrMaintenanceWorker(PR_ADMIN_BYPASS_LAND_ENTRYPOINT, options);
+}
+
+export function createPrOrphanRepairWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
+  return createPrMaintenanceWorker(PR_ORPHAN_REPAIR_ENTRYPOINT, options);
+}
+
+export function createPrDuplicateCloseWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
+  return createPrMaintenanceWorker(PR_DUPLICATE_CLOSE_ENTRYPOINT, options);
+}
+
+export function createPrJailbreakLandWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
+  return createPrMaintenanceWorker(PR_JAILBREAK_LAND_ENTRYPOINT, options);
+}
+
+export function createPrAutoLabelWorker(options: PrMaintenanceWorkerOptions): WorkerRuntime {
+  return createPrMaintenanceWorker(PR_AUTO_LABEL_ENTRYPOINT, options);
 }
 
 
@@ -204,6 +282,9 @@ export function probePrMaintenanceLock(options: PrMaintenanceLockProbeOptions): 
     timeout: 3_000,
     killSignal: 'SIGKILL',
   });
+  if (flockProbe.signal === 'SIGKILL' || (flockProbe.error && (flockProbe.error as NodeJS.ErrnoException).code === 'ETIMEDOUT')) {
+    return { held: false, reason: 'probe-timeout' };
+  }
   if (!flockProbe.error || (flockProbe.error as NodeJS.ErrnoException).code !== 'ENOENT') {
     return flockProbe.status === 0
       ? { held: false }
@@ -236,8 +317,10 @@ function createPrMaintenanceWorker(
     instanceId: options.instanceId,
     logger: options.logger,
     intervalMs: options.intervalMs ?? DEFAULT_PR_MAINTENANCE_WORKER_INTERVAL_MS,
+    startDelayMs: options.startDelayMs,
     tickOnStart: options.tickOnStart ?? false,
     installSignalHandlers: options.installSignalHandlers,
+    restartAfterSurvivedSignalMs: options.restartAfterSurvivedSignalMs ?? 30_000,
     onTick: options.onTick ?? createPrMaintenanceTick({
       entrypoint,
       logger: options.logger,
@@ -245,6 +328,9 @@ function createPrMaintenanceWorker(
       env: options.env,
       intervalMs: options.intervalMs,
       lockPath: options.lockPath,
+      lockWaitMs: options.lockWaitMs,
+      lockPollMs: options.lockPollMs,
+      tickTimeoutMs: options.tickTimeoutMs,
       shell: options.shell,
       spawnProcess: options.spawnProcess,
       lockProbe: options.lockProbe,
@@ -266,13 +352,33 @@ async function runPrMaintenanceEntrypoint(
   const lockPath = options.lockPath ?? env.INVOKER_PR_CRON_LOCK ?? defaultPrCronLockPath(env);
   env.INVOKER_PR_CRON_LOCK = lockPath;
   const lockProbe = options.lockProbe ?? probePrMaintenanceLock;
-  const lock = await lockProbe({
+  const probeOptions: PrMaintenanceLockProbeOptions = {
     lockPath,
     env,
     staleLockSeconds: parsePositiveInteger(env.INVOKER_PR_CRON_LOCK_STALE_SECS),
-  });
-
+  };
+  const envLockWaitSecs = parsePositiveInteger(env.INVOKER_PR_CRON_LOCK_WAIT_SECS);
+  const lockWaitMs = options.lockWaitMs
+    ?? (envLockWaitSecs !== undefined ? envLockWaitSecs * 1000 : DEFAULT_PR_MAINTENANCE_LOCK_WAIT_MS);
+  const lockPollMs = options.lockPollMs ?? DEFAULT_PR_MAINTENANCE_LOCK_POLL_MS;
+  const lockWaitDeadline = Date.now() + lockWaitMs;
+  let lock = await lockProbe(probeOptions);
   signal?.throwIfAborted();
+
+  if (lock.held && lockWaitMs > 0) {
+    options.logger.info(`[worker:${options.entrypoint.kind}] shared PR maintenance lock held; waiting for it`, {
+      module: 'pr-maintenance-worker',
+      worker: options.entrypoint.kind,
+      lockPath,
+      reason: lock.reason ?? 'lock-held',
+      lockWaitMs,
+    });
+  }
+  while (lock.held && Date.now() < lockWaitDeadline) {
+    await sleep(Math.min(lockPollMs, Math.max(0, lockWaitDeadline - Date.now())), undefined, { signal });
+    lock = await lockProbe(probeOptions);
+    signal?.throwIfAborted();
+  }
 
   if (lock.held) {
     options.logger.info(`[worker:${options.entrypoint.kind}] shared PR maintenance lock held; skipping tick`, {
@@ -281,6 +387,18 @@ async function runPrMaintenanceEntrypoint(
       lockPath,
       reason: lock.reason ?? 'lock-held',
     });
+    recordPrMaintenanceRun(
+      options,
+      `${options.entrypoint.kind}:${repoRoot}:lock-held`,
+      repoRoot,
+      'skipped',
+      'Shared PR maintenance lock held; tick not run',
+      {
+        reason: lock.reason ?? 'lock-held',
+        lockPath,
+      },
+      true,
+    );
     return;
   }
 
@@ -302,6 +420,7 @@ async function runPrMaintenanceEntrypoint(
       cwd: repoRoot,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     });
   } catch (err) {
     options.logger.error(`[worker:${options.entrypoint.kind}] spawn failed`, {
@@ -320,32 +439,76 @@ async function runPrMaintenanceEntrypoint(
   attachChildStreamLogger(options, child.stderr, 'stderr');
   recordPrMaintenanceRun(options, runExternalKey, repoRoot, 'running', `Started ${options.entrypoint.scriptRelativePath}`);
 
+  const tickTimeoutMs = resolvePrMaintenanceTickTimeoutMs(options.tickTimeoutMs);
+
   await new Promise<void>((resolvePromise, rejectPromise) => {
     let settled = false;
+    let timedOut = false;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let forceAbandonTimer: ReturnType<typeof setTimeout> | null = null;
+
     const settle = (fn: () => void): void => {
       if (settled) return;
       settled = true;
-      fn();
+      if (timeoutTimer) { clearTimeout(timeoutTimer); timeoutTimer = null; }
+      if (forceAbandonTimer) { clearTimeout(forceAbandonTimer); forceAbandonTimer = null; }
+      try {
+        fn();
+      } catch (err) {
+        options.logger.error(`[worker:${options.entrypoint.kind}] failed while finishing tick`, {
+          module: 'pr-maintenance-worker',
+          worker: options.entrypoint.kind,
+          err,
+        });
+        rejectPromise(err);
+      }
     };
 
     const onAbort = (): void => {
-      if (!child.killed) {
-        child.kill('SIGTERM');
-      }
-      settle(() => {
-        recordPrMaintenanceRun(options, runExternalKey, repoRoot, 'failed', 'PR maintenance aborted by stop', {
-          reason: 'aborted',
-        });
-        resolvePromise();
-      });
+      void terminateChildProcessGroup(child, () => settled);
     };
 
     if (signal) {
       if (signal.aborted) {
         onAbort();
-        return;
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true });
       }
-      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    const onTickTimeout = (): void => {
+      timedOut = true;
+      options.logger.error(
+        `[worker:${options.entrypoint.kind}] tick exceeded ${tickTimeoutMs}ms; killing spawned child`,
+        { module: 'pr-maintenance-worker', worker: options.entrypoint.kind, tickTimeoutMs },
+      );
+      void terminateChildProcessGroup(child, () => settled);
+      // Belt-and-suspenders: terminateChildProcessGroup already escalates
+      // SIGTERM -> SIGKILL within SIGKILL_TIMEOUT_MS and the close handler
+      // below settles this promise once the OS confirms exit. If 'close' is
+      // somehow never delivered, force-settle anyway so worker-runtime.ts's
+      // coalescing scheduler can never be wedged by this child no matter what.
+      forceAbandonTimer = setTimeout(() => {
+        settle(() => {
+          const message = `PR maintenance worker ${options.entrypoint.kind} child did not exit within `
+            + `${SIGKILL_TIMEOUT_MS}ms of SIGKILL after a ${tickTimeoutMs}ms tick timeout; abandoning`;
+          options.logger.error(`[worker:${options.entrypoint.kind}] force-abandoning unresponsive child`, {
+            module: 'pr-maintenance-worker',
+            worker: options.entrypoint.kind,
+          });
+          recordPrMaintenanceRun(options, runExternalKey, repoRoot, 'failed', message, {
+            reason: 'tick-timeout-force-abandoned',
+            tickTimeoutMs,
+          });
+          rejectPromise(new Error(message));
+        });
+      }, SIGKILL_TIMEOUT_MS + 1_000);
+      forceAbandonTimer.unref?.();
+    };
+
+    if (tickTimeoutMs > 0) {
+      timeoutTimer = setTimeout(onTickTimeout, tickTimeoutMs);
+      timeoutTimer.unref?.();
     }
 
     child.once('error', (err) => {
@@ -373,13 +536,29 @@ async function runPrMaintenanceEntrypoint(
           code,
           signal: closeSignal,
         };
+        if (timedOut) {
+          const message = `PR maintenance worker ${options.entrypoint.kind} exceeded its ${tickTimeoutMs}ms tick timeout and was killed`;
+          options.logger.error(`[worker:${options.entrypoint.kind}] shell entrypoint killed after tick timeout`, fields);
+          recordPrMaintenanceRun(options, runExternalKey, repoRoot, 'failed', message, {
+            reason: 'tick-timeout',
+            tickTimeoutMs,
+            code,
+            signal: closeSignal,
+          });
+          rejectPromise(new Error(message));
+          return;
+        }
         if (code === 0) {
           options.logger.info(`[worker:${options.entrypoint.kind}] shell entrypoint completed`, fields);
           recordPrMaintenanceRun(options, runExternalKey, repoRoot, 'completed', 'PR maintenance run completed');
+          recordAdminBypassBlockedPrRows(options, env);
           resolvePromise();
           return;
         }
         if (signal?.aborted) {
+          recordPrMaintenanceRun(options, runExternalKey, repoRoot, 'failed', 'PR maintenance aborted by stop', {
+            reason: 'aborted',
+          });
           resolvePromise();
           return;
         }
@@ -404,6 +583,7 @@ function recordPrMaintenanceRun(
   status: WorkerActionStatus,
   summary: string,
   payload?: Record<string, unknown>,
+  incrementAttempt?: boolean,
 ): void {
   if (!options.store) return;
   recordWorkerDecisionRow(options.store, {
@@ -414,9 +594,182 @@ function recordPrMaintenanceRun(
     subjectId: repoRoot,
     status,
     summary,
-    incrementAttempt: status === 'running',
+    incrementAttempt: incrementAttempt ?? status === 'running',
     ...(payload ? { payload } : {}),
   });
+}
+
+interface MergifyCommentBlockedLedgerRow {
+  pr: number;
+  headSha: string;
+  key: string;
+  detail: string;
+  repo?: string;
+}
+
+function recordAdminBypassBlockedPrRows(
+  options: PrMaintenanceTickOptions,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (!options.store || options.entrypoint.kind !== PR_ADMIN_BYPASS_LAND_WORKER_KIND) return;
+
+  const ledgerPath = resolveMergifyAdminRequeueLedgerPath(env);
+  for (const row of readCommentBlockedLedgerRows(options, ledgerPath)) {
+    recordBlockedPrDecisionRow(options, row, ledgerPath);
+    recordBlockedPrAlertSend(options, row, ledgerPath);
+  }
+}
+
+function recordBlockedPrDecisionRow(
+  options: PrMaintenanceTickOptions,
+  row: MergifyCommentBlockedLedgerRow,
+  ledgerPath: string,
+): void {
+  if (!options.store) return;
+  const subjectId = row.repo ? `${row.repo}#${row.pr}` : String(row.pr);
+  recordWorkerDecisionRow(options.store, {
+    workerKind: options.entrypoint.kind,
+    actionType: 'mergify-blocked-pr',
+    externalKey: blockedPrDecisionExternalKey(row),
+    subjectType: 'pr',
+    subjectId,
+    status: 'needs_input',
+    summary: row.detail,
+    payload: {
+      pr: row.pr,
+      ...(row.repo ? { repo: row.repo } : {}),
+      ledgerKey: row.key,
+      headSha: row.headSha,
+      ledgerPath,
+    },
+  });
+}
+
+function recordBlockedPrAlertSend(
+  options: PrMaintenanceTickOptions,
+  row: MergifyCommentBlockedLedgerRow,
+  ledgerPath: string,
+): void {
+  if (!options.store) return;
+  const subjectId = row.repo ? `${row.repo}#${row.pr}` : String(row.pr);
+  recordWorkerDecisionRow(options.store, {
+    workerKind: options.entrypoint.kind,
+    actionType: 'alert-send',
+    externalKey: blockedPrAlertExternalKey(row),
+    subjectType: 'pr',
+    subjectId,
+    status: 'completed',
+    summary: row.detail,
+    payload: {
+      message: row.detail,
+      pr: row.pr,
+      ...(row.repo ? { repo: row.repo } : {}),
+      ledgerKey: row.key,
+      headSha: row.headSha,
+      ledgerPath,
+    },
+  });
+}
+
+function readCommentBlockedLedgerRows(
+  options: PrMaintenanceTickOptions,
+  ledgerPath: string,
+): MergifyCommentBlockedLedgerRow[] {
+  if (!existsSync(ledgerPath)) return [];
+
+  const rowsByKey = new Map<string, MergifyCommentBlockedLedgerRow>();
+  let raw: string;
+  try {
+    raw = readFileSync(ledgerPath, 'utf8');
+  } catch (err) {
+    options.logger.warn(`[worker:${options.entrypoint.kind}] could not read Mergify admin-bypass ledger`, {
+      module: 'pr-maintenance-worker',
+      worker: options.entrypoint.kind,
+      ledgerPath,
+      err,
+    });
+    return [];
+  }
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const row = parseCommentBlockedLedgerRow(parsed);
+    if (!row) continue;
+    rowsByKey.set(blockedPrLedgerExternalKey(row), row);
+  }
+
+  return [...rowsByKey.values()];
+}
+
+function parseCommentBlockedLedgerRow(value: unknown): MergifyCommentBlockedLedgerRow | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const row = value as Record<string, unknown>;
+  if (row.kind !== 'comment-blocked') return undefined;
+
+  const pr = parseLedgerPrNumber(row.pr);
+  const headSha = typeof row.headSha === 'string' ? row.headSha.trim() : '';
+  const key = typeof row.key === 'string' ? row.key.trim() : '';
+  if (pr === undefined || !headSha || !key) return undefined;
+
+  const meta = row.meta && typeof row.meta === 'object'
+    ? row.meta as Record<string, unknown>
+    : {};
+  const detail = typeof meta.detail === 'string' && meta.detail.trim().length > 0
+    ? meta.detail.trim()
+    : `Mergify repair stopped for PR #${pr}: ${key}`;
+
+  const repo = typeof row.repo === 'string' && row.repo.trim().length > 0
+    ? row.repo.trim()
+    : undefined;
+
+  return { pr, headSha, key, detail, ...(repo ? { repo } : {}) };
+}
+
+function parseLedgerPrNumber(value: unknown): number | undefined {
+  const pr = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^\d+$/.test(value.trim())
+      ? Number(value.trim())
+      : Number.NaN;
+  return Number.isSafeInteger(pr) && pr > 0 ? pr : undefined;
+}
+
+function resolveMergifyAdminRequeueLedgerPath(env: NodeJS.ProcessEnv): string {
+  const configured = env.INVOKER_MERGIFY_ADMIN_REQUEUE_STATE_FILE
+    ?? env.MERGIFY_ADMIN_REQUEUE_STATE_FILE;
+  if (configured && configured.trim().length > 0) {
+    return resolveHomePath(configured.trim(), env);
+  }
+  const home = env.HOME && env.HOME.length > 0 ? env.HOME : homedir();
+  return resolve(home, DEFAULT_MERGIFY_ADMIN_REQUEUE_LEDGER_RELATIVE_PATH);
+}
+
+function resolveHomePath(path: string, env: NodeJS.ProcessEnv): string {
+  if (path === '~' || path.startsWith('~/')) {
+    const home = env.HOME && env.HOME.length > 0 ? env.HOME : homedir();
+    return resolve(home, path.slice(2));
+  }
+  return resolve(path);
+}
+
+function blockedPrLedgerExternalKey(row: MergifyCommentBlockedLedgerRow): string {
+  const repoPart = row.repo ? `repo:${row.repo}:` : '';
+  return `${repoPart}pr:${row.pr}:ledger:${row.key}:head:${row.headSha}`;
+}
+
+function blockedPrDecisionExternalKey(row: MergifyCommentBlockedLedgerRow): string {
+  return `mergify-blocked:${blockedPrLedgerExternalKey(row)}`;
+}
+
+function blockedPrAlertExternalKey(row: MergifyCommentBlockedLedgerRow): string {
+  return `alert-send:${blockedPrLedgerExternalKey(row)}`;
 }
 
 function attachChildStreamLogger(
@@ -464,7 +817,7 @@ function resolvePrMaintenanceRepoRoot(repoRoot: string | undefined): string {
   return repoRoot ? resolve(repoRoot) : resolveRepoRoot(process.cwd());
 }
 
-function buildPrMaintenanceEnv(repoRoot: string, overrides: EnvOverrides | undefined): NodeJS.ProcessEnv {
+export function buildPrMaintenanceEnv(repoRoot: string, overrides: EnvOverrides | undefined): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const [key, value] of Object.entries(overrides ?? {})) {
     if (value === undefined) {
@@ -473,6 +826,8 @@ function buildPrMaintenanceEnv(repoRoot: string, overrides: EnvOverrides | undef
       env[key] = value;
     }
   }
+  delete env.INVOKER_HEADLESS_STANDALONE;
+  env.INVOKER_HEADLESS_REQUIRE_EXISTING_OWNER = '1';
   env.INVOKER_REPO_ROOT = repoRoot;
   return env;
 }
@@ -486,6 +841,15 @@ function parsePositiveInteger(raw: string | undefined): number | undefined {
   if (!raw) return undefined;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function resolvePrMaintenanceTickTimeoutMs(explicit: number | undefined): number {
+  if (explicit !== undefined) return explicit;
+  const raw = process.env.INVOKER_PR_MAINTENANCE_TICK_TIMEOUT_MS?.trim();
+  if (raw === '0') return 0;
+  if (!raw || !/^(0|[1-9]\d*)$/.test(raw)) return DEFAULT_PR_MAINTENANCE_WORKER_TICK_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_PR_MAINTENANCE_WORKER_TICK_TIMEOUT_MS;
 }
 
 function readMkdirLockHolder(lockDir: string): number | undefined {

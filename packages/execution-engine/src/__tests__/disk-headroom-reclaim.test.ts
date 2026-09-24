@@ -1,18 +1,26 @@
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { TaskState } from '@invoker/workflow-core';
+
+import { computeRepoCacheHash } from '../git-utils.js';
+import type { RemoteDiskTarget } from '../workers/disk-headroom-monitor.js';
 import {
   buildInvokerHomeCleanupScript,
   cleanupLocalInvokerHome,
+  cleanupRemoteInvokerHome,
+  computeProtectedLocalPaths,
   DISK_RECLAIMABLE_DIRS,
   DiskCleanupCooldownTracker,
+  type DiskHeadroomWorkerStore,
   isSafeInvokerHome,
   isSafeRemoteInvokerHomePath,
   resolveDiskCleanupCooldownMs,
   resolveDiskCleanupEnabled,
-  TMP_SCRATCH_GLOBS,
+  TMP_SCRATCH_PROTECT_GLOBS,
   TMP_SCRATCH_MIN_AGE_MINUTES,
   TMP_TRANSIENT_TEST_GLOBS,
 } from '../workers/disk-headroom-reclaim.js';
@@ -24,6 +32,103 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function makeTask(overrides: Partial<TaskState> = {}): TaskState {
+  const { config, execution, ...rest } = overrides;
+  return {
+    id: 'wf-1/task-1',
+    description: 'test task',
+    status: 'running',
+    dependencies: [],
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    config: {
+      workflowId: 'wf-1',
+      command: 'pnpm test',
+      ...(config ?? {}),
+    },
+    execution: {
+      generation: 1,
+      ...(execution ?? {}),
+    },
+    taskStateVersion: 1,
+    ...rest,
+  } as TaskState;
+}
+
+const STALE_TMP_MTIME_SECONDS = Math.floor(
+  (Date.now() - (TMP_SCRATCH_MIN_AGE_MINUTES + 60) * 60 * 1000) / 1000,
+);
+
+interface TmpSweepScratch {
+  root: string;
+  invokerHome: string;
+  tmpDir: string;
+}
+
+function makeTmpSweepScratch(): TmpSweepScratch {
+  const root = mkdtempSync(join(tmpdir(), 'invoker-tmp-sweep-'));
+  tempDirs.push(root);
+  const invokerHome = join(root, 'home');
+  const tmpDir = join(root, 'scratch-tmp');
+  mkdirSync(invokerHome, { recursive: true });
+  mkdirSync(tmpDir, { recursive: true });
+  return { root, invokerHome, tmpDir };
+}
+
+function makeTmpEntry(
+  scratch: TmpSweepScratch,
+  name: string,
+  opts: { stale: boolean; fileName?: string; asFile?: boolean },
+): string {
+  const entry = join(scratch.tmpDir, name);
+  if (opts.asFile) {
+    writeFileSync(entry, 'x');
+  } else {
+    mkdirSync(entry, { recursive: true });
+    writeFileSync(join(entry, opts.fileName ?? 'payload.txt'), 'x');
+  }
+  if (opts.stale) utimesSync(entry, STALE_TMP_MTIME_SECONDS, STALE_TMP_MTIME_SECONDS);
+  return entry;
+}
+
+function canCreateForeignOwnedEntries(): boolean {
+  if (process.platform !== 'linux' || process.getuid?.() === 0) return false;
+  return spawnSync('sudo', ['-n', 'true'], { stdio: 'ignore' }).status === 0;
+}
+
+function makeForeignOwnedTmpEntry(
+  scratch: TmpSweepScratch,
+  name: string,
+  opts: { asFile?: boolean } = {},
+): string {
+  const entry = join(scratch.tmpDir, name);
+  if (opts.asFile) {
+    writeFileSync(entry, 'x');
+  } else {
+    mkdirSync(entry, { recursive: true });
+  }
+  const chown = spawnSync('sudo', ['-n', 'chown', '-R', 'root:root', entry]);
+  if (chown.status !== 0) throw new Error(`could not chown ${entry} to root`);
+  const touch = spawnSync('sudo', ['-n', 'touch', '-d', `@${STALE_TMP_MTIME_SECONDS}`, entry]);
+  if (touch.status !== 0) throw new Error(`could not age ${entry}`);
+  return entry;
+}
+
+function runCleanupScript(scratch: TmpSweepScratch) {
+  const scriptPath = join(scratch.root, 'cleanup.sh');
+  writeFileSync(scriptPath, buildInvokerHomeCleanupScript(scratch.invokerHome, [], 'stale-only'));
+  return spawnSync('bash', [scriptPath], {
+    encoding: 'utf8',
+    env: { ...process.env, TMPDIR: scratch.tmpDir },
+  });
+}
+
+function makeStore(workflows: Array<{ id: string; tasks: TaskState[] }>): DiskHeadroomWorkerStore {
+  return {
+    listWorkflows: () => workflows.map((w) => ({ id: w.id })),
+    loadTasks: (workflowId: string) => workflows.find((w) => w.id === workflowId)?.tasks ?? [],
+  };
+}
 
 describe('disk-headroom cleanup guards', () => {
   it('rejects unsafe invoker homes', () => {
@@ -61,32 +166,122 @@ describe('disk-headroom cleanup guards', () => {
     expect(script).not.toContain('$HOME/.pnpm-store');
   });
 
+  it('passes over a preserved path and no longer clears $INVOKER_HOME/repos as one whole unit', () => {
+    const preservedScript = buildInvokerHomeCleanupScript('~/.invoker', ['repos/abc123']);
+    expect(preservedScript).not.toContain('remove_path "$INVOKER_HOME/repos"');
+    expect(preservedScript).toContain("PRESERVE=('repos/abc123')");
+    expect(preservedScript).toContain('sweep_children_preserving "$INVOKER_HOME/repos" "repos"');
+    expect(preservedScript).toContain('sweep_children_preserving "$INVOKER_HOME/worktrees" "worktrees"');
+    expect(preservedScript).toContain('sweep_children_preserving "$INVOKER_HOME/merge-clones" "merge-clones"');
+    expect(preservedScript).toContain('sweep_children_preserving "$INVOKER_HOME/merge-launches" "merge-launches"');
+    // runtime and pr-cron-work stay whole-unit removals.
+    expect(preservedScript).toContain('remove_path "$INVOKER_HOME/runtime"');
+    expect(preservedScript).toContain('remove_path "$INVOKER_HOME/pr-cron-work"');
+    expect(preservedScript).toContain('#6632');
+  });
+
+  it('builds an empty PRESERVE array when no paths are given', () => {
+    const script = buildInvokerHomeCleanupScript('~/.invoker');
+    expect(script).toContain('PRESERVE=()');
+  });
+
+  it('actually preserves a listed child and clears its unrelated sibling when run for real', () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-remote-cleanup-real-'));
+    tempDirs.push(root);
+    const invokerHome = join(root, 'home');
+    const isolatedTmp = join(root, 'scratch-tmp');
+    mkdirSync(isolatedTmp, { recursive: true });
+
+    const preservedHash = 'preserved-hash';
+    const otherHash = 'other-hash';
+    const preservedDir = join(invokerHome, 'repos', preservedHash);
+    const otherDir = join(invokerHome, 'repos', otherHash);
+    mkdirSync(preservedDir, { recursive: true });
+    writeFileSync(join(preservedDir, 'file.txt'), 'keep-me');
+    mkdirSync(otherDir, { recursive: true });
+    writeFileSync(join(otherDir, 'file.txt'), 'clear-me');
+
+    const script = buildInvokerHomeCleanupScript(invokerHome, [`repos/${preservedHash}`]);
+    const scriptPath = join(root, 'cleanup.sh');
+    writeFileSync(scriptPath, script);
+
+    const result = spawnSync('bash', [scriptPath], {
+      encoding: 'utf8',
+      env: { ...process.env, TMPDIR: isolatedTmp },
+    });
+
+    expect(result.status).toBe(0);
+    expect(existsSync(join(preservedDir, 'file.txt'))).toBe(true);
+    expect(existsSync(otherDir)).toBe(false);
+    expect(existsSync(join(invokerHome, 'repos'))).toBe(true);
+  });
+
   it('reclaims the pr-cron-work scratch dir', () => {
     expect(DISK_RECLAIMABLE_DIRS).toContain('pr-cron-work');
     const script = buildInvokerHomeCleanupScript('~/.invoker');
     expect(script).toContain('$INVOKER_HOME/pr-cron-work');
   });
 
-  it('sweeps only Invoker/test scratch from the shared temp dir, never a blanket /tmp wipe', () => {
+  it('stale-only mode skips the destructive Invoker-managed-dir wipe but keeps the /tmp scratch sweep', () => {
+    const criticalScript = buildInvokerHomeCleanupScript('~/.invoker', [], 'critical');
+    const staleOnlyScript = buildInvokerHomeCleanupScript('~/.invoker', [], 'stale-only');
+
+    // critical still does the full destructive sweep.
+    expect(criticalScript).toContain("pkill -9 -f 'pnpm install");
+    expect(criticalScript).toContain('remove_path "$INVOKER_HOME/runtime"');
+    expect(criticalScript).toContain('remove_path "$INVOKER_HOME/pr-cron-work"');
+    expect(criticalScript).toContain('sweep_children_preserving "$INVOKER_HOME/repos" "repos"');
+    expect(criticalScript).toContain('mkdir -p');
+
+    // stale-only never kills provision grinders or wipes/recreates Invoker's own dirs.
+    expect(staleOnlyScript).not.toContain("pkill -9 -f 'pnpm install");
+    expect(staleOnlyScript).not.toContain('remove_path "$INVOKER_HOME/runtime"');
+    expect(staleOnlyScript).not.toContain('remove_path "$INVOKER_HOME/pr-cron-work"');
+    expect(staleOnlyScript).not.toContain('sweep_children_preserving "$INVOKER_HOME/repos" "repos"');
+    expect(staleOnlyScript).not.toContain('mkdir -p');
+
+    // stale-only still runs the age-gated /tmp scratch sweep, unconditionally.
+    for (const glob of TMP_SCRATCH_PROTECT_GLOBS) {
+      expect(staleOnlyScript).toContain(glob);
+    }
+    expect(staleOnlyScript).toContain('-user "$SWEEP_USER"');
+    expect(staleOnlyScript).toContain('reap_tmp');
+    expect(staleOnlyScript).toContain(`-mmin +${TMP_SCRATCH_MIN_AGE_MINUTES}`);
+    expect(staleOnlyScript).toContain('stale-only begin');
+    expect(staleOnlyScript).toContain('stale-only done');
+  });
+
+  it('sweeps stale user-owned entries from the shared temp dir, never a blanket /tmp wipe', () => {
     const script = buildInvokerHomeCleanupScript('~/.invoker');
     // Resolves the temp dir with a safe fallback, and re-anchors unsafe values to /tmp.
     expect(script).toContain('TMP_CLEAN="${TMPDIR:-/tmp}"');
     expect(script).toContain('TMP_CLEAN=/tmp');
-    for (const glob of TMP_SCRATCH_GLOBS) {
+    // The name list is a protect list, not an allow list: a stale entry matching
+    // nothing on it is still swept, so the sweep has no per-name blind spot.
+    expect(script).toContain('is_protected_tmp_name');
+    for (const glob of TMP_SCRATCH_PROTECT_GLOBS) {
       expect(script).toContain(glob);
     }
     for (const glob of TMP_TRANSIENT_TEST_GLOBS) {
       expect(script).toContain(glob);
     }
-    // Age guard protects in-flight runs; system + lock entries are excluded.
+    // Age guard protects in-flight runs; system + lock entries are protected.
     expect(script).toContain(`-mmin +${TMP_SCRATCH_MIN_AGE_MINUTES}`);
-    expect(script).toContain("! -name 'systemd-private-*'");
-    expect(script).toContain("! -name 'ssh-*'");
-    expect(script).toContain("! -name '*.lock'");
+    expect(TMP_SCRATCH_PROTECT_GLOBS).toContain('systemd-private-*');
+    expect(TMP_SCRATCH_PROTECT_GLOBS).toContain('ssh-*');
+    expect(TMP_SCRATCH_PROTECT_GLOBS).toContain('*.lock');
     // Must never wipe the whole temp dir.
     expect(script).not.toMatch(/rm -rf ["']?\/tmp["']?\s/);
     expect(script).not.toMatch(/rm -rf ["']?\$TMP_CLEAN["']?\s*$/m);
     expect(script).not.toContain('rm -rf "$TMP_CLEAN"/*');
+  });
+
+  it('limits the temp sweep to entries the running user owns', () => {
+    const script = buildInvokerHomeCleanupScript('~/.invoker');
+    expect(script).toContain('-user "$SWEEP_USER"');
+    expect(script).toContain('SWEEP_USER="$(id -un 2>/dev/null)"');
+    // An unresolvable user is an unchecked sweep, not a clean one -- it must say so.
+    expect(script).toContain('skip tmp sweep: cannot resolve the running user');
   });
 
   it('never reaps a temp entry that holds mineable .jsonl session data', () => {
@@ -121,6 +316,62 @@ describe('disk-headroom cleanup guards', () => {
     // Both /tmp sweeps refuse to touch the live invoker home.
     expect(script.match(/! -path "\$INVOKER_HOME"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
+
+  it('reclaims a stale unmatched temp entry while leaving fresh, protected, and transcript entries', () => {
+    const scratch = makeTmpSweepScratch();
+    const unmatched = makeTmpEntry(scratch, 'rustc-incremental-build-cache', { stale: true });
+    const fresh = makeTmpEntry(scratch, 'another-unmatched-scratch', { stale: false });
+    const protectedByName = makeTmpEntry(scratch, 'systemd-private-abc123', { stale: true });
+    const protectedUnixSocketDir = makeTmpEntry(scratch, '.X11-unix', { stale: true });
+    const protectedXDisplayLock = makeTmpEntry(scratch, '.X0-lock', { stale: true, asFile: true });
+    const protectedHighXDisplayLock = makeTmpEntry(scratch, '.X99-lock', {
+      stale: true,
+      asFile: true,
+    });
+    const protectedSshDir = makeTmpEntry(scratch, 'ssh-AbCdEf', { stale: true });
+    const withTranscript = makeTmpEntry(scratch, 'agent-scratch-dir', {
+      stale: true,
+      fileName: 'session.jsonl',
+    });
+    const transientTestWithTranscript = makeTmpEntry(scratch, 'invoker-e2e-db.xyz', {
+      stale: true,
+      fileName: 'session.jsonl',
+    });
+
+    const result = runCleanupScript(scratch);
+
+    expect(result.status).toBe(0);
+    expect(existsSync(unmatched)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(protectedByName)).toBe(true);
+    expect(existsSync(protectedUnixSocketDir)).toBe(true);
+    expect(existsSync(protectedXDisplayLock)).toBe(true);
+    expect(existsSync(protectedHighXDisplayLock)).toBe(true);
+    expect(existsSync(protectedSshDir)).toBe(true);
+    expect(existsSync(withTranscript)).toBe(true);
+    // Known transient test dirs are reaped even when they carry a transcript.
+    expect(existsSync(transientTestWithTranscript)).toBe(false);
+    expect(result.stdout).toContain(`[disk-headroom-cleanup] remove ${unmatched}`);
+    expect(result.stdout).toContain(`[disk-headroom-cleanup] preserve ${protectedByName} (protected name)`);
+    expect(result.stdout).toContain(`[disk-headroom-cleanup] preserve ${withTranscript} (transcripts)`);
+  });
+
+  it.runIf(canCreateForeignOwnedEntries())(
+    'leaves a stale temp entry owned by another user in place',
+    () => {
+      const scratch = makeTmpSweepScratch();
+      const ownEntry = makeTmpEntry(scratch, 'my-own-unmatched-scratch', { stale: true });
+      const foreignDir = makeForeignOwnedTmpEntry(scratch, 'other-user-scratch');
+      const foreignFile = makeForeignOwnedTmpEntry(scratch, 'other-user-file.bin', { asFile: true });
+
+      const result = runCleanupScript(scratch);
+
+      expect(result.status).toBe(0);
+      expect(existsSync(ownEntry)).toBe(false);
+      expect(existsSync(foreignDir)).toBe(true);
+      expect(existsSync(foreignFile)).toBe(true);
+    },
+  );
 });
 
 describe('disk-headroom cleanup env', () => {
@@ -180,6 +431,8 @@ describe('cleanupLocalInvokerHome', () => {
 
     expect(result.ok).toBe(true);
     expect(result.reason).toBe('critical-cleanup');
+    expect(result.protectedSkipCount).toBe(0);
+    expect(result.protectedSkipBytes).toBe(0);
     for (const name of DISK_RECLAIMABLE_DIRS) {
       expect(existsSync(join(home, name))).toBe(true);
       expect(readdirSync(join(home, name))).toEqual([]);
@@ -192,6 +445,55 @@ describe('cleanupLocalInvokerHome', () => {
     expect(existsSync(join(userHome, '.cache', 'electron', 'keep.bin'))).toBe(true);
   });
 
+  it('leaves protected reclaimable paths untouched', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-disk-cleanup-protected-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    const userHome = root;
+    const activeDir = join(home, 'worktrees', 'active-task');
+    mkdirSync(activeDir, { recursive: true });
+    writeFileSync(join(activeDir, 'file.txt'), 'x');
+
+    const store = makeStore([
+      {
+        id: 'wf-1',
+        tasks: [
+          makeTask({ id: 'wf-1/active', status: 'running', execution: { workspacePath: activeDir } }),
+        ],
+      },
+    ]);
+
+    const result = await cleanupLocalInvokerHome({
+      invokerHome: home,
+      userHome,
+      store,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('protected-path-in-use');
+    expect(result.protectedSkipCount).toBe(1);
+    expect(result.protectedSkipBytes).toBeGreaterThan(0);
+    expect(existsSync(activeDir)).toBe(true);
+    expect(existsSync(join(activeDir, 'file.txt'))).toBe(true);
+    expect(readdirSync(join(home, 'worktrees'))).toEqual(['active-task']);
+  });
+
+  it('clears pre-existing deleting orphans from the invoker home', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-disk-cleanup-orphan-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    const userHome = root;
+    const orphan = join(home, 'foo.deleting.abc');
+    mkdirSync(orphan, { recursive: true });
+    writeFileSync(join(orphan, 'file.txt'), 'x');
+
+    const result = await cleanupLocalInvokerHome({ invokerHome: home, userHome });
+
+    expect(result.ok).toBe(true);
+    expect(existsSync(orphan)).toBe(false);
+  });
+
   it('refuses to clean the user home itself', async () => {
     const result = await cleanupLocalInvokerHome({
       invokerHome: '/Users/me',
@@ -199,5 +501,547 @@ describe('cleanupLocalInvokerHome', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('path-guard');
+    expect(result.protectedSkipCount).toBe(0);
+    expect(result.protectedSkipBytes).toBe(0);
+  });
+});
+
+describe('computeProtectedLocalPaths', () => {
+  it('protects workspacePaths of non-terminal tasks only', () => {
+    const store = makeStore([
+      {
+        id: 'wf-1',
+        tasks: [
+          makeTask({ id: 'wf-1/running', status: 'running', execution: { workspacePath: '/home/u/.invoker/worktrees/running' } }),
+          makeTask({ id: 'wf-1/completed', status: 'completed', execution: { workspacePath: '/home/u/.invoker/worktrees/completed' } }),
+          makeTask({ id: 'wf-1/closed', status: 'closed', execution: { workspacePath: '/home/u/.invoker/worktrees/closed' } }),
+          makeTask({ id: 'wf-1/skipped', status: 'skipped', execution: { workspacePath: '/home/u/.invoker/worktrees/skipped' } }),
+          makeTask({ id: 'wf-1/stale', status: 'stale', execution: { workspacePath: '/home/u/.invoker/worktrees/stale' } }),
+          makeTask({ id: 'wf-1/no-path', status: 'pending', execution: {} }),
+        ],
+      },
+    ]);
+
+    const protectedPaths = computeProtectedLocalPaths(store);
+    expect(protectedPaths.has('/home/u/.invoker/worktrees/running')).toBe(true);
+    expect(protectedPaths.has('/home/u/.invoker/worktrees/completed')).toBe(false);
+    expect(protectedPaths.has('/home/u/.invoker/worktrees/closed')).toBe(false);
+    expect(protectedPaths.has('/home/u/.invoker/worktrees/skipped')).toBe(false);
+    expect(protectedPaths.has('/home/u/.invoker/worktrees/stale')).toBe(false);
+    expect(protectedPaths.size).toBe(1);
+  });
+
+  it('fails safe to an empty set when the store throws', () => {
+    const store: DiskHeadroomWorkerStore = {
+      listWorkflows: () => {
+        throw new Error('db unavailable');
+      },
+      loadTasks: () => [],
+    };
+    expect(computeProtectedLocalPaths(store)).toEqual(new Set());
+  });
+});
+
+describe('cleanupLocalInvokerHome DB-state liveness guard', () => {
+  it('protects only the in-use subpath under a reclaimable dir; sibling subpaths are still cleared', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-disk-cleanup-liveness-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    const userHome = root;
+    const activeDir = join(home, 'worktrees', 'active-task');
+    const staleDir = join(home, 'worktrees', 'stale-task');
+    mkdirSync(activeDir, { recursive: true });
+    writeFileSync(join(activeDir, 'file.txt'), 'x');
+    mkdirSync(staleDir, { recursive: true });
+    writeFileSync(join(staleDir, 'file.txt'), 'x');
+
+    const store = makeStore([
+      {
+        id: 'wf-1',
+        tasks: [
+          makeTask({ id: 'wf-1/active', status: 'running', execution: { workspacePath: activeDir } }),
+        ],
+      },
+    ]);
+
+    const result = await cleanupLocalInvokerHome({
+      invokerHome: home,
+      userHome,
+      store,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('protected-path-in-use');
+    expect(result.protectedSkipCount).toBe(1);
+    expect(result.protectedSkipBytes).toBeGreaterThan(0);
+    expect(existsSync(activeDir)).toBe(true);
+    expect(existsSync(join(activeDir, 'file.txt'))).toBe(true);
+    expect(existsSync(staleDir)).toBe(false);
+  });
+
+  it('does not protect a task workspacePath once the task reaches a terminal status', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-disk-cleanup-liveness-terminal-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    const userHome = root;
+    const completedDir = join(home, 'worktrees', 'completed-task');
+    mkdirSync(completedDir, { recursive: true });
+    writeFileSync(join(completedDir, 'file.txt'), 'x');
+
+    const store = makeStore([
+      {
+        id: 'wf-1',
+        tasks: [
+          makeTask({ id: 'wf-1/done', status: 'completed', execution: { workspacePath: completedDir } }),
+        ],
+      },
+    ]);
+
+    const result = await cleanupLocalInvokerHome({
+      invokerHome: home,
+      userHome,
+      store,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('critical-cleanup');
+    expect(existsSync(completedDir)).toBe(false);
+  });
+
+  it('fails safe by clearing normally (protects nothing) when the store errors', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-disk-cleanup-liveness-error-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    const userHome = root;
+    const someDir = join(home, 'worktrees', 'some-task');
+    mkdirSync(someDir, { recursive: true });
+    writeFileSync(join(someDir, 'file.txt'), 'x');
+
+    const throwingStore: DiskHeadroomWorkerStore = {
+      listWorkflows: () => {
+        throw new Error('db unavailable');
+      },
+      loadTasks: () => [],
+    };
+
+    const result = await cleanupLocalInvokerHome({
+      invokerHome: home,
+      userHome,
+      store: throwingStore,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('critical-cleanup');
+    expect(existsSync(someDir)).toBe(false);
+  });
+
+  it('behaves exactly as before (clears everything) when no store is provided', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-disk-cleanup-liveness-no-store-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    const userHome = root;
+    const someDir = join(home, 'worktrees', 'some-task');
+    mkdirSync(someDir, { recursive: true });
+    writeFileSync(join(someDir, 'file.txt'), 'x');
+
+    const result = await cleanupLocalInvokerHome({ invokerHome: home, userHome });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('critical-cleanup');
+    expect(result.protectedSkipCount).toBe(0);
+    expect(result.protectedSkipBytes).toBe(0);
+    expect(existsSync(someDir)).toBe(false);
+  });
+
+  it('protects a retrying (failed-status) workflow\'s shared repo mirror and worktree, clears an unrelated repo mirror', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-disk-cleanup-repo-hash-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    const userHome = root;
+
+    const repoUrl = 'https://github.com/example/protected-repo.git';
+    const repoHash = computeRepoCacheHash(repoUrl);
+
+    const protectedRepoDir = join(home, 'repos', repoHash);
+    mkdirSync(protectedRepoDir, { recursive: true });
+    writeFileSync(join(protectedRepoDir, 'file.txt'), 'x');
+
+    const protectedWorktreeDir = join(home, 'worktrees', 'active-task', 'some-experiment');
+    mkdirSync(protectedWorktreeDir, { recursive: true });
+    writeFileSync(join(protectedWorktreeDir, 'file.txt'), 'x');
+
+    const unrelatedRepoDir = join(home, 'repos', 'unrelated-hash');
+    mkdirSync(unrelatedRepoDir, { recursive: true });
+    writeFileSync(join(unrelatedRepoDir, 'file.txt'), 'x');
+
+    const store: DiskHeadroomWorkerStore = {
+      listWorkflows: () => [{ id: 'wf-1', repoUrl }],
+      loadTasks: (workflowId: string) =>
+        workflowId === 'wf-1'
+          ? [
+              makeTask({
+                id: 'wf-1/retrying',
+                status: 'failed',
+                execution: { workspacePath: protectedWorktreeDir },
+              }),
+            ]
+          : [],
+    };
+
+    const result = await cleanupLocalInvokerHome({
+      invokerHome: home,
+      userHome,
+      store,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(existsSync(protectedRepoDir)).toBe(true);
+    expect(existsSync(join(protectedRepoDir, 'file.txt'))).toBe(true);
+    expect(existsSync(protectedWorktreeDir)).toBe(true);
+    expect(existsSync(join(protectedWorktreeDir, 'file.txt'))).toBe(true);
+    expect(existsSync(unrelatedRepoDir)).toBe(false);
+  });
+
+  it('restores process.noAsar when the local pass returns cleanup errors', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-disk-cleanup-noasar-error-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    const userHome = root;
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, 'worktrees'), 'not-a-directory');
+
+    const processWithNoAsar = process as NodeJS.Process & { noAsar?: boolean };
+    const hadNoAsar = Object.prototype.hasOwnProperty.call(processWithNoAsar, 'noAsar');
+    const previousNoAsar = processWithNoAsar.noAsar;
+    processWithNoAsar.noAsar = false;
+
+    try {
+      const result = await cleanupLocalInvokerHome({ invokerHome: home, userHome });
+
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe('cleanup-error');
+      expect(processWithNoAsar.noAsar).toBe(false);
+    } finally {
+      if (hadNoAsar) {
+        processWithNoAsar.noAsar = previousNoAsar;
+      } else {
+        delete processWithNoAsar.noAsar;
+      }
+    }
+  });
+});
+
+describe('cleanupRemoteInvokerHome', () => {
+  function makeTarget(overrides: Partial<RemoteDiskTarget> = {}): RemoteDiskTarget {
+    return {
+      name: 'remote-1',
+      connection: { host: 'h', user: 'u', sshKeyPath: '/k' },
+      remotePath: '~/.invoker',
+      ...overrides,
+    };
+  }
+
+  it('never calls its execution callback when the accessor it is given throws', async () => {
+    const target = makeTarget();
+    const throwingStore: DiskHeadroomWorkerStore = {
+      listWorkflows: () => {
+        throw new Error('db unavailable');
+      },
+      loadTasks: () => [],
+    };
+    const runRemoteScript = vi.fn(async () => 'ok');
+
+    const result = await cleanupRemoteInvokerHome({
+      target,
+      store: throwingStore,
+      runRemoteScript,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any,
+    });
+
+    expect(runRemoteScript).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('cleanup-error');
+  });
+
+  it('stale-only mode skips the preservation lookup entirely, even when the store throws', async () => {
+    const target = makeTarget();
+    const throwingStore: DiskHeadroomWorkerStore = {
+      listWorkflows: () => {
+        throw new Error('db unavailable');
+      },
+      loadTasks: () => [],
+    };
+    const runRemoteScript = vi.fn(async () => 'ok');
+
+    const result = await cleanupRemoteInvokerHome({
+      target,
+      store: throwingStore,
+      runRemoteScript,
+      mode: 'stale-only',
+    });
+
+    expect(runRemoteScript).toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('warn-paced');
+  });
+
+  it('preserves every in-flight task on the host, whichever pool member or local target launched it', async () => {
+    const target = makeTarget({ name: 'remote-1', remotePath: '/home/invoker/.invoker' });
+
+    const store: DiskHeadroomWorkerStore = {
+      listWorkflows: () => [{ id: 'wf-1' }],
+      loadTasks: (workflowId: string) =>
+        workflowId === 'wf-1'
+          ? [
+              makeTask({
+                id: 'wf-1/on-target',
+                status: 'running',
+                config: { workflowId: 'wf-1', command: 'x', poolMemberId: 'remote-1' },
+                execution: { workspacePath: '/home/invoker/.invoker/worktrees/hash1/branch' },
+              }),
+              makeTask({
+                id: 'wf-1/on-other-target',
+                status: 'running',
+                config: { workflowId: 'wf-1', command: 'x', poolMemberId: 'remote-2' },
+                execution: { workspacePath: '/home/invoker/.invoker/worktrees/hash2/branch' },
+              }),
+              makeTask({
+                id: 'wf-1/local-owner-task',
+                status: 'running',
+                config: { workflowId: 'wf-1', command: 'x' },
+                execution: { workspacePath: '/home/invoker/.invoker/worktrees/hash3/branch' },
+              }),
+              makeTask({
+                id: 'wf-1/finished',
+                status: 'completed',
+                config: { workflowId: 'wf-1', command: 'x' },
+                execution: { workspacePath: '/home/invoker/.invoker/worktrees/hash4/branch' },
+              }),
+            ]
+          : [],
+    };
+
+    const capturedScripts: string[] = [];
+    const runRemoteScript = vi.fn(async (_t: RemoteDiskTarget, script: string) => {
+      capturedScripts.push(script);
+      return 'ok';
+    });
+
+    const result = await cleanupRemoteInvokerHome({ target, store, runRemoteScript });
+    expect(result.ok).toBe(true);
+    expect(capturedScripts[0]).toContain("'worktrees/hash1/branch'");
+    expect(capturedScripts[0]).toContain("'worktrees/hash2/branch'");
+    expect(capturedScripts[0]).toContain("'worktrees/hash3/branch'");
+    expect(capturedScripts[0]).not.toContain('worktrees/hash4/branch');
+  });
+
+  it('preserves in-flight workspaces when the target home is written with a leading ~', async () => {
+    const target = makeTarget({ remotePath: '~/.invoker' });
+    const store: DiskHeadroomWorkerStore = {
+      listWorkflows: () => [{ id: 'wf-1' }],
+      loadTasks: () => [
+        makeTask({
+          id: 'wf-1/remote-task',
+          status: 'running',
+          config: { workflowId: 'wf-1', command: 'x', poolMemberId: 'remote-1' },
+          execution: { workspacePath: '/home/invoker/.invoker/worktrees/hash1/branch' },
+        }),
+      ],
+    };
+    let capturedScript = '';
+    const runRemoteScript = vi.fn(async (_t: RemoteDiskTarget, script: string) => {
+      capturedScript = script;
+      return 'ok';
+    });
+
+    const result = await cleanupRemoteInvokerHome({ target, store, runRemoteScript });
+
+    expect(result.ok).toBe(true);
+    expect(capturedScript).toContain("'worktrees/hash1/branch'");
+  });
+
+  it('reads a leading-~ target home made of many slashes in linear time', async () => {
+    const target = makeTarget({ remotePath: `~/${'/'.repeat(20_000)}x` });
+    const store: DiskHeadroomWorkerStore = {
+      listWorkflows: () => [{ id: 'wf-1' }],
+      loadTasks: () => [
+        makeTask({
+          id: 'wf-1/remote-task',
+          status: 'running',
+          config: { workflowId: 'wf-1', command: 'x', poolMemberId: 'remote-1' },
+          execution: { workspacePath: '/home/invoker/.invoker/worktrees/hash1/branch' },
+        }),
+      ],
+    };
+    const runRemoteScript = vi.fn(async () => 'ok');
+
+    const result = await cleanupRemoteInvokerHome({ target, store, runRemoteScript });
+
+    expect(result.ok).toBe(true);
+  }, 2_000);
+
+  it('passes mode through to the generated script and result reason, defaulting to critical', async () => {
+    const target = makeTarget();
+    const capturedScripts: string[] = [];
+    const runRemoteScript = vi.fn(async (_t: RemoteDiskTarget, script: string) => {
+      capturedScripts.push(script);
+      return 'ok';
+    });
+
+    const staleResult = await cleanupRemoteInvokerHome({ target, runRemoteScript, mode: 'stale-only' });
+    expect(staleResult.ok).toBe(true);
+    expect(staleResult.reason).toBe('warn-paced');
+    expect(capturedScripts[0]).not.toContain("pkill -9 -f 'pnpm install");
+
+    const emptyStore: DiskHeadroomWorkerStore = { listWorkflows: () => [], loadTasks: () => [] };
+    const defaultResult = await cleanupRemoteInvokerHome({ target, store: emptyStore, runRemoteScript });
+    expect(defaultResult.ok).toBe(true);
+    expect(defaultResult.reason).toBe('critical-cleanup');
+    expect(capturedScripts[1]).toContain("pkill -9 -f 'pnpm install");
+  });
+
+  it('keeps an owner-local task workspace when a remote target names the owner host itself and the script runs for real', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-remote-self-target-'));
+    try {
+      const invokerHome = join(root, 'home');
+      const isolatedTmp = join(root, 'scratch-tmp');
+      mkdirSync(isolatedTmp, { recursive: true });
+      const localTaskDir = join(invokerHome, 'worktrees', 'hash-local', 'experiment-repair');
+      const idleDir = join(invokerHome, 'worktrees', 'hash-idle', 'experiment-old');
+      mkdirSync(localTaskDir, { recursive: true });
+      writeFileSync(join(localTaskDir, 'file.txt'), 'in use');
+      mkdirSync(idleDir, { recursive: true });
+      writeFileSync(join(idleDir, 'file.txt'), 'idle');
+
+      const store: DiskHeadroomWorkerStore = {
+        listWorkflows: () => [{ id: 'wf-1' }],
+        loadTasks: () => [
+          makeTask({
+            id: 'wf-1/repair',
+            status: 'running',
+            config: { workflowId: 'wf-1', command: 'x' },
+            execution: { workspacePath: localTaskDir },
+          }),
+        ],
+      };
+      const runRemoteScript = vi.fn(async (_t: RemoteDiskTarget, script: string) => {
+        const scriptPath = join(root, 'cleanup.sh');
+        writeFileSync(scriptPath, script);
+        const run = spawnSync('bash', [scriptPath], { encoding: 'utf8', env: { ...process.env, TMPDIR: isolatedTmp } });
+        expect(run.status).toBe(0);
+        return run.stdout;
+      });
+
+      const result = await cleanupRemoteInvokerHome({
+        target: makeTarget({ name: 'remote_owner_host', remotePath: invokerHome }),
+        store,
+        runRemoteScript,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(existsSync(join(localTaskDir, 'file.txt'))).toBe(true);
+      expect(existsSync(join(invokerHome, 'worktrees', 'hash-idle'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a critical run and sends nothing when no task store is provided', async () => {
+    const target = makeTarget();
+    const runRemoteScript = vi.fn(async () => 'ok');
+
+    const result = await cleanupRemoteInvokerHome({ target, runRemoteScript });
+
+    expect(runRemoteScript).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('cleanup-error');
+  });
+});
+
+describe('disk-headroom cleanup honors the in-use mark', () => {
+  function seedMarkedHome(root: string): string {
+    const home = join(root, '.invoker');
+    for (const hash of ['fresh-hash', 'old-hash', 'bare-hash']) {
+      mkdirSync(join(home, 'worktrees', hash, 'wt'), { recursive: true });
+      writeFileSync(join(home, 'worktrees', hash, 'wt', 'file.txt'), hash);
+    }
+    for (const hash of ['fresh-hash', 'old-hash']) {
+      mkdirSync(join(home, 'repos', hash), { recursive: true });
+      writeFileSync(join(home, 'repos', hash, 'file.txt'), hash);
+    }
+    for (const hash of ['fresh-hash', 'old-hash']) {
+      mkdirSync(join(home, 'in-use', 'worktrees', hash), { recursive: true });
+      writeFileSync(join(home, 'in-use', 'worktrees', hash, 'wt'), '');
+    }
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(join(home, 'in-use', 'worktrees', 'old-hash', 'wt'), twoHoursAgo, twoHoursAgo);
+    return home;
+  }
+
+  function expectOnlyFreshSurvived(home: string): void {
+    expect(existsSync(join(home, 'worktrees', 'fresh-hash', 'wt', 'file.txt'))).toBe(true);
+    expect(existsSync(join(home, 'repos', 'fresh-hash', 'file.txt'))).toBe(true);
+    expect(existsSync(join(home, 'worktrees', 'old-hash'))).toBe(false);
+    expect(existsSync(join(home, 'worktrees', 'bare-hash'))).toBe(false);
+    expect(existsSync(join(home, 'repos', 'old-hash'))).toBe(false);
+    expect(existsSync(join(home, 'in-use', 'worktrees', 'fresh-hash', 'wt'))).toBe(true);
+  }
+
+  it('keeps a freshly marked workspace when the generated remote script runs for real', () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-in-use-remote-'));
+    tempDirs.push(root);
+    const home = seedMarkedHome(root);
+    const isolatedTmp = join(root, 'scratch-tmp');
+    mkdirSync(isolatedTmp, { recursive: true });
+
+    const scriptPath = join(root, 'cleanup.sh');
+    writeFileSync(scriptPath, buildInvokerHomeCleanupScript(home, [], 'critical'));
+    const result = spawnSync('bash', [scriptPath], {
+      encoding: 'utf8',
+      env: { ...process.env, TMPDIR: isolatedTmp },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('(fresh in-use mark)');
+    expectOnlyFreshSurvived(home);
+  });
+
+  it('keeps a freshly marked workspace during a cleanup on this machine', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-in-use-local-'));
+    tempDirs.push(root);
+    const home = seedMarkedHome(root);
+
+    const result = await cleanupLocalInvokerHome({
+      invokerHome: home,
+      userHome: root,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.protectedSkipCount).toBeGreaterThanOrEqual(2);
+    expectOnlyFreshSurvived(home);
+  });
+
+  it('keeps a workspace whose mark cannot be read', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'invoker-in-use-unreadable-'));
+    tempDirs.push(root);
+    const home = join(root, '.invoker');
+    mkdirSync(join(home, 'worktrees', 'err-hash', 'wt'), { recursive: true });
+    writeFileSync(join(home, 'worktrees', 'err-hash', 'wt', 'file.txt'), 'x');
+    mkdirSync(join(home, 'in-use', 'worktrees'), { recursive: true });
+    writeFileSync(join(home, 'in-use', 'worktrees', 'err-hash'), 'not-a-directory');
+
+    const result = await cleanupLocalInvokerHome({
+      invokerHome: home,
+      userHome: root,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as any,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(existsSync(join(home, 'worktrees', 'err-hash', 'wt', 'file.txt'))).toBe(true);
   });
 });

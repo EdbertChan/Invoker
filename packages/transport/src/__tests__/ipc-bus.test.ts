@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { join, dirname } from 'node:path';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -9,9 +9,13 @@ import {
   IpcBus,
   DEFAULT_REQUEST_DEADLINE_MS,
   MALFORMED_FRAME_RATE_LIMIT_MS,
+  channelHasLongRequestDeadline,
   resolveDefaultSocketPath,
+  isServeRecoveryEligible,
+  shouldForwardRelayedErrorResponse,
   type MalformedFrameEvent,
 } from '../ipc-bus.js';
+import { IpcChannels } from '@invoker/contracts/ipc-channels';
 import { TransportError, TransportErrorCode } from '../transport-error.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -328,6 +332,44 @@ describe('IpcBus', () => {
     expect(result).toBe('owner:ok');
   });
 
+  // Regression: a headless CLI constructs its bus with allowServe: false at
+  // process startup, often before any owner process exists yet (socket file
+  // ENOENT). ensureStandaloneOwnerViaBootstrap (packages/app/src/headless-
+  // client.ts) then spawns an owner and polls discoverOwner() on that SAME
+  // bus for up to 60s waiting for it to come up. Before this fix, a pure
+  // client bus that failed its very first connect attempt gave up
+  // permanently — it never retried — so every poll iteration failed
+  // immediately (no peers), and only a fresh bus (via refreshMessageBus())
+  // could ever succeed. That wasted the full 60s timeout on every cold
+  // owner bootstrap, even though the owner was ready in well under a
+  // second. This proves a client-only bus now keeps retrying in the
+  // background and connects once a server appears, without recreating it.
+  it('a client-only bus created before any server exists still connects once one appears later', async () => {
+    const sock = tempSocketPath();
+
+    // No server exists yet at this socket path — this connect attempt must
+    // fail (ENOENT). With the bug, this bus would be permanently unable to
+    // reach any server for the rest of its lifetime.
+    const earlyClient = new IpcBus(sock, { allowServe: false });
+    buses.push(earlyClient);
+    await earlyClient.ready();
+
+    // The server only comes up afterward — simulating the owner process
+    // still booting when the CLI's bus made its first connection attempt.
+    const owner = createBus(sock);
+    await owner.ready();
+    owner.onRequest<string, string>('echo', (value) => `owner:${value}`);
+
+    // Give the background reconnect (25ms interval) a chance to land a peer
+    // before asserting — request() checks live peers synchronously and does
+    // not itself wait for a reconnect in flight.
+    await sleep(150);
+
+    // No new bus is constructed here — the SAME earlyClient must recover.
+    const result = await earlyClient.request<string, string>('echo', 'still-works');
+    expect(result).toBe('owner:still-works');
+  });
+
   it('ignores no-handler responses from other peers when one peer can satisfy the request', async () => {
     const sock = tempSocketPath();
 
@@ -350,6 +392,23 @@ describe('IpcBus', () => {
 
     const result = await requester.request<number, number>('delayed-double', 5);
     expect(result).toBe(10);
+  });
+
+  describe('shouldForwardRelayedErrorResponse', () => {
+    it('does not forward a NO_HANDLER response while other peers are still awaited', () => {
+      expect(shouldForwardRelayedErrorResponse(true, 2)).toBe(false);
+      expect(shouldForwardRelayedErrorResponse(true, 1)).toBe(false);
+    });
+
+    it('forwards once the last peer has responded with NO_HANDLER', () => {
+      expect(shouldForwardRelayedErrorResponse(true, 0)).toBe(true);
+    });
+
+    it('forwards a non-NO_HANDLER error immediately, regardless of peers still awaited', () => {
+      expect(shouldForwardRelayedErrorResponse(false, 2)).toBe(true);
+      expect(shouldForwardRelayedErrorResponse(false, 1)).toBe(true);
+      expect(shouldForwardRelayedErrorResponse(false, 0)).toBe(true);
+    });
   });
 
   // ---------------------------------------------------------------
@@ -398,6 +457,149 @@ describe('IpcBus', () => {
 
     const result = await client.request<number, number>('fast', 41);
     expect(result).toBe(42);
+  });
+
+  it('REGRESSION: a slow invoker:planning-chat-send delegated over headless.gui-mutation is killed by the default deadline instead of getting the long-deadline protection headless.exec gets', async () => {
+    const sock = tempSocketPath();
+
+    const server = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(server);
+    await server.ready();
+
+    // Simulates the planner subprocess still working on an investigative reply
+    // (e.g. "why wasn't PR #6459 queued by the admin-bypass land worker?") past
+    // the transport's default deadline.
+    server.onRequest('headless.gui-mutation', () => new Promise(() => {}));
+
+    const client = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(client);
+    await client.ready();
+    await sleep(20);
+
+    const pending = client.request('headless.gui-mutation', {
+      channel: 'invoker:planning-chat-send',
+      args: [{ sessionId: 'session-1', message: 'why was PR #6459 not queued by the admin-bypass land worker?' }],
+    });
+
+    const stillPending = Symbol('still-pending');
+    const winner = await Promise.race([pending, sleep(300).then(() => stillPending)]);
+
+    // headless.exec is on LONG_REQUEST_DEADLINE_CHANNELS and survives a slow owner
+    // reply; headless.gui-mutation (which wraps invoker:planning-chat-send and
+    // invoker:plan-from-goal) is not on that list, so it should behave the same
+    // way but currently does not.
+    expect(winner).toBe(stillPending);
+  });
+
+  it('REGRESSION: a slow invoker:planning-chat-submit delegated over headless.gui-mutation does not report failure while the owner is still submitting', async () => {
+    const sock = tempSocketPath();
+
+    const server = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(server);
+    await server.ready();
+
+    server.onRequest('headless.gui-mutation', () => new Promise(() => {}));
+
+    const client = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(client);
+    await client.ready();
+    await sleep(20);
+
+    const pending = client.request('headless.gui-mutation', {
+      channel: 'invoker:planning-chat-submit',
+      args: [{ sessionId: 'session-1' }],
+    });
+
+    const stillPending = Symbol('still-pending');
+    const winner = await Promise.race([pending, sleep(300).then(() => stillPending)]);
+
+    expect(winner).toBe(stillPending);
+  });
+
+  it('REGRESSION: a slow invoker:planning-chat-rebind-repo delegated over headless.gui-mutation is killed by the default deadline instead of getting the long-deadline protection planning-chat-send gets', async () => {
+    const sock = tempSocketPath();
+
+    const server = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(server);
+    await server.ready();
+
+    server.onRequest('headless.gui-mutation', () => new Promise(() => {}));
+
+    const client = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(client);
+    await client.ready();
+    await sleep(20);
+
+    const pending = client.request('headless.gui-mutation', {
+      channel: 'invoker:planning-chat-rebind-repo',
+      args: [{ sessionId: 'session-1', repoUrl: 'https://github.com/Neko-Catpital-Labs/Invoker/' }],
+    });
+
+    const stillPending = Symbol('still-pending');
+    const winner = await Promise.race([pending, sleep(300).then(() => stillPending)]);
+
+    expect(winner).toBe(stillPending);
+  });
+
+  it('REGRESSION: a slow invoker:planning-chat-create delegated over headless.gui-mutation gets the long deadline without being listed in LONG_REQUEST_DEADLINE_CHANNELS', async () => {
+    const sock = tempSocketPath();
+
+    const server = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(server);
+    await server.ready();
+
+    server.onRequest('headless.gui-mutation', () => new Promise(() => {}));
+
+    const client = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(client);
+    await client.ready();
+    await sleep(20);
+
+    const pending = client.request('headless.gui-mutation', {
+      channel: 'invoker:planning-chat-create',
+      args: [{}],
+    });
+
+    const stillPending = Symbol('still-pending');
+    const winner = await Promise.race([pending, sleep(300).then(() => stillPending)]);
+
+    expect(winner).toBe(stillPending);
+  });
+
+  it('gives every invoker:planning-chat-* IpcChannels key the long deadline', () => {
+    const planningChannels = Object.keys(IpcChannels).filter((channel) =>
+      channel.startsWith('invoker:planning-chat-'),
+    );
+    expect(planningChannels.length).toBeGreaterThan(0);
+    for (const channel of planningChannels) {
+      expect(channelHasLongRequestDeadline(channel), channel).toBe(true);
+    }
+    expect(channelHasLongRequestDeadline('invoker:get-status')).toBe(false);
+  });
+
+  it('REGRESSION: a slow invoker:start-ready delegated over headless.gui-mutation is killed by the default deadline instead of getting the long-deadline protection headless.exec gets', async () => {
+    const sock = tempSocketPath();
+
+    const server = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(server);
+    await server.ready();
+
+    server.onRequest('headless.gui-mutation', () => new Promise(() => {}));
+
+    const client = new IpcBus(sock, { requestDeadlineMs: 50 });
+    buses.push(client);
+    await client.ready();
+    await sleep(20);
+
+    const pending = client.request('headless.gui-mutation', {
+      channel: 'invoker:start-ready',
+      args: [],
+    });
+
+    const stillPending = Symbol('still-pending');
+    const winner = await Promise.race([pending, sleep(300).then(() => stillPending)]);
+
+    expect(winner).toBe(stillPending);
   });
 
   it('disconnect rejects with DISCONNECTED, not REQUEST_TIMEOUT', async () => {
@@ -465,6 +667,134 @@ describe('IpcBus', () => {
     busA.subscribe('ch', (msg: string) => received.push(msg));
     busA.publish('ch', 'ok');
     expect(received).toEqual(['ok']);
+  });
+
+  it('never unlinks a live server socket when connect fails with an unexpected error', async () => {
+    const sock = tempSocketPath();
+
+    const server = createBus(sock);
+    await server.ready();
+    server.onRequest<string, string>('echo', (value) => `owner:${value}`);
+
+    chmodSync(sock, 0o000);
+    const blocked = createBus(sock);
+    await blocked.ready();
+    await sleep(100);
+
+    expect(existsSync(sock)).toBe(true);
+    expect(server.isServing()).toBe(true);
+
+    chmodSync(sock, 0o777);
+    await waitFor(() => !blocked.isServing(), 2000);
+    await sleep(200);
+
+    expect(server.isServing()).toBe(true);
+    expect(blocked.isServing()).toBe(false);
+    const result = await blocked.request<string, string>('echo', 'ok');
+    expect(result).toBe('owner:ok');
+  });
+
+  function tooLongSocketPath(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'ipc-bus-test-'));
+    const nested = join(dir, 'x'.repeat(60), 'y'.repeat(60));
+    mkdirSync(nested, { recursive: true });
+    return join(nested, 'test.sock');
+  }
+
+  it('surfaces a non-retryable getFatalConnectError() instead of retrying forever when a server cannot bind a too-long socket path', async () => {
+    const sock = tooLongSocketPath();
+    const server = createBus(sock);
+
+    await waitFor(() => server.getFatalConnectError() !== null, 2000);
+
+    const fatal = server.getFatalConnectError();
+    expect(fatal).toBeInstanceOf(TransportError);
+    expect(fatal?.code).toBe(TransportErrorCode.SOCKET_PATH_INVALID);
+    expect(fatal?.message).toContain(String(sock.length));
+    expect(fatal?.message).toContain('INVOKER_IPC_SOCKET');
+  });
+
+  it('surfaces a non-retryable getFatalConnectError() for a pure client (headless CLI) on a too-long socket path', async () => {
+    const sock = tooLongSocketPath();
+    const client = new IpcBus(sock, { allowServe: false });
+    buses.push(client);
+
+    await waitFor(() => client.getFatalConnectError() !== null, 2000);
+
+    const fatal = client.getFatalConnectError();
+    expect(fatal).toBeInstanceOf(TransportError);
+    expect(fatal?.code).toBe(TransportErrorCode.SOCKET_PATH_INVALID);
+  });
+
+  it('still reclaims a stale socket file left behind by a crashed server', async () => {
+    const sock = tempSocketPath();
+
+    const crashed = spawn(process.execPath, [
+      '-e',
+      "const s = require('node:net').createServer(() => {}); s.listen(process.argv[1], () => process.stdout.write('ready'));",
+      sock,
+    ]);
+    await new Promise<void>((resolve) => {
+      crashed.stdout.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('ready')) resolve();
+      });
+    });
+    crashed.kill('SIGKILL');
+    await new Promise<void>((resolve) => crashed.on('exit', () => resolve()));
+    expect(existsSync(sock)).toBe(true);
+
+    const owner = createBus(sock);
+    await owner.ready();
+    await waitFor(() => owner.isServing(), 2000);
+    owner.onRequest<string, string>('echo', (value) => `owner:${value}`);
+
+    const client = new IpcBus(sock, { allowServe: false });
+    buses.push(client);
+    await client.ready();
+    const result = await client.request<string, string>('echo', 'ok');
+    expect(result).toBe('owner:ok');
+  });
+
+  describe('isServeRecoveryEligible', () => {
+    const eligibleState = {
+      disconnected: false,
+      hasServer: false,
+      hasPeers: false,
+      recoveryAlreadyScheduled: false,
+    };
+
+    it('is eligible when disconnected, server, peers, and scheduled are all false', () => {
+      expect(isServeRecoveryEligible(eligibleState)).toBe(true);
+    });
+
+    it('is ineligible once disconnected', () => {
+      expect(isServeRecoveryEligible({ ...eligibleState, disconnected: true })).toBe(false);
+    });
+
+    it('is ineligible once it already has a server', () => {
+      expect(isServeRecoveryEligible({ ...eligibleState, hasServer: true })).toBe(false);
+    });
+
+    it('is ineligible once it already has a peer', () => {
+      expect(isServeRecoveryEligible({ ...eligibleState, hasPeers: true })).toBe(false);
+    });
+
+    it('is ineligible once a recovery attempt is already scheduled', () => {
+      expect(isServeRecoveryEligible({ ...eligibleState, recoveryAlreadyScheduled: true })).toBe(
+        false,
+      );
+    });
+
+    it('is ineligible when every condition is true', () => {
+      expect(
+        isServeRecoveryEligible({
+          disconnected: true,
+          hasServer: true,
+          hasPeers: true,
+          recoveryAlreadyScheduled: true,
+        }),
+      ).toBe(false);
+    });
   });
 
   it('surviving client reclaims the socket after the original server disappears', async () => {

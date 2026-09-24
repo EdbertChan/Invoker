@@ -88,20 +88,20 @@ export function resolveHeadlessOwnerLaunchSpec(
 
   const invokerUi = which('invoker-ui');
   if (invokerUi) {
-    return { command: invokerUi, args: ['--headless', 'owner-serve'] };
+    return {
+      command: invokerUi,
+      args: [
+        ...(platform === 'linux' ? LINUX_HEADLESS_ELECTRON_FLAGS : []),
+        '--headless',
+        'owner-serve',
+      ],
+    };
   }
 
   const electronCjs = join(options.repoRoot, 'scripts', 'electron.cjs');
   const mainJs = join(options.repoRoot, 'packages', 'app', 'dist', 'main.js');
   if (fileExists(electronCjs) && fileExists(mainJs)) {
     const launchArgs = buildElectronHeadlessArgs('packages/app/dist/main.js', ['owner-serve'], platform);
-    if (platform === 'linux') {
-      return {
-        command: 'xvfb-run',
-        args: ['--auto-servernum', './scripts/electron.cjs', ...launchArgs],
-        cwd: options.repoRoot,
-      };
-    }
     return {
       command: './scripts/electron.cjs',
       args: launchArgs,

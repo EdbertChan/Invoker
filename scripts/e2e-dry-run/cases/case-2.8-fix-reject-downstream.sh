@@ -19,12 +19,12 @@ invoker_e2e_submit_plan "$INVOKER_E2E_REPO_ROOT/plans/e2e-dry-run/group2-multi-t
 
 STA=$(invoker_e2e_task_status e2e-g228-taskA)
 STB=$(invoker_e2e_task_status e2e-g228-taskB)
-if [ "$STA" != "failed" ] || [ "$STB" != "pending" ]; then
-  echo "FAIL case 2.8: expected A=failed B=pending, got A='$STA' B='$STB'"
-  invoker_e2e_run_headless status 2>&1 || true
+if [ "$STA" != "failed" ] || [ "$STB" != "skipped" ]; then
+  echo "FAIL case 2.8: expected A=failed B=skipped, got A='$STA' B='$STB'"
+  invoker_e2e_dump_tasks
   exit 1
 fi
-echo "==> case 2.8: confirmed A=failed, B=pending"
+echo "==> case 2.8: confirmed A=failed, B=skipped"
 
 echo "==> case 2.8: fix A (claude-marker.sh runs)"
 invoker_e2e_run_headless fix e2e-g228-taskA
@@ -32,7 +32,7 @@ invoker_e2e_run_headless fix e2e-g228-taskA
 STA=$(invoker_e2e_task_status e2e-g228-taskA)
 if [ "$STA" != "awaiting_approval" ]; then
   echo "FAIL case 2.8: expected A=awaiting_approval after fix, got '$STA'"
-  invoker_e2e_run_headless status 2>&1 || true
+  invoker_e2e_dump_tasks
   exit 1
 fi
 echo "==> case 2.8: confirmed A=awaiting_approval"
@@ -42,10 +42,10 @@ invoker_e2e_run_headless reject e2e-g228-taskA
 
 STA=$(invoker_e2e_task_status e2e-g228-taskA)
 STB=$(invoker_e2e_task_status e2e-g228-taskB)
-if [ "$STA" != "failed" ] || [ "$STB" != "pending" ]; then
-  echo "FAIL case 2.8: expected A=failed B=pending after reject, got A='$STA' B='$STB'"
-  invoker_e2e_run_headless status 2>&1 || true
+if [ "$STA" != "failed" ] || [ "$STB" != "skipped" ]; then
+  echo "FAIL case 2.8: expected A=failed B=skipped after reject, got A='$STA' B='$STB'"
+  invoker_e2e_dump_tasks
   exit 1
 fi
 
-echo "PASS case 2.8 (fix A → reject → A=failed, B=pending throughout)"
+echo "PASS case 2.8 (fix A → reject → A=failed, B=skipped throughout)"

@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import type { WorkRequest, WorkResponse } from '@invoker/contracts';
 import type { ExecutorHandle, PersistedTaskMeta } from '../executor.js';
 import { BaseExecutor } from '../base-executor.js';
-
+import { buildExperimentBranchName, computeContentHash } from '../branch-utils.js';
 // ---------------------------------------------------------------------------
 // Mock helpers
 // ---------------------------------------------------------------------------
@@ -222,6 +222,22 @@ describe('DockerExecutor', () => {
     expect(syncFromRemoteSpy).toHaveBeenCalledWith('/app', expect.any(String));
   });
 
+  it('skips Docker image-baked repo sync when origin is absent', async () => {
+    const execGitSpy = vi.spyOn(executor as any, 'execGitSimple').mockRejectedValueOnce(
+      new Error("docker exec failed (code 128): fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository."),
+    );
+    const emitOutputSpy = vi.spyOn(executor as any, 'emitOutput').mockImplementation(() => undefined);
+
+    await expect((executor as any).syncFromRemote('/app', 'exec-1')).resolves.toBeUndefined();
+
+    expect(execGitSpy).toHaveBeenCalledWith(['remote', 'get-url', 'origin'], '/app');
+    expect(syncFromRemoteSpy).not.toHaveBeenCalled();
+    expect(emitOutputSpy).toHaveBeenCalledWith(
+      'exec-1',
+      '[Git Fetch] Status: skipped | Remote: origin missing | Using image-baked repo state\n',
+    );
+  });
+
   it('calls setupTaskBranch with /app and content-addressable branch', async () => {
     await executor.start(makeRequest());
 
@@ -231,6 +247,41 @@ describe('DockerExecutor', () => {
       expect.any(Object),
       expect.objectContaining({
         branchName: expect.stringMatching(/^experiment\/action-1\/g\d+\.t\d+\.a[a-z0-9_-]*-[0-9a-f]{8}$/),
+      }),
+    );
+  });
+
+  it('uses upstreamBase commit for docker branch hashing and setup base', async () => {
+    const upstreamBaseCommit = '1234567890abcdef1234567890abcdef12345678';
+    const expectedBranch = buildExperimentBranchName(
+      'action-1',
+      '',
+      computeContentHash('action-1', 'echo hello', undefined, [], upstreamBaseCommit),
+    );
+
+    const execRemoteCaptureMock = (executor as any).execRemoteCapture as ReturnType<typeof vi.fn>;
+    execRemoteCaptureMock.mockImplementation(async (_containerId: string, script: string) => (
+      script.includes('--verify') ? upstreamBaseCommit : ''
+    ));
+
+    await executor.start(makeRequest({
+      inputs: {
+        command: 'echo hello',
+        repoUrl: 'https://github.com/test/repo.git',
+        upstreamBase: {
+          branch: 'experiment/dep-a',
+          commitHash: upstreamBaseCommit,
+        },
+      },
+    }));
+
+    expect(setupTaskBranchSpy).toHaveBeenCalledWith(
+      '/app',
+      expect.objectContaining({ actionId: 'action-1' }),
+      expect.any(Object),
+      expect.objectContaining({
+        branchName: expectedBranch,
+        base: upstreamBaseCommit,
       }),
     );
   });
@@ -265,22 +316,21 @@ describe('DockerExecutor', () => {
       runScopedGitAndShell('container-b', 'from-b', 0),
     ]);
 
-    expect(routedCalls).toEqual([
+    expect(routedCalls).toHaveLength(4);
+    expect(routedCalls.filter((call) => call.containerId === 'container-a')).toEqual([
       expect.objectContaining({
-        containerId: 'container-b',
         script: expect.stringContaining('git \'status\' \'--short\''),
       }),
       expect.objectContaining({
-        containerId: 'container-b',
-        script: 'echo from-b',
-      }),
-      expect.objectContaining({
-        containerId: 'container-a',
-        script: expect.stringContaining('git \'status\' \'--short\''),
-      }),
-      expect.objectContaining({
-        containerId: 'container-a',
         script: 'echo from-a',
+      }),
+    ]);
+    expect(routedCalls.filter((call) => call.containerId === 'container-b')).toEqual([
+      expect.objectContaining({
+        script: expect.stringContaining('git \'status\' \'--short\''),
+      }),
+      expect.objectContaining({
+        script: 'echo from-b',
       }),
     ]);
   });

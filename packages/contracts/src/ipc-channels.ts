@@ -13,6 +13,7 @@ import type {
   TaskState,
   TaskDelta,
   TaskStateChanges,
+  ExternalGatePolicy,
   WorkflowDerivedStatus,
   WorkflowRollup,
 } from '@invoker/workflow-graph';
@@ -130,7 +131,7 @@ export interface AgentSessionData {
 export interface ExternalGatePolicyUpdate {
   workflowId: string;
   taskId?: string;
-  gatePolicy: 'completed' | 'review_ready';
+  gatePolicy: 'completed' | 'review_ready' | 'ci_failed';
 }
 
 export interface TaskEvent {
@@ -217,6 +218,7 @@ export type WorkerActionStatus =
 export type WorkerSource = 'built-in' | 'external';
 export type WorkerAvailability = 'available' | 'unknown';
 export type WorkerLogSource = 'worker_actions' | 'task_events';
+export type WorkerSnapshotAuthority = 'live' | 'cached' | 'unavailable';
 
 export interface WorkerLogEntry {
   id: string;
@@ -254,6 +256,8 @@ export interface WorkerActionSummary {
   sessionId?: string;
   summary?: string;
   reason?: string;
+  outcomeClass?: string;
+  decisionOutcome?: string;
   decision?: 'act' | 'skip';
   createdAt: string;
   updatedAt: string;
@@ -286,6 +290,8 @@ export interface WorkerStatusEntry {
   policyReason?: string;
   autoStarts: boolean;
   desiredEnabled?: boolean;
+  configuredAutoStart?: boolean;
+  suppressedByPersistedStop?: boolean;
   startable: boolean;
   stoppable: boolean;
   controlDisabledReason?: string;
@@ -303,6 +309,9 @@ export interface WorkerStatusEntry {
 export interface WorkerStatusSnapshot {
   generatedAt: string;
   workers: WorkerStatusEntry[];
+  authority?: WorkerSnapshotAuthority;
+  lastSuccessfulAt?: string;
+  unavailableReason?: string;
 }
 
 export interface WorkerActionHistoryRequest {
@@ -436,12 +445,14 @@ export type InAppPlanResponse =
       error: string;
     };
 
+export type PlanningConfirmationMode = 'require' | 'auto_submit';
 export interface PlanningPresetOption {
   key: string;
   label: string;
   tool: string;
   model?: string;
   isDefault: boolean;
+  defaultConfirmationMode?: PlanningConfirmationMode;
 }
 
 export interface InAppPlanningPlanSummaryTaskGroup {
@@ -460,7 +471,8 @@ export type InAppPlanningSessionStatus =
   | 'still_discussing'
   | 'waiting_for_answer'
   | 'draft_ready'
-  | 'submitted';
+  | 'submitted'
+  | 'planner_error';
 
 export type PlanningTerminalMode = 'chat' | 'tmux';
 
@@ -477,9 +489,14 @@ export interface InAppPlanningSessionSummary {
   title: string;
   status: InAppPlanningSessionStatus;
   presetKey: string;
+  confirmationMode?: PlanningConfirmationMode;
   messages: InAppPlanningChatLine[];
   draftPlanAvailable: boolean;
   draftPlanSummary?: InAppPlanningPlanSummary;
+  draftPlanText?: string;
+  repoUrl?: string;
+  baseBranch?: string;
+  baseCommit?: string;
   submittedWorkflowId?: string;
   submittedPlanName?: string;
   terminalMode?: PlanningTerminalMode;
@@ -488,6 +505,9 @@ export interface InAppPlanningSessionSummary {
   terminalExitCode?: number;
   terminalOutputSnapshot?: string;
   terminalUpdatedAt?: string;
+  activeTurnId?: string;
+  activeTurnStatus?: InAppPlanningTurnStatus;
+  activeTurnError?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -495,6 +515,7 @@ export interface InAppPlanningSessionSummary {
 export interface InAppPlanningCreateSessionRequest {
   presetKey?: string;
   title?: string;
+  confirmationMode?: PlanningConfirmationMode;
 }
 
 export type InAppPlanningCreateSessionResponse =
@@ -510,30 +531,59 @@ export type InAppPlanningCreateSessionResponse =
 export type InAppPlanningListSessionsResponse = {
   ok: true;
   sessions: InAppPlanningSessionSummary[];
+  repoBinding?: InAppPlanningRepoBinding;
 };
+
+export type InAppPlanningTurnStatus = 'running' | 'failed';
+
+export type InAppPlanningTurnOutcome =
+  | {
+      status: 'completed';
+      reply: string;
+      reasoning?: string;
+      confirmationMode?: PlanningConfirmationMode;
+      draftPlanAvailable: boolean;
+      draftPlanSummary?: InAppPlanningPlanSummary;
+      draftPlanText?: string;
+    }
+  | { status: 'failed'; error: string };
 
 export interface InAppPlanningStreamEvent {
   sessionId: string;
-  chunk: string;
+  chunk?: string;
+  turnId?: string;
+  turn?: InAppPlanningTurnOutcome;
+}
+
+export interface InAppPlanningRepoBinding {
+  repoUrl: string;
+  baseBranch: string;
 }
 
 export interface InAppPlanningChatRequest {
   sessionId?: string;
   message: string;
   presetKey?: string;
+  confirmationMode?: PlanningConfirmationMode;
+  turnId?: string;
+  repoBinding?: InAppPlanningRepoBinding;
 }
 
 export type InAppPlanningChatResponse =
   | {
       ok: true;
       sessionId: string;
+      turnId?: string;
       reply: string;
+      confirmationMode?: PlanningConfirmationMode;
       draftPlanAvailable: boolean;
       draftPlanSummary?: InAppPlanningPlanSummary;
+      draftPlanText?: string;
     }
   | {
       ok: false;
       sessionId?: string;
+      turnId?: string;
       error: string;
     };
 
@@ -559,6 +609,13 @@ export interface InAppPlanningResetRequest {
 }
 
 export type InAppPlanningResetResponse = { ok: true };
+export interface InAppPlanningDiscardDraftRequest {
+  sessionId: string;
+}
+
+export type InAppPlanningDiscardDraftResponse =
+  | { ok: true }
+  | { ok: false; error: string };
 
 export interface InAppPlanningSetTerminalModeRequest {
   sessionId: string;
@@ -567,6 +624,16 @@ export interface InAppPlanningSetTerminalModeRequest {
 
 export type InAppPlanningSetTerminalModeResponse =
   | { ok: true }
+  | { ok: false; error: string };
+
+export interface InAppPlanningRebindRepoRequest {
+  sessionId: string;
+  repoUrl?: string;
+  baseBranch?: string;
+}
+
+export type InAppPlanningRebindRepoResponse =
+  | { ok: true; action: 'reuse' | 'provision' | 'invalidate_and_block_submit' }
   | { ok: false; error: string };
 
 
@@ -594,13 +661,50 @@ export interface WorkflowMutationAcceptedResult {
   channel: string;
 }
 
+export type StartReadyFreshBaseScope =
+  | 'failed'
+  | 'failed-and-pending'
+  | 'failed-pending-and-running'
+  | 'all';
+
+export interface StartReadyFreshBasePreview {
+  scope: StartReadyFreshBaseScope;
+  workflowIds: string[];
+  failedWorkflowIds: string[];
+  pendingWorkflowIds: string[];
+  runningWorkflowIds: string[];
+  completedWorkflowIds?: string[];
+}
+
+export type StartReadyWorkflowOutcome =
+  | {
+      ok: true;
+      workflowId: string;
+      mode: 'recreate' | 'fresh-base-recreate';
+      startedTaskIds: string[];
+    }
+  | {
+      ok: false;
+      workflowId: string;
+      mode: 'recreate' | 'fresh-base-recreate';
+      error: string;
+    };
+
+export type StartReadyExcludeSelector = {
+  field: 'mergeMode';
+  value: 'no_op';
+};
+
 export interface StartReadyRequest {
   recreateFailed?: boolean;
   recreateFailedAndPending?: boolean;
   recreateFailedPendingAndRunning?: boolean;
   /** Recreate failed + pending/queued + running + completed (finished) workflows. */
   recreateAll?: boolean;
+  freshBaseScope?: StartReadyFreshBaseScope;
   dryRun?: boolean;
+  /** Typed selectors that remove matching workflows from bulk recreation. */
+  exclude?: StartReadyExcludeSelector[];
 }
 
 export interface StartReadyPreview {
@@ -610,6 +714,7 @@ export interface StartReadyPreview {
   pendingWorkflowIds: string[];
   runningWorkflowIds: string[];
   completedWorkflowIds?: string[];
+  freshBase?: StartReadyFreshBasePreview;
   skipped: {
     awaitingApproval: number;
     reviewReady: number;
@@ -625,6 +730,10 @@ export interface StartReadyResult {
   preview: StartReadyPreview;
   started: TaskState[];
   recreatedWorkflowIds: string[];
+  excludedWorkflowIds?: string[];
+  freshBaseRecreatedWorkflowIds?: string[];
+  workflowOutcomes?: StartReadyWorkflowOutcome[];
+  partial?: boolean;
   dryRun: boolean;
 }
 
@@ -691,6 +800,16 @@ export interface HarnessMcpConfigState {
   serverName: string;
 }
 
+export interface HarnessInstructionConfigState {
+  id: string;
+  name: string;
+  path: string;
+  available: boolean;
+  installed: boolean;
+  upToDate: boolean;
+  installedInstructionNames: string[];
+}
+
 export interface BundledSkillsStatus {
   available: boolean;
   promptRecommended: boolean;
@@ -702,9 +821,10 @@ export interface BundledSkillsStatus {
   targets: BundledSkillTargetStatus[];
   commandTargets: HarnessConfigState[];
   mcpTargets: HarnessMcpConfigState[];
+  instructionTargets?: HarnessInstructionConfigState[];
 }
 
-export type BundledSkillsInstallMode = 'install' | 'update' | 'reinstall';
+export type BundledSkillsInstallMode = 'install' | 'update' | 'reinstall' | 'uninstall';
 
 export interface CliInstallerStatus {
   /** Packaged app + bundled binary present + darwin/linux. */
@@ -764,10 +884,15 @@ export interface SystemDiagnostics {
 
 export type RuntimeMode = 'local-owner' | 'daemon-owner' | 'read-only' | 'connection-lost';
 
+export type CodexSpendGateStatus =
+  | { state: 'tripped'; trippedAt: string; dayKey: string; message: string }
+  | { state: 'unreadable'; message: string };
+
 export interface RuntimeStatus {
   ownerMode: boolean;
   readOnly: boolean;
   mode: RuntimeMode;
+  codexSpendGate?: CodexSpendGateStatus;
 }
 
 
@@ -879,6 +1004,10 @@ export const IpcChannels = {
     request: [request: InAppPlanningSubmitRequest];
     response: InAppPlanningSubmitResponse;
   },
+  'invoker:planning-chat-discard-draft': {} as {
+    request: [request: InAppPlanningDiscardDraftRequest];
+    response: InAppPlanningDiscardDraftResponse;
+  },
   'invoker:planning-chat-reset': {} as {
     request: [request: InAppPlanningResetRequest];
     response: InAppPlanningResetResponse;
@@ -895,6 +1024,10 @@ export const IpcChannels = {
     request: [request: InAppPlanningSetTerminalModeRequest];
     response: InAppPlanningSetTerminalModeResponse;
   },
+  'invoker:planning-chat-rebind-repo': {} as {
+    request: [request: InAppPlanningRebindRepoRequest];
+    response: InAppPlanningRebindRepoResponse;
+  },
   'invoker:planning-terminal-open': {} as {
     request: [planningSessionId: string];
     response: OpenTerminalResponse;
@@ -910,6 +1043,10 @@ export const IpcChannels = {
   'invoker:planning-terminal-resize': {} as {
     request: [sessionId: string, cols: number, rows: number];
     response: { ok: boolean; reason?: string };
+  },
+  'invoker:planning-terminal-applied-size': {} as {
+    request: [sessionId: string];
+    response: { cols: number; rows: number } | null;
   },
   'invoker:planning-terminal-close': {} as {
     request: [sessionId: string];
@@ -961,6 +1098,10 @@ export const IpcChannels = {
   },
   'invoker:detach-workflow': {} as {
     request: [workflowId: string, upstreamWorkflowId: string];
+    response: WorkflowMutationAcceptedResult;
+  },
+  'invoker:attach-workflow': {} as {
+    request: [workflowId: string, upstreamWorkflowId: string, opts?: { taskId?: string; gatePolicy?: ExternalGatePolicy; force?: boolean }];
     response: WorkflowMutationAcceptedResult;
   },
   'invoker:load-workflow': {} as {
@@ -1019,20 +1160,7 @@ export const IpcChannels = {
     request: [taskId: string, experimentId: string | string[]];
     response: WorkflowMutationAcceptedResult;
   },
-  /**
-   * @deprecated Step 13 (`docs/architecture/task-invalidation-roadmap.md`):
-   * `invoker:restart-task` is the legacy channel name from when
-   * `restartTask` was the overloaded "retry-or-recreate" verb the
-   * chart's "Naming inconsistency" section flagged. The channel
-   * itself is preserved for UI compatibility but its handler in
-   * `main.ts` now routes through `commandService.retryTask` →
-   * `Orchestrator.retryTask` (retry-class semantics: preserves
-   * branch/workspacePath lineage). Prefer the explicit channels —
-   * `invoker:retry-task` (when wired) for retry-class invalidation
-   * or `invoker:recreate-task` for recreate-class invalidation.
-   * Once UI is migrated this channel can be removed.
-   */
-  'invoker:restart-task': {} as {
+  'invoker:retry-task': {} as {
     request: [taskId: string];
     response: WorkflowMutationAcceptedResult;
   },
@@ -1118,11 +1246,15 @@ export const IpcChannels = {
     request: [target: string];
     response: WorkflowMutationAcceptedResult;
   },
+  'invoker:spawn-repair-workflow': {} as {
+    request: [payload: unknown];
+    response: WorkflowMutationAcceptedResult;
+  },
   'invoker:set-merge-branch': {} as {
     request: [workflowId: string, baseBranch: string];
     response: WorkflowMutationAcceptedResult;
   },
-  'invoker:set-merge-mode': {} as {
+  'invoker:set-workflow-merge-mode': {} as {
     request: [workflowId: string, mergeMode: string];
     response: WorkflowMutationAcceptedResult;
   },
@@ -1156,7 +1288,7 @@ export const IpcChannels = {
 
   // Queue & Configuration
   'invoker:get-queue-status': {} as {
-    request: [];
+    request: [options?: { refresh?: boolean }];
     response: QueueStatus;
   },
   'invoker:get-worker-status': {} as {
@@ -1180,6 +1312,10 @@ export const IpcChannels = {
     response: WorkerStatusEntry;
   },
   'invoker:stop-worker': {} as {
+    request: [kind: string];
+    response: WorkerStatusEntry;
+  },
+  'invoker:tick-worker': {} as {
     request: [kind: string];
     response: WorkerStatusEntry;
   },
@@ -1212,6 +1348,14 @@ export const IpcChannels = {
   // Performance & Activity
   'invoker:report-ui-perf': {} as {
     request: [metric: string, data?: Record<string, unknown>];
+    response: void;
+  },
+  'invoker:trace-renderer-task-graph-event': {} as {
+    request: [event: TaskGraphEvent];
+    response: void;
+  },
+  'invoker:trace-renderer-workflow-event': {} as {
+    request: [workflows: unknown[]];
     response: void;
   },
   'invoker:get-ui-perf-stats': {} as {
@@ -1293,11 +1437,15 @@ export const IpcTestOnlyChannels = {
   'invoker:set-test-planning-chat-response': {} as {
     request: [
       response:
-        | { planYaml: string; planName: string; reply?: string }
+        | { planYaml: string; planName: string; reply?: string; delayMs?: number }
         | { throwError: string }
         | null,
     ];
     response: void;
+  },
+  'invoker:get-test-planning-chat-system-prompt': {} as {
+    request: [sessionId: string];
+    response: { systemPrompt: string | null };
   },
   'invoker:seed-main-process-hitch-fixture': {} as {
     request: [];
@@ -1320,6 +1468,7 @@ export const IpcTestOnlyChannels = {
       nowIso?: string;
       stuckLaunchingSlots?: number;
       launchAgeMs?: number;
+      taskStatusMode?: 'mixed' | 'pending' | 'completed';
     }];
     response: {
       workflowCount: number;
@@ -1329,6 +1478,7 @@ export const IpcTestOnlyChannels = {
       fixing: number;
       pending: number;
       failed: number;
+      completed: number;
     };
   },
 } as const;

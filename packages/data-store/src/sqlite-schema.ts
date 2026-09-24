@@ -27,6 +27,8 @@ export const SCHEMA_DDL = `
         external_dependency_changes TEXT CHECK (external_dependency_changes IS NULL OR json_valid(external_dependency_changes)),
         detached_external_dependencies TEXT CHECK (detached_external_dependencies IS NULL OR json_valid(detached_external_dependencies)),
         generation INTEGER DEFAULT 0 CHECK (typeof(generation) = 'integer' AND generation >= 0),
+        staged INTEGER NOT NULL DEFAULT 0 CHECK (staged IN (0, 1)),
+        deleted_at INTEGER,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       );
@@ -46,6 +48,7 @@ export const SCHEMA_DDL = `
         protocol_error_message TEXT,
         input_prompt TEXT,
         external_dependencies TEXT CHECK (external_dependencies IS NULL OR json_valid(external_dependencies)),
+        freshness TEXT CHECK (freshness IS NULL OR json_valid(freshness)),
 
         -- Context
         summary TEXT,
@@ -168,8 +171,29 @@ export const SCHEMA_DDL = `
         extracted_plan TEXT,
         plan_submitted INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
+        updated_at TEXT DEFAULT (datetime('now')),
+        surface TEXT NOT NULL DEFAULT 'slack'
       );
+
+      CREATE TABLE IF NOT EXISTS planning_drafts (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0),
+        plan_text TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('current', 'superseded', 'submitted')),
+        created_at TEXT NOT NULL,
+        superseded_at TEXT,
+        submitted_at TEXT,
+        UNIQUE(conversation_id, version)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_planning_drafts_current
+        ON planning_drafts(conversation_id)
+        WHERE status = 'current';
+
+      CREATE INDEX IF NOT EXISTS idx_planning_drafts_conversation_version
+        ON planning_drafts(conversation_id, version DESC);
 
       CREATE TABLE IF NOT EXISTS conversation_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,8 +214,40 @@ export const SCHEMA_DDL = `
         harness_preset TEXT NOT NULL,
         working_dir TEXT NOT NULL,
         requested_by TEXT NOT NULL,
-        lobby_channel_id TEXT NOT NULL
+        lobby_channel_id TEXT NOT NULL,
+        confirmation_mode TEXT NOT NULL DEFAULT 'require' CHECK (confirmation_mode IN ('require', 'auto_submit')),
+        harness_session_id TEXT,
+        surface TEXT NOT NULL DEFAULT 'slack'
       );
+
+      CREATE TABLE IF NOT EXISTS slack_plan_drafts (
+        draft_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        planning_draft_id TEXT,
+        channel_id TEXT NOT NULL,
+        thread_ts TEXT NOT NULL,
+        message_ts TEXT,
+        slack_file_id TEXT,
+        plan_text TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        summary_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('preparing', 'ready', 'submitting', 'submitted', 'failed', 'rejected', 'superseded')),
+        repo_url TEXT NOT NULL,
+        harness_preset TEXT NOT NULL,
+        working_dir TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        confirmation_mode TEXT NOT NULL DEFAULT 'require' CHECK (confirmation_mode IN ('require', 'auto_submit')),
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        decided_by TEXT,
+        execution_key TEXT,
+        workflow_ids_json TEXT,
+        surface TEXT NOT NULL DEFAULT 'slack',
+        PRIMARY KEY (draft_id, version)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_slack_plan_drafts_thread_ready
+        ON slack_plan_drafts(channel_id, thread_ts, status);
 
       CREATE TABLE IF NOT EXISTS slack_pending_confirmations (
         confirm_key TEXT PRIMARY KEY,
@@ -201,7 +257,8 @@ export const SCHEMA_DDL = `
         kind TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL
+        expires_at TEXT NOT NULL,
+        surface TEXT NOT NULL DEFAULT 'slack'
       );
 
       CREATE INDEX IF NOT EXISTS idx_slack_pending_confirmations_expiry
@@ -211,9 +268,12 @@ export const SCHEMA_DDL = `
         session_id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         preset_key TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('still_discussing', 'waiting_for_answer', 'draft_ready', 'submitted')),
+        status TEXT NOT NULL CHECK (status IN ('still_discussing', 'waiting_for_answer', 'draft_ready', 'submitted', 'planner_error')),
+        confirmation_mode TEXT NOT NULL DEFAULT 'require' CHECK (confirmation_mode IN ('require', 'auto_submit')),
         draft_plan_summary_json TEXT CHECK (draft_plan_summary_json IS NULL OR json_valid(draft_plan_summary_json)),
         draft_plan_text TEXT,
+        planning_draft_id TEXT,
+        planning_draft_hash TEXT,
         submitted_workflow_id TEXT,
         submitted_plan_name TEXT,
         terminal_mode TEXT NOT NULL DEFAULT 'chat' CHECK (terminal_mode IN ('chat', 'tmux')),
@@ -223,6 +283,9 @@ export const SCHEMA_DDL = `
         terminal_output_snapshot TEXT NOT NULL DEFAULT '',
         terminal_updated_at TEXT,
         pending_response INTEGER NOT NULL DEFAULT 0 CHECK (pending_response IN (0, 1)),
+        active_turn_id TEXT,
+        active_turn_status TEXT CHECK (active_turn_status IS NULL OR active_turn_status IN ('running', 'failed')),
+        active_turn_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -357,7 +420,7 @@ export const SCHEMA_DDL = `
         attempt_id TEXT NOT NULL,
         workflow_id TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'enqueued',
-        priority TEXT NOT NULL DEFAULT 'normal',
+        priority TEXT NOT NULL DEFAULT '2',
         dispatch_owner TEXT,
         enqueued_at TEXT NOT NULL DEFAULT (datetime('now')),
         leased_at TEXT,
@@ -367,6 +430,7 @@ export const SCHEMA_DDL = `
         attempts_count INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
         generation INTEGER NOT NULL,
+        abandon_reason TEXT,
         FOREIGN KEY (task_id) REFERENCES tasks(id),
         FOREIGN KEY (workflow_id) REFERENCES workflows(id)
       );
@@ -384,6 +448,37 @@ export const SCHEMA_DDL = `
 
       CREATE INDEX IF NOT EXISTS idx_task_launch_dispatch_task_state
         ON task_launch_dispatch(task_id, state);
+
+      CREATE TABLE IF NOT EXISTS queue_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recorded_at TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        workflow_id TEXT,
+        task_id TEXT,
+        attempt_id TEXT,
+        dispatch_id INTEGER,
+        resource_key TEXT,
+        resource_type TEXT,
+        holder_id TEXT,
+        from_state TEXT,
+        to_state TEXT NOT NULL DEFAULT 'unknown',
+        queue_position INTEGER CHECK (queue_position IS NULL OR queue_position > 0),
+        queue_size INTEGER CHECK (queue_size IS NULL OR queue_size >= 0),
+        payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+        unknown_fields TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(unknown_fields))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_queue_history_workflow_recorded
+        ON queue_history(workflow_id, recorded_at, id);
+
+      CREATE INDEX IF NOT EXISTS idx_queue_history_task_recorded
+        ON queue_history(task_id, recorded_at, id);
+
+      CREATE INDEX IF NOT EXISTS idx_queue_history_attempt_recorded
+        ON queue_history(attempt_id, recorded_at, id);
+
+      CREATE INDEX IF NOT EXISTS idx_queue_history_dispatch_recorded
+        ON queue_history(dispatch_id, recorded_at, id);
 
       CREATE TABLE IF NOT EXISTS worker_actions (
         id TEXT PRIMARY KEY,
@@ -481,12 +576,50 @@ export const SCHEMA_DDL = `
       CREATE INDEX IF NOT EXISTS idx_terminal_sessions_status_updated
         ON terminal_sessions(status, updated_at);
 
+      CREATE TABLE IF NOT EXISTS sync_journal (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('workflow', 'task', 'attempt', 'event', 'output')),
+        entity_id TEXT NOT NULL,
+        op TEXT NOT NULL CHECK (op IN ('upsert', 'tombstone')),
+        payload TEXT NOT NULL CHECK (json_valid(payload)),
+        origin TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sync_journal_entity
+        ON sync_journal(entity_type, entity_id, seq);
+
+      CREATE TABLE IF NOT EXISTS sync_cursors (
+        peer_id TEXT PRIMARY KEY,
+        last_sent_seq INTEGER NOT NULL DEFAULT 0 CHECK (typeof(last_sent_seq) = 'integer' AND last_sent_seq >= 0),
+        last_received_seq INTEGER NOT NULL DEFAULT 0 CHECK (typeof(last_received_seq) = 'integer' AND last_received_seq >= 0),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS repair_filings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        state_sha TEXT NOT NULL,
+        metadata TEXT CHECK (metadata IS NULL OR json_valid(metadata)),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_repair_filings_kind_subject_sha
+        ON repair_filings(kind, subject, state_sha);
+
     `;
 
 /** Idempotent `ALTER TABLE ... ADD COLUMN` migrations for older databases. */
 export const COLUMN_MIGRATIONS = [
   'ALTER TABLE workflow_channels ADD COLUMN progress_card_ts TEXT',
   "ALTER TABLE conversations ADD COLUMN mode TEXT DEFAULT 'plan'",
+  'ALTER TABLE slack_launch_contexts ADD COLUMN harness_session_id TEXT',
+  "ALTER TABLE slack_launch_contexts ADD COLUMN confirmation_mode TEXT NOT NULL DEFAULT 'require' CHECK (confirmation_mode IN ('require', 'auto_submit'))",
+  'ALTER TABLE slack_plan_drafts ADD COLUMN slack_file_id TEXT',
+  'ALTER TABLE slack_plan_drafts ADD COLUMN execution_key TEXT',
+  'ALTER TABLE slack_plan_drafts ADD COLUMN workflow_ids_json TEXT',
+  "ALTER TABLE slack_plan_drafts ADD COLUMN confirmation_mode TEXT NOT NULL DEFAULT 'require' CHECK (confirmation_mode IN ('require', 'auto_submit'))",
   'ALTER TABLE tasks ADD COLUMN claude_session_id TEXT',
   'ALTER TABLE tasks ADD COLUMN workspace_path TEXT',
   'ALTER TABLE tasks ADD COLUMN container_id TEXT',
@@ -549,17 +682,40 @@ export const COLUMN_MIGRATIONS = [
   'ALTER TABLE tasks ADD COLUMN fixed_integration_source TEXT',
   'ALTER TABLE tasks ADD COLUMN fix_prompt TEXT',
   'ALTER TABLE tasks ADD COLUMN fix_context TEXT',
+  'ALTER TABLE tasks ADD COLUMN freshness TEXT CHECK (freshness IS NULL OR json_valid(freshness))',
   'ALTER TABLE attempts ADD COLUMN queue_priority INTEGER NOT NULL DEFAULT 0',
   'ALTER TABLE attempts ADD COLUMN claimed_at TEXT',
   'ALTER TABLE attempts ADD COLUMN lease_expires_at TEXT',
   'ALTER TABLE tasks ADD COLUMN task_state_version INTEGER NOT NULL DEFAULT 1',
   'ALTER TABLE in_app_planning_sessions ADD COLUMN draft_plan_text TEXT',
+  "ALTER TABLE in_app_planning_sessions ADD COLUMN confirmation_mode TEXT NOT NULL DEFAULT 'require' CHECK (confirmation_mode IN ('require', 'auto_submit'))",
   "ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_mode TEXT NOT NULL DEFAULT 'chat' CHECK (terminal_mode IN ('chat', 'tmux'))",
   'ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_session_id TEXT',
   "ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_status TEXT CHECK (terminal_status IS NULL OR terminal_status IN ('running', 'exited'))",
   'ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_exit_code INTEGER',
   "ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_output_snapshot TEXT NOT NULL DEFAULT ''",
   'ALTER TABLE in_app_planning_sessions ADD COLUMN terminal_updated_at TEXT',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN repo_url TEXT',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN base_branch TEXT',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN base_commit TEXT',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN worktree_path TEXT',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN worktree_branch TEXT',
+  // abandon_reason: why a launch dispatch row was abandoned (e.g.
+  // 'stuck-lease', 'lifecycle-reset', 'stale-claim'). Written now, read by
+  // a later slice's scoped retry count -- unused for now.
+  'ALTER TABLE task_launch_dispatch ADD COLUMN abandon_reason TEXT',
+  'ALTER TABLE workflows ADD COLUMN deleted_at INTEGER',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN active_turn_id TEXT',
+  "ALTER TABLE in_app_planning_sessions ADD COLUMN active_turn_status TEXT CHECK (active_turn_status IS NULL OR active_turn_status IN ('running', 'failed'))",
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN active_turn_error TEXT',
+  'ALTER TABLE slack_plan_drafts ADD COLUMN planning_draft_id TEXT',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN planning_draft_id TEXT',
+  'ALTER TABLE in_app_planning_sessions ADD COLUMN planning_draft_hash TEXT',
+  'ALTER TABLE workflows ADD COLUMN staged INTEGER NOT NULL DEFAULT 0 CHECK (staged IN (0, 1))',
+  "ALTER TABLE conversations ADD COLUMN surface TEXT NOT NULL DEFAULT 'slack'",
+  "ALTER TABLE slack_launch_contexts ADD COLUMN surface TEXT NOT NULL DEFAULT 'slack'",
+  "ALTER TABLE slack_plan_drafts ADD COLUMN surface TEXT NOT NULL DEFAULT 'slack'",
+  "ALTER TABLE slack_pending_confirmations ADD COLUMN surface TEXT NOT NULL DEFAULT 'slack'",
 ];
 
 /**
@@ -568,6 +724,30 @@ export const COLUMN_MIGRATIONS = [
  * dispatch index. Order preserved from the original `migrate()` body.
  */
 export const POST_MIGRATION_STATEMENTS = [
+  'DROP TRIGGER IF EXISTS trg_tasks_executor_routing_insert',
+  'DROP TRIGGER IF EXISTS trg_tasks_executor_routing_update',
+  `CREATE TRIGGER trg_tasks_executor_routing_insert
+    BEFORE INSERT ON tasks
+    WHEN COALESCE((
+      (COALESCE(NEW.runner_kind, '') IN ('', 'worktree', 'ssh') AND COALESCE(TRIM(NEW.pool_id), '') <> '' AND NEW.docker_image IS NULL)
+      OR (NEW.runner_kind = 'docker' AND NEW.pool_id IS NULL AND NEW.pool_member_id IS NULL)
+      OR (NEW.runner_kind = 'merge' AND NEW.pool_id IS NULL AND NEW.pool_member_id IS NULL)
+      OR (NEW.runner_kind = 'scratch' AND NEW.pool_id IS NULL AND NEW.pool_member_id IS NULL)
+    ), 0) = 0
+    BEGIN
+      SELECT RAISE(ABORT, 'tasks executor routing invariant violated');
+    END`,
+  `CREATE TRIGGER trg_tasks_executor_routing_update
+    BEFORE UPDATE OF runner_kind, pool_id, pool_member_id, docker_image ON tasks
+    WHEN COALESCE((
+      (COALESCE(NEW.runner_kind, '') IN ('', 'worktree', 'ssh') AND COALESCE(TRIM(NEW.pool_id), '') <> '' AND NEW.docker_image IS NULL)
+      OR (NEW.runner_kind = 'docker' AND NEW.pool_id IS NULL AND NEW.pool_member_id IS NULL)
+      OR (NEW.runner_kind = 'merge' AND NEW.pool_id IS NULL AND NEW.pool_member_id IS NULL)
+      OR (NEW.runner_kind = 'scratch' AND NEW.pool_id IS NULL AND NEW.pool_member_id IS NULL)
+    ), 0) = 0
+    BEGIN
+      SELECT RAISE(ABORT, 'tasks executor routing invariant violated');
+    END`,
   'DROP INDEX IF EXISTS idx_attempts_node',
   'CREATE INDEX IF NOT EXISTS idx_attempts_node_created ON attempts(node_id, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_events_task_id_id ON events(task_id, id)',
@@ -577,6 +757,28 @@ export const POST_MIGRATION_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_worker_actions_task_updated ON worker_actions(task_id, updated_at)',
   'CREATE INDEX IF NOT EXISTS idx_worker_actions_workflow_status ON worker_actions(workflow_id, worker_kind, status)',
   'CREATE INDEX IF NOT EXISTS idx_worker_actions_kind_updated ON worker_actions(worker_kind, updated_at DESC, id)',
+  `CREATE TABLE IF NOT EXISTS queue_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    workflow_id TEXT,
+    task_id TEXT,
+    attempt_id TEXT,
+    dispatch_id INTEGER,
+    resource_key TEXT,
+    resource_type TEXT,
+    holder_id TEXT,
+    from_state TEXT,
+    to_state TEXT NOT NULL DEFAULT 'unknown',
+    queue_position INTEGER CHECK (queue_position IS NULL OR queue_position > 0),
+    queue_size INTEGER CHECK (queue_size IS NULL OR queue_size >= 0),
+    payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+    unknown_fields TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(unknown_fields))
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_queue_history_workflow_recorded ON queue_history(workflow_id, recorded_at, id)',
+  'CREATE INDEX IF NOT EXISTS idx_queue_history_task_recorded ON queue_history(task_id, recorded_at, id)',
+  'CREATE INDEX IF NOT EXISTS idx_queue_history_attempt_recorded ON queue_history(attempt_id, recorded_at, id)',
+  'CREATE INDEX IF NOT EXISTS idx_queue_history_dispatch_recorded ON queue_history(dispatch_id, recorded_at, id)',
   `CREATE TABLE IF NOT EXISTS worker_desired_states (
     worker_kind TEXT PRIMARY KEY,
     desired_enabled INTEGER NOT NULL,
@@ -591,6 +793,38 @@ export const POST_MIGRATION_STATEMENTS = [
   `UPDATE worker_actions SET status = 'cancelled' WHERE status = 'canceled'`,
   'CREATE TABLE IF NOT EXISTS task_crash_preservation (task_id TEXT PRIMARY KEY, preserved_at TEXT NOT NULL, owner_pid INTEGER, diagnostic_report_path TEXT, diagnostic_summary TEXT, FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE)',
   'CREATE INDEX IF NOT EXISTS idx_task_crash_preservation_preserved_at ON task_crash_preservation(preserved_at)',
+  `CREATE TABLE IF NOT EXISTS sync_journal (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('workflow', 'task', 'attempt', 'event', 'output')),
+    entity_id TEXT NOT NULL,
+    op TEXT NOT NULL CHECK (op IN ('upsert', 'tombstone')),
+    payload TEXT NOT NULL CHECK (json_valid(payload)),
+    origin TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_sync_journal_entity ON sync_journal(entity_type, entity_id, seq)',
+  `CREATE TABLE IF NOT EXISTS sync_cursors (
+    peer_id TEXT PRIMARY KEY,
+    last_sent_seq INTEGER NOT NULL DEFAULT 0 CHECK (typeof(last_sent_seq) = 'integer' AND last_sent_seq >= 0),
+    last_received_seq INTEGER NOT NULL DEFAULT 0 CHECK (typeof(last_received_seq) = 'integer' AND last_received_seq >= 0),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  // repair_filings: durable cross-system dedup ledger for auto-filed CI/PR
+  // repair work. UNIQUE(kind, subject, state_sha) is the atomic
+  // insert-if-not-exists primitive -- see insertRepairFiling().
+  `CREATE TABLE IF NOT EXISTS repair_filings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    state_sha TEXT NOT NULL,
+    metadata TEXT CHECK (metadata IS NULL OR json_valid(metadata)),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_repair_filings_kind_subject_sha ON repair_filings(kind, subject, state_sha)',
+  'CREATE INDEX IF NOT EXISTS idx_conversations_surface_thread ON conversations(surface, thread_ts)',
+  'CREATE INDEX IF NOT EXISTS idx_slack_launch_contexts_surface_thread ON slack_launch_contexts(surface, thread_ts)',
+  'CREATE INDEX IF NOT EXISTS idx_slack_plan_drafts_surface_thread ON slack_plan_drafts(surface, thread_ts)',
+  'CREATE INDEX IF NOT EXISTS idx_slack_pending_confirmations_surface_thread ON slack_pending_confirmations(surface, thread_ts)',
 ];
 
 /** Rebuilt `workflows` table used to drop a legacy `status` column. */
@@ -614,6 +848,7 @@ export const WORKFLOWS_REBUILD_TABLE_DDL = `
         external_dependency_changes TEXT CHECK (external_dependency_changes IS NULL OR json_valid(external_dependency_changes)),
         detached_external_dependencies TEXT CHECK (detached_external_dependencies IS NULL OR json_valid(detached_external_dependencies)),
         generation INTEGER DEFAULT 0 CHECK (typeof(generation) = 'integer' AND generation >= 0),
+        deleted_at INTEGER,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       )
@@ -625,12 +860,12 @@ export const WORKFLOWS_REBUILD_INSERT_DDL = `
         id, name, description, visual_proof, plan_file, repo_url, intermediate_repo_url,
         branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode,
         review_provider, external_dependencies, external_dependency_changes, detached_external_dependencies,
-        generation, created_at, updated_at
+        generation, deleted_at, created_at, updated_at
       )
       SELECT
         id, name, description, visual_proof, plan_file, repo_url, intermediate_repo_url,
         branch, on_finish, base_branch, parent_remote, feature_branch, merge_mode,
         review_provider, external_dependencies, external_dependency_changes, detached_external_dependencies,
-        generation, created_at, updated_at
+        generation, deleted_at, created_at, updated_at
       FROM workflows
     `;

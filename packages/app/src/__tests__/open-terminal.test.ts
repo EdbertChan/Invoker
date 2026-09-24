@@ -11,7 +11,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 
 import {
@@ -25,34 +26,50 @@ import {
 } from '@invoker/workflow-core';
 import type { TaskStateChanges } from '@invoker/workflow-graph';
 import {
-  DockerExecutor, WorktreeExecutor, ExecutorRegistry, SshExecutor,
+  DockerExecutor,
+  WorktreeExecutor,
+  ExecutorRegistry,
+  SshExecutor,
   MergeGateExecutor,
   BaseExecutor,
   getEffectivePath,
-  type ExecutorHandle, type TerminalSpec, type PersistedTaskMeta,
+  defaultCodexSpendGatePath,
+  registerBuiltinAgents as registerBuiltinAgentsStatic,
+  type Executor,
+  type ExecutorHandle,
+  type TerminalSpec,
+  type PersistedTaskMeta,
 } from '@invoker/execution-engine';
-import type { WorkResponse, WorkRequest } from '@invoker/contracts';
-vi.mock('../terminal-external-launch.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../terminal-external-launch.js')>();
-  return {
-    ...actual,
-    spawnDetachedTerminal: vi.fn(async () => ({ opened: true })),
-  };
-});
+import type * as NodeFsModule from 'node:fs';
+import type * as TerminalExternalLaunchModule from '../terminal-external-launch.js';
 import {
   buildLinuxXTerminalBashScript,
   buildMacOSOsascriptArgs,
   buildTerminalShellCommand,
   spawnDetachedTerminal,
 } from '../terminal-external-launch.js';
-import { openExternalTerminalForTask } from '../open-terminal-for-task.js';
+import { openEmbeddedTerminalForTask, openExternalTerminalForTask } from '../open-terminal-for-task.js';
+import type { EmbeddedTerminalManager } from '../embedded-terminal-manager.js';
 import * as configModule from '../config.js';
 
+vi.mock('../terminal-external-launch.js', async (importOriginal) => {
+  const actual = await importOriginal<TerminalExternalLaunchModule>();
+  return {
+    ...actual,
+    spawnDetachedTerminal: vi.fn(async () => ({ opened: true })),
+  };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
+  const actual = await importOriginal<NodeFsModule>();
   return { ...actual, existsSync: vi.fn(actual.existsSync) };
 });
 import { existsSync } from 'node:fs';
+
+function mockPathsExistExceptSpendGateTrip(): void {
+  const spendGatePath = defaultCodexSpendGatePath();
+  vi.mocked(existsSync).mockImplementation((path) => path !== spendGatePath);
+}
 
 /** Host shell for worktree branch-checkout terminal specs (see WorktreeExecutor.getRestoredTerminalSpec). */
 const worktreeCheckoutShell = process.platform === 'darwin' ? 'zsh' : 'bash';
@@ -422,6 +439,39 @@ describe('terminal-external-launch', () => {
     // Should use '\'' (backslash-quote) not '"'"' (double-quote idiom)
     expect(line).toContain("\\'");
     expect(line).not.toMatch(/'"'"'/);
+  });
+
+  it('prints display bridge text without injection and preserves command argv', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'terminal-bridge-'));
+    const marker = join(dir, 'injected');
+    try {
+      const line = buildTerminalShellCommand(
+        {
+          cwd: dir,
+          command: 'sh',
+          args: [
+            '-c',
+            'printf "%s\\n" "$@" > argv.txt',
+            'argv0',
+            'arg one',
+            'semi;colon',
+            "quote'arg",
+          ],
+          displayOnlyBridgeText: `bridge $(touch ${marker}); echo 'bad'`,
+        },
+        '/fallback',
+      );
+
+      execFileSync('bash', ['-c', line], { cwd: dir });
+
+      expect(readFileSync(join(dir, 'argv.txt'), 'utf8')).toBe(
+        "arg one\nsemi;colon\nquote'arg\n",
+      );
+      expect(readFileSync(join(dir, 'argv.txt'), 'utf8')).not.toContain('bad');
+      expect(() => readFileSync(marker)).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('buildMacOSOsascriptArgs includes activate and uses multi-line AppleScript', () => {
@@ -1044,7 +1094,7 @@ describe('SshExecutor getRestoredTerminalSpec', () => {
 
 describe('getRestoredTerminalSpec dispatches codex vs claude session resume', () => {
   // Lazy import to avoid circular dep issues at module level
-  let registerBuiltinAgents: typeof import('@invoker/execution-engine').registerBuiltinAgents;
+  let registerBuiltinAgents: typeof registerBuiltinAgentsStatic;
 
   beforeEach(async () => {
     ({ registerBuiltinAgents } = await import('@invoker/execution-engine'));
@@ -1062,7 +1112,7 @@ describe('getRestoredTerminalSpec dispatches codex vs claude session resume', ()
         cacheDir: '/tmp/cache',
         agentRegistry,
       });
-      vi.mocked(existsSync).mockReturnValue(true);
+      mockPathsExistExceptSpendGateTrip();
       const meta: PersistedTaskMeta = {
         taskId: 'task-codex',
         runnerKind: 'worktree',
@@ -1110,7 +1160,7 @@ describe('getRestoredTerminalSpec dispatches codex vs claude session resume', ()
         cacheDir: '/tmp/cache',
         agentRegistry,
       });
-      vi.mocked(existsSync).mockReturnValue(true);
+      mockPathsExistExceptSpendGateTrip();
       const meta: PersistedTaskMeta = {
         taskId: 'task-default',
         runnerKind: 'worktree',
@@ -1209,7 +1259,7 @@ describe('getRestoredTerminalSpec dispatches codex vs claude session resume', ()
  * openExternalTerminalForTask does, and getRestoredTerminalSpec dispatches correctly.
  */
 describe('fix-with-agent → open-terminal produces correct agent resume command', () => {
-  let registerBuiltinAgents: typeof import('@invoker/execution-engine').registerBuiltinAgents;
+  let registerBuiltinAgents: typeof registerBuiltinAgentsStatic;
 
   beforeEach(async () => {
     ({ registerBuiltinAgents } = await import('@invoker/execution-engine'));
@@ -1264,7 +1314,7 @@ describe('fix-with-agent → open-terminal produces correct agent resume command
   }
 
   it('fix with codex → terminal launches codex, not claude', () => {
-    vi.mocked(existsSync).mockReturnValue(true);
+    mockPathsExistExceptSpendGateTrip();
     const agentRegistry = registerBuiltinAgents();
     const wt = new WorktreeExecutor({
       worktreeBaseDir: '/tmp/wt',
@@ -1308,7 +1358,7 @@ describe('fix-with-agent → open-terminal produces correct agent resume command
   });
 
   it('completed command task with only last agent metadata launches codex resume', () => {
-    vi.mocked(existsSync).mockReturnValue(true);
+    mockPathsExistExceptSpendGateTrip();
     const agentRegistry = registerBuiltinAgents();
     const wt = new WorktreeExecutor({
       worktreeBaseDir: '/tmp/wt',
@@ -1378,7 +1428,7 @@ describe('fix-with-agent → open-terminal produces correct agent resume command
   });
 
   it('prompt task with stale claude agent_name still launches configured codex resume', async () => {
-    vi.mocked(existsSync).mockReturnValue(true);
+    mockPathsExistExceptSpendGateTrip();
     const { resolveTaskTerminalSpec } = await import('../open-terminal-for-task.js');
     const agentRegistry = registerBuiltinAgents();
     vi.spyOn(agentRegistry, 'getSessionDriver').mockReturnValue({
@@ -1426,7 +1476,7 @@ describe('fix-with-agent → open-terminal produces correct agent resume command
   });
 
   it('fix with no agent specified → terminal defaults to codex', () => {
-    vi.mocked(existsSync).mockReturnValue(true);
+    mockPathsExistExceptSpendGateTrip();
     const agentRegistry = registerBuiltinAgents();
     const wt = new WorktreeExecutor({
       worktreeBaseDir: '/tmp/wt',
@@ -1647,5 +1697,46 @@ describe('openExternalTerminalForTask fail-fast workspace invariant', () => {
       expect(result.reason).not.toContain('workspace metadata is missing');
       expect(result.reason).not.toContain('requires a managed workspace');
     }
+  });
+});
+
+describe('openEmbeddedTerminalForTask', () => {
+  it('attaches running tasks without persistence metadata when a live handle exists', () => {
+    const openOrReuse = vi.fn(() => ({
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      kind: 'task',
+      status: 'running',
+      mode: 'attached',
+      attached: true,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      outputSnapshot: '',
+    }));
+    const liveExecutor = { type: 'worktree' } as unknown as Executor;
+    const liveHandle = {
+      executionId: 'exec-1',
+      taskId: 'task-1',
+      workspacePath: '/tmp/task-1',
+    } as ExecutorHandle;
+
+    const result = openEmbeddedTerminalForTask({
+      taskId: 'task-1',
+      executorRegistry: new ExecutorRegistry(),
+      repoRoot: '/repo',
+      taskHandles: new Map([['task-1', { handle: liveHandle, executor: liveExecutor }]]),
+      embeddedTerminalManager: { openOrReuse } as unknown as Pick<EmbeddedTerminalManager, 'openOrReuse'>,
+    });
+
+    expect(result).toEqual({
+      opened: true,
+      session: expect.objectContaining({ sessionId: 'session-1', taskId: 'task-1', mode: 'attached' }),
+    });
+    expect(openOrReuse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'task-1',
+        cwd: '/tmp/task-1',
+        attach: { handle: liveHandle, executor: liveExecutor },
+      }),
+    );
   });
 });

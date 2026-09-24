@@ -8,7 +8,42 @@ The SSH executor (`runnerKind: ssh`) runs task commands on remote hosts over SSH
 
 Each remote target is defined in the Invoker config with a host, user, and path to an SSH private key. Tasks reference targets by ID.
 
-## Configuration
+## Guided Setup: the Machines Wizard
+
+The easiest way to add a remote target is the setup wizard, rather than hand-editing config JSON:
+
+```bash
+invoker-cli setup machines
+```
+
+It asks for, in order: machine name, host, user, SSH key path, repo URL, SSH port (default `22`),
+max concurrent tasks (default `1`), and an optional provision command. Before saving anything, it
+runs a real SSH connectivity probe (`ssh ... 'exit 0'` with `BatchMode=yes` and a 10s connect
+timeout), then a bundle of remote readiness checks over that same connection: git/node/pnpm
+present on the box, free disk space, and — using the repo URL — whether the box can reach that
+repo with its own git credentials (`git ls-remote <repoUrl>`, read-only). A machine is only
+written to `~/.invoker/config.json` if the connectivity probe and every required readiness check
+succeed; the disk-space check is a warning, not a blocker. This is deliberately stricter than a
+bare SSH ping: it catches a common failure mode where a box is reachable but can't actually
+finish a task, because a `git push` at the end of a task authenticates independently on the
+remote box, not through the SSH key you gave the wizard (that key only opens the connection
+*to* the box). The repo URL itself is used only to run this check — it is not written to config.
+It also rejects a name or host that duplicates an existing target. After each machine, it asks
+whether to add another, so you can add several in one run.
+
+For scripting, `invoker-cli setup machines --json` reads a JSON array of machine objects from
+stdin (each object needs a `repoUrl` field alongside `name`/`host`/`user`/`sshKeyPath`, used the
+same way as above) and writes a JSON array of per-machine results (including the connectivity
+outcome and doctor-check results) to stdout, instead of prompting interactively.
+
+The desktop app has a matching step: the System Setup panel's "Add remote machines" section asks
+for the same fields and performs the same reachability check (via the same CLI) before adding
+the machine to your list, with its button reading "Checking machine…" while the probe runs.
+
+If you'd rather manage `~/.invoker/config.json` yourself, see **Manual Configuration (Fallback)**
+below.
+
+## Manual Configuration (Fallback)
 
 Add remote targets to `~/.invoker/config.json`.
 
@@ -23,6 +58,7 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
       "sshKeyPath": "/home/user/.ssh/id_staging",
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
+      "provisionCommand": "bash scripts/provision-ssh-worker.sh ensure-repo-ready",
       "remoteHeartbeatIntervalSeconds": 30
     },
     "staging-server-b": {
@@ -32,24 +68,24 @@ If you want to use a repo-specific config file, launch Invoker with `INVOKER_REP
       "port": 22,
       "managedWorkspaces": true,
       "remoteInvokerHome": "~/.invoker",
+      "provisionCommand": "bash scripts/provision-ssh-worker.sh ensure-repo-ready",
       "remoteHeartbeatIntervalSeconds": 30
     }
   }
 }
 ```
-Invoker does not run repo bootstrap automatically on managed SSH checkouts. If a repo needs setup such as `pnpm install` or `flutter pub get`, make the task command run that repo-owned step explicitly.
+Managed SSH checkouts only run repo bootstrap when the target defines `provisionCommand`. Leave it unset to skip hydration entirely.
 
 ## Owner-host workers
 
 Remote SSH targets execute workflow tasks only. Long-lived operator automation belongs on the Invoker owner host, where the process owns the workflow database and worker registry.
 
-For the supported PR-maintenance setup, enable `prMaintenance` in `~/.invoker/config.json` on the owner host and run the built-in worker kinds from the Workers tab or headless CLI:
+For the supported PR-maintenance setup, enable `prMaintenance` in `~/.invoker/config.json` on the owner host and run the surviving built-in worker kinds from the Workers tab or headless CLI:
 
 ```bash
-./run.sh --headless worker status --output text
-./run.sh --headless worker coderabbit-address
-./run.sh --headless worker pr-conflict-rebase
-./run.sh --headless worker pr-ci-failure-scan
+invoker-ui --headless worker status --output text
+invoker-ui --headless worker pr-admin-bypass-land
+invoker-ui --headless worker pr-orphan-repair
 ```
 
 Do not install separate cron jobs on SSH targets for these maintenance paths. The workers share the owner process, owner database, and per-kind worker locks; SSH targets stay disposable execution capacity.
@@ -64,6 +100,7 @@ Do not install separate cron jobs on SSH targets for these maintenance paths. Th
 | `port` | number | no | SSH port (default: 22) |
 | `managedWorkspaces` | boolean | no | When true, Invoker clones/fetches the repo and manages per-task worktrees on the remote host |
 | `remoteInvokerHome` | string | no | Base directory used by managed remote workspaces (default: `~/.invoker`) |
+| `provisionCommand` | string | no | Repo-owned bootstrap command run inside each managed remote worktree before the task payload |
 | `remoteHeartbeatIntervalSeconds` | number | no | Interval (seconds) for SSH remote workload heartbeat markers used by executing-stall detection (default: `30`) |
 
 ## Multiple SSH Targets
@@ -121,7 +158,7 @@ The executor validates at runtime that the selected target or pool exists and re
 
 1. The plan parser reads `poolId` from YAML and stores it on the task config.
 2. At dispatch time, Invoker resolves that `poolId` either directly to a `remoteTargets` entry or to an `executionPools` member selection.
-3. An `SshExecutor` instance is created with the chosen target's connection details.
+3. An `SshExecutor` instance is created with the chosen target's connection and managed-worktree bootstrap details.
 4. The runner spawns: `ssh -i <keyPath> -p <port> -o StrictHostKeyChecking=accept-new -o BatchMode=yes user@host <command>`
 5. For `claude` action types, the Claude CLI command is shell-quoted and executed remotely.
 
@@ -141,7 +178,7 @@ SSH member capacity is decided by durable host-keyed leases in `execution_resour
 - **Claim-at-select:** the runner acquires the lease while selecting a pool member, before start. Dispatch renews an already-held lease instead of claiming again.
 - **In-memory maps:** `activeExecutions` / `pendingPoolSelections` still drive kill, heartbeat, and start plumbing, but they do **not** contribute to SSH `poolMemberLoad`. Worktree pool members still use in-memory load.
 - **Reclaim:** orphan-executor reclaim remains useful cleanup; it is not the source of truth for “is this host full?”.
-- **Inspect:** with the GUI/owner up, `./run.sh --headless query execution-leases [--output json|text|label]` lists live holders (`resourceKey`, `poolId`, `poolMemberId`, `taskId`, `holderId`, expiry).
+- **Inspect:** with the GUI/owner up, `invoker-ui --headless query execution-leases [--output json|text|label]` lists live holders (`resourceKey`, `poolId`, `poolMemberId`, `taskId`, `holderId`, expiry).
 - **Regression gate:** `bash scripts/repro/repro-ssh-lease-capacity-battery.sh --gate` (orphan ghosts, cross-pool exclusivity, churn refill, lease/occupancy parity).
 
 ## Member Health & Circuit Breaker

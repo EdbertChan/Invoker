@@ -10,10 +10,11 @@
 [![npm invoker-cli](https://img.shields.io/npm/v/@neko-catpital-labs/invoker-cli?label=invoker-cli&style=flat-square)](https://www.npmjs.com/package/@neko-catpital-labs/invoker-cli)
 [![npm invoker-ui](https://img.shields.io/npm/v/@neko-catpital-labs/invoker-ui?label=invoker-ui&style=flat-square)](https://www.npmjs.com/package/@neko-catpital-labs/invoker-ui)
 [![npm invoker-slack](https://img.shields.io/npm/v/@neko-catpital-labs/invoker-slack?label=invoker-slack&style=flat-square)](https://www.npmjs.com/package/@neko-catpital-labs/invoker-slack)
+[![Slack](https://img.shields.io/badge/slack-join-4A154B?style=flat-square&logo=slack&logoColor=white)](https://join.slack.com/t/invoker-ai/shared_invite/zt-476imo738-VqNp_SDfI6DFZp80EGgscQ)
 
 A DAG of tasks in isolated git worktrees, composed through merge gates and review — desktop, CLI, and Slack on one control plane.
 
-**[Download](https://github.com/Neko-Catpital-Labs/Invoker/releases/latest)** · **[Website](https://invoker-control.dev)**
+**[Download](https://github.com/Neko-Catpital-Labs/Invoker/releases/latest)** · **[Website](https://invoker-control.dev)** · **[Join Slack](https://join.slack.com/t/invoker-ai/shared_invite/zt-476imo738-VqNp_SDfI6DFZp80EGgscQ)**
 
 <video src="docs/assets/invoker-preview.mp4" controls muted playsinline width="100%"></video>
 
@@ -100,33 +101,43 @@ Spread work across SSH targets and remote machines you already manage — same a
 
 Invoker background work is owned by the built-in worker registry. `autofix` is the default failed-task recovery worker; it reconciles persisted state and submits normal `fix-with-agent` intents instead of running recovery from task-state producers.
 
-Run workers on the Invoker owner host. Operators can start and stop them from the desktop Workers tab, inspect them with `./run.sh --headless worker status --output text|json|jsonl`, or trigger one explicit scan with `./run.sh --headless worker <kind>`. Each kind takes its own single-instance lock, so a second scan of the same worker is refused without blocking other worker kinds.
+Run workers on the Invoker owner host. Operators can start and stop them from the desktop Workers tab, inspect them with `invoker-ui --headless worker status --output text|json|jsonl`, or trigger one explicit scan with `invoker-ui --headless worker <kind>`. Each kind takes its own single-instance lock, so a second scan of the same worker is refused without blocking other worker kinds.
 
-PR maintenance uses the same owner-host worker path. Enable the built-in `coderabbit-address`, `pr-conflict-rebase`, and `pr-ci-failure-scan` workers with the `prMaintenance` config block; do not install separate cron jobs or external worker launchers for the supported setup.
+PR maintenance uses the same owner-host worker path. Enable `prMaintenance` to launch `pr-admin-bypass-land`, keep `pr-orphan-repair` available from the same built-in registry, and do not install separate cron jobs or external worker launchers for the supported setup.
 
 ## Install
+
+Requires Node.js 26.x. One command installs CLI + UI, runs doctor, wires skills/MCP, and turns on `pr-status` / `autofix` / `auto-approve` (skips Slack and remote machines):
+
+```bash
+npx @neko-catpital-labs/invoker-cli@latest install
+```
+
+Sample output: [docs/install-transcript.txt](docs/install-transcript.txt) (`invoker-cli install --demo`).
+
+Default Invoker owner is **local**. In chat, name a host or IP to use a remote Invoker (the agent probes SSH and retargets MCP). Slack and remote machines stay optional (`invoker-cli setup slack` / `setup machines`).
+
+Manual equivalent:
 
 ```bash
 npm install -g @neko-catpital-labs/invoker-ui
 npm install -g @neko-catpital-labs/invoker-cli
-npm install -g @neko-catpital-labs/invoker-slack
+invoker-cli install
 ```
 
-Or grab desktop builds and standalone binaries from [GitHub Releases](https://github.com/Neko-Catpital-Labs/Invoker/releases/latest). Full install, config, and source checkout steps: [Getting started](docs/getting-started.md).
+If you need Node installed first, optional wrapper: `curl -fsSL https://raw.githubusercontent.com/Neko-Catpital-Labs/Invoker/master/scripts/bootstrap.sh | bash` (ensures Node 26, then runs the same `npx @neko-catpital-labs/invoker-cli@latest install`). Desktop packages only: `curl -fsSL https://raw.githubusercontent.com/Neko-Catpital-Labs/Invoker/master/scripts/install.sh | bash`. Full install, config, and source checkout steps: [Getting started](docs/getting-started.md).
 
-Packaged installs bundle the first-party Invoker AI helpers inside the app. Install helpers from System Setup or:
+`invoker-cli install` (and interactive `invoker-cli setup`) installs the first-party Invoker AI helper skills and registers the Invoker MCP server with Codex, Claude, Cursor, and OMP. Interactive `setup` still walks Slack and machines when you want them.
 
-```bash
-invoker-ui --install-skills
-```
+Then, in Codex, Claude, Cursor, or OMP, ask in normal chat to plan and run durable work through Invoker. Setup already installs the `invoker-chat-submit` skill and MCP tools, so the agent can prepare a review, wait for one approval, submit, and watch status without a slash command.
 
-Then, in Codex, Claude, Cursor, or OMP, run:
+Explicit fallback remains available:
 
 ```text
 /invoker-plan-to-invoker "help me plan <change>"
 ```
 
-The command plans first, writes `plans/invoker-handoff.md`, converts it to `plans/invoker-handoff.yaml`, validates, and submits with `invoker-cli run --live` or the Invoker MCP tool.
+Either path writes `plans/invoker-handoff.md`, converts it to `plans/invoker-handoff.yaml`, validates, and reviews via MCP (`invoker_prepare_plan_review` → one approval → `invoker_submit_plan` with `reviewToken`), then reports status with `invoker_get_workflow` / `invoker_list_tasks` / bounded `invoker_wait_for_workflow`. The explicit fallback command can also submit with `invoker-cli run --live` instead of the Invoker MCP tool.
 ## Docs
 
 - [Getting started](docs/getting-started.md) — prerequisites, install, config, quick start, troubleshooting
@@ -138,9 +149,9 @@ The command plans first, writes `plans/invoker-handoff.md`, converts it to `plan
 - [Contributing](CONTRIBUTING.md)
 - [License](LICENSE)
 
-More: [local macOS release build](docs/local-macos-release-build.md), [remote SSH targets](docs/remote-ssh-targets.md), [Docker executor](docs/docker-executor.md), [web surface](docs/web-surface.md), [product story](docs/invoker-medium-article.md).
+More: [local macOS release build](docs/local-macos-release-build.md), [remote SSH targets](docs/remote-ssh-targets.md), [Docker executor](docs/docker-executor.md), [web surface](docs/web-surface.md), [UI/backend drift tracing](docs/ui-backend-drift-tracing.md), [product story](docs/invoker-medium-article.md).
 
-If you need to turn a product or implementation plan into an Invoker workflow, install helpers from System Setup or `invoker-ui --install-skills`, then run `/invoker-plan-to-invoker "help me plan <change>"` in Codex, Claude, Cursor, or OMP. The command plans first, writes `plans/invoker-handoff.md`, converts it to `plans/invoker-handoff.yaml`, validates, and submits with `invoker-cli run --live` or the Invoker MCP tool.
+If you need to turn a product or implementation plan into an Invoker workflow, run `invoker-cli setup` (or System Setup in the desktop app) to install helpers. In normal chat, ask to plan/submit durable work through Invoker; the installed `invoker-chat-submit` skill and MCP tools handle review, one approval, submit, and status. `/invoker-plan-to-invoker "help me plan <change>"` remains the explicit slash-command fallback.
 ## License
 
 [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (SPDX: **FSL-1.1-ALv2**). Permitted use, competing use, and the future Apache License 2.0 grant are defined in the license file.

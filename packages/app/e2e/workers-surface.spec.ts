@@ -1,15 +1,44 @@
 import { test, expect, captureScreenshot } from './fixtures/electron-app.js';
 
+test.use({
+  repoConfig: {
+    autoFixRetries: 0,
+    infraRepair: { enabled: true },
+  },
+});
+
+test('workers surface shows db-reaper registered', async ({ page }) => {
+  await page.getByTestId('sidebar-workers').click();
+  await expect(page.getByTestId('worker-process-list')).toBeVisible();
+  await expect(page.getByTestId('worker-row-db-reaper')).toBeVisible();
+
+  await page.getByTestId('worker-row-db-reaper').click();
+  await expect(page.getByTestId('worker-detail-start-stop')).toBeVisible();
+
+  await captureScreenshot(page, 'workers-db-reaper-registered');
+});
+
+test('workers surface shows admin-bypass-e2e-babysit registered', async ({ page }) => {
+  await page.getByTestId('sidebar-workers').click();
+  await expect(page.getByTestId('worker-process-list')).toBeVisible();
+  await expect(page.getByTestId('worker-row-admin-bypass-e2e-babysit')).toBeVisible();
+
+  await page.getByTestId('worker-row-admin-bypass-e2e-babysit').click();
+  await expect(page.getByTestId('worker-detail-start-stop')).toBeVisible();
+
+  await captureScreenshot(page, 'workers-admin-bypass-e2e-babysit-registered');
+});
+
 test('workers surface shows the worker control in the details panel', async ({ page }) => {
   await page.getByTestId('sidebar-workers').click();
 
   await expect(page.getByTestId('workers-rail')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Workers' })).toBeVisible();
-  await expect(page.getByText('3 workers registered.')).toBeVisible();
+  await expect(page.getByText(/\d+ workers registered\./)).toBeVisible();
   await expect(page.getByTestId('worker-process-list')).toBeVisible();
   await expect(page.getByTestId('worker-row-autofix')).toBeVisible();
   await expect(page.getByTestId('worker-row-pr-status')).toBeVisible();
-  await expect(page.getByTestId('worker-row-ci-failure')).toBeVisible();
+  await expect(page.getByTestId('worker-row-infra-repair')).toBeVisible();
 
   await page.getByTestId('worker-row-pr-status').click();
   await expect(page.getByTestId('worker-detail-start-stop')).toBeVisible();
@@ -32,7 +61,7 @@ test('workers surface details control turns one worker off without touching the 
 
   await expect(page.getByTestId('worker-lifecycle-pr-status')).toHaveAttribute('data-lifecycle', 'stopped');
   await expect(control).toHaveAttribute('data-action', 'start');
-  await expect(page.getByTestId('worker-lifecycle-ci-failure')).toHaveAttribute('data-lifecycle', 'running');
+  await expect(page.getByTestId('worker-lifecycle-infra-repair')).toHaveAttribute('data-lifecycle', 'running');
   await captureScreenshot(page, 'workers-detail-control-step-2-one-off');
 
   await control.click();

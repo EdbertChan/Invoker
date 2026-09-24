@@ -13,7 +13,7 @@
  * preserved exactly.
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type {
@@ -24,7 +24,7 @@ import type {
   TaskStatus,
 } from '@invoker/workflow-graph';
 import { getTransitiveDependents } from '@invoker/workflow-graph';
-import type { Logger } from '@invoker/contracts';
+import { appendRotatingLogLine, type Logger } from '@invoker/contracts';
 import {
   OrchestratorError,
   OrchestratorErrorCode,
@@ -56,7 +56,7 @@ const MERGE_TRACE_LOG = resolve(homedir(), '.invoker', 'merge-trace.log');
 function mergeTrace(tag: string, data: Record<string, unknown>): void {
   try {
     mkdirSync(resolve(homedir(), '.invoker'), { recursive: true });
-    appendFileSync(MERGE_TRACE_LOG, `${new Date().toISOString()} [merge-trace:orchestrator] ${tag} ${JSON.stringify(data)}\n`);
+    appendRotatingLogLine(MERGE_TRACE_LOG, `${new Date().toISOString()} [merge-trace:orchestrator] ${tag} ${JSON.stringify(data)}\n`);
   } catch { /* best effort */ }
 }
 
@@ -74,6 +74,7 @@ export interface LifecycleHost {
   readonly logger: Logger;
   readonly taskRepository: TaskRepository;
   readonly deferredTaskIds: Set<string>;
+  readonly onRecreateTasksReset?: (taskIds: readonly string[]) => void;
   lastInvalidationPlan?: InvalidationPlan;
 
   refreshFromDb(): void;
@@ -257,16 +258,22 @@ export function resetSubgraphToPendingImpl(
   return { affectedIds, readyIds };
 }
 
-export function restartTaskImpl(host: LifecycleHost, taskId: string): TaskState[] {
-  host.logger.warn(
-    '[orchestrator] restartTask is deprecated. Routing to recreateTask. Use retryTask() for lineage-preserving reset or recreateTask() for fresh-lineage reset explicitly.',
-    { taskId },
-  );
-  return host.recreateTask(taskId);
+function refreshWorkflowForTask(host: LifecycleHost, taskId: string): void {
+  const workflowId = host.stateGetTask(taskId)?.config.workflowId;
+  if (workflowId) {
+    host.refreshWorkflowFromDb(workflowId);
+  } else {
+    host.refreshFromDb();
+  }
+}
+
+function tasksInSameWorkflow(host: LifecycleHost, task: TaskState): TaskState[] {
+  const workflowId = task.config.workflowId;
+  return host.stateMachine.getAllTasks().filter((t) => t.config.workflowId === workflowId);
 }
 
 export function retryTaskImpl(host: LifecycleHost, taskId: string): TaskState[] {
-  host.refreshFromDb();
+  refreshWorkflowForTask(host, taskId);
   const task = host.stateGetTask(taskId);
   if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
   const id = task.id;
@@ -281,7 +288,7 @@ export function retryTaskImpl(host: LifecycleHost, taskId: string): TaskState[] 
   const plan = planInvalidation({
     action: 'retryTask',
     targetId: id,
-    tasks: host.stateMachine.getAllTasks(),
+    tasks: tasksInSameWorkflow(host, task),
   });
   host.lastInvalidationPlan = plan;
 
@@ -400,7 +407,7 @@ export function retryWorkflowImpl(host: LifecycleHost, workflowId: string): Task
   let plan = planInvalidation({
     action: 'retryWorkflow',
     targetId: workflowId,
-    tasks: host.stateMachine.getAllTasks(),
+    tasks: host.stateMachine.getAllTasks().filter((t) => t.config.workflowId === workflowId),
     retryStatuses,
   });
   host.lastInvalidationPlan = plan;
@@ -457,7 +464,7 @@ export function retryWorkflowImpl(host: LifecycleHost, workflowId: string): Task
  * ready tasks within that affected subgraph.
  */
 export function recreateTaskImpl(host: LifecycleHost, taskId: string): TaskState[] {
-  host.refreshFromDb();
+  refreshWorkflowForTask(host, taskId);
   const task = host.stateGetTask(taskId);
   if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
 
@@ -471,7 +478,7 @@ export function recreateTaskImpl(host: LifecycleHost, taskId: string): TaskState
   const plan = planInvalidation({
     action: 'recreateTask',
     targetId: rootId,
-    tasks: host.stateMachine.getAllTasks(),
+    tasks: tasksInSameWorkflow(host, task),
   });
   host.lastInvalidationPlan = plan;
   host.logger.info('[orchestrator] recreateTask reset', {
@@ -508,6 +515,7 @@ export function applyRecreateResetImpl(host: LifecycleHost, plan: InvalidationPl
     host.deferredTaskIds.delete(id);
     host.clearQueuedSchedulerEntries(id, priorAttemptId);
   }
+  host.onRecreateTasksReset?.(toResetIds);
 
   const readyIds = host.stateMachine
     .getReadyTasks()
@@ -523,7 +531,7 @@ export function applyRecreateResetImpl(host: LifecycleHost, plan: InvalidationPl
  * Calling it on a leaf is a no-op.
  */
 export function recreateDownstreamImpl(host: LifecycleHost, taskId: string): TaskState[] {
-  host.refreshFromDb();
+  refreshWorkflowForTask(host, taskId);
   const task = host.stateGetTask(taskId);
   if (!task) throw new OrchestratorError(OrchestratorErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found`);
 
@@ -532,7 +540,7 @@ export function recreateDownstreamImpl(host: LifecycleHost, taskId: string): Tas
   const plan = planInvalidation({
     action: 'recreateDownstream',
     targetId: rootId,
-    tasks: host.stateMachine.getAllTasks(),
+    tasks: tasksInSameWorkflow(host, task),
   });
   host.lastInvalidationPlan = plan;
   const toResetIds = plan.affectedTaskIds;
@@ -574,7 +582,7 @@ export function bumpWorkflowGenerationImpl(host: LifecycleHost, workflowId: stri
  * Used when a rebase conflicts and the entire DAG needs to re-execute.
  */
 export function recreateWorkflowImpl(host: LifecycleHost, workflowId: string): TaskState[] {
-  host.refreshFromDb();
+  host.refreshWorkflowFromDb(workflowId);
 
   const allTasks = host.stateMachine.getAllTasks().filter(
     (t) => t.config.workflowId === workflowId,
@@ -590,7 +598,7 @@ export function recreateWorkflowImpl(host: LifecycleHost, workflowId: string): T
   let plan = planInvalidation({
     action: 'recreateWorkflow',
     targetId: workflowId,
-    tasks: host.stateMachine.getAllTasks(),
+    tasks: allTasks,
   });
   host.lastInvalidationPlan = plan;
 
@@ -654,6 +662,7 @@ export function recreateWorkflowImpl(host: LifecycleHost, workflowId: string): T
     host.messageBus.publish(TASK_DELTA_CHANNEL, delta);
     host.clearQueuedSchedulerEntries(task.id, priorAttemptId);
   }
+  host.onRecreateTasksReset?.(allTasks.map((task) => task.id));
 
   const readyIds = host.stateMachine
     .getReadyTasks()

@@ -23,6 +23,8 @@ import { homedir } from 'node:os';
 import type { Logger } from '@invoker/contracts';
 import { assertNotGitConfigMutation, ensureRemoteUrl } from './git-config-mutation.js';
 import { killProcessGroup, SIGKILL_TIMEOUT_MS } from './process-utils.js';
+import { spawnLocalProvisioning } from './local-provisioning.js';
+import { getExecutorStartTimeoutMs } from './task-runner-launch-support.js';
 import { retryTransientGitHubCli } from './git-utils.js';
 import { normalizeBranchForGithubCli } from './github-branch-ref.js';
 
@@ -38,11 +40,25 @@ export type GitExecGh = (args: string[], cwd?: string) => Promise<string>;
 /** Instance-bound `git` exec (explicit dir) so higher-level helpers route through overrides. */
 export type GitExecIn = (args: string[], dir: string) => Promise<string>;
 
+async function listRemoteNamesForGithubCli(execGitIn: GitExecIn, cwd: string): Promise<string[]> {
+  try {
+    const output = await execGitIn(['remote'], cwd);
+    const names = output
+      .split('\n')
+      .map((name) => name.trim())
+      .filter(Boolean);
+    return names.length > 0 ? names : ['origin'];
+  } catch {
+    return ['origin'];
+  }
+}
+
 /** Dependencies `createMergeWorktree` needs from the owning runner. */
 export interface CreateMergeWorktreeContext {
   cwd: string;
   logger: Logger;
   ensureRepoMirrorPath: (repoUrl: string) => Promise<string | undefined>;
+  provisionCommandFor?: (repoUrl: string | undefined) => string;
 }
 
 function getGitOperationTimeoutMs(): number {
@@ -271,6 +287,24 @@ export async function createMergeWorktree(
     );
   }
   await execGitIn(['checkout', '--detach', refSha], clonePath);
+  const provisionCommand = ctx.provisionCommandFor?.(repoUrl) ?? '';
+  if (provisionCommand.trim()) {
+    ctx.logger.info(`[createMergeWorktree] Provisioning merge clone ${clonePath} for ${repoUrl ?? ctx.cwd}`);
+  } else {
+    ctx.logger.info(`[createMergeWorktree] No provisioning command configured for ${repoUrl ?? ctx.cwd}; merge clone ${clonePath} not provisioned`);
+  }
+  try {
+    await spawnLocalProvisioning({
+      command: provisionCommand,
+      cwd: clonePath,
+      traceLabel: 'createMergeWorktree.provision',
+      failurePrefix: 'Merge clone provisioning failed:',
+      timeoutMs: getExecutorStartTimeoutMs(),
+    }).completion;
+  } catch (error) {
+    await removeMergeWorktree(clonePath, ctx.logger);
+    throw error;
+  }
   return clonePath;
 }
 
@@ -353,8 +387,9 @@ export async function execPr(
   execGh: GitExecGh,
   execGitIn: GitExecIn,
 ): Promise<string> {
-  const ghBase = normalizeBranchForGithubCli(baseBranch);
-  const ghHead = normalizeBranchForGithubCli(featureBranch);
+  const remoteNames = await listRemoteNamesForGithubCli(execGitIn, cwd);
+  const ghBase = normalizeBranchForGithubCli(baseBranch, remoteNames);
+  const ghHead = normalizeBranchForGithubCli(featureBranch, remoteNames);
   const effectiveCwd = cwd;
   const targetRepo = await resolveGithubTargetRepo(effectiveCwd, execGitIn);
   const repoOwner = targetRepo.split('/')[0];

@@ -120,14 +120,14 @@ module.exports = {
     {
       name: 'layer-0-no-deps',
       comment:
-        'Layer 0 packages (contracts, workflow-graph, transport, runtime-domain, runtime-service, shell, ui) should not depend on other workspace packages.',
+        'Layer 0 packages (contracts, workflow-graph, transport, runtime-domain, runtime-service, shell, ui, slack-bug-scan) should not depend on other workspace packages.',
       severity: 'error',
       from: {
-        path: '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui)/',
+        path: '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui|npm-cli|npm-slack|npm-ui|svc-api|web-app|slack-bug-scan)/',
       },
       to: {
         path: '^packages/',
-        pathNot: '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui)/',
+        pathNot: '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui|npm-cli|npm-slack|npm-ui|svc-api|web-app|slack-bug-scan)/',
       },
     },
     {
@@ -142,7 +142,7 @@ module.exports = {
         path: '^packages/',
         pathNot: [
           '^packages/(workflow-core|protocol|runtime-adapters|graph)/',
-          '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui)/',
+          '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui|npm-cli|npm-slack|npm-ui|svc-api|web-app|slack-bug-scan)/',
         ],
       },
     },
@@ -159,44 +159,44 @@ module.exports = {
         pathNot: [
           '^packages/(data-store|persistence|core)/',
           '^packages/(workflow-core|protocol|runtime-adapters|graph)/',
-          '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui)/',
+          '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui|npm-cli|npm-slack|npm-ui|svc-api|web-app|slack-bug-scan)/',
         ],
       },
     },
     {
       name: 'layer-3-deps',
       comment:
-        'Layer 3 packages (execution-engine, surfaces) can only depend on Layers 0, 1, and 2.',
+        'Layer 3 packages (execution-engine, surfaces, planning-core) can only depend on Layers 0, 1, and 2.',
       severity: 'error',
       from: {
-        path: '^packages/(execution-engine|surfaces)/',
+        path: '^packages/(execution-engine|surfaces|planning-core)/',
       },
       to: {
         path: '^packages/',
         pathNot: [
-          '^packages/(execution-engine|surfaces)/',
+          '^packages/(execution-engine|surfaces|planning-core)/',
           '^packages/(data-store|persistence|core)/',
           '^packages/(workflow-core|protocol|runtime-adapters|graph)/',
-          '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui)/',
+          '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui|npm-cli|npm-slack|npm-ui|svc-api|web-app|slack-bug-scan)/',
         ],
       },
     },
     {
       name: 'layer-4-deps',
       comment:
-        'Layer 4 packages (test-kit, app) can only depend on Layers 0, 1, 2, and 3.',
+        'Layer 4 packages (test-kit, app, cli, slack-manager, discord) can only depend on Layers 0, 1, 2, and 3.',
       severity: 'error',
       from: {
-        path: '^packages/(test-kit|app)/',
+        path: '^packages/(test-kit|app|cli|slack-manager|discord)/',
       },
       to: {
         path: '^packages/',
         pathNot: [
-          '^packages/(test-kit|app)/',
-          '^packages/(execution-engine|surfaces)/',
+          '^packages/(test-kit|app|cli|slack-manager|discord)/',
+          '^packages/(execution-engine|surfaces|planning-core)/',
           '^packages/(data-store|persistence|core)/',
           '^packages/(workflow-core|protocol|runtime-adapters|graph)/',
-          '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui)/',
+          '^packages/(contracts|workflow-graph|transport|runtime-domain|runtime-service|shell|ui|slack-bug-scan)/',
         ],
       },
     },

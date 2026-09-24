@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
+
+const require = createRequire(import.meta.url);
+let typescriptModule;
 
 const CODE_EXTENSIONS = new Set(['.cjs', '.js', '.jsx', '.mjs', '.ts', '.tsx']);
+/** Extensions consulted by the refactor-dead-symbol check only; CODE_EXTENSIONS stays TS-AST-only. */
+const DEFINITION_EXTENSIONS = new Set([...CODE_EXTENSIONS, '.py']);
 const LOCKFILES = new Set(['pnpm-lock.yaml', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'bun.lockb']);
 const MANIFESTS = new Set(['package.json']);
 const GENERATED_DIRS = new Set(['dist', 'out', 'build', 'coverage', '.next', '__generated__']);
@@ -34,9 +39,21 @@ const POLICY = {
     severity: 'warning',
     message: 'A skipped test (.skip) was added; confirm the skip is intentional.',
   },
+  'test-assertion-weakened': {
+    severity: 'fatal',
+    message: 'A test assertion was flipped (negation or expected value changed) in the same diff as a non-test file change; confirm the test still catches the original bug instead of matching a regression.',
+  },
   'unrelated-areas': {
     severity: 'warning',
     message: 'The diff spans multiple unrelated top-level areas; confirm this is one atomic change.',
+  },
+  'refactor-dead-symbol': {
+    severity: 'warning',
+    message: 'A refactor-lane PR adds a symbol with no reference anywhere else in the diff; confirm the extraction also re-pointed its call sites in this PR.',
+  },
+  'refactor-multiple-symbols': {
+    severity: 'warning',
+    message: 'A refactor-lane PR touches more than one top-level symbol in this diff; confirm this is one cohesive move (see the dependency-cluster exception in the review-compression skill\'s Decomposition & Extraction Refactors section) or split into separate PRs.',
   },
 };
 
@@ -81,7 +98,14 @@ function classifyPath(filePath) {
   return 'other';
 }
 
-function scriptKindFor(filePath) {
+function getTypeScript() {
+  if (!typescriptModule) {
+    typescriptModule = require('typescript');
+  }
+  return typescriptModule;
+}
+
+function scriptKindFor(ts, filePath) {
   const extension = path.extname(filePath);
   if (extension === '.tsx') {
     return ts.ScriptKind.TSX;
@@ -113,8 +137,17 @@ function finalizeFile(file) {
     lines[lineNumber - 1] = text;
   }
   file.newContent = lines.join('\n');
+
+  const oldMax = file.oldLineMap.size > 0 ? Math.max(...file.oldLineMap.keys()) : 0;
+  const oldLines = new Array(oldMax).fill('');
+  for (const [lineNumber, text] of file.oldLineMap) {
+    oldLines[lineNumber - 1] = text;
+  }
+  file.oldContent = oldLines.join('\n');
+
   file.category = classifyPath(file.path);
   delete file.newLineMap;
+  delete file.oldLineMap;
   return file;
 }
 
@@ -123,6 +156,9 @@ export function parseUnifiedDiff(diffText, source = 'diff') {
   const lines = (diffText || '').split('\n');
   let current = null;
   let counter = 0;
+  let oldCounter = 0;
+  let groupCounter = 0;
+  let inChangeRun = false;
 
   const start = (header) => {
     const finalized = finalizeFile(current);
@@ -137,12 +173,20 @@ export function parseUnifiedDiff(diffText, source = 'diff') {
       path: '',
       changeType: 'modify',
       addedLineNumbers: new Set(),
+      removedLineNumbers: new Set(),
+      addedGroupMap: new Map(),
+      removedGroupMap: new Map(),
       removedCount: 0,
       newLineMap: new Map(),
+      oldLineMap: new Map(),
       newContent: '',
+      oldContent: '',
       category: 'other',
     };
     counter = 0;
+    oldCounter = 0;
+    groupCounter = 0;
+    inChangeRun = false;
   };
 
   for (const line of lines) {
@@ -182,26 +226,44 @@ export function parseUnifiedDiff(diffText, source = 'diff') {
       continue;
     }
     if (line.startsWith('@@')) {
-      const match = /@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      counter = match ? Number.parseInt(match[1], 10) : 0;
+      const match = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      oldCounter = match ? Number.parseInt(match[1], 10) : 0;
+      counter = match ? Number.parseInt(match[2], 10) : 0;
+      inChangeRun = false;
       continue;
     }
-    if (counter < 1) {
+    if (counter < 1 && oldCounter < 1) {
       continue;
     }
     if (line.startsWith('+') && !line.startsWith('+++')) {
+      if (!inChangeRun) {
+        groupCounter += 1;
+        inChangeRun = true;
+      }
       current.newLineMap.set(counter, line.slice(1));
       current.addedLineNumbers.add(counter);
+      current.addedGroupMap.set(counter, groupCounter);
       counter += 1;
       continue;
     }
     if (line.startsWith('-') && !line.startsWith('---')) {
+      if (!inChangeRun) {
+        groupCounter += 1;
+        inChangeRun = true;
+      }
+      current.oldLineMap.set(oldCounter, line.slice(1));
+      current.removedLineNumbers.add(oldCounter);
+      current.removedGroupMap.set(oldCounter, groupCounter);
       current.removedCount += 1;
+      oldCounter += 1;
       continue;
     }
     if (line.startsWith(' ')) {
       current.newLineMap.set(counter, line.slice(1));
+      current.oldLineMap.set(oldCounter, line.slice(1));
       counter += 1;
+      oldCounter += 1;
+      inChangeRun = false;
     }
   }
 
@@ -213,7 +275,7 @@ export function parseUnifiedDiff(diffText, source = 'diff') {
   return files;
 }
 
-function rootIdentifier(node) {
+function rootIdentifier(ts, node) {
   let expression = node;
   while (ts.isPropertyAccessExpression(expression)) {
     expression = expression.expression;
@@ -225,8 +287,9 @@ function collectAstFindings(file) {
   if (!CODE_EXTENSIONS.has(path.extname(file.path)) || file.category === 'generated') {
     return [];
   }
+  const ts = getTypeScript();
   const findings = [];
-  const sourceFile = ts.createSourceFile(file.path, file.newContent, ts.ScriptTarget.Latest, true, scriptKindFor(file.path));
+  const sourceFile = ts.createSourceFile(file.path, file.newContent, ts.ScriptTarget.Latest, true, scriptKindFor(ts, file.path));
 
   const record = (kind, node) => {
     const lineNumber = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
@@ -240,7 +303,7 @@ function collectAstFindings(file) {
       record('debugger-statement', node);
     } else if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) {
       const member = node.name.text;
-      if ((member === 'only' || member === 'skip') && TEST_FUNCTIONS.has(rootIdentifier(node.expression))) {
+      if ((member === 'only' || member === 'skip') && TEST_FUNCTIONS.has(rootIdentifier(ts, node.expression))) {
         record(member === 'only' ? 'focused-test' : 'skipped-test', node);
       }
     }
@@ -248,6 +311,234 @@ function collectAstFindings(file) {
   };
 
   walk(sourceFile);
+  return findings;
+}
+
+function analyzeAssertionCall(ts, node) {
+  if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) || !ts.isIdentifier(node.expression.name)) {
+    return null;
+  }
+  const matcherName = node.expression.name.text;
+  const matcherArgs = node.arguments.map((arg) => arg.getText()).join(', ');
+
+  let cursor = node.expression.expression;
+  let negated = false;
+  while (ts.isPropertyAccessExpression(cursor) && ts.isIdentifier(cursor.name)) {
+    if (cursor.name.text === 'not') {
+      negated = true;
+    }
+    cursor = cursor.expression;
+  }
+  if (!ts.isCallExpression(cursor) || !ts.isIdentifier(cursor.expression) || cursor.expression.text !== 'expect') {
+    return null;
+  }
+  const target = cursor.arguments.map((arg) => arg.getText()).join(', ').trim();
+  return { target, matcherName, matcherArgs, negated };
+}
+
+function collectAssertionCalls(file, content, lineNumbers, groupMap) {
+  if (!CODE_EXTENSIONS.has(path.extname(file.path)) || lineNumbers.size === 0) {
+    return [];
+  }
+  const ts = getTypeScript();
+  const sourceFile = ts.createSourceFile(file.path, content, ts.ScriptTarget.Latest, true, scriptKindFor(ts, file.path));
+  const assertions = [];
+
+  const walk = (node) => {
+    const assertion = analyzeAssertionCall(ts, node);
+    if (assertion) {
+      // Match on the call's full line RANGE, not just its start line: an
+      // expected-value edit inside a multi-line argument list leaves the
+      // `expect(` line untouched and must still count as a changed assertion.
+      const startLine = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+      const endLine = sourceFile.getLineAndCharacterOfPosition(node.getEnd()).line + 1;
+      let touchesChangedLine = false;
+      const groupIds = new Set();
+      for (let line = startLine; line <= endLine; line += 1) {
+        if (lineNumbers.has(line)) {
+          touchesChangedLine = true;
+          const groupId = groupMap.get(line);
+          if (groupId !== undefined) {
+            groupIds.add(groupId);
+          }
+        }
+      }
+      if (touchesChangedLine) {
+        assertions.push({ ...assertion, line: startLine, groupIds });
+      }
+    }
+    ts.forEachChild(node, walk);
+  };
+
+  walk(sourceFile);
+  return assertions;
+}
+
+const ADDITIVE_EXPECTATION_MATCHERS = new Set([
+  'toEqual',
+  'toStrictEqual',
+  'toMatchObject',
+  'toHaveBeenCalledWith',
+  'toHaveBeenLastCalledWith',
+  'toHaveBeenNthCalledWith',
+]);
+
+function parseArgumentList(ts, argsText) {
+  const sourceFile = ts.createSourceFile('args.ts', `[${argsText}]`, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  if ((sourceFile.parseDiagnostics ?? []).length > 0 || sourceFile.statements.length !== 1) {
+    return null;
+  }
+  const statement = sourceFile.statements[0];
+  if (!ts.isExpressionStatement(statement) || !ts.isArrayLiteralExpression(statement.expression)) {
+    return null;
+  }
+  return statement.expression.elements;
+}
+
+function propertyKey(ts, property) {
+  if (ts.isSpreadAssignment(property)) {
+    return `...${property.expression.getText()}`;
+  }
+  return property.name ? property.name.getText() : null;
+}
+
+function argumentsOnlyAddFields(ts, oldArgs, newArgs) {
+  return oldArgs.length === newArgs.length
+    && oldArgs.every((arg, index) => nodeOnlyAddsFields(ts, arg, newArgs[index]));
+}
+
+function nodeOnlyAddsFields(ts, oldNode, newNode) {
+  if (oldNode.getText() === newNode.getText()) {
+    return true;
+  }
+  if (ts.isObjectLiteralExpression(oldNode) && ts.isObjectLiteralExpression(newNode)) {
+    const newByKey = new Map();
+    for (const property of newNode.properties) {
+      const key = propertyKey(ts, property);
+      if (key === null || newByKey.has(key)) {
+        return false;
+      }
+      newByKey.set(key, property);
+    }
+    return oldNode.properties.every((property) => {
+      const key = propertyKey(ts, property);
+      const match = key === null ? undefined : newByKey.get(key);
+      if (!match) {
+        return false;
+      }
+      return property.getText() === match.getText()
+        || (ts.isPropertyAssignment(property)
+          && ts.isPropertyAssignment(match)
+          && nodeOnlyAddsFields(ts, property.initializer, match.initializer));
+    });
+  }
+  if (ts.isCallExpression(oldNode) && ts.isCallExpression(newNode)) {
+    return oldNode.expression.getText() === 'expect.objectContaining'
+      && newNode.expression.getText() === 'expect.objectContaining'
+      && argumentsOnlyAddFields(ts, oldNode.arguments, newNode.arguments);
+  }
+  return false;
+}
+
+function isStricterExpectation(removed, added) {
+  if (removed.negated || added.negated || !ADDITIVE_EXPECTATION_MATCHERS.has(added.matcherName)) {
+    return false;
+  }
+  const ts = getTypeScript();
+  const oldArgs = parseArgumentList(ts, removed.matcherArgs);
+  const newArgs = parseArgumentList(ts, added.matcherArgs);
+  return Boolean(oldArgs && newArgs) && argumentsOnlyAddFields(ts, oldArgs, newArgs);
+}
+
+function groupIdsIntersect(a, b) {
+  for (const id of a) {
+    if (b.has(id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function collectTestAssertionWeakenedFindings(files) {
+  const hasNonTestFile = files.some((file) => file.category !== 'test' && file.path && file.path !== '/dev/null');
+  if (!hasNonTestFile) {
+    return [];
+  }
+
+  const findings = [];
+  for (const file of files) {
+    if (file.category !== 'test') {
+      continue;
+    }
+    const removedAssertions = collectAssertionCalls(file, file.oldContent, file.removedLineNumbers, file.removedGroupMap);
+    if (removedAssertions.length === 0) {
+      continue;
+    }
+    const addedAssertions = collectAssertionCalls(file, file.newContent, file.addedLineNumbers, file.addedGroupMap);
+    for (const added of addedAssertions) {
+      const flipped = removedAssertions.some((removed) =>
+        removed.target === added.target
+        && removed.matcherName === added.matcherName
+        && (removed.negated !== added.negated
+          || (removed.matcherArgs !== added.matcherArgs && !isStricterExpectation(removed, added)))
+        && groupIdsIntersect(removed.groupIds, added.groupIds));
+      if (flipped) {
+        findings.push(makeFinding('test-assertion-weakened', file.path, added.line, file.source));
+      }
+    }
+  }
+  return findings;
+}
+
+const PY_DEF_PATTERN = /^(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)/;
+const JS_DEF_PATTERN = /^(?:export\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=/;
+
+function definitionPatternFor(extension) {
+  return extension === '.py' ? PY_DEF_PATTERN : JS_DEF_PATTERN;
+}
+
+function isFrameworkInvokedName(name, extension) {
+  if (name === 'main') return true;
+  if (/^__.+__$/.test(name)) return true;
+  if (extension === '.py' && (/^test_/.test(name) || /^Test[A-Z_]/.test(name))) return true;
+  return false;
+}
+
+function collectRefactorDeadSymbolCandidates(file) {
+  const extension = path.extname(file.path);
+  if (!DEFINITION_EXTENSIONS.has(extension) || file.category === 'test' || file.category === 'generated') {
+    return [];
+  }
+  const pattern = definitionPatternFor(extension);
+  const candidates = [];
+  for (const lineNumber of file.addedLineNumbers) {
+    const text = file.newContent.split('\n')[lineNumber - 1] ?? '';
+    const match = pattern.exec(text);
+    const name = match ? (match[1] || match[2]) : '';
+    if (!name || isFrameworkInvokedName(name, extension)) continue;
+    candidates.push({ name, path: file.path, line: lineNumber, source: file.source });
+  }
+  return candidates;
+}
+
+function collectRefactorFindings(files) {
+  const candidates = files.flatMap((file) => collectRefactorDeadSymbolCandidates(file));
+  if (candidates.length === 0) {
+    return [];
+  }
+  const haystack = files.map((file) => file.newContent).join('\n');
+  const findings = [];
+  for (const candidate of candidates) {
+    const occurrences = haystack.match(new RegExp(`\\b${candidate.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g'));
+    if (!occurrences || occurrences.length <= 1) {
+      findings.push(makeFinding('refactor-dead-symbol', candidate.path, candidate.line, candidate.source));
+    }
+  }
+  if (candidates.length > 1) {
+    for (const candidate of candidates) {
+      findings.push(makeFinding('refactor-multiple-symbols', candidate.path, candidate.line, candidate.source));
+    }
+  }
   return findings;
 }
 
@@ -264,9 +555,20 @@ function makeFinding(kind, filePath, line, source) {
 }
 
 export function collectDiffAtomicityFindings(options = {}) {
-  const { diffText, source = 'diff' } = options;
-  const files = Array.isArray(options.files) ? options.files : parseUnifiedDiff(diffText, source);
+  const { diffText, source = 'diff', reviewLane } = options;
+  const hasFiles = Array.isArray(options.files);
+  if (!hasFiles && typeof diffText !== 'string') {
+    throw new TypeError(
+      'collectDiffAtomicityFindings requires options.diffText (string) or options.files (array); '
+      + 'returning no findings for an unreadable argument would report a dirty diff as clean.',
+    );
+  }
+  const files = hasFiles ? options.files : parseUnifiedDiff(diffText, source);
   const findings = [];
+
+  if (reviewLane === 'refactor') {
+    findings.push(...collectRefactorFindings(files));
+  }
 
   const hasGenerated = files.some((file) => file.category === 'generated');
   const hasHandwritten = files.some((file) => file.category === 'source' || file.category === 'test');
@@ -289,6 +591,8 @@ export function collectDiffAtomicityFindings(options = {}) {
   for (const file of files) {
     findings.push(...collectAstFindings(file));
   }
+
+  findings.push(...collectTestAssertionWeakenedFindings(files));
 
   const areas = new Set();
   for (const file of files) {
@@ -340,11 +644,11 @@ export function lintDiffAtomicityForGit(options = {}) {
     `${baseRef}...HEAD`,
     '--',
   ]);
-  return collectDiffAtomicityFindings({ diffText, source: `${baseRef}...HEAD` });
+  return collectDiffAtomicityFindings({ diffText, source: `${baseRef}...HEAD`, reviewLane: options.reviewLane });
 }
 
 function usage() {
-  console.error('Usage: node scripts/lint-pr-diff-atomicity.mjs [--base <ref>] [--root <path>]');
+  console.error('Usage: node scripts/lint-pr-diff-atomicity.mjs [--base <ref>] [--root <path>] [--review-lane <lane>]');
 }
 
 function hasGitRef(root, ref) {
@@ -371,7 +675,7 @@ function defaultBase(root) {
 }
 
 function parseArgs(argv) {
-  const parsed = { base: process.env.INVOKER_DIFF_ATOMICITY_BASE || '', root: process.cwd() };
+  const parsed = { base: process.env.INVOKER_DIFF_ATOMICITY_BASE || '', root: process.cwd(), reviewLane: '' };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--base') {
@@ -384,6 +688,11 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg.startsWith('--root=')) {
       parsed.root = arg.slice('--root='.length);
+    } else if (arg === '--review-lane') {
+      parsed.reviewLane = argv[index + 1] || '';
+      index += 1;
+    } else if (arg.startsWith('--review-lane=')) {
+      parsed.reviewLane = arg.slice('--review-lane='.length);
     } else if (arg === '--help' || arg === '-h') {
       usage();
       process.exit(0);
@@ -393,7 +702,7 @@ function parseArgs(argv) {
       process.exit(2);
     }
   }
-  return { base: parsed.base, root: path.resolve(parsed.root) };
+  return { base: parsed.base, root: path.resolve(parsed.root), reviewLane: parsed.reviewLane };
 }
 
 function main() {
@@ -404,7 +713,7 @@ function main() {
     process.exit(2);
   }
 
-  const findings = lintDiffAtomicityForGit({ root: args.root, baseRef: base });
+  const findings = lintDiffAtomicityForGit({ root: args.root, baseRef: base, reviewLane: args.reviewLane });
   const fatal = findings.filter((finding) => finding.severity === 'fatal');
   const warnings = findings.filter((finding) => finding.severity === 'warning');
 

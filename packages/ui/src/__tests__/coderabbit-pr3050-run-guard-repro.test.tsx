@@ -24,7 +24,11 @@ describe('CodeRabbit PR #3050 — submitted planning stays read-only after start
 
   async function openPlanningTerminal() {
     fireEvent.click(await screen.findByTestId('sidebar-home'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Options' }));
+    const expandPlanningChats = screen.queryByRole('button', { name: 'Expand planning chats' });
+    if (expandPlanningChats) fireEvent.click(expandPlanningChats);
+    if (!screen.queryByTestId('invoker-terminal-harness')) {
+      fireEvent.click(await screen.findByRole('button', { name: 'Options' }));
+    }
     await waitFor(() => {
       expect(screen.getByTestId('invoker-terminal-harness')).toHaveValue('codex');
     });
@@ -45,15 +49,16 @@ describe('CodeRabbit PR #3050 — submitted planning stays read-only after start
 
     fireEvent.change(screen.getByTestId('invoker-terminal-input'), { target: { value: 'draft the full plan' } });
     fireEvent.submit(screen.getByTestId('invoker-terminal-input').closest('form')!);
-    await screen.findByTestId('invoker-terminal-ready-bar');
-    fireEvent.click(screen.getByRole('button', { name: 'Review draft' }));
-    fireEvent.click(await screen.findByTestId('planning-create-workflow'));
+    await screen.findByTestId('planning-create-workflow');
+    expect(screen.queryByTestId('invoker-terminal-ready-bar')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('planning-create-workflow'));
     await waitFor(() => {
       expect(mock.api.planningChatSubmit).toHaveBeenCalledTimes(1);
     });
 
-    await openPlanningTerminal();
-    await screen.findByText('Plan "Mock Plan" submitted to Invoker. Review it, then use Start ready work.');
+    await screen.findByText('Plan "Mock Plan" submitted to Invoker. Review the graph, then Start ready work.');
+    expect(screen.getByTestId('invoker-terminal-input')).toBeDisabled();
+    expect(mock.api.startReady).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByTestId('sidebar-planning'));
     fireEvent.click(await screen.findByTestId('rail-start-ready'));

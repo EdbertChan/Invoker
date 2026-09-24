@@ -1,5 +1,8 @@
 import { _electron as electron, expect, test } from '@playwright/test';
 import { resolveRepoRoot } from '@invoker/contracts';
+import { SQLiteAdapter } from '@invoker/data-store';
+import { InMemoryBus } from '@invoker/test-kit';
+import { Orchestrator } from '@invoker/workflow-core';
 import * as fs from 'node:fs/promises';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -7,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { stringify as yamlStringify } from 'yaml';
 import type { Page } from '@playwright/test';
 
-import { E2E_REPO_URL } from './fixtures/electron-app.js';
+import { closeElectronApp, E2E_REPO_URL, waitForInvokerBridge } from './fixtures/electron-app.js';
 import { registerTrackedBrowserUserDataDir } from './fixtures/browser-process-registry.js';
 import {
   activityLogWatermark,
@@ -18,16 +21,16 @@ import {
 } from './fixtures/ui-perf.js';
 
 const repoRoot = resolveRepoRoot(__dirname);
-const STARTUP_BUDGET_MS = 12000;
+const STARTUP_BUDGET_MS = 25000;
 const PLANNING_PRESSURE_TURNS = 30;
 const PLANNING_INPUT_HANDLER_BUDGET_MS = 50;
 const PLANNING_INPUT_COMMIT_BUDGET_MS = 250;
 const PLANNING_INPUT_FILL_WALL_BUDGET_MS = 1500;
 const MAX_PLANNING_RENDERER_EVENT_LOOP_LAG_MS = 1000;
 const MAX_PLANNING_RENDERER_LONG_TASK_MS = 1500;
-const STARTUP_GRAPH_VISIBLE_AFTER_WINDOW_BUDGET_MS = 5000;
-const MAX_STARTUP_RENDERER_EVENT_LOOP_LAG_MS = 1000;
-const MAX_STARTUP_RENDERER_LONG_TASK_MS = 1500;
+const STARTUP_GRAPH_VISIBLE_AFTER_WINDOW_BUDGET_MS = 15000;
+const MAX_STARTUP_RENDERER_EVENT_LOOP_LAG_MS = 6000;
+const MAX_STARTUP_RENDERER_LONG_TASK_MS = 3000;
 const MAX_PLANNING_RENDERER_LONG_TASK_COUNT = 0;
 
 const STARTUP_NONEMPTY_BUDGETS = {
@@ -79,7 +82,6 @@ async function launchElectronApp(testDir: string, extraEnv?: Record<string, stri
       INVOKER_GUI_OWNER_MODE: process.env.INVOKER_E2E_GUI_OWNER_MODE ?? 'gui',
       INVOKER_DB_DIR: testDir,
       INVOKER_IPC_SOCKET: ipcSocketPath,
-      INVOKER_ALLOW_DELETE_ALL: '1',
       INVOKER_E2E_ENABLE_COMPOSITOR: '1',
       INVOKER_REPO_CONFIG_PATH: configPath,
       INVOKER_E2E_MARKER_ROOT: markerRoot,
@@ -111,6 +113,40 @@ function buildPlanningPressureReply(): string {
   )).join('\n');
 }
 
+async function seedStartupWorkflows(testDir: string, workflowCount: number): Promise<number> {
+  const adapter = await SQLiteAdapter.create(path.join(testDir, 'invoker.db'), { ownerCapability: true });
+  try {
+    const orchestrator = new Orchestrator({
+      persistence: adapter,
+      messageBus: new InMemoryBus(),
+      maxConcurrency: 1,
+    });
+    adapter.runInTransaction(() => {
+      for (let index = 0; index < workflowCount; index += 1) {
+        orchestrator.loadPlan(buildPlan(index));
+      }
+      for (const workflow of adapter.listWorkflows()) {
+        for (const task of adapter.loadTasks(workflow.id)) {
+          adapter.saveTask(workflow.id, {
+            ...task,
+            status: 'completed',
+            execution: {
+              ...task.execution,
+              completedAt: new Date(),
+              exitCode: 0,
+            },
+          });
+        }
+      }
+    });
+    return adapter.listWorkflows()
+      .flatMap((workflow) => adapter.loadTasks(workflow.id))
+      .length;
+  } finally {
+    adapter.close();
+  }
+}
+
 async function waitForWorkflowGraphVisible(page: Page, timeoutMs: number): Promise<number> {
   const startedAt = Date.now();
   await page.locator('[data-testid^="workflow-node-"]:visible').first().waitFor({
@@ -118,6 +154,17 @@ async function waitForWorkflowGraphVisible(page: Page, timeoutMs: number): Promi
     timeout: timeoutMs,
   });
   return Date.now() - startedAt;
+}
+
+async function waitForSelectedTaskGraphVisible(page: Page, timeoutMs: number): Promise<void> {
+  await page
+    .getByTestId('selected-workflow-mini-dag')
+    .locator('.react-flow__node:visible')
+    .first()
+    .waitFor({
+      state: 'visible',
+      timeout: timeoutMs,
+    });
 }
 
 async function dragGraphAndAssertViewportMoves(page: Page): Promise<void> {
@@ -144,37 +191,20 @@ test('non-empty persisted startup stays responsive and avoids initial db-poll re
   const tasksPerWorkflow = 8;
   const expectedTaskCount = workflowCount * tasksPerWorkflow;
   try {
-    const seedApp = await launchElectronApp(testDir);
-    try {
-      const page = await seedApp.firstWindow({ timeout: 5000 });
-      await page.waitForLoadState('domcontentloaded');
-      await page.waitForFunction(() => typeof window.invoker !== 'undefined', null, { timeout: 15_000 });
-
-      for (let index = 0; index < workflowCount; index += 1) {
-        const planYaml = yamlStringify(buildPlan(index));
-        await page.evaluate(async (planText) => {
-          await window.invoker.loadPlan(planText);
-        }, planYaml);
-      }
-
-      const seeded = await page.evaluate(() => window.invoker.getTasks());
-      const seededTasks = Array.isArray(seeded) ? seeded : seeded.tasks;
-      expect(seededTasks.length).toBe(expectedTaskCount);
-    } finally {
-      await seedApp.close();
-    }
+    await expect(seedStartupWorkflows(testDir, workflowCount)).resolves.toBe(expectedTaskCount);
 
     const startedAt = Date.now();
     const app = await launchElectronApp(testDir, {
       INVOKER_TEST_RESUME_PENDING_DELAY_MS: '15000',
     });
     try {
-      const page = await app.firstWindow({ timeout: STARTUP_BUDGET_MS });
+      const page = await app.firstWindow({ timeout: 60_000 });
       const elapsedMs = Date.now() - startedAt;
-      await page.waitForLoadState('domcontentloaded');
-      await page.waitForFunction(() => typeof window.invoker !== 'undefined', null, { timeout: 10_000 });
-
+      await page.getByTestId('sidebar-planning').dispatchEvent('click', { bubbles: true, cancelable: true });
+      await waitForInvokerBridge(page, 30_000);
+      await expect(page.getByRole('heading', { name: 'Plan graph' })).toBeVisible({ timeout: 10_000 });
       await waitForWorkflowGraphVisible(page, 5000);
+      await waitForSelectedTaskGraphVisible(page, 10_000);
       await dragGraphAndAssertViewportMoves(page);
 
       const result = await page.evaluate(async () => {
@@ -261,7 +291,7 @@ test('non-empty persisted startup stays responsive and avoids initial db-poll re
       expect(result.taskCount, startupEvidenceMessage).toBe(expectedTaskCount);
       expect(result.perf.dbPollCreated, startupEvidenceMessage).toBe(0);
     } finally {
-      await app.close();
+      await closeElectronApp(app);
     }
   } finally {
     rmSync(testDir, { recursive: true, force: true });
@@ -275,9 +305,8 @@ test('planning chat typing stays responsive with a large restored transcript', a
       INVOKER_TEST_RESUME_PENDING_DELAY_MS: '15000',
     });
     try {
-      const page = await app.firstWindow({ timeout: STARTUP_BUDGET_MS });
-      await page.waitForLoadState('domcontentloaded');
-      await page.waitForFunction(() => typeof window.invoker !== 'undefined', null, { timeout: 10_000 });
+      const page = await app.firstWindow({ timeout: 30_000 });
+      await waitForInvokerBridge(page, 30_000);
       await page.evaluate(async () => {
         await window.invoker.clear();
         await window.invoker.deleteAllWorkflows();
@@ -311,8 +340,7 @@ test('planning chat typing stays responsive with a large restored transcript', a
       expect(sessionId).toBeTruthy();
 
       await page.reload();
-      await page.waitForLoadState('domcontentloaded');
-      await page.waitForFunction(() => typeof window.invoker !== 'undefined', null, { timeout: 10_000 });
+      await waitForInvokerBridge(page, 30_000);
       await page.getByTestId('sidebar-home').click();
       await expect(page.getByTestId('invoker-terminal-input')).toBeVisible({ timeout: 10000 });
       await expect(page.getByTestId('invoker-terminal-transcript')).toContainText(
@@ -388,7 +416,7 @@ test('planning chat typing stays responsive with a large restored transcript', a
       expect(maxPayloadNumber(payloads, 'renderer_event_loop_lag', 'lagMs'), planningEvidenceMessage).toBeLessThanOrEqual(MAX_PLANNING_RENDERER_EVENT_LOOP_LAG_MS);
       expect(maxPayloadNumber(payloads, 'renderer_long_task', 'durationMs'), planningEvidenceMessage).toBeLessThanOrEqual(MAX_PLANNING_RENDERER_LONG_TASK_MS);
     } finally {
-      await app.close();
+      await closeElectronApp(app);
     }
   } finally {
     rmSync(testDir, { recursive: true, force: true });

@@ -8,18 +8,27 @@
  * command-family modules — keeping the import graph acyclic.
  */
 
-import { makeEnvelope, type StartReadyRequest } from '@invoker/contracts';
+import {
+  makeEnvelope,
+  type StartReadyFreshBasePreview,
+  type StartReadyFreshBaseScope,
+  type StartReadyRequest,
+  type StartReadyResult,
+} from '@invoker/contracts';
 import type { TaskState } from '@invoker/workflow-core';
 import {
   remoteFetchForPool,
   registerBuiltinAgents,
   assertPlanExecutionAgentsRegistered,
+  type TaskRunner,
 } from '@invoker/execution-engine';
 import { backupPlan } from './plan-backup.js';
 import { startApiServer } from './api-server.js';
 import { startWebSurfaceForHeadless } from './web/start-web-surface.js';
+import type { TaskHandleMap } from './execution/task-runner-wiring.js';
 import {
   fixWithAgentAction,
+  recreateWorkflowFromFreshBase,
   rebaseRetry,
   rebaseRecreate,
   resolveConflictAction,
@@ -34,21 +43,21 @@ import {
   isDispatchableLaunch,
 } from './global-topup.js';
 import { resolveHeadlessTargetWorkflowId } from './headless-command-classification.js';
-import { preemptWorkflowBeforeMutation } from './workflow-preemption.js';
 import {
   type HeadlessDeps,
   BOLD,
   RESET,
   createHeadlessExecutor,
+  createTrackedHeadlessExecutor,
   wireHeadlessApproveHook,
   buildHeadlessApiServerDeps,
   trackHeadlessWorkflow,
   restoreWorkflowForTaskUnlessDeleteAllWon,
   withRestoredTaskUnlessDeleteAllWon,
   preemptTaskSubgraph,
-  preemptWorkflowExecution,
 } from './headless-shared.js';
-import { runStartReady } from './start-ready.js';
+import { parseStartReadyExcludeSelector, runStartReady } from './start-ready.js';
+import { LaunchDispatcher } from './launch-dispatcher.js';
 type StartReadyRequestExt = StartReadyRequest & {
   recreateFailedAndPending?: boolean;
   recreateFailedPendingAndRunning?: boolean;
@@ -60,6 +69,8 @@ type StartReadyPreviewExt = {
   failedWorkflowIds: string[];
   pendingWorkflowIds: string[];
   runningWorkflowIds: string[];
+  completedWorkflowIds?: string[];
+  freshBase?: StartReadyFreshBasePreview;
   skipped: {
     awaitingApproval: number;
     reviewReady: number;
@@ -69,6 +80,161 @@ type StartReadyPreviewExt = {
     runningTasks: number;
   };
 };
+
+const START_READY_USAGE = '--headless start-ready [--dry-run] [--recreate-failed] [--recreate-failed-and-pending] [--recreate-failed-pending-and-running] [--recreate-all] [--exclude mergeMode:no_op]... [--fresh-base-failed] [--fresh-base-failed-and-pending] [--fresh-base-failed-pending-and-running] [--fresh-base-all] [--no-track]';
+
+const FRESH_BASE_MODE_LABELS: Record<StartReadyFreshBaseScope, string> = {
+  failed: 'Start ready work and recreate failed workflows from fresh base',
+  'failed-and-pending': 'Start ready work and recreate failed and pending workflows from fresh base',
+  'failed-pending-and-running': 'Start ready work and recreate failed, pending, and running workflows from fresh base',
+  all: 'Start ready work and recreate all workflows from fresh base (including finished)',
+};
+
+function includesPendingStartReadyScope(request: StartReadyRequestExt): boolean {
+  return Boolean(
+    request.recreateAll
+    || request.recreateFailedAndPending
+    || request.recreateFailedPendingAndRunning
+    || request.freshBaseScope === 'failed-and-pending'
+    || request.freshBaseScope === 'failed-pending-and-running'
+    || request.freshBaseScope === 'all',
+  );
+}
+
+function includesRunningStartReadyScope(request: StartReadyRequestExt): boolean {
+  return Boolean(
+    request.recreateAll
+    || request.recreateFailedPendingAndRunning
+    || request.freshBaseScope === 'failed-pending-and-running'
+    || request.freshBaseScope === 'all',
+  );
+}
+
+function includesCompletedStartReadyScope(request: StartReadyRequestExt): boolean {
+  return Boolean(request.recreateAll || request.freshBaseScope === 'all');
+}
+
+function unionIds(...groups: readonly (readonly string[] | undefined)[]): string[] {
+  const ids = new Set<string>();
+  for (const group of groups) {
+    for (const id of group ?? []) ids.add(id);
+  }
+  return Array.from(ids);
+}
+
+function freshBasePreviewForOutput(
+  preview: StartReadyPreviewExt,
+  scope: StartReadyFreshBaseScope,
+): StartReadyFreshBasePreview {
+  if (preview.freshBase) return preview.freshBase;
+  const pendingWorkflowIds = scope === 'failed-and-pending'
+    || scope === 'failed-pending-and-running'
+    || scope === 'all'
+    ? preview.pendingWorkflowIds
+    : [];
+  const runningWorkflowIds = scope === 'failed-pending-and-running' || scope === 'all'
+    ? preview.runningWorkflowIds
+    : [];
+  const completedWorkflowIds = scope === 'all'
+    ? preview.completedWorkflowIds ?? []
+    : [];
+  return {
+    scope,
+    workflowIds: unionIds(
+      preview.failedWorkflowIds,
+      pendingWorkflowIds,
+      runningWorkflowIds,
+      completedWorkflowIds,
+    ),
+    failedWorkflowIds: preview.failedWorkflowIds,
+    pendingWorkflowIds,
+    runningWorkflowIds,
+    completedWorkflowIds,
+  };
+}
+
+function startReadyModeLabel(request: StartReadyRequestExt): string {
+  if (request.freshBaseScope) return FRESH_BASE_MODE_LABELS[request.freshBaseScope];
+  return request.recreateAll
+    ? 'Start and recreate all (including finished)'
+    : request.recreateFailedPendingAndRunning
+      ? 'Start and recreate failed, pending, and running'
+      : request.recreateFailedAndPending
+        ? 'Start and recreate failed and pending'
+        : request.recreateFailed
+          ? 'Start and recreate failed'
+          : 'Start ready work';
+}
+
+function printFreshBasePreview(preview: StartReadyPreviewExt, scope: StartReadyFreshBaseScope): void {
+  const freshBase = freshBasePreviewForOutput(preview, scope);
+  process.stdout.write(`  fresh-base scope: ${freshBase.scope}\n`);
+  process.stdout.write(`  fresh-base workflows: ${freshBase.workflowIds.length}\n`);
+  process.stdout.write(`  fresh-base failed workflows: ${freshBase.failedWorkflowIds.length}\n`);
+  if (freshBase.scope === 'failed-and-pending'
+    || freshBase.scope === 'failed-pending-and-running'
+    || freshBase.scope === 'all') {
+    process.stdout.write(`  fresh-base pending workflows: ${freshBase.pendingWorkflowIds.length}\n`);
+  }
+  if (freshBase.scope === 'failed-pending-and-running' || freshBase.scope === 'all') {
+    process.stdout.write(`  fresh-base running workflows: ${freshBase.runningWorkflowIds.length}\n`);
+  }
+  if (freshBase.scope === 'all') {
+    process.stdout.write(`  fresh-base completed workflows: ${freshBase.completedWorkflowIds?.length ?? 0}\n`);
+  }
+}
+
+function printStartReadyOutcomeSummary(result: StartReadyResult, request: StartReadyRequestExt): void {
+  if (request.freshBaseScope || result.freshBaseRecreatedWorkflowIds !== undefined) {
+    process.stdout.write(`  fresh-base recreated workflows: ${result.freshBaseRecreatedWorkflowIds?.length ?? 0}\n`);
+  }
+  if (result.partial) {
+    process.stdout.write('  partial: yes\n');
+  }
+  if (result.workflowOutcomes?.length) {
+    const failed = result.workflowOutcomes.filter((outcome) => !outcome.ok).length;
+    const succeeded = result.workflowOutcomes.length - failed;
+    process.stdout.write(`  workflow outcomes: ${succeeded} succeeded, ${failed} failed\n`);
+  }
+}
+
+
+function startTrackedHeadlessLaunchDispatcher(
+  deps: HeadlessDeps,
+  taskExecutor: TaskRunner,
+  context: string,
+): () => void {
+  const dispatcher = new LaunchDispatcher({
+    persistence: deps.persistence,
+    orchestrator: {
+      prepareTaskForNewAttempt: (taskId, reason) =>
+        deps.orchestrator.prepareTaskForNewAttempt(taskId, reason),
+      failTask: (taskId, reason) => deps.orchestrator.failTask(taskId, reason),
+      syncFromDb: (workflowId) => deps.orchestrator.syncFromDb(workflowId),
+      getTask: (taskId) => deps.orchestrator.getTask(taskId),
+      getTaskLaunchReadiness: (taskId) => deps.orchestrator.getTaskLaunchReadiness(taskId),
+    },
+    taskRunnerProvider: () => taskExecutor,
+    ownerId: `headless-tracked-${process.pid}-${context}`,
+    logger: deps.logger,
+  });
+
+  const poll = (): void => {
+    try {
+      dispatcher.poll();
+    } catch (err) {
+      deps.logger.warn(
+        `[headless] ${context}: tracked launch dispatcher poll failed: ${err instanceof Error ? err.message : String(err)}`,
+        { module: 'headless' },
+      );
+    }
+  };
+
+  poll();
+  const timer = setInterval(poll, 250);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
 
 export async function headlessWatch(workflowId: string | undefined, deps: HeadlessDeps): Promise<void> {
   const workflows = deps.persistence.listWorkflows();
@@ -114,7 +280,13 @@ export async function headlessRun(
   process.stdout.write(`${BOLD}Loading plan: ${plan.name}${RESET}\n`);
   process.stdout.write(`Tasks: ${plan.tasks.length}\n\n`);
 
-  const taskExecutor = createHeadlessExecutor(deps);
+  const wfIdsBefore = new Set(orchestrator.getWorkflowIds());
+  orchestrator.loadPlan(plan, { allowGraphMutation: invokerConfig.allowGraphMutation });
+  const currentWorkflowId = orchestrator.getWorkflowIds().find((id) => !wfIdsBefore.has(id));
+  if (currentWorkflowId) process.stdout.write(`Workflow ID: ${currentWorkflowId}\n`);
+
+  const taskHandles: TaskHandleMap = new Map();
+  const taskExecutor = createTrackedHeadlessExecutor(deps, taskHandles);
   wireHeadlessApproveHook(deps, taskExecutor);
 
   const apiServerDeps = buildHeadlessApiServerDeps(deps, taskExecutor);
@@ -125,12 +297,15 @@ export async function headlessRun(
     executorRegistry: deps.executorRegistry,
     ...apiServerDeps,
   });
-  const webSurface = startWebSurfaceForHeadless(deps, apiServerDeps);
-
-  const wfIdsBefore = new Set(orchestrator.getWorkflowIds());
-  orchestrator.loadPlan(plan, { allowGraphMutation: invokerConfig.allowGraphMutation });
-  const currentWorkflowId = orchestrator.getWorkflowIds().find((id) => !wfIdsBefore.has(id));
-  if (currentWorkflowId) process.stdout.write(`Workflow ID: ${currentWorkflowId}\n`);
+  const webSurface = startWebSurfaceForHeadless(
+    {
+      ...deps,
+      repoRoot: deps.repoRoot,
+      executorRegistry: deps.executorRegistry,
+      taskHandles,
+    },
+    apiServerDeps,
+  );
 
   const started = orchestrator.startExecution();
 
@@ -151,18 +326,22 @@ export async function headlessRun(
     return;
   }
 
-  if (started.length > 0) {
-    await taskExecutor.executeTasks(started);
-  }
+  const stopLaunchDispatcher = started.length > 0
+    ? startTrackedHeadlessLaunchDispatcher(deps, taskExecutor, 'run')
+    : undefined;
 
-  if (currentWorkflowId) {
-    await trackHeadlessWorkflow(currentWorkflowId, deps, {
-      waitForApproval,
-      printSnapshot: true,
-      printSummary: true,
-      printTaskOutput: true,
-      setExitCodeOnFailure: true,
-    });
+  try {
+    if (currentWorkflowId) {
+      await trackHeadlessWorkflow(currentWorkflowId, deps, {
+        waitForApproval,
+        printSnapshot: true,
+        printSummary: true,
+        printTaskOutput: true,
+        setExitCodeOnFailure: true,
+      });
+    }
+  } finally {
+    stopLaunchDispatcher?.();
   }
 
   await api.close().catch(() => {});
@@ -180,7 +359,8 @@ export async function headlessResume(
 
   process.stdout.write(`${BOLD}Resuming workflow: ${workflowId}${RESET}\n\n`);
 
-  const taskExecutor = createHeadlessExecutor(deps);
+  const taskHandles: TaskHandleMap = new Map();
+  const taskExecutor = createTrackedHeadlessExecutor(deps, taskHandles);
   wireHeadlessApproveHook(deps, taskExecutor);
 
   const apiServerDeps = buildHeadlessApiServerDeps(deps, taskExecutor);
@@ -191,7 +371,15 @@ export async function headlessResume(
     executorRegistry: deps.executorRegistry,
     ...apiServerDeps,
   });
-  const webSurface = startWebSurfaceForHeadless(deps, apiServerDeps);
+  const webSurface = startWebSurfaceForHeadless(
+    {
+      ...deps,
+      repoRoot: deps.repoRoot,
+      executorRegistry: deps.executorRegistry,
+      taskHandles,
+    },
+    apiServerDeps,
+  );
 
   orchestrator.syncFromDb(workflowId);
   const allStarted = orchestrator.startExecution();
@@ -219,15 +407,18 @@ export async function headlessResume(
     return;
   }
 
-  await taskExecutor.executeTasks(allStarted);
-
-  await trackHeadlessWorkflow(workflowId, deps, {
-    waitForApproval,
-    printSnapshot: true,
-    printSummary: true,
-    printTaskOutput: true,
-    setExitCodeOnFailure: true,
-  });
+  const stopLaunchDispatcher = startTrackedHeadlessLaunchDispatcher(deps, taskExecutor, 'resume');
+  try {
+    await trackHeadlessWorkflow(workflowId, deps, {
+      waitForApproval,
+      printSnapshot: true,
+      printSummary: true,
+      printTaskOutput: true,
+      setExitCodeOnFailure: true,
+    });
+  } finally {
+    stopLaunchDispatcher();
+  }
 
   await api.close().catch(() => {});
   await webSurface?.close().catch(() => {});
@@ -239,7 +430,8 @@ function parseStartReadyArgs(args: string[], inheritedNoTrack: boolean | undefin
 } {
   const request: StartReadyRequestExt = {};
   let noTrack = inheritedNoTrack ?? false;
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
     switch (arg) {
       case '--dry-run':
         request.dryRun = true;
@@ -256,11 +448,32 @@ function parseStartReadyArgs(args: string[], inheritedNoTrack: boolean | undefin
       case '--recreate-all':
         request.recreateAll = true;
         break;
+      case '--exclude': {
+        const selector = args[++i];
+        if (!selector || selector.startsWith('--')) {
+          throw new Error(`Missing value for --exclude. Usage: ${START_READY_USAGE}`);
+        }
+        const parsed = parseStartReadyExcludeSelector(selector);
+        request.exclude = [...(request.exclude ?? []), parsed];
+        break;
+      }
+      case '--fresh-base-failed':
+        request.freshBaseScope = 'failed';
+        break;
+      case '--fresh-base-failed-and-pending':
+        request.freshBaseScope = 'failed-and-pending';
+        break;
+      case '--fresh-base-failed-pending-and-running':
+        request.freshBaseScope = 'failed-pending-and-running';
+        break;
+      case '--fresh-base-all':
+        request.freshBaseScope = 'all';
+        break;
       case '--no-track':
         noTrack = true;
         break;
       default:
-        throw new Error(`Unknown start-ready option "${arg}". Usage: --headless start-ready [--dry-run] [--recreate-failed] [--recreate-failed-and-pending] [--recreate-failed-pending-and-running] [--recreate-all] [--no-track]`);
+        throw new Error(`Unknown start-ready option "${arg}". Usage: ${START_READY_USAGE}`);
     }
   }
   return { request, noTrack };
@@ -268,39 +481,41 @@ function parseStartReadyArgs(args: string[], inheritedNoTrack: boolean | undefin
 
 export async function headlessStartReady(args: string[], deps: HeadlessDeps): Promise<void> {
   const { request, noTrack } = parseStartReadyArgs(args, deps.noTrack);
-  const result = runStartReady(deps.orchestrator, request) as ReturnType<typeof runStartReady> & {
+  const result = await runStartReady(deps.orchestrator, request, {
+    freshBaseRecreateWorkflow: (workflowId) => recreateWorkflowFromFreshBase(workflowId, {
+      ...deps,
+      commandService: deps.commandService,
+      taskExecutor: createHeadlessExecutor(deps),
+      mutationTiming: deps.mutationTiming,
+    }),
+  }) as StartReadyResult & {
     preview: StartReadyPreviewExt;
   };
   const runnable = result.started.filter(isDispatchableLaunch);
   const preview = result.preview;
 
-  const modeLabel = request.recreateAll
-    ? 'Start and recreate all (including finished)'
-    : request.recreateFailedPendingAndRunning
-      ? 'Start and recreate failed, pending, and running'
-      : request.recreateFailedAndPending
-        ? 'Start and recreate failed and pending'
-        : request.recreateFailed
-          ? 'Start and recreate failed'
-          : 'Start ready work';
+  const modeLabel = startReadyModeLabel(request);
   process.stdout.write(`${modeLabel}: ${result.dryRun ? 'preview' : 'submitted'}\n`);
   process.stdout.write(`  ready: ${preview.readyTaskIds.length}\n`);
   process.stdout.write(`  recoverable: ${preview.recoverableTaskIds.length}\n`);
   process.stdout.write(`  failed workflows: ${preview.failedWorkflowIds.length}\n`);
-  if (
-    request.recreateAll
-    || request.recreateFailedAndPending
-    || request.recreateFailedPendingAndRunning
-  ) {
+  if (includesPendingStartReadyScope(request)) {
     process.stdout.write(`  pending workflows: ${preview.pendingWorkflowIds.length}\n`);
   }
-  if (request.recreateAll || request.recreateFailedPendingAndRunning) {
+  if (includesRunningStartReadyScope(request)) {
     process.stdout.write(`  running workflows: ${preview.runningWorkflowIds.length}\n`);
   }
-  if (request.recreateAll) {
+  if (includesCompletedStartReadyScope(request)) {
     process.stdout.write(`  completed workflows: ${preview.completedWorkflowIds?.length ?? 0}\n`);
   }
+  if (request.freshBaseScope) {
+    printFreshBasePreview(preview, request.freshBaseScope);
+  }
   process.stdout.write(`  recreated workflows: ${result.recreatedWorkflowIds.length}\n`);
+  if ((result.excludedWorkflowIds?.length ?? 0) > 0 || (request.exclude?.length ?? 0) > 0) {
+    process.stdout.write(`  excluded workflows: ${result.excludedWorkflowIds?.length ?? 0}\n`);
+  }
+  printStartReadyOutcomeSummary(result, request);
   process.stdout.write(`  started: ${runnable.length}\n`);
 
   if (result.dryRun || runnable.length === 0) {
@@ -334,17 +549,7 @@ export async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Pro
   if (!taskId) throw new Error('Missing arguments. Usage: --headless retry-task <taskId>');
   await withRestoredTaskUnlessDeleteAllWon(taskId, deps, 'retry-task', async (restored) => {
     taskId = restored.resolvedTaskId;
-    if (deps.mutationTiming) {
-      await deps.mutationTiming.span(
-        'headless.retry-task.preemptTaskSubgraph',
-        { taskId },
-        () => preemptTaskSubgraph(taskId, deps),
-      );
-    } else {
-      await preemptTaskSubgraph(taskId, deps);
-    }
-
-    const envelope = makeEnvelope('restart-task', 'headless', 'task', { taskId });
+    const envelope = makeEnvelope('retry-task', 'headless', 'task', { taskId });
     const result = deps.mutationTiming
       ? await deps.mutationTiming.span(
         'headless.retry-task.commandService.retryTask',
@@ -391,7 +596,7 @@ export async function headlessRetryTask(taskId: string, deps: HeadlessDeps): Pro
       orchestrator: deps.orchestrator,
       taskExecutor,
       logger: deps.logger,
-      context: 'headless.restart-task',
+      context: 'headless.retry-task',
       started: result.data,
       scopedTaskIds: [taskId],
       mutationTiming: deps.mutationTiming,
@@ -528,12 +733,6 @@ export async function headlessResolveConflict(taskId: string, deps: HeadlessDeps
 export async function headlessRebaseRetry(target: string, deps: HeadlessDeps): Promise<void> {
   if (!target) throw new Error('Missing arguments. Usage: --headless rebase-retry <workflowId|mergeTaskId|taskId>');
   const workflowId = resolveHeadlessTargetWorkflowId(target, deps.persistence);
-  await preemptWorkflowBeforeMutation(workflowId, {
-    preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
-    logger: deps.logger,
-    context: 'headless.rebase-retry',
-    mutationTiming: deps.mutationTiming,
-  });
   const te = createHeadlessExecutor(deps);
   const started = await rebaseRetry(target, {
     ...deps,
@@ -572,12 +771,6 @@ export async function headlessRebaseRetry(target: string, deps: HeadlessDeps): P
 export async function headlessRebaseRecreate(workflowTarget: string, deps: HeadlessDeps): Promise<void> {
   if (!workflowTarget) throw new Error('Missing arguments. Usage: --headless rebase-recreate <workflowId|mergeTaskId|taskId>');
   const workflowId = resolveHeadlessTargetWorkflowId(workflowTarget, deps.persistence);
-  await preemptWorkflowBeforeMutation(workflowId, {
-    preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
-    logger: deps.logger,
-    context: 'headless.rebase-recreate',
-    mutationTiming: deps.mutationTiming,
-  });
   const te = createHeadlessExecutor(deps);
   const started = await rebaseRecreate(workflowTarget, {
     ...deps,
@@ -617,12 +810,6 @@ export async function headlessRecreateWorkflow(workflowId: string, deps: Headles
   if (!workflowId) {
     throw new Error('Missing arguments. Usage: --headless recreate <workflowId>');
   }
-  await preemptWorkflowBeforeMutation(workflowId, {
-    preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
-    logger: deps.logger,
-    context: 'headless.recreate-workflow',
-    mutationTiming: deps.mutationTiming,
-  });
   const recreateWfEnvelope = makeEnvelope('recreate-workflow', 'headless', 'workflow', { workflowId });
   const recreateWfResult = deps.mutationTiming
     ? await deps.mutationTiming.span(
@@ -801,6 +988,7 @@ export async function headlessForkWorkflow(
     orchestrator: deps.orchestrator,
     logger: deps.logger,
   });
+  deps.requestWorkflowMetadataPublish?.('fork-workflow');
   const taskExecutor = createHeadlessExecutor(deps);
   const { runnable } = await dispatchStartedTasksWithGlobalTopup({
     orchestrator: deps.orchestrator,
@@ -822,12 +1010,6 @@ export async function headlessRetryWorkflow(workflowId: string, deps: HeadlessDe
   }
   deps.logger.info(`headlessRetryWorkflow begin workflow="${workflowId}" noTrack=${deps.noTrack ? 'true' : 'false'}`, {
     module: 'headless',
-  });
-  await preemptWorkflowBeforeMutation(workflowId, {
-    preemptWorkflowExecution: (id) => preemptWorkflowExecution(id, deps),
-    logger: deps.logger,
-    context: 'headless.retry-workflow',
-    mutationTiming: deps.mutationTiming,
   });
   const envelope = makeEnvelope('retry-workflow', 'headless', 'workflow', { workflowId });
   const result = deps.mutationTiming

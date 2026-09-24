@@ -1,20 +1,28 @@
 /**
- * Headless "query" command family: the read-only `query <sub>` router
+ * Headless "query" command family: the mostly read-only `query <sub>` router
  * (workflows · tasks · task · queue · review-gate · action-graph · audit ·
- * session · workers · worker-actions · cost · cost-events · costs · ui-perf · stats), the cost-event
- * collection/rollup
- * helpers, agent session resolution, and `query-select`.
+ * session · workers · worker-actions · cost · cost-events ·
+ * costs · ui-perf · stats · execution-leases · mutation-locks), the
+ * cost-event collection/rollup helpers, agent session resolution, and
+ * `query-select`.
  *
- * The deprecated top-level aliases (`list`, `status`, `task-status`, `queue`,
- * `audit`, `session`) route here through the `headless.ts` router. It depends on
- * `headless-shared.ts` and reuses `worker-control.ts` for the worker-decisions view.
+ * It depends on `headless-shared.ts` and reuses `worker-control.ts` for the
+ * worker-decisions view.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Attempt, TaskState } from '@invoker/workflow-core';
-import type { AgentSessionData, NormalizedCostEvent, WorkerActionSummary, WorkerStatusSnapshot } from '@invoker/contracts';
+import type { Workflow } from '@invoker/data-store';
+import {
+  type AgentSessionData,
+  type NormalizedCostEvent,
+  type WorkerActionSummary,
+  type WorkerStatusSnapshot,
+  type TaskFilterNode,
+  validateTaskFilter,
+} from '@invoker/contracts';
 import { AUTO_FIX_WORKER_KIND, createWorkerRegistry, registerBuiltinWorkers, type AgentRegistry, type WorkerRuntimeDependencies } from '@invoker/execution-engine';
-import type { CostAttributionAttempt } from '@invoker/data-store';
+import type { CostAttributionAttempt, WorkerActionRecord } from '@invoker/data-store';
 import type { CostGroupDimension } from './cost-rollup.js';
 import { buildCurrentActionGraphSnapshot } from './action-graph-snapshot.js';
 import { buildReviewGateQueryResponse } from './review-gate-query.js';
@@ -27,10 +35,10 @@ import {
   parseQueryFlags,
   restoreWorkflowForTask,
 } from './headless-shared.js';
-import { resolveDefaultExecutionAgent } from './config.js';
+import { resolveDefaultExecutionAgent, type InvokerConfig } from './config.js';
 import { registerExternalWorkersFromConfig } from './external-worker-loader.js';
 import { loadAllEventsPaged } from './load-all-events-paged.js';
-import { AUTO_STARTED_OWNER_WORKER_KINDS, createLocalWorkerStatusSnapshot, listWorkerDecisions, toWorkerActionSummary } from './worker-control.js';
+import { autoStartedOwnerWorkerKindsForConfig, createLocalWorkerStatusSnapshot, listWorkerDecisions, toWorkerActionSummary } from './worker-control.js';
 import { renderWorkerLifecycle } from './headless-worker-lifecycle.js';
 import { createRendererUiPerfCounters } from './renderer-ui-perf.js';
 import {
@@ -48,6 +56,8 @@ import {
  * per request, so concurrent delegated queries never cross output.
  */
 const queryOutputSink = new AsyncLocalStorage<(chunk: string) => void>();
+const QUERY_SUBCOMMANDS = 'workflows, workflow, tasks, task, task-output, container-id, queue, review-gate, action-graph, audit, session, workers, worker-actions, worker-decisions, alert-history, cost, cost-events, costs, ui-perf, stats, execution-leases, mutation-locks, capacity';
+const QUERY_SUBCOMMAND_USAGE = QUERY_SUBCOMMANDS.replaceAll(', ', '|');
 
 function writeOut(chunk: string): void {
   const sink = queryOutputSink.getStore();
@@ -65,12 +75,56 @@ export type HeadlessQueryDeps = Pick<
   'orchestrator' | 'persistence' | 'executionAgentRegistry' | 'invokerConfig' | 'getUiPerfStats' | 'resetUiPerfStats'
 >;
 
+function hasStringProp(value: unknown, key: string): boolean {
+  return Boolean(value && typeof value === 'object' && typeof (value as Record<string, unknown>)[key] === 'string');
+}
+
+const TASK_FILTER_PAGE_SIZE = 500;
+
+function queryAllTasksByFilter(
+  persistence: Pick<HeadlessQueryDeps['persistence'], 'queryTasksByFilter'>,
+  filter: TaskFilterNode,
+): TaskState[] {
+  const all: TaskState[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = persistence.queryTasksByFilter(filter, { limit: TASK_FILTER_PAGE_SIZE, offset });
+    all.push(...page);
+    if (page.length < TASK_FILTER_PAGE_SIZE) break;
+    offset += TASK_FILTER_PAGE_SIZE;
+  }
+  return all;
+}
+
+function isAlertWorkerAction(action: WorkerActionRecord): boolean {
+  const searchable = [
+    action.actionType,
+    action.subjectType,
+    action.subjectId,
+    action.externalKey,
+  ].join(' ').toLowerCase();
+  if (searchable.includes('alert')) return true;
+  const payload = action.payload;
+  return hasStringProp(payload, 'alertKey')
+    || hasStringProp(payload, 'alertSource')
+    || (hasStringProp(payload, 'severity') && (hasStringProp(payload, 'subject') || hasStringProp(payload, 'message')));
+}
+
+export function listAlertHistoryRows(
+  persistence: Pick<HeadlessQueryDeps['persistence'], 'listWorkerActions'>,
+): WorkerActionRecord[] {
+  return persistence.listWorkerActions().filter(isAlertWorkerAction);
+}
+
 export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Promise<void> {
   const subCommand = args[0];
   if (!subCommand) {
-    throw new Error('Missing query sub-command. Usage: --headless query <workflows|workflow|tasks|task|task-output|container-id|queue|review-gate|action-graph|audit|session|workers|worker-actions|worker-decisions|cost|cost-events|costs|ui-perf|stats|execution-leases>');
+    throw new Error(`Missing query sub-command. Usage: --headless query <${QUERY_SUBCOMMAND_USAGE}>`);
   }
   const flags = parseQueryFlags(args.slice(1));
+  if (flags.filter !== undefined && subCommand !== 'tasks') {
+    throw new Error('--filter is only supported for `query tasks`');
+  }
 
   const {
     formatWorkflowList, formatTaskStatus, formatWorkflowStatus,
@@ -108,6 +162,41 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
     }
     case 'tasks': {
       const { orchestrator, persistence } = deps;
+      let filteredTasks: TaskState[] | undefined;
+      if (flags.filter !== undefined) {
+        let parsedFilter: unknown;
+        try {
+          parsedFilter = JSON.parse(flags.filter);
+        } catch (error) {
+          throw new Error(`Invalid --filter JSON: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const validation = validateTaskFilter(parsedFilter);
+        if (!validation.valid) throw new Error(validation.error);
+        const filters: TaskFilterNode[] = [parsedFilter as TaskFilterNode];
+        const workflowFilterId = flags.workflow ?? flags.positional[0];
+        if (workflowFilterId) filters.push({ op: 'eq', key: 'workflow_id', value: workflowFilterId });
+        if (flags.status) filters.push({ op: 'eq', key: 'status', value: flags.status });
+        if (flags.noMerge) filters.push({ op: 'eq', key: 'is_merge_node', value: false });
+        const filter: TaskFilterNode = filters.length === 1 ? filters[0] : { op: 'and', filters };
+        filteredTasks = queryAllTasksByFilter(persistence, filter);
+      }
+
+      if (filteredTasks) {
+        const allTasks = filteredTasks;
+        switch (flags.output) {
+          case 'label': writeOut(formatAsLabel(allTasks) + '\n'); break;
+          case 'json':  writeOut(formatAsJson(allTasks.map(serializeTask)) + '\n'); break;
+          case 'jsonl': writeOut(formatAsJsonl(allTasks.map(serializeTask)) + '\n'); break;
+          default: {
+            for (const task of allTasks) writeOut(formatTaskStatus(task) + '\n');
+            const status = orchestrator.getWorkflowStatus();
+            writeOut(`\n${formatWorkflowStatus(status)}\n`);
+            break;
+          }
+        }
+        break;
+      }
+
       const workflows = persistence.listWorkflows();
       if (workflows.length === 0) {
         writeOut('No workflows found. Run a plan first.\n');
@@ -201,16 +290,16 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
     }
     case 'review-gate': {
       const arg = flags.positional[0];
-      if (!arg) throw new Error('Usage: --headless query review-gate <prNumber|prUrl> [--output text|json|jsonl|label]');
-      const prNumber = parsePrNumber(arg);
-      if (!prNumber) throw new Error(`Could not parse a PR number from "${arg}".`);
-      const record = deps.persistence.findReviewGateByPr(prNumber);
+      if (!arg) throw new Error('Usage: --headless query review-gate <prNumber|owner/repo#pr|prUrl> [--output text|json|jsonl|label]');
+      const parsed = parseReviewGatePrArg(arg);
+      if (!parsed) throw new Error(`Could not parse a PR number from "${arg}".`);
+      const record = deps.persistence.findReviewGateByPr(parsed.prNumber, parsed.repo);
       switch (flags.output) {
         case 'label': writeOut(`${record?.workflowId ?? ''}\n`); break;
         case 'json':  writeOut(formatAsJson(record ?? {}) + '\n'); break;
         case 'jsonl': writeOut(formatAsJsonl(record ? [record] : []) + '\n'); break;
         default:      if (!record) {
-          writeOut(`No Invoker workflow found for PR ${prNumber}.\n`);
+          writeOut(`No Invoker workflow found for PR ${parsed.prNumber}.\n`);
           break;
         }
         {
@@ -219,7 +308,7 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
           const gate = buildReviewGateQueryResponse({ workflowId: record.workflowId, workflow, tasks });
           const substate = gate.substate ?? 'null';
           writeOut(
-            `${record.workflowId}\t${record.reviewId ?? prNumber}\t${record.workflowStatus}\tgen=${record.workflowGeneration}\tsubstate=${substate}\t${record.branch ?? ''}\n`,
+            `${record.workflowId}\t${record.reviewId ?? parsed.prNumber}\t${record.workflowStatus}\tgen=${record.workflowGeneration}\tsubstate=${substate}\t${record.branch ?? ''}\n`,
           );
         }
         break;
@@ -332,6 +421,16 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
         case 'json': writeOut(formatAsJson(response.actions) + '\n'); break;
         case 'jsonl': writeOut(formatAsJsonl(response.actions) + '\n'); break;
         default: writeOut(formatWorkerDecisions(response.actions) + '\n'); break;
+      }
+      break;
+    }
+    case 'alert-history': {
+      const alerts = listAlertHistoryRows(deps.persistence);
+      switch (flags.output) {
+        case 'label': writeOut(formatAsLabel(alerts) + '\n'); break;
+        case 'json': writeOut(formatAsJson(alerts.map(serializeWorkerAction)) + '\n'); break;
+        case 'jsonl': writeOut(formatAsJsonl(alerts.map(serializeWorkerAction)) + '\n'); break;
+        default: writeOut(formatWorkerActions(alerts) + '\n'); break;
       }
       break;
     }
@@ -482,21 +581,274 @@ export async function headlessQuery(args: string[], deps: HeadlessQueryDeps): Pr
       }
       break;
     }
+    case 'mutation-locks': {
+      const workflowFilter = flags.workflow ?? flags.positional[0];
+      const leases = deps.persistence.listWorkflowMutationLeases()
+        .filter((lease) => !workflowFilter || lease.workflowId === workflowFilter)
+        .map((lease) => ({
+          workflowId: lease.workflowId,
+          ownerId: lease.ownerId,
+          activeIntentId: lease.activeIntentId ?? null,
+          activeMutationKind: lease.activeMutationKind ?? null,
+          leasedAt: lease.leasedAt,
+          lastHeartbeatAt: lease.lastHeartbeatAt,
+          leaseExpiresAt: lease.leaseExpiresAt,
+        }));
+      const intents = deps.persistence
+        .listWorkflowMutationIntents(workflowFilter, ['queued', 'running'])
+        .map((intent) => ({
+          id: intent.id,
+          workflowId: intent.workflowId,
+          channel: intent.channel,
+          status: intent.status,
+          priority: intent.priority,
+          ownerId: intent.ownerId ?? null,
+          createdAt: intent.createdAt,
+          startedAt: intent.startedAt ?? null,
+        }));
+      const result = { leases, intents };
+      switch (flags.output) {
+        case 'label':
+          writeOut([...leases.map((l) => l.workflowId), ...intents.map((i) => String(i.id))].join('\n') + '\n');
+          break;
+        case 'json':
+          writeOut(formatAsJson(result) + '\n');
+          break;
+        case 'jsonl':
+          writeOut(formatAsJsonl([...leases, ...intents]) + '\n');
+          break;
+        default: {
+          const nowIso = new Date().toISOString();
+          const leaseLines = leases.length === 0
+            ? ['No workflow mutation leases.']
+            : [
+                'WORKFLOW\tOWNER\tACTIVE_INTENT\tKIND\tHEARTBEAT\tEXPIRES\tSTATE',
+                ...leases.map((l) => [
+                  l.workflowId,
+                  l.ownerId,
+                  l.activeIntentId ?? '-',
+                  l.activeMutationKind ?? '-',
+                  l.lastHeartbeatAt,
+                  l.leaseExpiresAt,
+                  l.leaseExpiresAt > nowIso ? 'live' : 'EXPIRED',
+                ].join('\t')),
+              ];
+          const intentLines = intents.length === 0
+            ? ['No queued or running mutation intents.']
+            : [
+                'ID\tWORKFLOW\tCHANNEL\tSTATUS\tOWNER\tCREATED_AT',
+                ...intents.map((i) => [
+                  i.id,
+                  i.workflowId,
+                  i.channel,
+                  i.status,
+                  i.ownerId ?? '-',
+                  i.createdAt,
+                ].join('\t')),
+              ];
+          writeOut([...leaseLines, '', ...intentLines].join('\n') + '\n');
+          break;
+        }
+      }
+      break;
+    }
+    case 'capacity': {
+      const report = buildCapacityReport(deps.persistence, deps.invokerConfig);
+      switch (flags.output) {
+        case 'label':
+          writeOut(report.pools.flatMap((pool) => pool.members.map((member) => `${pool.poolId}/${member.memberId}`)).join('\n') + '\n');
+          break;
+        case 'json':
+          writeOut(formatAsJson(report) + '\n');
+          break;
+        case 'jsonl':
+          writeOut(formatAsJsonl(report.pools) + '\n');
+          break;
+        default:
+          writeOut(formatCapacityReport(report) + '\n');
+          break;
+      }
+      break;
+    }
     default:
-      throw new Error(`Unknown query sub-command: "${subCommand}". Use: workflows, workflow, tasks, task, task-output, container-id, queue, review-gate, action-graph, audit, session, workers, worker-actions, worker-decisions, cost, cost-events, costs, ui-perf, stats, execution-leases`);
+      throw new Error(`Unknown query sub-command: "${subCommand}". Use: ${QUERY_SUBCOMMANDS}`);
   }
 }
 
+const CAPACITY_QUEUE_PREFIX_TRIM_RE = /\b[0-9a-f]{7,40}\b.*$/i;
+
+function normalizeCapacityWorkflowPrefix(name: string): string {
+  const stripped = name.replace(CAPACITY_QUEUE_PREFIX_TRIM_RE, '').trim().replace(/[:\-\s]+$/, '');
+  return stripped || name.trim();
+}
+
+const CAPACITY_WAITING_TASK_STATUSES = new Set(['queued', 'pending']);
+
+export interface CapacityPoolMemberReport {
+  memberId: string;
+  maxConcurrentTasks: number;
+  inUse: number;
+  full: boolean;
+}
+
+export interface CapacityPoolReport {
+  poolId: string;
+  maxConcurrentTasksPerMember: number;
+  members: CapacityPoolMemberReport[];
+}
+
+export interface CapacityQueuePrefixReport {
+  prefix: string;
+  queuedTasks: number;
+  workflowCount: number;
+}
+
+export interface CapacityOldestWaitingReport {
+  taskId: string;
+  workflowId: string;
+  createdAt: string;
+  ageMs: number;
+}
+
+export interface CapacityReport {
+  generatedAt: string;
+  pools: CapacityPoolReport[];
+  totalQueued: number;
+  queueByWorkflowPrefix: CapacityQueuePrefixReport[];
+  oldestWaiting: CapacityOldestWaitingReport | null;
+}
+
+export function buildCapacityReport(
+  persistence: Pick<HeadlessQueryDeps['persistence'], 'loadWorkflowTaskSnapshot' | 'listExecutionResourceLeases'>,
+  invokerConfig: Pick<InvokerConfig, 'executionPools'>,
+): CapacityReport {
+  const nowIso = new Date().toISOString();
+  const now = Date.now();
+
+  const listLeases = persistence.listExecutionResourceLeases?.bind(persistence);
+  const leases = listLeases ? listLeases().filter((lease) => lease.leaseExpiresAt > nowIso) : [];
+  const inUseByPoolMember = new Map<string, number>();
+  for (const lease of leases) {
+    if (!lease.poolId || !lease.poolMemberId) continue;
+    const key = `${lease.poolId} ${lease.poolMemberId}`;
+    inUseByPoolMember.set(key, (inUseByPoolMember.get(key) ?? 0) + 1);
+  }
+
+  const pools: CapacityPoolReport[] = [];
+  for (const [poolId, pool] of Object.entries(invokerConfig.executionPools ?? {})) {
+    const maxConcurrentTasksPerMember = pool.maxConcurrentTasksPerMember ?? 1;
+    const members: CapacityPoolMemberReport[] = pool.members.map((member) => {
+      const maxConcurrentTasks = member.maxConcurrentTasks ?? maxConcurrentTasksPerMember;
+      const inUse = inUseByPoolMember.get(`${poolId} ${member.id}`) ?? 0;
+      return { memberId: member.id, maxConcurrentTasks, inUse, full: inUse >= maxConcurrentTasks };
+    });
+    pools.push({ poolId, maxConcurrentTasksPerMember, members });
+  }
+
+  const snapshot = persistence.loadWorkflowTaskSnapshot();
+  const workflowNameById = new Map<string, string>(
+    snapshot.workflows.map((workflow: Workflow) => [workflow.id, workflow.name]),
+  );
+
+  const waitingTasks = snapshot.tasks.filter((task) => (
+    CAPACITY_WAITING_TASK_STATUSES.has(task.status) && !task.config.isMergeNode
+  ));
+
+  const prefixCounts = new Map<string, { queuedTasks: number; workflowIds: Set<string> }>();
+  for (const task of waitingTasks) {
+    const workflowId = task.config.workflowId;
+    const name = (workflowId && workflowNameById.get(workflowId)) || 'unknown';
+    const prefix = normalizeCapacityWorkflowPrefix(name);
+    const entry = prefixCounts.get(prefix) ?? { queuedTasks: 0, workflowIds: new Set<string>() };
+    entry.queuedTasks += 1;
+    if (workflowId) entry.workflowIds.add(workflowId);
+    prefixCounts.set(prefix, entry);
+  }
+  const queueByWorkflowPrefix = [...prefixCounts.entries()]
+    .map(([prefix, entry]) => ({ prefix, queuedTasks: entry.queuedTasks, workflowCount: entry.workflowIds.size }))
+    .sort((a, b) => b.queuedTasks - a.queuedTasks);
+
+  let oldestWaiting: CapacityOldestWaitingReport | null = null;
+  for (const task of waitingTasks) {
+    const createdAtMs = task.createdAt.getTime();
+    if (!oldestWaiting || createdAtMs < new Date(oldestWaiting.createdAt).getTime()) {
+      oldestWaiting = {
+        taskId: task.id,
+        workflowId: task.config.workflowId ?? '',
+        createdAt: task.createdAt.toISOString(),
+        ageMs: now - createdAtMs,
+      };
+    }
+  }
+
+  return {
+    generatedAt: nowIso,
+    pools,
+    totalQueued: waitingTasks.length,
+    queueByWorkflowPrefix,
+    oldestWaiting,
+  };
+}
+
+function formatCapacityAge(ageMs: number): string {
+  const totalSeconds = Math.floor(ageMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (hours > 0) return `${hours}h${minutes}m`;
+  return `${minutes}m`;
+}
+
+export function formatCapacityReport(report: CapacityReport): string {
+  const lines: string[] = [];
+  lines.push('POOL/MEMBER CAPACITY');
+  if (report.pools.length === 0) {
+    lines.push('No execution pools configured.');
+  } else {
+    for (const pool of report.pools) {
+      lines.push(`${pool.poolId} (default cap ${pool.maxConcurrentTasksPerMember}/member):`);
+      for (const member of pool.members) {
+        lines.push(`  ${member.memberId}: ${member.inUse}/${member.maxConcurrentTasks}${member.full ? ' (FULL)' : ''}`);
+      }
+    }
+  }
+  lines.push('');
+  lines.push(`QUEUE DEPTH (${report.totalQueued} waiting task(s))`);
+  if (report.queueByWorkflowPrefix.length === 0) {
+    lines.push('No queued or pending tasks.');
+  } else {
+    for (const entry of report.queueByWorkflowPrefix) {
+      lines.push(`  ${entry.prefix}: ${entry.queuedTasks} queued task(s) across ${entry.workflowCount} workflow(s)`);
+    }
+  }
+  lines.push('');
+  if (report.oldestWaiting) {
+    lines.push(`OLDEST WAITING: ${report.oldestWaiting.taskId} (workflow ${report.oldestWaiting.workflowId}) — waiting ${formatCapacityAge(report.oldestWaiting.ageMs)}`);
+  } else {
+    lines.push('OLDEST WAITING: none');
+  }
+  return lines.join('\n');
+}
+
 /**
- * Parse a PR number from either a bare number (`999`, `#999`) or a full PR URL
- * (`https://github.com/owner/repo/pull/999`). Returns undefined when neither
- * shape matches.
+ * Parse a PR number from either a bare number (`999`, `#999`), `owner/repo#999`,
+ * or a full PR URL (`https://github.com/owner/repo/pull/999`). Returns undefined
+ * when none of those shapes match.
  */
 function parsePrNumber(arg: string): string | undefined {
-  const fromUrl = arg.match(/\/pull\/(\d+)/);
-  if (fromUrl) return fromUrl[1];
+  return parseReviewGatePrArg(arg)?.prNumber;
+}
+
+function parseReviewGatePrArg(arg: string): { prNumber: string; repo?: string } | undefined {
+  const fromUrl = arg.match(/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/i);
+  if (fromUrl) {
+    return { prNumber: fromUrl[3], repo: `${fromUrl[1]}/${fromUrl[2]}` };
+  }
+  const fromNwo = arg.match(/^([^/\s#]+)\/([^/\s#]+)#(\d+)$/);
+  if (fromNwo) {
+    return { prNumber: fromNwo[3], repo: `${fromNwo[1]}/${fromNwo[2]}` };
+  }
   const bare = arg.replace(/^#/, '');
-  return /^\d+$/.test(bare) ? bare : undefined;
+  return /^\d+$/.test(bare) ? { prNumber: bare } : undefined;
 }
 
 async function headlessCosts(
@@ -812,7 +1164,7 @@ export async function resolveAgentSession(
 }
 
 export async function headlessSession(taskId: string | undefined, deps: Pick<HeadlessDeps, 'orchestrator' | 'persistence' | 'executionAgentRegistry' | 'invokerConfig'>): Promise<void> {
-  if (!taskId) throw new Error('Usage: --headless session <taskId>');
+  if (!taskId) throw new Error('Usage: --headless query session <taskId>');
   taskId = restoreWorkflowForTask(taskId, deps).resolvedTaskId;
   const task = deps.orchestrator.getTask(taskId);
   if (!task) throw new Error(`Task "${taskId}" not found`);
@@ -876,7 +1228,7 @@ function createHeadlessWorkerStatusSnapshot(
   return createLocalWorkerStatusSnapshot({
     registry,
     persistence: deps.persistence,
-    autoStartKinds: AUTO_STARTED_OWNER_WORKER_KINDS,
+    autoStartKinds: autoStartedOwnerWorkerKindsForConfig(deps.invokerConfig),
   });
 }
 
@@ -981,19 +1333,6 @@ async function dispatchReadOnlyHeadlessQuery(args: string[], deps: HeadlessQuery
       return headlessQuery(args.slice(1), deps);
     case 'query-select':
       return headlessQuerySelect(args[1], deps);
-    // Deprecated top-level aliases → canonical `query <sub>`.
-    case 'list':
-      return headlessQuery(['workflows', ...args.slice(1)], deps);
-    case 'status':
-      return headlessQuery(['tasks', ...args.slice(1)], deps);
-    case 'task-status':
-      return headlessQuery(['task', ...args.slice(1)], deps);
-    case 'queue':
-      return headlessQuery(['queue', ...args.slice(1)], deps);
-    case 'audit':
-      return headlessQuery(['audit', ...args.slice(1)], deps);
-    case 'session':
-      return headlessQuery(['session', ...args.slice(1)], deps);
     case 'worker': {
       const workerSub = args[1] ?? 'list';
       if (workerSub === 'status') {

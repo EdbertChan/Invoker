@@ -15,6 +15,7 @@ describe('workflow rollup', () => {
   it.each([
     { name: 'no tasks', statuses: [], expected: 'pending' },
     { name: 'all pending', statuses: ['pending'], expected: 'pending' },
+    { name: 'queued task', statuses: ['queued'], expected: 'running' },
     { name: 'running task', statuses: ['pending', 'running'], expected: 'running' },
     { name: 'fixing task', statuses: ['running', 'fixing_with_ai'], expected: 'fixing_with_ai' },
     { name: 'awaiting approval', statuses: ['completed', 'awaiting_approval'], expected: 'awaiting_approval' },
@@ -24,6 +25,7 @@ describe('workflow rollup', () => {
     { name: 'failed with unrelated pending work by counts only', statuses: ['failed', 'pending'], expected: 'failed' },
     { name: 'terminal failed', statuses: ['failed', 'completed'], expected: 'failed' },
     { name: 'closed gate', statuses: ['completed', 'closed'], expected: 'closed' },
+    { name: 'skipped gate', statuses: ['completed', 'skipped'], expected: 'closed' },
     { name: 'running outranks closed', statuses: ['closed', 'running'], expected: 'running' },
     { name: 'awaiting approval outranks closed', statuses: ['closed', 'awaiting_approval'], expected: 'awaiting_approval' },
     { name: 'review ready outranks closed', statuses: ['closed', 'review_ready'], expected: 'review_ready' },
@@ -145,5 +147,13 @@ describe('hasFailedDependencyPath', () => {
 
   it('is false when there are no dependencies', () => {
     expect(hasFailedDependencyPath(task('solo', 'blocked'), mapOf())).toBe(false);
+  });
+
+  it('is false for a target with a satisfied chain even when an unrelated sibling has a failed dependency', () => {
+    const siblingRoot = task('sibling-root', 'failed');
+    const sibling = task('sibling', 'blocked', ['sibling-root']);
+    const root = task('root', 'completed');
+    const target = task('target', 'blocked', ['root']);
+    expect(hasFailedDependencyPath(target, mapOf(siblingRoot, sibling, root, target))).toBe(false);
   });
 });

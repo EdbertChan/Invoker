@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, statSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { SQLiteAdapter } from '../sqlite-adapter.js';
+import { MAINTENANCE_BATCH_SCAN_LIMIT, SQLiteAdapter, isLaunchDispatchCandidateStale, runWithFreedStatement, assertOwnerCapabilityForWritableOpen } from '../sqlite-adapter.js';
 import type { Workflow, Conversation, WorkerActionWrite, TerminalSessionRecord, InAppPlanningSessionRecord } from '../adapter.js';
-import { createAttempt } from '@invoker/workflow-core';
+import { BUILT_IN_LOCAL_EXECUTION_POOL_ID, createAttempt, resolveTaskConfig, assertWorkflowConsistent, assertWorkflowPatchConsistent } from '@invoker/workflow-core';
 import type { Attempt, TaskState, TaskStateChanges } from '@invoker/workflow-core';
 
 describe('SQLiteAdapter', () => {
@@ -27,16 +27,17 @@ describe('SQLiteAdapter', () => {
   };
 
   function makeTask(id: string, overrides: Partial<TaskState> = {}): TaskState {
+    const { config, ...taskOverrides } = overrides;
     return {
       id,
       description: `Task ${id}`,
       status: 'pending',
       dependencies: [],
       createdAt: new Date(),
-      config: {},
+      config: resolveTaskConfig(config ?? {}),
       execution: {},
       taskStateVersion: 1,
-      ...overrides,
+      ...taskOverrides,
     };
   }
 
@@ -72,6 +73,7 @@ describe('SQLiteAdapter', () => {
       title: `Planning ${id}`,
       presetKey: 'codex',
       status: 'draft_ready',
+      confirmationMode: 'require',
       messages: [
         {
           id: 1,
@@ -462,8 +464,11 @@ describe('SQLiteAdapter', () => {
         'title',
         'preset_key',
         'status',
+        'confirmation_mode',
         'draft_plan_summary_json',
         'draft_plan_text',
+        'planning_draft_id',
+        'planning_draft_hash',
         'submitted_workflow_id',
         'submitted_plan_name',
         'terminal_mode',
@@ -473,8 +478,16 @@ describe('SQLiteAdapter', () => {
         'terminal_output_snapshot',
         'terminal_updated_at',
         'pending_response',
+        'active_turn_id',
+        'active_turn_status',
+        'active_turn_error',
         'created_at',
         'updated_at',
+        'repo_url',
+        'base_branch',
+        'base_commit',
+        'worktree_path',
+        'worktree_branch',
       ]);
       expect(tableColumns(adapter, 'in_app_planning_messages')).toEqual([
         'session_id',
@@ -499,6 +512,57 @@ describe('SQLiteAdapter', () => {
 
         const reopened = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
         expect(reopened.loadInAppPlanningSession('planning-1')).toEqual(makePlanningSession('planning-1'));
+        reopened.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('migrates the legacy planning status constraint and preserves existing sessions', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-planning-status-migration-'));
+      const dbPath = join(dir, 'invoker.db');
+      const legacyStatuses = ['still_discussing', 'waiting_for_answer', 'draft_ready', 'submitted'] as const;
+      try {
+        const legacy = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        for (const status of legacyStatuses) {
+          legacy.upsertInAppPlanningSession(makePlanningSession(`planning-${status}`, { status }));
+        }
+
+        const schema = (legacy as any).queryOne(
+          `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'in_app_planning_sessions'`,
+        ).sql as string;
+        const legacySchema = schema
+          .replace('CREATE TABLE in_app_planning_sessions', 'CREATE TABLE in_app_planning_sessions_legacy')
+          .replace(", 'planner_error'", '');
+        (legacy as any).db.run('PRAGMA foreign_keys = OFF');
+        (legacy as any).db.run(legacySchema);
+        (legacy as any).db.run(
+          'INSERT INTO in_app_planning_sessions_legacy SELECT * FROM in_app_planning_sessions',
+        );
+        (legacy as any).db.run('DROP TABLE in_app_planning_sessions');
+        (legacy as any).db.run(
+          'ALTER TABLE in_app_planning_sessions_legacy RENAME TO in_app_planning_sessions',
+        );
+        (legacy as any).db.run('PRAGMA foreign_keys = ON');
+        (legacy as any).dirty = true;
+        legacy.close();
+
+        const migrated = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        expect(legacyStatuses.map((status) => migrated.loadInAppPlanningSession(`planning-${status}`)?.status))
+          .toEqual(legacyStatuses);
+        expect(migrated.loadInAppPlanningSession('planning-still_discussing')?.messages)
+          .toEqual(makePlanningSession('planning-still_discussing').messages);
+        expect(tableIndexes(migrated, 'in_app_planning_sessions'))
+          .toContain('idx_in_app_planning_sessions_updated');
+        expect(tableForeignKeys(migrated, 'in_app_planning_messages'))
+          .toContain('in_app_planning_sessions.session_id:NO ACTION');
+        migrated.upsertInAppPlanningSession(makePlanningSession('planning-error', {
+          status: 'planner_error',
+        }));
+        migrated.close();
+
+        const reopened = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        expect(reopened.loadInAppPlanningSession('planning-error')?.status).toBe('planner_error');
         reopened.close();
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -536,6 +600,7 @@ describe('SQLiteAdapter', () => {
 
     it('updates planning sessions and replaces visible messages', () => {
       adapter.upsertInAppPlanningSession(makePlanningSession('planning-1'));
+      const runSpy = vi.spyOn((adapter as any).db, 'run');
       adapter.updateInAppPlanningSession('planning-1', {
         status: 'still_discussing',
         terminalMode: 'tmux',
@@ -555,6 +620,13 @@ describe('SQLiteAdapter', () => {
         pendingResponse: false,
         updatedAt: '2026-07-07T00:00:05.000Z',
       });
+
+      const messageDeletes = runSpy.mock.calls.filter(([sql]) =>
+        String(sql).includes('DELETE FROM in_app_planning_messages WHERE session_id = ?'));
+      const messageInserts = runSpy.mock.calls.filter(([sql]) =>
+        String(sql).includes('INSERT INTO in_app_planning_messages'));
+      expect(messageDeletes).toHaveLength(1);
+      expect(messageInserts).toHaveLength(1);
 
       const loaded = adapter.loadInAppPlanningSession('planning-1');
       expect(loaded).toMatchObject({
@@ -576,6 +648,164 @@ describe('SQLiteAdapter', () => {
       });
       expect(loaded?.draftPlanSummary).toBeUndefined();
       expect(loaded?.draftPlanText).toBeUndefined();
+    });
+
+    it('appends unseen monotonic planning messages without reloading or rewriting the transcript', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-planning-append-'));
+      const dbPath = join(dir, 'invoker.db');
+      const initial = makePlanningSession('planning-append');
+      const userMessage = {
+        id: 4,
+        role: 'user' as const,
+        text: 'Add another task',
+        createdAt: '2026-07-07T00:00:04.000Z',
+      };
+      const assistantMessage = {
+        id: 5,
+        role: 'assistant' as const,
+        text: 'Added another task.',
+        createdAt: '2026-07-07T00:00:05.000Z',
+      };
+      try {
+        const first = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        first.upsertInAppPlanningSession(initial);
+        first.close();
+
+        const reopened = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        try {
+          const runSpy = vi.spyOn((reopened as any).db, 'run');
+          const queryOneSpy = vi.spyOn(reopened as any, 'queryOne');
+          const queryAllSpy = vi.spyOn(reopened as any, 'queryAll');
+
+          reopened.updateInAppPlanningSession(initial.id, {
+            messages: [...initial.messages, userMessage],
+            pendingResponse: true,
+            updatedAt: userMessage.createdAt,
+          });
+          reopened.updateInAppPlanningSession(initial.id, {
+            messages: [...initial.messages, userMessage, assistantMessage],
+            pendingResponse: false,
+            updatedAt: assistantMessage.createdAt,
+          });
+
+          const messageDeletes = runSpy.mock.calls.filter(([sql]) =>
+            String(sql).includes('DELETE FROM in_app_planning_messages WHERE session_id = ?'));
+          const messageInserts = runSpy.mock.calls.filter(([sql]) =>
+            String(sql).includes('INSERT INTO in_app_planning_messages'));
+          const countQueries = queryOneSpy.mock.calls.filter(([sql]) =>
+            String(sql).includes('COUNT(*) AS message_count'));
+          const messageReloads = queryAllSpy.mock.calls.filter(([sql]) =>
+            String(sql).includes('FROM in_app_planning_messages'));
+
+          expect(messageDeletes).toHaveLength(0);
+          expect(messageInserts).toHaveLength(2);
+          expect(countQueries).toHaveLength(1);
+          expect(messageReloads).toHaveLength(0);
+          expect(sqliteScalar(reopened, `SELECT COUNT(*) FROM in_app_planning_messages WHERE session_id = '${initial.id}'`)).toBe(5);
+        } finally {
+          reopened.close();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('rewrites planning messages when a restored history is edited before append', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-planning-edit-fallback-'));
+      const dbPath = join(dir, 'invoker.db');
+      const initial = makePlanningSession('planning-edit-fallback');
+      const appendedMessage = {
+        id: 4,
+        role: 'assistant' as const,
+        text: 'Edited history acknowledged.',
+        createdAt: '2026-07-07T00:00:04.000Z',
+      };
+      try {
+        const first = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        first.upsertInAppPlanningSession(initial);
+        first.close();
+
+        const reopened = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        try {
+          const restored = reopened.loadInAppPlanningSession(initial.id);
+          if (!restored) throw new Error('planning session did not restore');
+          const firstMessage = restored.messages[0];
+          if (!firstMessage) throw new Error('planning session restored without messages');
+          const editedMessages = [
+            { ...firstMessage, text: 'Edited starter prompt.' },
+            ...restored.messages.slice(1),
+            appendedMessage,
+          ];
+          const runSpy = vi.spyOn((reopened as any).db, 'run');
+
+          reopened.updateInAppPlanningSession(initial.id, {
+            messages: editedMessages,
+            updatedAt: appendedMessage.createdAt,
+          });
+
+          const messageDeletes = runSpy.mock.calls.filter(([sql]) =>
+            String(sql).includes('DELETE FROM in_app_planning_messages WHERE session_id = ?'));
+          const messageInserts = runSpy.mock.calls.filter(([sql]) =>
+            String(sql).includes('INSERT INTO in_app_planning_messages'));
+          expect(messageDeletes).toHaveLength(1);
+          expect(messageInserts).toHaveLength(editedMessages.length);
+          expect(reopened.loadInAppPlanningSession(initial.id)?.messages).toEqual(editedMessages);
+        } finally {
+          reopened.close();
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('round-trips repo/HEAD/worktree binding columns when populated', () => {
+      adapter.upsertInAppPlanningSession(makePlanningSession('planning-binding', {
+        repoUrl: 'https://github.com/example/repo.git',
+        baseBranch: 'main',
+        baseCommit: 'abc1234',
+        worktreePath: '/tmp/invoker-worktrees/planning-binding',
+        worktreeBranch: 'plan/planning-binding',
+      }));
+
+      const loaded = adapter.loadInAppPlanningSession('planning-binding');
+      expect(loaded).toEqual(makePlanningSession('planning-binding', {
+        repoUrl: 'https://github.com/example/repo.git',
+        baseBranch: 'main',
+        baseCommit: 'abc1234',
+        worktreePath: '/tmp/invoker-worktrees/planning-binding',
+        worktreeBranch: 'plan/planning-binding',
+      }));
+    });
+
+    it('round-trips omitted repo/HEAD/worktree binding columns as undefined', () => {
+      adapter.upsertInAppPlanningSession(makePlanningSession('planning-1'));
+
+      const loaded = adapter.loadInAppPlanningSession('planning-1');
+      expect(loaded?.repoUrl).toBeUndefined();
+      expect(loaded?.baseBranch).toBeUndefined();
+      expect(loaded?.baseCommit).toBeUndefined();
+      expect(loaded?.worktreePath).toBeUndefined();
+      expect(loaded?.worktreeBranch).toBeUndefined();
+    });
+
+    it('patches repo/HEAD/worktree binding columns independently', () => {
+      adapter.upsertInAppPlanningSession(makePlanningSession('planning-1'));
+
+      adapter.updateInAppPlanningSession('planning-1', {
+        repoUrl: 'https://github.com/example/repo.git',
+        baseCommit: 'def5678',
+        worktreePath: '/tmp/invoker-worktrees/planning-1',
+      });
+
+      const loaded = adapter.loadInAppPlanningSession('planning-1');
+      expect(loaded).toMatchObject({
+        title: 'Planning planning-1',
+        repoUrl: 'https://github.com/example/repo.git',
+        baseCommit: 'def5678',
+        worktreePath: '/tmp/invoker-worktrees/planning-1',
+      });
+      expect(loaded?.baseBranch).toBeUndefined();
+      expect(loaded?.worktreeBranch).toBeUndefined();
     });
 
     it('deletes planning sessions and their visible messages', () => {
@@ -602,10 +832,42 @@ describe('SQLiteAdapter', () => {
       expect(loaded[0].status).toBe('pending');
     });
 
+    it('round-trips task freshness through save, update, clear, and omission', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const freshness = {
+        watchPaths: ['packages/a.ts', 'packages/z.ts'],
+        pathPreconditions: [
+          { path: 'generated/output.json', expected: 'absent' as const },
+          { path: 'packages/a.ts', expected: 'present' as const },
+        ],
+        guardedBehaviorIds: ['a-guard', 'z_guard'],
+      };
+      adapter.saveTask('wf-1', makeTask('with-freshness', { config: { freshness } }));
+      adapter.saveTask('wf-1', makeTask('without-freshness'));
+
+      expect(adapter.loadTask('with-freshness')?.config.freshness).toEqual(freshness);
+      expect(adapter.loadTask('without-freshness')?.config).not.toHaveProperty('freshness');
+      const persisted = (adapter as any).db.exec(
+        `SELECT freshness FROM tasks WHERE id = 'with-freshness'`,
+      ) as Array<{ values: unknown[][] }>;
+      expect(persisted[0]?.values[0]?.[0]).toBe(JSON.stringify(freshness));
+
+      const updatedFreshness = {
+        watchPaths: ['src/index.ts'],
+        pathPreconditions: [{ path: 'src/index.ts', expected: 'present' as const }],
+        guardedBehaviorIds: [],
+      };
+      adapter.updateTask('with-freshness', { config: { freshness: updatedFreshness } });
+      expect(adapter.loadTask('with-freshness')?.config.freshness).toEqual(updatedFreshness);
+
+      adapter.updateTask('with-freshness', { config: { freshness: undefined } });
+      expect(adapter.loadTask('with-freshness')?.config).not.toHaveProperty('freshness');
+    });
+
     it('persists poolMemberId through updateTask and getPoolMemberId', () => {
       adapter.saveWorkflow(testWorkflow);
       adapter.saveTask('wf-1', makeTask('ssh-task', {
-        config: { runnerKind: 'ssh' },
+        config: { runnerKind: 'ssh', poolId: 'ssh-pool' },
       }));
 
       adapter.updateTask('ssh-task', {
@@ -712,6 +974,7 @@ describe('SQLiteAdapter', () => {
 
     it('creates execution_model and worker_actions schema objects', () => {
       expect(tableColumns(adapter, 'tasks')).toContain('execution_model');
+      expect(tableColumns(adapter, 'tasks')).toContain('freshness');
       expect(tableColumns(adapter, 'worker_actions')).toEqual(expect.arrayContaining([
         'id',
         'worker_kind',
@@ -751,6 +1014,127 @@ describe('SQLiteAdapter', () => {
 
     it('does not create auto_fix_attempts on fresh task tables', () => {
       expect(tableColumns(adapter, 'tasks')).not.toContain('auto_fix_attempts');
+    });
+
+    it('adds the optional freshness column when reopening an older task table', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-task-freshness-migration-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const oldDb = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        (oldDb as any).db.run('ALTER TABLE tasks DROP COLUMN freshness');
+        expect(tableColumns(oldDb, 'tasks')).not.toContain('freshness');
+        oldDb.close();
+
+        const reopened = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        expect(tableColumns(reopened, 'tasks')).toContain('freshness');
+        reopened.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects direct SQL writes that violate resolved executor routing', () => {
+      adapter.saveWorkflow(testWorkflow);
+      const db = (adapter as any).db;
+
+      expect(() => db.run(
+        `INSERT INTO tasks (id, workflow_id, description, runner_kind, pool_id)
+         VALUES ('bad-pooled-insert', 'wf-1', 'missing pool', 'worktree', NULL)`,
+      )).toThrow('tasks executor routing invariant violated');
+      expect(() => db.run(
+        `INSERT INTO tasks (id, workflow_id, description, runner_kind, pool_id)
+         VALUES ('bad-docker-insert', 'wf-1', 'docker with pool', 'docker', 'local-worktree')`,
+      )).toThrow('tasks executor routing invariant violated');
+      expect(() => db.run(
+        `INSERT INTO tasks (id, workflow_id, description, runner_kind, pool_id)
+         VALUES ('bad-null-kind-insert', 'wf-1', 'no runner kind or pool', NULL, NULL)`,
+      )).toThrow('tasks executor routing invariant violated');
+      expect(() => db.run(
+        `INSERT INTO tasks (id, workflow_id, description, runner_kind, pool_id, docker_image)
+         VALUES ('bad-pooled-docker-image', 'wf-1', 'pool with image', NULL, 'mixed-pool', 'node:22')`,
+      )).toThrow('tasks executor routing invariant violated');
+      expect(() => db.run(
+        `INSERT INTO tasks (id, workflow_id, description, runner_kind, pool_id)
+         VALUES ('pool-only-insert', 'wf-1', 'pool picks the runner', NULL, 'mixed-pool')`,
+      )).not.toThrow();
+
+      adapter.saveTask('wf-1', makeTask('valid-task'));
+      expect(() => db.run(
+        `UPDATE tasks SET pool_id = NULL WHERE id = 'valid-task'`,
+      )).toThrow('tasks executor routing invariant violated');
+    });
+
+    it('keeps a pool-only task without a runner kind across save, load, and reopen', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-pool-only-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const first = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        first.saveWorkflow(testWorkflow);
+        first.saveTask('wf-1', makeTask('pool-only', {
+          config: { command: 'echo pooled', poolId: 'mixed-pool', poolMemberId: 'member-a' },
+        }));
+        const saved = first.loadTask('pool-only');
+        expect(saved?.config).toMatchObject({ poolId: 'mixed-pool', poolMemberId: 'member-a' });
+        expect(saved?.config.runnerKind).toBeUndefined();
+        first.close();
+
+        const reopened = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        const reloaded = reopened.loadTask('pool-only');
+        expect(reloaded?.config).toMatchObject({ poolId: 'mixed-pool', poolMemberId: 'member-a' });
+        expect(reloaded?.config.runnerKind).toBeUndefined();
+        reopened.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('backfills compatible legacy ordinary rows without changing lifecycle data', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-pool-invariant-'));
+      const dbPath = join(dir, 'invoker.db');
+
+      try {
+        const legacy = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        legacy.saveWorkflow(testWorkflow);
+        (legacy as any).db.run('DROP TRIGGER trg_tasks_executor_routing_insert');
+        (legacy as any).db.run('DROP TRIGGER trg_tasks_executor_routing_update');
+        (legacy as any).db.run(
+          `INSERT INTO tasks (
+             id, workflow_id, description, status, blocked_by, dependencies,
+             command, runner_kind, pool_id, started_at, last_heartbeat_at,
+             execution_generation, task_state_version
+           ) VALUES (
+             'legacy-task', 'wf-1', 'Legacy ordinary task', 'running', 'upstream', '["dep-a"]',
+             'echo legacy', 'worktree', NULL, '2026-08-01T01:02:03.000Z',
+             '2026-08-01T01:02:04.000Z', 7, 11
+           )`,
+        );
+        (legacy as any).dirty = true;
+        legacy.close();
+
+        const reopened = await SQLiteAdapter.create(dbPath, { ownerCapability: true });
+        const task = reopened.loadTask('legacy-task');
+        expect(task).toMatchObject({
+          status: 'running',
+          dependencies: ['dep-a'],
+          config: {
+            runnerKind: 'worktree',
+            poolId: BUILT_IN_LOCAL_EXECUTION_POOL_ID,
+            command: 'echo legacy',
+          },
+          execution: {
+            blockedBy: 'upstream',
+            generation: 7,
+            startedAt: new Date('2026-08-01T01:02:03.000Z'),
+            lastHeartbeatAt: new Date('2026-08-01T01:02:04.000Z'),
+          },
+          taskStateVersion: 11,
+        });
+        reopened.close();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('drops legacy auto_fix_attempts columns when reopening writable databases', async () => {
@@ -1011,6 +1395,36 @@ describe('SQLiteAdapter', () => {
       expect(leases[0]?.resourceKey).toBe('ssh:live-b');
     });
 
+    it('globally sweeps expired leases across keys the way a dispatcher poll invokes it', () => {
+      // LaunchDispatcher.poll() (launch-dispatcher.ts) falls back to calling
+      // releaseExpiredExecutionResourceLeases() with no arguments on every
+      // tick when the liveness-aware sweep isn't wired; mirror that call
+      // signature here.
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:poll-expired-a',
+        resourceType: 'ssh',
+        holderId: 'holder-a',
+        leaseMs: -1,
+      })).toBe(true);
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'worktree:poll-expired-b',
+        resourceType: 'worktree',
+        holderId: 'holder-b',
+        leaseMs: -1,
+      })).toBe(true);
+      expect(adapter.claimExecutionResourceLease({
+        resourceKey: 'ssh:poll-live-c',
+        resourceType: 'ssh',
+        holderId: 'holder-c',
+        leaseMs: 60_000,
+      })).toBe(true);
+
+      expect(adapter.releaseExpiredExecutionResourceLeases()).toBe(2);
+      const leases = adapter.listExecutionResourceLeases();
+      expect(leases).toHaveLength(1);
+      expect(leases[0]?.resourceKey).toBe('ssh:poll-live-c');
+    });
+
     it('allows up to maxHolders live holders on one resource key', () => {
       expect(adapter.claimExecutionResourceLease({
         resourceKey: 'ssh:invoker@counted.example.com:22',
@@ -1110,7 +1524,7 @@ describe('SQLiteAdapter', () => {
 
       expect(inserted.id).toBeGreaterThan(0);
       expect(inserted.state).toBe('enqueued');
-      expect(inserted.priority).toBe('normal');
+      expect(inserted.priority).toBe(2);
       expect(inserted.attemptsCount).toBe(0);
 
       const byId = adapter.loadLaunchDispatchById(inserted.id);
@@ -1133,7 +1547,7 @@ describe('SQLiteAdapter', () => {
         attemptId: 'attempt-1',
         workflowId: 'wf-launch',
         generation: 0,
-        priority: 'normal',
+        priority: 2,
       });
     });
 
@@ -1143,19 +1557,19 @@ describe('SQLiteAdapter', () => {
         taskId: 'wf-launch/t1',
         attemptId: 'attempt-dup',
         workflowId: 'wf-launch',
-        priority: 'high',
+        priority: 1,
         generation: 0,
       });
       const second = adapter.enqueueLaunchDispatch({
         taskId: 'wf-launch/t1',
         attemptId: 'attempt-dup',
         workflowId: 'wf-launch',
-        priority: 'low',
+        priority: 4,
         generation: 0,
       });
 
       expect(second.id).toBe(first.id);
-      expect(second.priority).toBe('high');
+      expect(second.priority).toBe(1);
       expect(
         adapter.listLaunchDispatchesByState(['enqueued', 'leased']),
       ).toHaveLength(1);
@@ -1350,6 +1764,58 @@ describe('SQLiteAdapter', () => {
       expect(liveAfter?.state).toBe('leased');
     });
 
+    describe('listAbandonableLaunchDispatchLeases enqueued_at format', () => {
+      it('writes enqueued_at in SQLite space-format, not ISO-Z', () => {
+        setupWorkflowAndTask();
+        const row = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t1',
+          attemptId: 'attempt-format-check',
+          workflowId: 'wf-launch',
+          generation: 0,
+        });
+        const result = (adapter as any).db.exec(
+          `SELECT enqueued_at FROM task_launch_dispatch WHERE id = ${row.id}`,
+        ) as Array<{ values: unknown[][] }>;
+        const raw = String(result[0]?.values?.[0]?.[0]);
+        // The production insert path never overrides the schema default
+        // (datetime('now')): "YYYY-MM-DD HH:MM:SS", no 'T', no 'Z'.
+        expect(raw).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+      });
+
+      it('does not abandon a lease enqueued a minute ago just because the ISO cutoff falls on the same calendar day', () => {
+        setupWorkflowAndTask();
+        const row = adapter.enqueueLaunchDispatch({
+          taskId: 'wf-launch/t1',
+          attemptId: 'attempt-freshly-enqueued',
+          workflowId: 'wf-launch',
+          generation: 0,
+        });
+        // Mirrors the real write path: enqueued_at in SQLite's
+        // datetime('now') space-format, at 23:59 on the cutoff's calendar
+        // day -- one minute before "now", nowhere near the 24h age limit.
+        (adapter as any).db.run(
+          `UPDATE task_launch_dispatch
+             SET state = 'leased', dispatch_owner = 'owner-x',
+                 enqueued_at = '2026-08-09 23:59:00',
+                 fenced_until = '2026-08-09T23:59:30.000Z'
+           WHERE id = ?`,
+          [row.id],
+        );
+
+        const candidates = adapter.listAbandonableLaunchDispatchLeases({
+          nowIso: '2026-08-10T00:00:00.000Z',
+          maxAttempts: 10,
+          maxLaunchAgeMs: 24 * 60 * 60 * 1000, // ageCutoff = 2026-08-09T00:00:00.000Z
+        });
+
+        // Real elapsed time is 1 minute, far under the 24h maxLaunchAgeMs.
+        // A string comparison of "2026-08-09 23:59:00" against
+        // "2026-08-09T00:00:00.000Z" reads the row as older than the
+        // cutoff (space < 'T'), which is wrong.
+        expect(candidates.map((c) => c.attemptId)).not.toContain('attempt-freshly-enqueued');
+      });
+    });
+
     describe('claimLaunchDispatchAtomic', () => {
       it('leases the only enqueued row when capacity allows', () => {
         setupWorkflowAndTask('wf-launch', 'wf-launch/t1', {
@@ -1430,14 +1896,14 @@ describe('SQLiteAdapter', () => {
           taskId: 'wf-launch/t-low',
           attemptId: 'attempt-low',
           workflowId: 'wf-launch',
-          priority: 'low',
+          priority: 4,
           generation: 0,
         });
         const high = adapter.enqueueLaunchDispatch({
           taskId: 'wf-launch/t-high',
           attemptId: 'attempt-high',
           workflowId: 'wf-launch',
-          priority: 'high',
+          priority: 1,
           generation: 0,
         });
 
@@ -1500,14 +1966,14 @@ describe('SQLiteAdapter', () => {
           taskId: 'wf-launch/t-stale',
           attemptId: 'attempt-stale',
           workflowId: 'wf-launch',
-          priority: 'high',
+          priority: 1,
           generation: 0,
         });
         const valid = adapter.enqueueLaunchDispatch({
           taskId: 'wf-launch/t-valid',
           attemptId: 'attempt-valid',
           workflowId: 'wf-launch',
-          priority: 'normal',
+          priority: 2,
           generation: 0,
         });
 
@@ -1520,6 +1986,57 @@ describe('SQLiteAdapter', () => {
         const staleAfter = adapter.loadLaunchDispatchById(stale.id);
         expect(staleAfter?.state).toBe('abandoned');
         expect(staleAfter?.lastError).toMatch(/not the selected attempt/);
+      });
+
+      describe('isLaunchDispatchCandidateStale', () => {
+        const baseCandidate = {
+          id: 1,
+          task_id: 'wf-launch/t1',
+          attempt_id: 'attempt-current',
+          generation: 0,
+          current_task_id: 'wf-launch/t1',
+          current_task_status: 'pending',
+          current_selected_attempt_id: 'attempt-current',
+          current_execution_generation: 0,
+        };
+
+        it('flags a missing task', () => {
+          const reason = isLaunchDispatchCandidateStale({
+            ...baseCandidate,
+            current_task_id: null,
+          });
+          expect(reason).toMatch(/no longer exists/);
+        });
+
+        it('flags a non-claimable task status', () => {
+          const reason = isLaunchDispatchCandidateStale({
+            ...baseCandidate,
+            current_task_status: 'failed',
+          });
+          expect(reason).toMatch(/status is failed/);
+        });
+
+        it('flags a mismatched selected attempt', () => {
+          const reason = isLaunchDispatchCandidateStale({
+            ...baseCandidate,
+            current_selected_attempt_id: 'attempt-other',
+          });
+          expect(reason).toMatch(/not the selected attempt/);
+        });
+
+        it('flags a mismatched execution generation', () => {
+          const reason = isLaunchDispatchCandidateStale({
+            ...baseCandidate,
+            generation: 1,
+            current_execution_generation: 2,
+          });
+          expect(reason).toMatch(/does not match task generation/);
+        });
+
+        it('returns undefined for a fully-matching candidate', () => {
+          const reason = isLaunchDispatchCandidateStale(baseCandidate);
+          expect(reason).toBeUndefined();
+        });
       });
 
       it('abandons stale generation candidates', () => {
@@ -1667,6 +2184,60 @@ describe('SQLiteAdapter', () => {
       }
       expect(adapter.loadLaunchDispatchById(completed.id)?.state).toBe('completed');
       expect(adapter.loadLaunchDispatchById(unrelated.id)?.state).toBe('enqueued');
+    });
+
+    it('abandonLaunchDispatchesForTasks tags rows with abandon_reason=lifecycle-reset', () => {
+      adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+      saveLaunchTask('wf-launch', 'wf-launch/t1', 'attempt-reason-check');
+      const row = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1',
+        attemptId: 'attempt-reason-check',
+        workflowId: 'wf-launch',
+        generation: 0,
+      });
+      adapter.abandonLaunchDispatchesForTasks(['wf-launch/t1'], 'workflow cancelled');
+      expect(adapter.loadLaunchDispatchById(row.id)?.abandonReason).toBe('lifecycle-reset');
+      // Lifecycle-reset abandons must not erode the stuck-lease retry
+      // budget -- they are unrelated, legitimate events.
+      expect(adapter.countAbandonedLaunchDispatchesForTask('wf-launch/t1')).toBe(0);
+    });
+
+    it('countAbandonedLaunchDispatchesForTask only counts stuck-lease abandons, and resetStuckLeaseAbandonCount clears them', () => {
+      adapter.saveWorkflow({ ...testWorkflow, id: 'wf-launch' });
+      saveLaunchTask('wf-launch', 'wf-launch/t1', 'attempt-mixed-1');
+
+      const stuck1 = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1', attemptId: 'attempt-mixed-1', workflowId: 'wf-launch', generation: 0,
+      });
+      adapter.markLaunchDispatchAbandoned(stuck1.id, 'looked stuck', undefined, 'stuck-lease');
+
+      const stuck2 = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1', attemptId: 'attempt-mixed-2', workflowId: 'wf-launch', generation: 1,
+      });
+      adapter.markLaunchDispatchAbandoned(stuck2.id, 'looked stuck again', undefined, 'stuck-lease');
+
+      const cancelled = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1', attemptId: 'attempt-mixed-3', workflowId: 'wf-launch', generation: 2,
+      });
+      adapter.markLaunchDispatchAbandoned(cancelled.id, 'user cancelled', undefined, 'lifecycle-reset');
+
+      const unlabelled = adapter.enqueueLaunchDispatch({
+        taskId: 'wf-launch/t1', attemptId: 'attempt-mixed-4', workflowId: 'wf-launch', generation: 3,
+      });
+      adapter.markLaunchDispatchAbandoned(unlabelled.id, 'no reason given');
+
+      // Only the two 'stuck-lease' rows count -- cancel and unlabelled abandons don't.
+      expect(adapter.countAbandonedLaunchDispatchesForTask('wf-launch/t1')).toBe(2);
+
+      const resetCount = adapter.resetStuckLeaseAbandonCount('wf-launch/t1');
+      expect(resetCount).toBe(2);
+      expect(adapter.countAbandonedLaunchDispatchesForTask('wf-launch/t1')).toBe(0);
+      // Relabelled, not deleted -- the row stays abandoned/auditable.
+      expect(adapter.loadLaunchDispatchById(stuck1.id)?.state).toBe('abandoned');
+      expect(adapter.loadLaunchDispatchById(stuck1.id)?.abandonReason).toBe('stuck-lease-reset');
+
+      // A second reset on an already-reset task is a no-op, not an error.
+      expect(adapter.resetStuckLeaseAbandonCount('wf-launch/t1')).toBe(0);
     });
 
     it('releaseExecutionResourceLeasesForTasks releases only leases held by the selected task set', () => {
@@ -2324,6 +2895,17 @@ describe('SQLiteAdapter', () => {
   });
 
   describe('updateWorkflow', () => {
+    it('persists staged workflow activation with active as the default', () => {
+      adapter.saveWorkflow(testWorkflow);
+      expect(adapter.loadWorkflow('wf-1')?.staged).toBe(false);
+
+      adapter.updateWorkflow('wf-1', { staged: true });
+      expect(adapter.loadWorkflow('wf-1')?.staged).toBe(true);
+
+      adapter.updateWorkflow('wf-1', { staged: false });
+      expect(adapter.loadWorkflow('wf-1')?.staged).toBe(false);
+    });
+
     it('ignores workflow status mutations because status is derived from tasks', () => {
       adapter.saveWorkflow(testWorkflow);
       // @ts-expect-error workflow status is derived output, not a persistence input.
@@ -2604,6 +3186,41 @@ describe('SQLiteAdapter', () => {
       expect(second[0]!.eventType).toBe(`event-${29 - 10}`);
     });
 
+    it('getRecentEventsOfType returns only the matching type, newest first, bounded by limit', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+      adapter.logEvent('t1', 'task.executor.selected', { poolMemberId: 'target-1' });
+      adapter.logEvent('t1', 'debug.noise', {});
+      adapter.logEvent('t1', 'task.executor.selected', { poolMemberId: 'target-2' });
+      adapter.logEvent('t1', 'debug.noise', {});
+      adapter.logEvent('t1', 'task.executor.selected', { poolMemberId: 'target-3' });
+
+      const latestTwo = adapter.getRecentEventsOfType('t1', 'task.executor.selected', 2);
+      expect(latestTwo.map((event) => JSON.parse(event.payload!).poolMemberId)).toEqual([
+        'target-3',
+        'target-2',
+      ]);
+
+      expect(adapter.getRecentEventsOfType('t1', 'task.executor.selected', 0)).toEqual([]);
+      expect(adapter.getRecentEventsOfType('t1', 'no-such-type', 5)).toEqual([]);
+    });
+
+    it('uses an index lookup for getRecentEventsOfType instead of a full task-history scan', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('t1'));
+
+      const planRows = (adapter as any).db
+        .prepare('EXPLAIN QUERY PLAN SELECT * FROM events WHERE task_id = ? AND event_type = ? ORDER BY id DESC LIMIT ?')
+        .all('t1', 'task.executor.selected', 20) as Array<{ detail: string }>;
+      const detail = planRows.map((row) => row.detail).join('\n');
+
+      // Either the (task_id, id) or (event_type, id) index keeps this bounded;
+      // the invariant under test is "indexed SEARCH", not a specific index name.
+      expect(detail).toContain('SEARCH events USING INDEX');
+      expect(detail).not.toContain('SCAN events');
+      expect(detail).not.toContain('USE TEMP B-TREE');
+    });
+
     it('lists recent task events across tasks by event type', () => {
       adapter.saveWorkflow(testWorkflow);
       adapter.saveTask('wf-1', makeTask('t1'));
@@ -2810,7 +3427,27 @@ describe('SQLiteAdapter', () => {
         generation: 1,
       });
 
+      const runSpy = vi.spyOn((adapter as any).db, 'run');
+
       expect(() => adapter.deleteAllTasks('wf-1')).not.toThrow();
+
+      const deletedTables = runSpy.mock.calls
+        .map(([sql]) => /DELETE FROM (\w+)/.exec(sql as string)?.[1])
+        .filter((table): table is string => table !== undefined);
+
+      expect(deletedTables).toEqual([
+        'workflow_mutation_leases',
+        'workflow_mutation_intents',
+        'task_launch_dispatch',
+        'worker_actions',
+        'execution_resource_leases',
+        'events',
+        'task_output',
+        'attempts',
+        'output_spool',
+        'terminal_sessions',
+        'tasks',
+      ]);
 
       expect(adapter.loadWorkflow('wf-1')).toBeDefined();
       expect(adapter.loadTasks('wf-1')).toEqual([]);
@@ -2900,14 +3537,17 @@ describe('SQLiteAdapter', () => {
   });
 
   describe('saveTask null defaults', () => {
-    it('stores SQL NULL (not string literals) for missing optional fields', () => {
+    it('stores the resolved built-in pool while leaving runtime fields SQL NULL', () => {
       adapter.saveWorkflow(testWorkflow);
       adapter.saveTask('wf-1', makeTask('t1'));
 
       const loaded = adapter.loadTasks('wf-1');
       const task = loaded[0];
 
-      expect(task.config.runnerKind).toBeUndefined();
+      expect(task.config).toMatchObject({
+        runnerKind: 'worktree',
+        poolId: BUILT_IN_LOCAL_EXECUTION_POOL_ID,
+      });
       expect(task.execution.agentSessionId).toBeUndefined();
       expect(task.execution.workspacePath).toBeUndefined();
       expect(task.execution.containerId).toBeUndefined();
@@ -4157,6 +4797,13 @@ describe('SQLiteAdapter', () => {
       expect(adapter.loadWorkflow('wf-1')!.generation).toBe(0);
     });
 
+    it('assertWorkflowConsistent and assertWorkflowPatchConsistent reject the same invalid generation value', () => {
+      expect(() => assertWorkflowConsistent({ ...testWorkflow, generation: -1 })).toThrow(/generation/);
+      expect(() =>
+        assertWorkflowPatchConsistent(testWorkflow, { ...testWorkflow, generation: -1 }),
+      ).toThrow(/generation/);
+    });
+
     it('rejects invalid saved external dependency shapes before writing', () => {
       expect(() => adapter.saveWorkflow({
         ...testWorkflow,
@@ -4312,7 +4959,7 @@ describe('SQLiteAdapter', () => {
         status: 'running',
         execution: { isFixingWithAI: true },
       }));
-      (adapter as any).db.run(`UPDATE workflows SET merge_mode = 'github' WHERE id = 'wf-1'`);
+      (adapter as any).db.prepare('UPDATE workflows SET merge_mode = ? WHERE id = ?').run('github', 'wf-1');
 
       const report = adapter.runCompatibilityMigration();
 
@@ -4347,7 +4994,7 @@ describe('SQLiteAdapter', () => {
       adapter.saveWorkflow(testWorkflow);
       adapter.saveTask('wf-1', makeTask('ssh-old', {
         status: 'completed',
-        config: { runnerKind: 'ssh' },
+        config: { runnerKind: 'ssh', poolId: 'ssh-pool' },
         execution: { workspacePath: '~/.invoker/worktrees/ssh-old', branch: 'experiment/ssh-old' },
       }));
       adapter.logEvent('ssh-old', 'task.executor.selected', { runnerKind: 'ssh', poolMemberId: 'remote-old' });
@@ -4363,9 +5010,9 @@ describe('SQLiteAdapter', () => {
 
     it('does not repair missing SSH pool member ids from malformed or empty event payloads', () => {
       adapter.saveWorkflow(testWorkflow);
-      adapter.saveTask('wf-1', makeTask('ssh-empty', { config: { runnerKind: 'ssh' } }));
+      adapter.saveTask('wf-1', makeTask('ssh-empty', { config: { runnerKind: 'ssh', poolId: 'ssh-pool' } }));
       adapter.logEvent('ssh-empty', 'task.executor.selected', { runnerKind: 'ssh', poolMemberId: '  ' });
-      adapter.saveTask('wf-1', makeTask('ssh-bad', { config: { runnerKind: 'ssh' } }));
+      adapter.saveTask('wf-1', makeTask('ssh-bad', { config: { runnerKind: 'ssh', poolId: 'ssh-pool' } }));
       (adapter as any).db.run(
         `INSERT INTO events (task_id, event_type, payload) VALUES ('ssh-bad', 'task.executor.selected', '{')`,
       );
@@ -4827,6 +5474,64 @@ describe('SQLiteAdapter', () => {
   });
 
   // ── Output Spool Regression Tests ──────────────────────
+
+  it('isolates in-memory output files when INVOKER_DB_DIR is configured', async () => {
+    const originalDbDir = process.env.INVOKER_DB_DIR;
+    const configuredDbDir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-configured-db-dir-'));
+    let first: SQLiteAdapter | undefined;
+    let second: SQLiteAdapter | undefined;
+
+    try {
+      process.env.INVOKER_DB_DIR = configuredDbDir;
+      first = await SQLiteAdapter.create(':memory:');
+      first.appendOutputChunk('shared-task-id', 'first adapter\n');
+      first.close();
+      first = undefined;
+
+      second = await SQLiteAdapter.create(':memory:');
+      expect(second.replayOutputFrom('shared-task-id', 0)).toEqual([]);
+    } finally {
+      first?.close();
+      second?.close();
+      if (originalDbDir === undefined) {
+        delete process.env.INVOKER_DB_DIR;
+      } else {
+        process.env.INVOKER_DB_DIR = originalDbDir;
+      }
+      rmSync(configuredDbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('colocates output files with each file-backed database', async () => {
+    const originalDbDir = process.env.INVOKER_DB_DIR;
+    const configuredDbDir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-configured-db-dir-'));
+    const firstDbDir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-first-db-'));
+    const secondDbDir = mkdtempSync(join(tmpdir(), 'sqlite-adapter-second-db-'));
+    let first: SQLiteAdapter | undefined;
+    let second: SQLiteAdapter | undefined;
+
+    try {
+      process.env.INVOKER_DB_DIR = configuredDbDir;
+      first = await SQLiteAdapter.create(join(firstDbDir, 'invoker.db'), { ownerCapability: true });
+      first.appendOutputChunk('shared-task-id', 'first database\n');
+      first.close();
+      first = undefined;
+
+      second = await SQLiteAdapter.create(join(secondDbDir, 'invoker.db'), { ownerCapability: true });
+      expect(second.replayOutputFrom('shared-task-id', 0)).toEqual([]);
+    } finally {
+      first?.close();
+      second?.close();
+      if (originalDbDir === undefined) {
+        delete process.env.INVOKER_DB_DIR;
+      } else {
+        process.env.INVOKER_DB_DIR = originalDbDir;
+      }
+      rmSync(configuredDbDir, { recursive: true, force: true });
+      rmSync(firstDbDir, { recursive: true, force: true });
+      rmSync(secondDbDir, { recursive: true, force: true });
+    }
+  });
 
   describe('output spool: monotonic offsets', () => {
     it('appends chunks with strictly increasing offset values', () => {
@@ -5690,6 +6395,29 @@ describe('SQLiteAdapter', () => {
       }
     });
 
+    it('runWithFreedStatement frees the statement and returns the callback result', () => {
+      const stmt = { free: vi.fn() };
+      const db = { prepare: vi.fn(() => stmt) };
+      const result = runWithFreedStatement(db, 'SELECT 1', (s) => {
+        expect(s).toBe(stmt);
+        return 'ok';
+      });
+      expect(result).toBe('ok');
+      expect(db.prepare).toHaveBeenCalledWith('SELECT 1');
+      expect(stmt.free).toHaveBeenCalledTimes(1);
+    });
+
+    it('runWithFreedStatement frees the statement when the callback throws', () => {
+      const stmt = { free: vi.fn() };
+      const db = { prepare: vi.fn(() => stmt) };
+      expect(() =>
+        runWithFreedStatement(db, 'SELECT 1', () => {
+          throw new Error('boom');
+        }),
+      ).toThrow('boom');
+      expect(stmt.free).toHaveBeenCalledTimes(1);
+    });
+
     it('frees the prepared statement when stmt.get throws with params inside queryOne', () => {
       let captured: any;
       const handle = instrumentPrepare(adapter, (stmt) => {
@@ -5782,6 +6510,296 @@ describe('SQLiteAdapter', () => {
       } finally {
         handle.restore();
       }
+    });
+  });
+
+  describe('assertOwnerCapabilityForWritableOpen', () => {
+    it('throws when a writable open of a file-backed database lacks ownerCapability', () => {
+      expect(() => assertOwnerCapabilityForWritableOpen(true, true, undefined)).toThrow(
+        'Writable persistence initialization requires owner capability.',
+      );
+      expect(() => assertOwnerCapabilityForWritableOpen(true, true, false)).toThrow(
+        'Writable persistence initialization requires owner capability.',
+      );
+    });
+
+    it('does not throw when ownerCapability is granted for a writable file-backed open', () => {
+      expect(() => assertOwnerCapabilityForWritableOpen(true, true, true)).not.toThrow();
+    });
+
+    it('does not throw for a read-only request regardless of ownerCapability', () => {
+      expect(() => assertOwnerCapabilityForWritableOpen(true, false, undefined)).not.toThrow();
+    });
+
+    it('does not throw for a non-file-backed (ephemeral) database regardless of ownerCapability', () => {
+      expect(() => assertOwnerCapabilityForWritableOpen(false, true, undefined)).not.toThrow();
+    });
+  });
+
+  describe('pruneOldEvents', () => {
+    it('bounds candidate scans, advances past ineligible rows, and revisits retained rows', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'running', config: { workflowId: 'wf-1' } }));
+      adapter.saveTask('wf-1', makeTask('wf-1/t2', { status: 'completed', config: { workflowId: 'wf-1' } }));
+      for (let i = 0; i < 1000; i += 1) insertEvent('wf-1/t1');
+      insertEvent('wf-1/t2');
+      (adapter as any).db.run("UPDATE events SET created_at = datetime('now','-30 days')");
+      expect(adapter.pruneOldEvents(14).deleted).toBe(0);
+      expect(adapter.getEvents('wf-1/t2')).toHaveLength(1);
+      expect(adapter.pruneOldEvents(14).deleted).toBe(1);
+      expect(adapter.pruneOldEvents(14).deleted).toBe(0); // reset at end of keyspace
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'completed', config: { workflowId: 'wf-1' } }));
+      expect(adapter.pruneOldEvents(14).deleted).toBe(1000);
+    });
+
+    it('reports the candidate scan size and whether the pass drained, so maintenance continues past ineligible rows', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'running', config: { workflowId: 'wf-1' } }));
+      adapter.saveTask('wf-1', makeTask('wf-1/t2', { status: 'completed', config: { workflowId: 'wf-1' } }));
+      for (let i = 0; i < MAINTENANCE_BATCH_SCAN_LIMIT; i += 1) insertEvent('wf-1/t1');
+      insertEvent('wf-1/t2');
+      (adapter as any).db.run("UPDATE events SET created_at = datetime('now','-30 days')");
+
+      expect(adapter.pruneOldEvents(14)).toEqual({
+        deleted: 0, scanned: MAINTENANCE_BATCH_SCAN_LIMIT, passDrained: false,
+      });
+      expect(adapter.getEvents('wf-1/t2')).toHaveLength(1);
+      expect(adapter.pruneOldEvents(14)).toEqual({ deleted: 1, scanned: 1, passDrained: false });
+      expect(adapter.getEvents('wf-1/t2')).toHaveLength(0);
+      expect(adapter.pruneOldEvents(14)).toEqual({ deleted: 0, scanned: 0, passDrained: true });
+    });
+
+    function backdateEvent(eventId: number, daysAgo: number): void {
+      (adapter as any).db.run(
+        `UPDATE events SET created_at = datetime('now', ?) WHERE id = ?`,
+        [`-${daysAgo} days`, eventId],
+      );
+    }
+
+    function insertEvent(taskId: string): number {
+      adapter.logEvent(taskId, 'task.created');
+      const row = (adapter as any).queryOne(
+        'SELECT id FROM events WHERE task_id = ? ORDER BY id DESC LIMIT 1',
+        [taskId],
+      );
+      return Number(row.id);
+    }
+
+    it('prunes old events belonging to a terminal-status task', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'completed', config: { workflowId: 'wf-1' } }));
+      const eventId = insertEvent('wf-1/t1');
+      backdateEvent(eventId, 30);
+
+      const pruned = adapter.pruneOldEvents(14).deleted;
+
+      expect(pruned).toBe(1);
+      expect(adapter.getEvents('wf-1/t1')).toHaveLength(0);
+    });
+
+    it('does not prune recent events even for a terminal-status task', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'completed', config: { workflowId: 'wf-1' } }));
+      insertEvent('wf-1/t1');
+
+      const pruned = adapter.pruneOldEvents(14).deleted;
+
+      expect(pruned).toBe(0);
+      expect(adapter.getEvents('wf-1/t1')).toHaveLength(1);
+    });
+
+    it('does not prune old events for a task that is still running (not terminal)', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'running', config: { workflowId: 'wf-1' } }));
+      const eventId = insertEvent('wf-1/t1');
+      backdateEvent(eventId, 30);
+
+      const pruned = adapter.pruneOldEvents(14).deleted;
+
+      expect(pruned).toBe(0);
+      expect(adapter.getEvents('wf-1/t1')).toHaveLength(1);
+    });
+
+    it('does not prune old events for a task the user reopened back to a non-terminal status', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'completed', config: { workflowId: 'wf-1' } }));
+      const eventId = insertEvent('wf-1/t1');
+      backdateEvent(eventId, 30);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'running', config: { workflowId: 'wf-1' } }));
+
+      const pruned = adapter.pruneOldEvents(14).deleted;
+
+      expect(pruned).toBe(0);
+      expect(adapter.getEvents('wf-1/t1')).toHaveLength(1);
+    });
+
+    it('is a no-op for a non-positive retention window', () => {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'completed', config: { workflowId: 'wf-1' } }));
+      const eventId = insertEvent('wf-1/t1');
+      backdateEvent(eventId, 3650);
+
+      expect(adapter.pruneOldEvents(0).deleted).toBe(0);
+      expect(adapter.pruneOldEvents(-1).deleted).toBe(0);
+      expect(adapter.getEvents('wf-1/t1')).toHaveLength(1);
+    });
+  });
+
+  describe('pruneOldSyncJournal', () => {
+    it('limits deletes to 1000 candidates and eventually revisits unacknowledged rows', () => {
+      for (let i = 0; i < 2001; i += 1) insertJournalRow(30);
+      insertCursor('peer', 1500);
+      expect(adapter.pruneOldSyncJournal(14).deleted).toBe(1000);
+      expect(adapter.pruneOldSyncJournal(14).deleted).toBe(500);
+      expect(adapter.pruneOldSyncJournal(14).deleted).toBe(0);
+      expect(journalRowCount()).toBe(501);
+      expect(adapter.pruneOldSyncJournal(14).deleted).toBe(0); // reset at end of keyspace
+      (adapter as any).db.run('UPDATE sync_cursors SET last_sent_seq = 2001');
+      expect(adapter.pruneOldSyncJournal(14).deleted).toBe(501);
+    });
+
+    function insertJournalRow(daysAgo: number, seq?: number): number {
+      (adapter as any).db.run(
+        `INSERT INTO sync_journal (entity_type, entity_id, op, payload, origin, created_at)
+         VALUES ('workflow', 'wf-x', 'upsert', '{}', 'home', datetime('now', ?))`,
+        [`-${daysAgo} days`],
+      );
+      const row = (adapter as any).queryOne(
+        'SELECT seq FROM sync_journal ORDER BY seq DESC LIMIT 1',
+      );
+      return Number(row.seq);
+    }
+
+    function insertCursor(peerId: string, lastSentSeq: number): void {
+      (adapter as any).db.run(
+        `INSERT INTO sync_cursors (peer_id, last_sent_seq, last_received_seq, updated_at)
+         VALUES (?, ?, 0, datetime('now'))`,
+        [peerId, lastSentSeq],
+      );
+    }
+
+    function journalRowCount(): number {
+      const row = (adapter as any).queryOne('SELECT COUNT(*) AS c FROM sync_journal');
+      return Number(row.c);
+    }
+
+    it('prunes an old row when no peer has ever registered a cursor', () => {
+      insertJournalRow(30);
+
+      const pruned = adapter.pruneOldSyncJournal(14).deleted;
+
+      expect(pruned).toBe(1);
+      expect(journalRowCount()).toBe(0);
+    });
+
+    it('does not prune a recent row even with no registered peer', () => {
+      insertJournalRow(1);
+
+      const pruned = adapter.pruneOldSyncJournal(14).deleted;
+
+      expect(pruned).toBe(0);
+      expect(journalRowCount()).toBe(1);
+    });
+
+    it('does not prune an old row a registered peer has not yet been sent', () => {
+      const seq = insertJournalRow(30);
+      insertCursor('peer-a', seq - 1);
+
+      const pruned = adapter.pruneOldSyncJournal(14).deleted;
+
+      expect(pruned).toBe(0);
+      expect(journalRowCount()).toBe(1);
+    });
+
+    it('prunes an old row once every registered peer has been sent past it', () => {
+      const seq = insertJournalRow(30);
+      insertCursor('peer-a', seq);
+      insertCursor('peer-b', seq + 5);
+
+      const pruned = adapter.pruneOldSyncJournal(14).deleted;
+
+      expect(pruned).toBe(1);
+      expect(journalRowCount()).toBe(0);
+    });
+
+    it('does not prune an old row when even one of several peers has not been sent past it', () => {
+      const seq = insertJournalRow(30);
+      insertCursor('peer-a', seq);
+      insertCursor('peer-b', seq - 1);
+
+      const pruned = adapter.pruneOldSyncJournal(14).deleted;
+
+      expect(pruned).toBe(0);
+      expect(journalRowCount()).toBe(1);
+    });
+
+    it('is a no-op for a non-positive retention window', () => {
+      insertJournalRow(3650);
+
+      expect(adapter.pruneOldSyncJournal(0).deleted).toBe(0);
+      expect(adapter.pruneOldSyncJournal(-1).deleted).toBe(0);
+      expect(journalRowCount()).toBe(1);
+    });
+  });
+
+  describe('getFreelistPageCount / runIncrementalVacuum', () => {
+    function induceFragmentation(): void {
+      adapter.saveWorkflow(testWorkflow);
+      adapter.saveTask('wf-1', makeTask('wf-1/t1', { status: 'completed', config: { workflowId: 'wf-1' } }));
+      for (let i = 0; i < 2_000; i += 1) {
+        adapter.logEvent('wf-1/t1', 'task.created', { padding: 'x'.repeat(500) });
+      }
+      (adapter as any).db.run('DELETE FROM events WHERE task_id = ?', ['wf-1/t1']);
+    }
+
+    it('returns 0 on a fresh database with no dead pages', () => {
+      expect(adapter.getFreelistPageCount()).toBe(0);
+    });
+
+    it('is a safe no-op while auto_vacuum is still the default NONE, even with real fragmentation', () => {
+      induceFragmentation();
+      const freelistBefore = adapter.getFreelistPageCount();
+      expect(freelistBefore).toBeGreaterThan(0);
+
+      const reclaimed = adapter.runIncrementalVacuum(10_000);
+
+      expect(reclaimed).toBe(0);
+      expect(adapter.getFreelistPageCount()).toBe(freelistBefore);
+    });
+
+    it('reclaims real freelist pages once auto_vacuum is switched to INCREMENTAL', () => {
+      (adapter as any).nativeDb.exec('PRAGMA auto_vacuum = INCREMENTAL');
+      (adapter as any).nativeDb.exec('VACUUM');
+      induceFragmentation();
+      const freelistBefore = adapter.getFreelistPageCount();
+      expect(freelistBefore).toBeGreaterThan(0);
+
+      const reclaimed = adapter.runIncrementalVacuum(freelistBefore + 1_000);
+
+      expect(reclaimed).toBeGreaterThan(0);
+      expect(adapter.getFreelistPageCount()).toBeLessThan(freelistBefore);
+    });
+
+    it('caps reclaimed pages at the requested maxPages', () => {
+      (adapter as any).nativeDb.exec('PRAGMA auto_vacuum = INCREMENTAL');
+      (adapter as any).nativeDb.exec('VACUUM');
+      induceFragmentation();
+      const freelistBefore = adapter.getFreelistPageCount();
+      expect(freelistBefore).toBeGreaterThan(5);
+
+      const reclaimed = adapter.runIncrementalVacuum(5);
+
+      expect(reclaimed).toBeLessThanOrEqual(5);
+      expect(adapter.getFreelistPageCount()).toBe(freelistBefore - reclaimed);
+    });
+
+    it('is a no-op for a non-positive maxPages', () => {
+      (adapter as any).nativeDb.exec('PRAGMA auto_vacuum = INCREMENTAL');
+      (adapter as any).nativeDb.exec('VACUUM');
+      induceFragmentation();
+
+      expect(adapter.runIncrementalVacuum(0)).toBe(0);
+      expect(adapter.runIncrementalVacuum(-1)).toBe(0);
     });
   });
 });

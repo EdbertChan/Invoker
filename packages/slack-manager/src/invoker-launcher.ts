@@ -13,10 +13,12 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { openSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 
 import {
   resolveHeadlessOwnerLaunchSpec,
+  resolveProductionOwnerServiceMarkerPath,
   type HeadlessOwnerLaunchSpec,
 } from '@invoker/contracts';
 
@@ -27,6 +29,23 @@ const SLACK_ENV_VARS = [
   'SLACK_CHANNEL_ID',
   'SLACK_LOBBY_CHANNEL_ID',
 ] as const;
+
+/**
+ * The packaged Electron owner aborts with SIGSEGV during startup when PATH
+ * carries directories that do not exist -- systemd's default user PATH ends in
+ * /snap/bin, which is absent on hosts without snapd, so the supervised owner
+ * crashed on every launch while the same binary ran fine from a login shell.
+ */
+export function withoutMissingPathEntries(
+  pathValue: string | undefined,
+  directoryExists: (path: string) => boolean = existsSync,
+): string | undefined {
+  if (!pathValue) return pathValue;
+  return pathValue
+    .split(delimiter)
+    .filter((entry) => entry.length > 0 && directoryExists(entry))
+    .join(delimiter);
+}
 
 export interface InvokerLauncherOptions {
   repoRoot: string;
@@ -42,6 +61,30 @@ export interface InvokerLauncher {
 export type OwnerLaunchSpec = HeadlessOwnerLaunchSpec;
 export { resolveHeadlessOwnerLaunchSpec as resolveOwnerLaunch };
 
+export function buildOwnerSpawnEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  directoryExists: (path: string) => boolean = existsSync,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    LIBGL_ALWAYS_SOFTWARE: platform === 'linux' ? '1' : baseEnv.LIBGL_ALWAYS_SOFTWARE,
+    PATH: withoutMissingPathEntries(baseEnv.PATH, directoryExists),
+    INVOKER_PRODUCTION_OWNER_SERVICE: '1',
+  };
+  for (const key of SLACK_ENV_VARS) delete env[key];
+  return env;
+}
+
+export function writeProductionOwnerServiceMarkerFile(
+  markerPath: string = resolveProductionOwnerServiceMarkerPath(),
+  makeDirectory: (path: string, options: { recursive: boolean }) => unknown = mkdirSync,
+  writeFile: (path: string, data: string) => void = writeFileSync,
+): void {
+  makeDirectory(join(markerPath, '..'), { recursive: true });
+  writeFile(markerPath, new Date().toISOString());
+}
+
 export function createInvokerLauncher(options: InvokerLauncherOptions): InvokerLauncher {
   let child: ChildProcess | undefined;
 
@@ -56,11 +99,13 @@ export function createInvokerLauncher(options: InvokerLauncherOptions): InvokerL
         }
       }
 
-      const env: NodeJS.ProcessEnv = {
-        ...process.env,
-        LIBGL_ALWAYS_SOFTWARE: process.platform === 'linux' ? '1' : process.env.LIBGL_ALWAYS_SOFTWARE,
-      };
-      for (const key of SLACK_ENV_VARS) delete env[key];
+      try {
+        writeProductionOwnerServiceMarkerFile();
+      } catch (error) {
+        options.log('warn', `failed to write production owner service marker: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      const env = buildOwnerSpawnEnv(process.env);
 
       const spec = resolveHeadlessOwnerLaunchSpec({ repoRoot: options.repoRoot });
       const out = openSync(options.logPath, 'a');

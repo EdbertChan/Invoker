@@ -1,4 +1,4 @@
-import type { TaskState, TaskStatus } from './types.js';
+import { TASK_STATUSES, type TaskState, type TaskStatus } from './types.js';
 
 export type WorkflowDerivedStatus =
   | 'pending'
@@ -58,20 +58,6 @@ export interface WorkflowRollupTaskSummary {
   };
 }
 
-export const TASK_STATUSES: readonly TaskStatus[] = [
-  'pending',
-  'running',
-  'fixing_with_ai',
-  'completed',
-  'failed',
-  'closed',
-  'needs_input',
-  'blocked',
-  'review_ready',
-  'awaiting_approval',
-  'stale',
-];
-
 export function createEmptyWorkflowTaskStatusCounts(): WorkflowTaskStatusCounts {
   return Object.fromEntries(TASK_STATUSES.map((status) => [status, 0])) as WorkflowTaskStatusCounts;
 }
@@ -87,11 +73,11 @@ export function computeWorkflowStatusFromCounts(
   if (counts.running > 0) return 'running';
   if (counts.awaiting_approval > 0) return 'awaiting_approval';
   if (counts.review_ready > 0) return 'review_ready';
-  if (counts.closed > 0) return 'closed';
+  if (counts.closed > 0 || counts.skipped > 0) return 'closed';
   if (counts.blocked > 0 || counts.needs_input > 0) return 'blocked';
   if (counts.pending === total) return 'pending';
   if (counts.pending > 0) return 'running';
-  if (counts.completed > 0 && counts.completed + counts.stale === total) return 'completed';
+  if (counts.completed > 0 && counts.completed + counts.stale + counts.skipped === total) return 'completed';
   if (counts.stale === total) return 'stale';
 
   return 'running';

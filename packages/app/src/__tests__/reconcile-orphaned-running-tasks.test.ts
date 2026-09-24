@@ -59,10 +59,36 @@ describe('reconcileOrphanedInFlightTasksOnBoot', () => {
       attemptId: 'attempt-1',
       executionGeneration: 3,
       status: 'failed',
-      outputs: { exitCode: 1, error: 'Application quit' },
+      outputs: { exitCode: 1, error: 'Application quit', failureClass: 'owner-interrupted' },
     });
     expect(appendTaskOutput).toHaveBeenCalledTimes(1);
     expect(String(appendTaskOutput.mock.calls[0]?.[1] ?? '')).toContain('Startup Orphan Diagnostic');
+    expect(String(appendTaskOutput.mock.calls[0]?.[1] ?? '')).toContain('forcedStopReason=Application quit');
+  });
+
+  it('preserves a recognizable infra failure line from the output tail as the coarse error', () => {
+    // Must stay byte-identical to the production SSH executor's failure text.
+    const OAUTH_EXPIRED_LINE = 'Failed to authenticate: OAuth session expired and could not be refreshed';
+    const running = makeTask('wf-1/slow-task', 'running');
+    const handleWorkerResponse = vi.fn();
+    const appendTaskOutput = vi.fn();
+    const getOutputTail = vi.fn(() => [{
+      data: `[SshExecutor] Running task payload...\n${OAUTH_EXPIRED_LINE}\n[SshExecutor] Recording task result and pushing branch on remote...`,
+    }]);
+
+    reconcileOrphanedInFlightTasksOnBoot({
+      orchestrator: {
+        getAllTasks: () => [running],
+        handleWorkerResponse,
+      },
+      persistence: { getOutputTail, appendTaskOutput },
+    });
+
+    expect(handleWorkerResponse).toHaveBeenCalledTimes(1);
+    expect(handleWorkerResponse).toHaveBeenCalledWith(expect.objectContaining({
+      outputs: { exitCode: 1, error: OAUTH_EXPIRED_LINE },
+    }));
+    expect(handleWorkerResponse.mock.calls[0]?.[0]?.outputs).not.toHaveProperty('failureClass');
     expect(String(appendTaskOutput.mock.calls[0]?.[1] ?? '')).toContain('forcedStopReason=Application quit');
   });
 });

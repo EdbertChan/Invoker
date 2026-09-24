@@ -63,6 +63,11 @@ must_contain "$SKILL_MD" "caption each visual proof item with the concrete thing
 
 must_contain "$SKILL_MD" "Use visible markdown sections for review metadata" "make-pr skill must require visible review metadata sections"
 must_contain "$SKILL_MD" "Do not hide" "make-pr skill must forbid details-wrapped review metadata"
+must_contain "$SKILL_MD" "validate-pr-body-local.mjs" "make-pr skill must validate the body against local changed files and diff before publication"
+must_contain "$SKILL_MD" "For a \`refactor\` lane, include one of these exact claims" "make-pr skill must state the refactor unchanged-behavior non-goal requirement"
+must_contain "$SKILL_MD" "CI validates the declared Review Lane and Review Unit against the actual changed files" "make-pr skill must explain CI's diff-aware lane and unit validation"
+must_contain "$SKILL_MD" "### Before" "make-pr skill Architecture guidance must include the required Before subsection"
+must_contain "$SKILL_MD" "### After" "make-pr skill Architecture guidance must include the required After subsection"
 must_contain "$SKILL_MD" "Before/after visual proof images must use distinct local filenames" "make-pr visual proof must prevent before/after basename upload collisions"
 must_contain "$SKILL_MD" 'The uploader keys media by basename inside one upload prefix' "make-pr visual proof must explain why duplicate basenames are unsafe"
 must_contain "$SKILL_MD" "cursor, pointer, hover-only affordance" "make-pr visual proof must call out states static screenshots cannot show"
@@ -90,6 +95,7 @@ must_contain "$SKILL_MD" "Read each live PR (\`gh pr view\` or \`pr://\`) for ti
 must_contain "$SKILL_MD" "aligned stack title prefix" "make-pr skill must require aligned stack titles after publication"
 must_contain "$SKILL_MD" "remote-only head branch name" "make-pr skill must document the Mergify branch-name mismatch case"
 must_contain "$SKILL_MD" "gh pr edit --title ... --body-file ..." "make-pr skill must allow immediate metadata repair when create-pr cannot map the published branch"
+must_contain "$SKILL_MD" "first run \`node scripts/validate-pr-body-local.mjs" "make-pr skill must validate before the gh pr edit escape hatch"
 
 # Broad stack repair must re-audit the full rebuilt stack and fold no-claim fixups.
 must_contain "$SKILL_MD" "diff atomicity blockers are hard failures" "make-pr skill must make stacked diff-atomicity blockers fatal"
@@ -111,12 +117,14 @@ must_contain "$SKILL_MD" "auto-switch to a stale leftover branch and publish an 
 must_contain "$SKILL_MD" "\`--dry-run\` refuses on a generated branch; the real push does not" "make-pr skill must require dry-run as the safety check"
 must_contain "$SKILL_MD" "git push --force-with-lease origin HEAD" "make-pr skill must offer the deterministic single-branch update path"
 must_contain "$SKILL_MD" "node scripts/safe-stack-push.mjs" "make-pr skill must route pushes through the safe-stack-push guard"
+must_contain "$SKILL_MD" "Never publish a Mergify stack with a \`plan/\` base" "make-pr skill must forbid plan bases for Mergify stacks"
+must_contain "$SKILL_MD" "does not prohibit non-Mergify Invoker workflows from using \`plan/\` integration branches" "make-pr skill must scope the plan-base restriction to Mergify"
 
 # The guard itself must exist and classify branches correctly (refuse generated, allow working).
 GUARD="$REPO_ROOT/scripts/safe-stack-push.mjs"
 [[ -f "$GUARD" ]] || fail "expected guard script $GUARD"
 node --input-type=module -e "
-import { isGeneratedStackBranch, evaluatePush } from '$GUARD';
+import { extractPlannedPrNumbers, isGeneratedStackBranch, evaluatePlanBases, evaluatePush } from '$GUARD';
 const gen = 'stack/EdbertChan/pr/app-tsconfig-noemit/stop-tsc-clobbering-tsup-built-dist--c0651a20';
 const work = 'pr/app-tsconfig-noemit';
 if (!isGeneratedStackBranch(gen)) process.exit(1);
@@ -124,6 +132,11 @@ if (isGeneratedStackBranch(work)) process.exit(1);
 if (evaluatePush({ branch: gen, mergifyRefusesAsGenerated: false }).allowed) process.exit(1);
 if (!evaluatePush({ branch: work, mergifyRefusesAsGenerated: false }).allowed) process.exit(1);
 if (evaluatePush({ branch: work, mergifyRefusesAsGenerated: true }).allowed) process.exit(1);
+const plan = 'created https://github.com/Neko-Catpital-Labs/Invoker/pull/42\\nupdated https://github.com/Neko-Catpital-Labs/Invoker/pull/42\\n';
+if (JSON.stringify(extractPlannedPrNumbers(plan)) !== '[42]') process.exit(1);
+if (evaluatePlanBases(['master', 'stack/EdbertChan/example']).allowed !== true) process.exit(1);
+const blocked = evaluatePlanBases(['master', 'plan/upstream', 'plan/upstream']);
+if (blocked.allowed || JSON.stringify(blocked.planBases) !== '[\"plan/upstream\"]') process.exit(1);
 " || fail "safe-stack-push guard must refuse generated branches and allow working branches"
 
 # One-refactor-at-a-time decomposition: one PR moves exactly one top-level symbol.
@@ -147,5 +160,22 @@ must_contain "$SKILL_MD" "Mandatory refresh after branch/PR changes that can sta
 must_contain "$SKILL_MD" "After any branch update, rebase, force-push, or stacked-branch reshuffle, refresh the PR title and body" "make-pr skill must require refreshing PR title/body after any branch update, rebase, or force-push"
 must_contain "$SKILL_MD" "ensure the PR title still matches the current slice after any branch update or force-push" "make-pr skill validation checklist must include the PR-title staleness check"
 must_contain "$SKILL_MD" 'ensure the `## Summary` section still describes the current diff, not the earlier version' "make-pr skill validation checklist must include the Summary staleness check"
+
+# Visual proof claims must be backed by actually looking at the media, not just
+# capturing it. Locks the prove-it hard gate wiring.
+must_contain "$SKILL_MD" "actually open that exact media yourself" "make-pr skill must require actually opening visual proof media before claiming it"
+must_contain "$SKILL_MD" "Do not trust an automated DOM/test assertion as a substitute for looking" "make-pr skill must reject automated assertions as a substitute for looking at proof"
+must_contain "$SKILL_MD" 'rejects a Visual Proof section that has media but no `Manually inspected:` line' "make-pr skill must document the Manually inspected validator gate"
+must_contain "$SKILL_MD" "skills/prove-it/SKILL.md" "make-pr skill must reference the shared prove-it evidence rule"
+must_contain "$SKILL_MD" "Manually inspected: state exactly what you saw when you opened the image or video yourself" "make-pr skill schema must include the Manually inspected template line"
+
+# Proof-lane assertions must test the exact claim, not an easier proxy signal.
+must_contain "$REVIEW_COMPRESSION_MD" "## Proof Must Match the Claim" "review-compression must keep the proof-must-match-the-claim section heading"
+must_contain "$REVIEW_COMPRESSION_MD" "A proxy assertion can pass while the real behavior described in the claim is still broken" "review-compression must explain why a proxy assertion is unsafe"
+
+must_contain "$SKILL_MD" "CI validates the declared Review Lane and Review Unit against the actual changed files" "make-pr skill must say review units come from changed files"
+if grep -q "check-pr-body-keywords" "$SKILL_MD"; then
+  fail "make-pr skill must not send drafters to a prose keyword check; review units come from changed files"
+fi
 
 echo "OK: make-pr skill contract checks passed"

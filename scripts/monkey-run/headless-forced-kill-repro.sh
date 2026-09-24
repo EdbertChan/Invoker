@@ -142,7 +142,6 @@ start_owner() {
     INVOKER_DB_DIR="$INVOKER_DB_DIR" \
     INVOKER_IPC_SOCKET="$INVOKER_IPC_SOCKET" \
     INVOKER_REPO_CONFIG_PATH="$INVOKER_REPO_CONFIG_PATH" \
-    INVOKER_ALLOW_DELETE_ALL=1 \
     INVOKER_UNSAFE_DISABLE_DB_WRITER_LOCK=1 \
     INVOKER_EXECUTING_STALL_TIMEOUT_MS="$STALL_TIMEOUT_MS" \
     INVOKER_STARTUP_POLL_DELAY_MS=0 \
@@ -227,7 +226,7 @@ for _ in $(seq 1 40); do
 done
 if [[ -z "$RESOLVED_ID" ]]; then
   echo "repro: task never entered running" >&2
-  invoker_e2e_run_headless status >&2 || true
+  invoker_e2e_dump_tasks >&2
   exit 1
 fi
 echo "stage: task running as $RESOLVED_ID"

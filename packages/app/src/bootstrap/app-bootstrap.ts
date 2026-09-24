@@ -1,3 +1,4 @@
+import type { CodexSpendGateStatus } from '@invoker/contracts';
 import { join } from 'node:path';
 import type { App } from 'electron';
 
@@ -17,6 +18,14 @@ export function shouldRefreshGuiOwnerRoute(
   isUsingDaemonOwner: boolean,
 ): boolean {
   return preference === 'daemon' || (preference === 'auto' && isUsingDaemonOwner);
+}
+export function shouldBootstrapDaemonOwner(preference: GuiOwnerPreference): boolean {
+  return preference === 'daemon' || preference === 'auto';
+}
+
+export function guiAutoOwnerBootstrapTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number.parseInt(env.INVOKER_GUI_AUTO_OWNER_BOOTSTRAP_TIMEOUT_MS ?? '5000', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5000;
 }
 
 export function guiOwnerBootstrapTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -43,6 +52,7 @@ export interface RuntimeStatusFields {
   ownerMode: boolean;
   readOnly: boolean;
   mode: RuntimeModeSnapshot;
+  codexSpendGate?: CodexSpendGateStatus;
 }
 
 /** Compute the GUI runtime status from ownership flags. */
@@ -98,6 +108,7 @@ export interface EarlyElectronAppOptions {
   platform?: NodeJS.Platform;
   enableTestCompositor: boolean;
   isHeadless: boolean;
+  hideE2eWindow: boolean;
 }
 
 export function configureEarlyElectronApp(options: EarlyElectronAppOptions): void {
@@ -124,7 +135,7 @@ export function configureEarlyElectronApp(options: EarlyElectronAppOptions): voi
     options.app.commandLine.appendSwitch('class', 'invoker');
   }
 
-  if (platform === 'darwin' && options.isHeadless) {
+  if (platform === 'darwin' && (options.isHeadless || options.hideE2eWindow)) {
     options.app.setActivationPolicy?.('accessory');
     options.app.dock?.hide();
   }

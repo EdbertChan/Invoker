@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, existsSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
+import { ExecutorStartup, StartupCancelledError } from '../executor.js';
 import { RepoPool, ResourceLimitError } from '../repo-pool.js';
 import { remoteFetchForPool } from '../remote-fetch-policy.js';
 import * as branchUtils from '../branch-utils.js';
@@ -46,6 +47,99 @@ describe('RepoPool', () => {
     await pool.destroyAll();
     rmSync(tmpDir, { recursive: true, force: true });
     rmSync(localRepoUrl, { recursive: true, force: true });
+  });
+
+  it('startup cancellation retains a shared clone lock for surviving and later waiters', async () => {
+    let unblock!: () => void;
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const original = (pool as any).ensureCloneUnqueued.bind(pool);
+    const clone = vi.spyOn(pool as any, 'ensureCloneUnqueued').mockImplementation(async (repo: string) => {
+      await gate;
+      return original(repo);
+    });
+    const startup = new ExecutorStartup(Date.now() + 10000, new StartupCancelledError('timeout', 'test deadline'));
+    const expired = pool.ensureCloneThroughRepoQueue(localRepoUrl, startup);
+    const survivor = pool.ensureCloneThroughRepoQueue(localRepoUrl);
+    startup.cancel();
+    await expect(expired).rejects.toMatchObject({ reason: 'timeout' });
+    const later = pool.ensureCloneThroughRepoQueue(localRepoUrl);
+    unblock();
+    const [first, second] = await Promise.all([survivor, later]);
+    expect(first).toBe(second);
+    expect(clone).toHaveBeenCalledTimes(1);
+    clone.mockRestore();
+  });
+
+  it('startup cancellation removes a queued acquisition without cancelling the shared operation ahead of it', async () => {
+    let unblock!: () => void;
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const original = (pool as any).ensureCloneUnqueued.bind(pool);
+    vi.spyOn(pool as any, 'ensureCloneUnqueued').mockImplementationOnce(async (repo: string) => {
+      await gate;
+      return original(repo);
+    });
+    const shared = pool.ensureCloneThroughRepoQueue(localRepoUrl);
+    const startup = new ExecutorStartup(Date.now() + 10000, new StartupCancelledError('timeout', 'test deadline'));
+    const queued = pool.acquireWorktree(localRepoUrl, 'expired-queued', undefined, undefined, { startup });
+    startup.cancel();
+    await expect(queued).rejects.toMatchObject({ reason: 'timeout' });
+    const survivor = pool.acquireWorktree(localRepoUrl, 'survivor');
+    unblock();
+    await shared;
+    const acquired = await survivor;
+    const branches = execSync('git branch --list expired-queued', { cwd: acquired.clonePath, encoding: 'utf8' });
+    expect(branches.trim()).toBe('');
+    expect(existsSync(acquired.worktreePath)).toBe(true);
+    expect([...((pool as any).activeWorktrees as Map<string, Set<string>>).values()].flatMap(paths => [...paths])).toEqual([acquired.worktreePath]);
+  });
+
+  it('startup cancellation settles an active acquisition only after releasing its late result', async () => {
+    let reached!: () => void;
+    let unblock!: () => void;
+    const entered = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const original = (pool as any).doAcquireWorktree.bind(pool);
+    vi.spyOn(pool as any, 'doAcquireWorktree').mockImplementationOnce(async (...args: unknown[]) => {
+      const acquired = await original(...args);
+      reached();
+      await gate;
+      return acquired;
+    });
+    const startup = new ExecutorStartup(Date.now() + 10000, new StartupCancelledError('timeout', 'test deadline'));
+    let settled = false;
+    const acquisition = pool.acquireWorktree(localRepoUrl, 'expired-delivery', undefined, undefined, { startup })
+      .catch(error => { settled = true; return error; });
+    try {
+      await entered;
+      startup.cancel();
+      await new Promise(resolve => setImmediate(resolve));
+      expect(settled, 'owned cleanup must finish before startup settles').toBe(false);
+      unblock();
+      expect(await acquisition).toMatchObject({ reason: 'timeout' });
+      expect([...((pool as any).activeWorktrees as Map<string, Set<string>>).values()].flatMap(paths => [...paths])).toEqual([]);
+    } finally {
+      unblock();
+      await acquisition;
+    }
+  });
+
+  it('startup cancellation cleanup cannot release a newer owner of the same worktree path', async () => {
+    const leases = new Set<string>();
+    const leasedPool = new RepoPool({ cacheDir: tmpDir, leasePersistence: {
+      claimExecutionResourceLease: ({ holderId }) => { leases.add(holderId); return true; },
+      releaseExecutionResourceLease: (_key, holderId) => { leases.delete(holderId); },
+    } });
+    const old = await leasedPool.acquireWorktree(localRepoUrl, 'same-branch', undefined, undefined, { leaseHolderId: 'old' });
+    const current = await leasedPool.acquireWorktree(localRepoUrl, 'same-branch', undefined, undefined, { leaseHolderId: 'current' });
+    expect(current.worktreePath).toBe(old.worktreePath);
+    old.softRelease();
+    old.softRelease();
+    await old.release();
+    expect([...leases]).toEqual(['current']);
+    expect(existsSync(current.worktreePath)).toBe(true);
+    expect([...((leasedPool as any).activeWorktrees as Map<string, Set<string>>).values()].flatMap(paths => [...paths])).toEqual([current.worktreePath]);
+    await current.release();
+    expect([...leases]).toEqual([]);
   });
 
   it('ensureCloneThroughRepoQueue: clones repo on first call', async () => {
@@ -235,6 +329,147 @@ describe('RepoPool', () => {
     }
   });
 
+  it('acquireWorktree: retries once after a transient git worktree setup failure', async () => {
+    const branch = 'experiment/race-not-in-work-tree';
+    const actionId = 'wf-race/task-not-in-work-tree';
+    const poolWithExternalBase = new RepoPool({
+      cacheDir: tmpDir,
+      worktreeBaseDir: join(tmpDir, 'managed-worktrees'),
+    });
+    const targetPath = poolWithExternalBase.externalWorktreePath(localRepoUrl, branch);
+
+    const originalRunBashLocal = branchUtils.runBashLocal;
+    let shouldFailFirstAttempt = true;
+    const runBashSpy = vi
+      .spyOn(branchUtils, 'runBashLocal')
+      .mockImplementation(async (script, cwd) => {
+        if (shouldFailFirstAttempt) {
+          shouldFailFirstAttempt = false;
+          const error = new Error(
+            `bash exited with code 128: Preparing worktree (new branch '${branch}')\n` +
+              'fatal: this operation must be run in a work tree',
+          );
+          (error as Error & { exitCode?: number }).exitCode = 128;
+          throw error;
+        }
+        return originalRunBashLocal(script, cwd);
+      });
+
+    try {
+      const acquired = await poolWithExternalBase.acquireWorktree(
+        localRepoUrl,
+        branch,
+        undefined,
+        actionId,
+        { forceFresh: true },
+      );
+      expect(realpathSync(acquired.worktreePath)).toBe(realpathSync(targetPath));
+      expect(existsSync(join(acquired.worktreePath, '.git'))).toBe(true);
+      const currentBranch = execSync('git branch --show-current', { cwd: acquired.worktreePath })
+        .toString()
+        .trim();
+      expect(currentBranch).toBe(branch);
+      expect(runBashSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      runBashSpy.mockRestore();
+      await poolWithExternalBase.destroyAll();
+    }
+  });
+
+  it('acquireWorktree: retries once when worktree add reports target gitdir missing', async () => {
+    const branch = 'experiment/race-missing-gitdir';
+    const actionId = 'wf-race/task-missing-gitdir';
+    const poolWithExternalBase = new RepoPool({
+      cacheDir: tmpDir,
+      worktreeBaseDir: join(tmpDir, 'managed-worktrees'),
+    });
+    const targetPath = poolWithExternalBase.externalWorktreePath(localRepoUrl, branch);
+
+    const originalRunBashLocal = branchUtils.runBashLocal;
+    let shouldFailFirstAttempt = true;
+    const runBashSpy = vi
+      .spyOn(branchUtils, 'runBashLocal')
+      .mockImplementation(async (script, cwd) => {
+        if (shouldFailFirstAttempt) {
+          shouldFailFirstAttempt = false;
+          const error = new Error(
+            `bash exited with code 128: Preparing worktree (new branch '${branch}')\n` +
+              `fatal: not a git repository: '${targetPath}/.git'`,
+          );
+          (error as Error & { exitCode?: number }).exitCode = 128;
+          throw error;
+        }
+        return originalRunBashLocal(script, cwd);
+      });
+
+    try {
+      const acquired = await poolWithExternalBase.acquireWorktree(
+        localRepoUrl,
+        branch,
+        undefined,
+        actionId,
+        { forceFresh: true },
+      );
+      expect(realpathSync(acquired.worktreePath)).toBe(realpathSync(targetPath));
+      expect(existsSync(join(acquired.worktreePath, '.git'))).toBe(true);
+      const currentBranch = execSync('git branch --show-current', { cwd: acquired.worktreePath })
+        .toString()
+        .trim();
+      expect(currentBranch).toBe(branch);
+      expect(runBashSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      runBashSpy.mockRestore();
+      await poolWithExternalBase.destroyAll();
+    }
+  });
+
+  it('acquireWorktree: reuses a worktree when git reports failure after creating it', async () => {
+    const branch = 'experiment/race-partial-success';
+    const actionId = 'wf-race/task-partial';
+    const poolWithExternalBase = new RepoPool({
+      cacheDir: tmpDir,
+      worktreeBaseDir: join(tmpDir, 'managed-worktrees'),
+    });
+    const targetPath = poolWithExternalBase.externalWorktreePath(localRepoUrl, branch);
+
+    const originalRunBashLocal = branchUtils.runBashLocal;
+    let shouldFailAfterCreatingWorktree = true;
+    const runBashSpy = vi
+      .spyOn(branchUtils, 'runBashLocal')
+      .mockImplementation(async (script, cwd) => {
+        await originalRunBashLocal(script, cwd);
+        if (shouldFailAfterCreatingWorktree) {
+          shouldFailAfterCreatingWorktree = false;
+          const error = new Error(
+            `bash exited with code 255: Preparing worktree (resetting branch '${branch}')\n` +
+              `fatal: cannot force update the branch '${branch}' used by worktree at '${targetPath}'`,
+          );
+          (error as Error & { exitCode?: number }).exitCode = 255;
+          throw error;
+        }
+      });
+
+    try {
+      const acquired = await poolWithExternalBase.acquireWorktree(
+        localRepoUrl,
+        branch,
+        undefined,
+        actionId,
+        { forceFresh: true },
+      );
+      expect(realpathSync(acquired.worktreePath)).toBe(realpathSync(targetPath));
+      expect(existsSync(join(acquired.worktreePath, '.git'))).toBe(true);
+      const currentBranch = execSync('git branch --show-current', { cwd: acquired.worktreePath })
+        .toString()
+        .trim();
+      expect(currentBranch).toBe(branch);
+      expect(runBashSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      runBashSpy.mockRestore();
+      await poolWithExternalBase.destroyAll();
+    }
+  });
+
   it('softRelease: frees slot without removing worktree from disk', async () => {
     const limitedPool = new RepoPool({ cacheDir: tmpDir, maxWorktrees: 1 });
     const wt1 = await limitedPool.acquireWorktree(localRepoUrl, 'branch-soft');
@@ -266,6 +501,98 @@ describe('RepoPool', () => {
     const wt2 = await limitedPool.acquireWorktree(localRepoUrl, 'branch-both');
     expect(wt2.worktreePath).toBeDefined();
     await limitedPool.destroyAll();
+  });
+
+  describe('lease persistence (DB-backed worktree slots)', () => {
+    /** Minimal in-memory stand-in for the execution_resource_leases table. */
+    function makeFakeLeasePersistence() {
+      const rows = new Map<string, { resourceKey: string; holderId: string }>();
+      return {
+        rows,
+        claimExecutionResourceLease: vi.fn((options: {
+          resourceKey: string;
+          resourceType: string;
+          holderId: string;
+          maxHolders?: number;
+        }) => {
+          const key = `${options.resourceKey}::${options.holderId}`;
+          if (rows.has(key)) return true;
+          const maxHolders = Math.max(1, options.maxHolders ?? 1);
+          const otherHolders = [...rows.values()].filter((r) => r.resourceKey === options.resourceKey).length;
+          if (otherHolders >= maxHolders) return false;
+          rows.set(key, { resourceKey: options.resourceKey, holderId: options.holderId });
+          return true;
+        }),
+        releaseExecutionResourceLease: vi.fn((resourceKey: string, holderId: string) => {
+          rows.delete(`${resourceKey}::${holderId}`);
+        }),
+      };
+    }
+
+    it('claims a lease on acquire and releases it on softRelease', async () => {
+      const leasePersistence = makeFakeLeasePersistence();
+      const limitedPool = new RepoPool({ cacheDir: tmpDir, maxWorktrees: 1, leasePersistence });
+      const wt = await limitedPool.acquireWorktree(localRepoUrl, 'branch-lease-1', undefined, undefined, {
+        leaseHolderId: 'attempt-1',
+      });
+
+      expect(leasePersistence.claimExecutionResourceLease).toHaveBeenCalledWith(
+        expect.objectContaining({ resourceType: 'worktree', holderId: 'attempt-1', maxHolders: 1 }),
+      );
+      expect(wt.leaseHolderId).toBe('attempt-1');
+      expect(leasePersistence.rows.size).toBe(1);
+
+      wt.softRelease();
+      expect(leasePersistence.releaseExecutionResourceLease).toHaveBeenCalledWith(wt.leaseResourceKey, 'attempt-1');
+      expect(leasePersistence.rows.size).toBe(0);
+      await limitedPool.destroyAll();
+    });
+
+    it('claims a lease on acquire and releases it on full release', async () => {
+      const leasePersistence = makeFakeLeasePersistence();
+      const limitedPool = new RepoPool({ cacheDir: tmpDir, maxWorktrees: 1, leasePersistence });
+      const wt = await limitedPool.acquireWorktree(localRepoUrl, 'branch-lease-2', undefined, undefined, {
+        leaseHolderId: 'attempt-2',
+      });
+      expect(leasePersistence.rows.size).toBe(1);
+
+      await wt.release();
+      expect(leasePersistence.rows.size).toBe(0);
+    });
+
+    it('throws ResourceLimitError when the DB lease is exhausted, without mutating the in-memory Set beyond it', async () => {
+      const leasePersistence = makeFakeLeasePersistence();
+      // Pre-fill the DB lease for this repo as already held by a different holder,
+      // simulating a slot reserved by another process instance.
+      const limitedPool = new RepoPool({ cacheDir: tmpDir, maxWorktrees: 5, leasePersistence });
+      leasePersistence.rows.set('bootstrap-key::other-holder', { resourceKey: 'bootstrap-key', holderId: 'other-holder' });
+      // Use the pool's own repo-key computation via a real acquire first, then
+      // saturate the DB lease at maxHolders=5 with distinct external holders.
+      const wt1 = await limitedPool.acquireWorktree(localRepoUrl, 'branch-lease-3a', undefined, undefined, {
+        leaseHolderId: 'attempt-3a',
+      });
+      const repoKey = wt1.leaseResourceKey!;
+      for (let i = 0; i < 4; i += 1) {
+        leasePersistence.rows.set(`${repoKey}::external-${i}`, { resourceKey: repoKey, holderId: `external-${i}` });
+      }
+      // In-memory Set only has 1 active worktree (well under maxWorktrees=5),
+      // but the DB lease is now saturated (1 real + 4 external = 5).
+      await expect(
+        limitedPool.acquireWorktree(localRepoUrl, 'branch-lease-3b', undefined, undefined, {
+          leaseHolderId: 'attempt-3b',
+        }),
+      ).rejects.toThrow(ResourceLimitError);
+      await limitedPool.destroyAll();
+    });
+
+    it('degrades to in-memory-only capacity when no leaseHolderId is supplied, even with persistence configured', async () => {
+      const leasePersistence = makeFakeLeasePersistence();
+      const limitedPool = new RepoPool({ cacheDir: tmpDir, maxWorktrees: 2, leasePersistence });
+      const wt = await limitedPool.acquireWorktree(localRepoUrl, 'branch-lease-4');
+      expect(leasePersistence.claimExecutionResourceLease).not.toHaveBeenCalled();
+      expect(wt.leaseResourceKey).toBeUndefined();
+      await limitedPool.destroyAll();
+    });
   });
 
   it('reconcileActiveWorktrees clears stale slot reservations', async () => {

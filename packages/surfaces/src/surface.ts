@@ -25,6 +25,7 @@ export type SurfaceCommand =
       requestedBy?: string;
       lobbyChannel?: string;
       lobbyThreadTs?: string;
+      executionKey?: string;
     };
 
 // ── Workflow operations (Surface → Orchestrator, lobby command routing) ──
@@ -95,6 +96,14 @@ export type SurfaceEvent =
   | { type: 'workflow_status'; status: WorkflowStatus; workflowId?: string }
   | { type: 'workflow_progress'; progress: WorkflowProgress }
   | {
+      type: 'alert';
+      severity: 'info' | 'warning' | 'critical';
+      source: string;
+      subject: string;
+      message: string;
+      alertKey: string;
+    }
+  | {
       type: 'workflow_created';
       workflowId: string;
       requestedBy?: string;
@@ -102,8 +111,20 @@ export type SurfaceEvent =
       lobbyThreadTs?: string;
       harnessPreset?: string;
       repoUrl?: string;
+      planFile?: string;
     }
   | { type: 'error'; message: string };
+
+type SurfaceEventTypecheck<T extends SurfaceEvent> = T;
+
+type SurfaceAlertEventTypecheck = SurfaceEventTypecheck<{
+  type: 'alert';
+  severity: 'info';
+  source: string;
+  subject: string;
+  message: string;
+  alertKey: string;
+}>;
 
 // ── Logging ──────────────────────────────────────────────
 
@@ -111,7 +132,7 @@ export type LogFn = (source: string, level: string, message: string) => void;
 
 // ── Interface ──────────────────────────────────────────────
 
-export type CommandHandler = (command: SurfaceCommand) => void | Promise<void>;
+export type CommandHandler = (command: SurfaceCommand) => void | Promise<void | { workflowIds?: string[] }>;
 
 export interface Surface {
   /** Unique identifier for this surface type (e.g. 'slack', 'discord'). */

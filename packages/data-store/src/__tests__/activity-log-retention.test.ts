@@ -1,5 +1,6 @@
+import { setImmediate as yieldToMaintenance } from 'node:timers/promises';
 import { describe, it, expect, afterEach } from 'vitest';
-import { SQLiteAdapter } from '../sqlite-adapter.js';
+import { SQLiteAdapter, shouldPruneActivityLog } from '../sqlite-adapter.js';
 
 const PRUNE_INTERVAL = 1_000; // matches ACTIVITY_LOG_PRUNE_INTERVAL in sqlite-adapter.ts
 
@@ -48,6 +49,7 @@ describe('activity_log retention', () => {
     for (let i = 0; i < writes; i += 1) {
       adapter.writeActivityLog('flood', 'info', `entry-${i}`);
     }
+    for (let i = 0; i < 5; i += 1) await yieldToMaintenance();
     const count = rowCount(adapter);
     expect(count).toBeLessThanOrEqual(cap + PRUNE_INTERVAL);
     expect(count).toBeGreaterThanOrEqual(cap);
@@ -55,6 +57,24 @@ describe('activity_log retention', () => {
     const newest = adapter.getActivityLogs(0, writes).map((r) => r.message);
     expect(newest).toContain(`entry-${writes - 1}`);
     expect(newest).not.toContain('entry-0');
+  });
+
+  it('limits one prune to 1000 rows and cancels queued maintenance on close', async () => {
+    const adapter = await makeAdapter(10);
+    for (let i = 0; i < 2500; i += 1) adapter.writeActivityLog('test', 'info', `${i}`);
+    expect(rowCount(adapter)).toBe(2500);
+    expect(adapter.pruneActivityLog()).toBe(1000);
+    expect(rowCount(adapter)).toBe(1500);
+    adapter.close();
+    adapters.pop();
+    await yieldToMaintenance();
+  });
+
+  it('shouldPruneActivityLog throttles on the writes-since-prune/interval threshold', () => {
+    expect(shouldPruneActivityLog(0, PRUNE_INTERVAL)).toBe(false);
+    expect(shouldPruneActivityLog(PRUNE_INTERVAL - 1, PRUNE_INTERVAL)).toBe(false);
+    expect(shouldPruneActivityLog(PRUNE_INTERVAL, PRUNE_INTERVAL)).toBe(true);
+    expect(shouldPruneActivityLog(PRUNE_INTERVAL + 1, PRUNE_INTERVAL)).toBe(true);
   });
 
   it('treats maxRows <= 0 as retention disabled (reproduces the unbounded growth)', async () => {

@@ -1,34 +1,38 @@
 # Slack-native coding workflows
 
-Drive Invoker from Slack: mention `@Invoker` in a shared **lobby** channel to start a normal agent thread in a checked-out repo. If you want an Invoker workflow, say `plan:` first, then submit the drafted plan. When a workflow starts, Invoker creates a **private `workflow-<id>` channel**, invites you, and posts the workflow there. Mentioning `@Invoker` inside that channel answers using **only that workflow's context** (its planning conversation plus every task transcript) and runs control actions on it.
+Drive Invoker from Slack: mention `@Invoker` in any channel where the bot is present to start a normal agent thread in a checked-out repo. When the scope is ready, use `@Invoker /plan` in that same thread. Invoker posts a durable review message with the exact YAML attachment and Approve/Cancel buttons. When a workflow starts, Invoker creates a **private `workflow-<id>` channel**, invites you, and posts the workflow there. Mentioning `@Invoker` inside that mapped channel answers using **only that workflow's context** (its planning conversation plus every task transcript) and runs control actions on it.
 
 ## Flow
 
-1. **Start a normal agent thread.** In the lobby channel: `@Invoker [omp+codex] [repo:web] fix the Slack routing bug`. Invoker checks out the repo and runs a normal OMP/Codex-style conversation in the thread.
-2. **Opt into Invoker planning.** Use `@Invoker plan: add a /health endpoint` when you want YAML for an Invoker workflow instead of direct local agent work. You can also reply `plan: add a /health endpoint` in an existing agent thread; Invoker promotes that same thread to planning and retains its selected repo and harness preset.
-3. **Submit only when ready.** Run `@Invoker submit` in that plan thread, then approve the short summary. That starts the generated YAML plan as a workflow.
-4. **Workflow channel appears.** Invoker creates private `workflow-<id>`, invites you, posts the workflow summary there, and links it from the lobby thread.
+1. **Start a normal agent thread.** In any channel where Invoker is present: `@Invoker [omp+codex] [repo:web] fix the Slack routing bug` or `@Invoker fix this in https://github.com/acme/web`. Invoker checks out the selected repo and runs a normal OMP/Codex-style conversation in the thread.
+2. **Create a plan explicitly.** Use `@Invoker /plan` in the established thread. It uses the same thread history, pinned repo, and harness preset to convert the agreed scope to Invoker YAML.
+3. **Review and approve.** The review message contains newline-delimited steps, the exact YAML attachment, and Approve/Cancel buttons. It is durable: it does not expire. Approve starts that exact YAML plan as a workflow.
+4. **Workflow channel appears.** Invoker creates private `workflow-<id>`, invites you, posts the workflow summary there, and links it from the originating plan thread.
 5. **Operate in the channel.** `@Invoker status`, `@Invoker approve <task>`, `@Invoker reject <task>`, `@Invoker retry <task>`, `@Invoker input <task>: <text>`, or ask a free-form question (answered only from this workflow's planning + task transcripts).
 
-## Message tags (lobby only)
+## Message tags
 
 Leading `[...]` tags select how planning runs. Order does not matter; everything after the tags is the request.
 
 - `[<preset>]` — pick a harness preset (CLI tool + model). No tag ⇒ the default preset.
-- `[repo:<alias|git-url>]` — pick the target repo. No tag ⇒ `defaultRepoUrl`.
+- `[repo:<alias|git-url>]` — explicitly pick the target repo. One unambiguous GitHub or git URL in the tagged request also selects that repo. Multiple URLs, or a URL that conflicts with `[repo:…]`, are rejected. No selector ⇒ `defaultRepoUrl`.
 
 `@Invoker raise a PR that adds rate limiting` (no tags) uses the default preset and default repo as a normal agent thread.
 
+The repository and harness are pinned when the thread starts. Start a new thread to use another repository or preset.
+
+When the harness preset supports it, Invoker resumes the same underlying agent session across turns and across a Slack manager restart (append-based continuity) instead of replaying the full prompt history each time.
+
 ## Local and plan modes
 
-Normal lobby mentions are local agent sessions. They can answer, edit, and run focused checks in their repo worktree.
+Normal mentions outside mapped workflow channels are exploration sessions. They can answer and create repro artifacts, but tracked files are restored and the turn fails if the agent modifies them before plan approval.
 
 - `@Invoker fix the typo in the Slack docs` — starts or continues a normal agent thread.
 - `@Invoker local: fix the typo in the Slack docs` — kept as an alias for the same normal agent thread.
 - `@Invoker run local: report back how many workflows are running` — answers through Invoker status directly. Other local queries use the normal agent thread.
 - `@Invoker exec local: pnpm --filter @invoker/surfaces test -- slack-surface-workflows.test.ts` — runs that exact shell command and reports the exit code and output. It does **not** edit files.
-- `@Invoker plan: fix the typo in the Slack docs` — drafts Invoker YAML. Use `@Invoker submit` (or bare `submit`) in that thread to start the approval flow.
-- `plan: turn the discussion above into a migration plan` — promotes the current agent thread to plan mode, keeping its repo and harness selection. This works after a Slack service restart as well.
+- `@Invoker /plan` — converts the current thread into a YAML review message without changing its pinned repository or preset.
+- Plain text such as `plan`, `submit`, or YAML fences does not create or execute a workflow.
 
 ## Harness presets
 
@@ -88,14 +92,14 @@ documented. The standalone manager reads that config first, then falls back to
 `INVOKER_SLACK_DEFAULT_PRESET` only when the config leaves the preset unset.
 To configure by hand, put these credential values in `~/.invoker/.env`
 (canonical, loaded on startup before the Slack check) or `<repoRoot>/.env`
-(fallback), then run `invoker-slack` (or `./run.sh` for the desktop app only):
+(fallback), then run `invoker-slack` (or `invoker-ui` for the desktop app only):
 
 ```
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 SLACK_SIGNING_SECRET=...
-SLACK_CHANNEL_ID=C...            # lobby channel (fallback for SLACK_LOBBY_CHANNEL_ID)
-SLACK_LOBBY_CHANNEL_ID=C...      # optional; defaults to SLACK_CHANNEL_ID
+SLACK_CHANNEL_ID=C...            # default channel (fallback for SLACK_LOBBY_CHANNEL_ID)
+SLACK_LOBBY_CHANNEL_ID=C...      # optional default/home channel
 INVOKER_REPO_URL=git@github.com:acme/web.git   # optional; default repo (else git remote origin)
 CURSOR_COMMAND=cursor            # optional planning CLI override
 CURSOR_MODEL=...                 # optional planning model override
@@ -111,8 +115,8 @@ The bot runs in Socket Mode. Add these bot scopes to the app manifest (reinstall
 - `app_mentions:read` — receive `@Invoker` mentions.
 - `chat:write` — post messages.
 - `files:write` — upload artifacts an agent links from its worktree.
-- `channels:history` — read lobby thread replies (public lobby channel).
-- `channels:read` — resolve the lobby channel via `conversations.info` during setup checks.
+- `channels:history` — read thread replies in public channels where Invoker is used.
+- `channels:read` — resolve the configured default channel via `conversations.info` during setup checks.
 - `groups:write` — **create** private `workflow-<id>` channels and invite users.
 - `groups:history` — receive mentions/replies **inside** the private workflow channels.
 - `users:read` — resolve users for invites.

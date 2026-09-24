@@ -1,21 +1,33 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import {
+  addRemoteTarget,
   assembleReadinessChecks,
   buildReport,
+  checkRemoteTargetConnectivity,
   DEFAULT_DRAFTER_MCP_PACKAGE_SPEC,
   DEFAULT_TOOL_REQUIREMENTS,
   EXTERNAL_DEPENDENCIES,
   formatReport,
+  readInvokerConfigFile,
+  resolveRepoRoot,
+  type RemoteTargetConnectivityImpl,
+  type RemoteTargetInput,
   type IsInstalled,
   type PlanningPresetSpec,
   type PrerequisiteCheck,
   updateInvokerConfigFile,
+  writeInvokerConfigFile,
 } from '@invoker/contracts';
+import { commandExists } from '@invoker/shell';
+import { parsePlanFile } from '@invoker/workflow-core';
 import { formatCaughtException, logCaughtException } from './logging.js';
+import { installBundledSkills } from './bundled-skills.js';
+import { runRemoteDoctorChecks } from './remote-doctor.js';
+import { applyWorkerToggle, isDesiredStateWorkerToggle, isPolicyWorkerToggle, ONBOARDING_WORKER_TOGGLES, openWorkerDesiredStateStore, applyDesiredStateWorkerToggle, readDesiredStateWorkerToggleValue, readWorkerToggleValue, resolveCliInstanceProfile } from './worker-toggles.js';
 
 // ── Paths ────────────────────────────────────────────────────
 
@@ -33,7 +45,7 @@ function experimentalPlannerServerSpec(packageSpec: string = EXPERIMENTAL_PLANNE
 }
 
 export function invokerHomeDir(): string {
-  return join(homedir(), '.invoker');
+  return resolveCliInstanceProfile().homeRoot;
 }
 export function defaultConfigPath(): string {
   return process.env.INVOKER_REPO_CONFIG_PATH ?? join(invokerHomeDir(), 'config.json');
@@ -57,10 +69,6 @@ function resolveExperimentalPlannerMcpPath(targetPath: string | undefined, confi
 }
 
 // ── Tool probing & install ───────────────────────────────────
-
-export function commandExists(command: string): boolean {
-  return spawnSync('sh', ['-c', `command -v ${command} >/dev/null 2>&1`], { stdio: 'ignore' }).status === 0;
-}
 
 const INSTALL_SPECS: Record<string, { brew?: string[]; apt?: string[]; npm?: string[] }> = {
   git: { brew: ['git'], apt: ['git'] },
@@ -267,12 +275,163 @@ export function runDoctor(argv: string[]): number {
   return report.ok ? 0 : 1;
 }
 
+// ── setup readiness extras (GitHub auth + smoke + oneshot ending) ─
+
+export interface CommandRunnerResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: unknown;
+}
+
+export type CommandRunner = (command: string, args: readonly string[]) => CommandRunnerResult;
+
+export function defaultCommandRunner(command: string, args: readonly string[]): CommandRunnerResult {
+  const result = spawnSync(command, [...args], { encoding: 'utf8' });
+  return {
+    status: result.status,
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
+    error: result.error,
+  };
+}
+
+export function skippedGithubAuthCheck(): PrerequisiteCheck {
+  return {
+    id: 'github-auth',
+    name: 'GitHub auth',
+    status: 'warn',
+    detail: 'gh not installed; skipped auth check',
+    remediation: 'Install GitHub CLI (`brew install gh` or `apt-get install gh`), then run `gh auth login`',
+  };
+}
+
+/** Probe `gh auth status`. Injectable `runner` keeps tests offline. */
+export function checkGithubAuth(runner: CommandRunner = defaultCommandRunner): PrerequisiteCheck {
+  let result: CommandRunnerResult;
+  try {
+    result = runner('gh', ['auth', 'status']);
+  } catch (error) {
+    if (isMissingCommandError(error)) return skippedGithubAuthCheck();
+    return {
+      id: 'github-auth',
+      name: 'GitHub auth',
+      status: 'error',
+      detail: formatCaughtException(error),
+      remediation: 'Run `gh auth login` and re-run `invoker-cli setup`',
+    };
+  }
+  if (commandRunnerResultIsMissing(result)) return skippedGithubAuthCheck();
+  if (result.status === 0) {
+    return {
+      id: 'github-auth',
+      name: 'GitHub auth',
+      status: 'ok',
+      detail: 'gh is authenticated',
+    };
+  }
+  const detail = (result.stderr || result.stdout || 'gh auth status failed').trim().split('\n')[0]
+    || 'gh auth status failed';
+  return {
+    id: 'github-auth',
+    name: 'GitHub auth',
+    status: 'error',
+    detail,
+    remediation: 'Run `gh auth login` and re-run `invoker-cli setup`',
+  };
+}
+
+function isMissingCommandError(error: unknown): boolean {
+  const code = isJsonRecord(error) && typeof error.code === 'string' ? error.code : undefined;
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  return code === 'ENOENT'
+    || /\bENOENT\b|command not found|\bgh(?::|\b).*not found|no such file or directory/i.test(message);
+}
+
+function commandRunnerResultIsMissing(result: CommandRunnerResult): boolean {
+  if (isMissingCommandError(result.error)) return true;
+  const output = `${result.stderr}\n${result.stdout}`;
+  return (result.status === null || result.status === 127)
+    && /command not found|\bgh(?::|\b).*not found|no such file or directory|\bENOENT\b/i.test(output);
+}
+
+const SETUP_SMOKE_PLAN = `name: Setup Smoke
+description: Tiny offline plan used by invoker-cli setup.
+repoUrl: .
+onFinish: none
+tasks:
+  - id: smoke
+    description: Validate plan parsing during setup.
+    command: echo setup-smoke
+`;
+const SETUP_SMOKE_CHECK_NAME = 'smoke: plan validation';
+
+/** Parse a one-task temp plan with no network. Confirms the local plan pipeline works. */
+export async function runPlanValidationSmoke(): Promise<PrerequisiteCheck> {
+  const dir = mkdtempSync(join(tmpdir(), 'invoker-setup-smoke-'));
+  const planPath = join(dir, 'smoke.yaml');
+  try {
+    writeFileSync(planPath, SETUP_SMOKE_PLAN);
+    const plan = await parsePlanFile(planPath);
+    if (!plan.tasks.length) {
+      return {
+        id: 'smoke-plan',
+        name: SETUP_SMOKE_CHECK_NAME,
+        status: 'error',
+        detail: 'Parsed plan has no tasks',
+        remediation: 'Reinstall invoker-cli; plan parsing returned an empty task list',
+      };
+    }
+    return {
+      id: 'smoke-plan',
+      name: SETUP_SMOKE_CHECK_NAME,
+      status: 'ok',
+      detail: `Parsed ${plan.tasks.length} task(s) from a local smoke plan`,
+    };
+  } catch (error) {
+    return {
+      id: 'smoke-plan',
+      name: SETUP_SMOKE_CHECK_NAME,
+      status: 'error',
+      detail: formatCaughtException(error),
+      remediation: 'Reinstall invoker-cli or report a plan-parser regression',
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** First hard failure — the single thing setup tells the user to fix. */
+export function firstSetupFailure(checks: readonly PrerequisiteCheck[]): PrerequisiteCheck | undefined {
+  return checks.find((check) => check.status === 'error');
+}
+
+export function formatSetupEnding(checks: readonly PrerequisiteCheck[]): string {
+  const failure = firstSetupFailure(checks);
+  if (!failure) return "You're ready.";
+  const remediation = failure.remediation ? ` ${failure.remediation}` : '';
+  return `Fix this first: ${failure.name}: ${failure.detail}.${remediation}`;
+}
+
+export interface SetupDeps {
+  isInstalled?: IsInstalled;
+  commandRunner?: CommandRunner;
+  githubAuthCheck?: (runner: CommandRunner) => PrerequisiteCheck | Promise<PrerequisiteCheck>;
+  smokePlanValidation?: () => Promise<PrerequisiteCheck>;
+  remoteTargetConnectivity?: RemoteTargetConnectivityImpl;
+  remoteDoctorChecks?: typeof runRemoteDoctorChecks;
+  bundledSkillsInstall?: typeof installBundledSkills;
+  resolveSkillsRepoRoot?: typeof resolveRepoRoot;
+  resolveStandaloneSkillsRoot?: typeof resolveStandaloneSkillsRoot;
+}
+
 // ── Slack manifest ───────────────────────────────────────────
 
 export const REQUIRED_BOT_SCOPES = [
   'app_mentions:read',
   'chat:write',
   'files:write',
+  'pins:write',
   'channels:history',
   'channels:read',
   'groups:write',
@@ -438,6 +597,7 @@ export function writeSlackEnv(creds: Required<Pick<SlackCredentials, 'botToken' 
 export interface SetupIO {
   print: (line: string) => void;
   prompt: (question: string) => Promise<string>;
+  readStdin?: () => Promise<string>;
   interactive?: boolean;
 }
 
@@ -446,7 +606,8 @@ export class NonInteractiveSetupError extends Error {
     super(
       `Cannot ask "${question.trim()}" because stdin is not a TTY.\n`
       + 'Re-run with --yes to accept the guided defaults, or use a non-interactive path: '
-      + '`invoker-cli setup planner`, or `invoker-cli setup slack --from-env` with SLACK_* set.',
+      + '`invoker-cli setup planner`, `invoker-cli setup machines --json`, or '
+      + '`invoker-cli setup slack --from-env` with SLACK_* set.',
     );
     this.name = 'NonInteractiveSetupError';
   }
@@ -465,6 +626,15 @@ function defaultIO(): SetupIO & { rl: ReturnType<typeof createInterface> } {
 function askLine(io: SetupIO, question: string): Promise<string> {
   if (io.interactive === false) throw new NonInteractiveSetupError(question);
   return io.prompt(question);
+}
+
+async function readAllStdin(io: SetupIO): Promise<string> {
+  if (io.readStdin) return io.readStdin();
+  let input = '';
+  for await (const chunk of process.stdin) {
+    input += String(chunk);
+  }
+  return input;
 }
 
 function manifestSteps(manifestPath: string): string {
@@ -520,7 +690,7 @@ export function loadInvokerEnv(): void {
   loadEnvFile(join(process.cwd(), '.env'));
 }
 
-type SetupSubcommand = 'slack' | 'planner';
+type SetupSubcommand = 'slack' | 'planner' | 'machines';
 
 interface ParsedSetupArgs {
   subcommand?: SetupSubcommand;
@@ -539,7 +709,7 @@ function parseSetupArgs(argv: string[]): ParsedSetupArgs {
   const parsed: ParsedSetupArgs = { checkOnly: false, json: false, uninstall: false, fromEnv: false, assumeYes: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === 'slack' || arg === 'planner') {
+    if (arg === 'slack' || arg === 'planner' || arg === 'machines') {
       if (parsed.subcommand) throw new Error(`Unexpected setup argument: ${arg}`);
       parsed.subcommand = arg;
     } else if (arg === '--check') {
@@ -621,14 +791,424 @@ async function promptYes(io: SetupIO, question: string, assumeYes = false): Prom
   return answer === 'y' || answer === 'yes';
 }
 
-export async function runSetup(argv: string[], io: SetupIO = defaultIO()): Promise<number> {
+interface MachineSetupSuccessResult {
+  name: string;
+  reachable: boolean;
+  written: boolean;
+  message: string;
+  doctorChecks?: PrerequisiteCheck[];
+}
+
+interface MachineSetupErrorResult {
+  name?: string;
+  reachable?: boolean;
+  written: false;
+  message: string;
+  error: {
+    code: string;
+    message: string;
+    conflictingTargetId?: string;
+  };
+  doctorChecks?: PrerequisiteCheck[];
+}
+
+type MachineSetupResult = MachineSetupSuccessResult | MachineSetupErrorResult;
+
+function parseOptionalPositiveInteger(value: string, fieldName: string, max?: number): number | undefined {
+  const trimmed = value.trim();
+  if (trimmed === '') return undefined;
+  if (!/^\d+$/.test(trimmed)) throw new Error(`${fieldName} must be a positive integer`);
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || (max !== undefined && parsed > max)) {
+    throw new Error(`${fieldName} must be ${max === undefined ? 'a positive integer' : `between 1 and ${max}`}`);
+  }
+  return parsed;
+}
+
+/**
+ * Repo URL used only to run the remote doctor's push-credential check
+ * (`git ls-remote` on the box) — deliberately not part of `RemoteTargetInput`,
+ * so it never gets written into `remoteTargets` config.
+ */
+function extractRepoUrl(value: unknown): string {
+  if (!isJsonRecord(value)) throw new Error('machine must be an object');
+  const raw = value.repoUrl;
+  if (typeof raw !== 'string' || raw.trim() === '') throw new Error('repoUrl is required');
+  return raw.trim();
+}
+
+function normalizeRemoteTargetInput(value: unknown): RemoteTargetInput {
+  if (!isJsonRecord(value)) throw new Error('machine must be an object');
+
+  const stringField = (field: keyof RemoteTargetInput): string => {
+    const raw = value[field];
+    if (typeof raw !== 'string' || raw.trim() === '') throw new Error(`${field} is required`);
+    return raw.trim();
+  };
+
+  const input: RemoteTargetInput = {
+    name: stringField('name'),
+    host: stringField('host'),
+    user: stringField('user'),
+    sshKeyPath: stringField('sshKeyPath'),
+  };
+
+  if (value.port !== undefined) {
+    if (typeof value.port !== 'number' || !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) {
+      throw new Error('port must be an integer between 1 and 65535');
+    }
+    input.port = value.port;
+  }
+  if (value.maxConcurrentTasks !== undefined) {
+    if (typeof value.maxConcurrentTasks !== 'number' || !Number.isSafeInteger(value.maxConcurrentTasks) || value.maxConcurrentTasks < 1) {
+      throw new Error('maxConcurrentTasks must be a positive integer');
+    }
+    input.maxConcurrentTasks = value.maxConcurrentTasks;
+  }
+  if (value.provisionCommand !== undefined) {
+    if (typeof value.provisionCommand !== 'string') throw new Error('provisionCommand must be a string');
+    const trimmed = value.provisionCommand.trim();
+    if (trimmed !== '') input.provisionCommand = trimmed;
+  }
+
+  return input;
+}
+
+interface RemoteTargetDraft {
+  input: RemoteTargetInput;
+  repoUrl: string;
+}
+
+async function askRemoteTargetInput(io: SetupIO): Promise<RemoteTargetDraft> {
+  const name = await askLine(io, 'Machine name: ');
+  const host = await askLine(io, 'Host: ');
+  const user = await askLine(io, 'User: ');
+  const sshKeyPath = await askLine(io, 'SSH key path: ');
+  const repoUrl = await askLine(io, 'Repo URL (used to verify this box can push code back): ');
+  const port = parseOptionalPositiveInteger(await askLine(io, 'SSH port [22]: '), 'port', 65535);
+  const maxConcurrentTasks = parseOptionalPositiveInteger(
+    await askLine(io, 'Max concurrent tasks [1]: '),
+    'maxConcurrentTasks',
+  );
+  const provisionCommand = (await askLine(io, 'Provision command (optional): ')).trim();
+
+  const input = normalizeRemoteTargetInput({
+    name,
+    host,
+    user,
+    sshKeyPath,
+    ...(port !== undefined ? { port } : {}),
+    ...(maxConcurrentTasks !== undefined ? { maxConcurrentTasks } : {}),
+    ...(provisionCommand !== '' ? { provisionCommand } : {}),
+  });
+
+  return { input, repoUrl: extractRepoUrl({ repoUrl }) };
+}
+
+async function checkAndMaybeWriteRemoteTarget(
+  input: RemoteTargetInput,
+  repoUrl: string,
+  write: boolean,
+  options: SetupDeps,
+): Promise<MachineSetupResult> {
+  const target = {
+    host: input.host,
+    user: input.user,
+    sshKeyPath: input.sshKeyPath,
+    port: input.port,
+  };
+
+  const connectivity = await checkRemoteTargetConnectivity(target, { impl: options.remoteTargetConnectivity });
+
+  if (!connectivity.reachable) {
+    return {
+      name: input.name,
+      reachable: false,
+      written: false,
+      message: connectivity.message,
+      error: { code: 'connectivity-failed', message: connectivity.message },
+    };
+  }
+
+  const runDoctorChecks = options.remoteDoctorChecks ?? runRemoteDoctorChecks;
+  const doctorChecks = await runDoctorChecks({ target, repoUrl });
+  const failedCheck = doctorChecks.find((check) => check.status === 'error');
+
+  if (failedCheck) {
+    const message = `Remote readiness check failed: ${failedCheck.name} — ${failedCheck.detail}`;
+    return {
+      name: input.name,
+      reachable: true,
+      written: false,
+      message,
+      error: { code: 'doctor-check-failed', message },
+      doctorChecks,
+    };
+  }
+
+  if (!write) {
+    return {
+      name: input.name,
+      reachable: true,
+      written: false,
+      message: connectivity.message,
+      doctorChecks,
+    };
+  }
+
+  return { ...writeRemoteTarget(input), doctorChecks };
+}
+
+function writeRemoteTarget(input: RemoteTargetInput): MachineSetupResult {
+  const configPath = defaultConfigPath();
+  const addResult = addRemoteTarget(readInvokerConfigFile(configPath), input);
+  if (!addResult.ok) {
+    return {
+      name: input.name,
+      reachable: true,
+      written: false,
+      message: addResult.error.message,
+      error: addResult.error,
+    };
+  }
+
+  writeInvokerConfigFile(configPath, addResult.config);
+  return {
+    name: input.name,
+    reachable: true,
+    written: true,
+    message: `Wrote machine "${input.name}" to ${configPath}`,
+  };
+}
+
+function formatMachineConnectivity(result: MachineSetupResult): string {
+  if (result.reachable) return `Connectivity check passed: ${result.message}`;
+  return `Connectivity check failed: ${result.message}`;
+}
+
+async function runMachinesSetupInteractive(io: SetupIO, options: SetupDeps): Promise<void> {
+  let addAnother = true;
+  while (addAnother) {
+    let repeatThisMachine = true;
+    while (repeatThisMachine) {
+      let draft: RemoteTargetDraft;
+      try {
+        draft = await askRemoteTargetInput(io);
+      } catch (error) {
+        io.print(`Invalid machine input: ${formatCaughtException(error)}`);
+        repeatThisMachine = await promptYes(io, 'Try this machine again? [y/N] ');
+        continue;
+      }
+
+      const checked = await checkAndMaybeWriteRemoteTarget(draft.input, draft.repoUrl, false, options);
+      io.print(formatMachineConnectivity(checked));
+
+      if (!checked.reachable) {
+        repeatThisMachine = await promptYes(io, 'Try this machine again? [y/N] ');
+        continue;
+      }
+
+      if (checked.doctorChecks) {
+        io.print('');
+        io.print(formatReport(buildReport(checked.doctorChecks)));
+      }
+
+      if ('error' in checked && checked.error.code === 'doctor-check-failed') {
+        repeatThisMachine = await promptYes(io, 'Try this machine again? [y/N] ');
+        continue;
+      }
+
+      const keep = await promptYes(io, 'Keep this machine? [y/N] ');
+      if (!keep) {
+        io.print('Nothing written.');
+        repeatThisMachine = await promptYes(io, 'Try this machine again? [y/N] ');
+        continue;
+      }
+
+      const written = writeRemoteTarget(draft.input);
+      if (written.written) {
+        io.print(written.message);
+      } else {
+        io.print(`Nothing written: ${written.message}`);
+      }
+      repeatThisMachine = false;
+    }
+
+    addAnother = await promptYes(io, 'Add another machine? [y/N] ');
+  }
+}
+
+async function runMachinesSetupJson(io: SetupIO, options: SetupDeps): Promise<number> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readAllStdin(io));
+  } catch (error) {
+    io.print(JSON.stringify([{
+      written: false,
+      message: `Invalid JSON input: ${formatCaughtException(error)}`,
+      error: { code: 'invalid-json', message: formatCaughtException(error) },
+    } satisfies MachineSetupErrorResult]));
+    return 1;
+  }
+
+  if (!Array.isArray(parsed)) {
+    io.print(JSON.stringify([{
+      written: false,
+      message: 'Invalid JSON input: expected an array',
+      error: { code: 'invalid-json', message: 'expected an array' },
+    } satisfies MachineSetupErrorResult]));
+    return 1;
+  }
+
+  const results: MachineSetupResult[] = [];
+  for (const item of parsed) {
+    let input: RemoteTargetInput;
+    let repoUrl: string;
+    try {
+      input = normalizeRemoteTargetInput(item);
+      repoUrl = extractRepoUrl(item);
+    } catch (error) {
+      results.push({
+        written: false,
+        message: `Invalid machine input: ${formatCaughtException(error)}`,
+        error: { code: 'invalid-input', message: formatCaughtException(error) },
+      });
+      continue;
+    }
+    results.push(await checkAndMaybeWriteRemoteTarget(input, repoUrl, true, options));
+  }
+
+  io.print(JSON.stringify(results));
+  return results.every((result) => result.written) ? 0 : 1;
+}
+
+async function runWorkerTogglesInteractive(io: SetupIO, assumeYes: boolean): Promise<void> {
+  const configPath = defaultConfigPath();
+  let config = readInvokerConfigFile(configPath);
+  let configChanged = false;
+  const summary: string[] = [];
+  const desiredStore = await openWorkerDesiredStateStore();
+
+  try {
+    for (const spec of ONBOARDING_WORKER_TOGGLES) {
+      io.print(`\n${spec.label}: ${spec.description}`);
+      let current: boolean;
+      if (isDesiredStateWorkerToggle(spec)) {
+        current = readDesiredStateWorkerToggleValue(desiredStore, spec) ?? spec.defaultEnabled ?? false;
+      } else {
+        current = readWorkerToggleValue(config, spec) ?? spec.defaultEnabled ?? false;
+      }
+      const enable = assumeYes ? current : await promptYes(io, `Enable ${spec.label}? [y/N] `);
+      if (enable !== current) {
+        if (isDesiredStateWorkerToggle(spec)) {
+          applyDesiredStateWorkerToggle(desiredStore, spec, enable);
+        } else if (isPolicyWorkerToggle(spec)) {
+          config = applyWorkerToggle(config, spec, enable);
+          configChanged = true;
+        }
+      }
+      summary.push(`${spec.label}: ${enable ? 'on' : 'off'}`);
+    }
+  } finally {
+    desiredStore.close?.();
+  }
+
+  if (configChanged) {
+    writeInvokerConfigFile(configPath, config);
+  }
+
+  io.print('');
+  io.print(`Worker toggles — ${summary.join(', ')}`);
+}
+
+/**
+ * Prefers an Invoker checkout (dev, or a repo clone) reachable from the
+ * current directory. The standalone release binary and the npm-cli install
+ * both ship a `skills/` directory next to the running executable
+ * (scripts/archive-cli-binary.sh, packages/npm-cli/scripts/install.js), so
+ * this falls back to that location when `setup` isn't run from a checkout.
+ * Fails soft: if neither is found, this skips with a note instead of
+ * breaking the rest of `setup`.
+ */
+function resolveStandaloneSkillsRoot(): string | null {
+  let execPath: string;
+  try {
+    execPath = realpathSync(process.execPath);
+  } catch {
+    execPath = process.execPath;
+  }
+  const candidate = dirname(execPath);
+  return existsSync(join(candidate, 'skills')) ? candidate : null;
+}
+
+export function installSetupBundledSkills(io: SetupIO, options: SetupDeps): void {
+  const resolveSkillsRepoRoot = options.resolveSkillsRepoRoot ?? resolveRepoRoot;
+  const resolveStandaloneRoot = options.resolveStandaloneSkillsRoot ?? resolveStandaloneSkillsRoot;
+  const install = options.bundledSkillsInstall ?? installBundledSkills;
+  let repoRoot: string;
+  try {
+    repoRoot = resolveSkillsRepoRoot(process.cwd());
+  } catch {
+    const standaloneRoot = resolveStandaloneRoot();
+    if (!standaloneRoot) {
+      io.print('Skills: skipped (not running from an Invoker checkout, and no bundled skills next to this binary).');
+      return;
+    }
+    repoRoot = standaloneRoot;
+  }
+
+  try {
+    const status = install({ isPackaged: false, repoRoot });
+    const installedTargets = status.targets.filter((target) => target.installed).map((target) => target.name);
+    const installedMcp = status.mcpTargets.filter((target) => target.installed).map((target) => target.name);
+    io.print(`Skills: installed ${status.bundledSkillNames.length} bundled skill(s) for ${installedTargets.join(', ') || 'no targets'}.`);
+    io.print(`Skills MCP: registered invoker-cli mcp for ${installedMcp.join(', ') || 'no detected harnesses'}.`);
+  } catch (error) {
+    io.print(`Skills: install skipped — ${formatCaughtException(error)}`);
+  }
+}
+
+export async function collectGithubAndSmokeChecks(options: SetupDeps): Promise<PrerequisiteCheck[]> {
+  const isInstalled = options.isInstalled ?? commandExists;
+  const commandRunner = options.commandRunner ?? defaultCommandRunner;
+  const runGithubAuth = options.githubAuthCheck ?? checkGithubAuth;
+  const runSmokePlanValidation = options.smokePlanValidation ?? (() => runPlanValidationSmoke());
+
+  const checks: PrerequisiteCheck[] = [];
+  checks.push(isInstalled('gh') ? await runGithubAuth(commandRunner) : skippedGithubAuthCheck());
+  checks.push(await runSmokePlanValidation());
+  return checks;
+}
+
+function printSetupEnding(io: SetupIO, checks: readonly PrerequisiteCheck[]): number {
+  const report = buildReport([...checks]);
+  io.print('');
+  io.print(formatSetupEnding(report.checks));
+  return report.ok ? 0 : 1;
+}
+
+export async function runSetup(
+  argv: string[],
+  io: SetupIO = defaultIO(),
+  options: SetupDeps = {},
+): Promise<number> {
   const parsed = parseSetupArgs(argv);
   const wantSlack = parsed.subcommand === 'slack';
+  const wantMachines = parsed.subcommand === 'machines';
   const fromEnv = parsed.fromEnv;
   const rl = (io as { rl?: { close: () => void } }).rl;
+  const isInstalled = options.isInstalled ?? commandExists;
   try {
     if (parsed.subcommand === 'planner') {
       return await maybeInstallPlanner(parsed, io);
+    }
+
+    if (wantMachines && parsed.json) {
+      return await runMachinesSetupJson(io, options);
+    }
+
+    if (wantMachines && parsed.checkOnly) {
+      throw new Error('setup machines does not support --check');
     }
 
     if (parsed.checkOnly) {
@@ -640,41 +1220,30 @@ export async function runSetup(argv: string[], io: SetupIO = defaultIO()): Promi
     }
 
     io.print('Invoker setup\n');
-    const core = buildReport(buildDoctorChecks(loadCliConfig()));
-    io.print(formatReport(core));
+    const doctorChecks = buildDoctorChecks(loadCliConfig(), isInstalled);
+    const checks: PrerequisiteCheck[] = [...doctorChecks];
+    io.print(formatReport(buildReport(doctorChecks)));
     io.print('');
 
-    const plannerState = ensureExperimentalPlannerMcp({
-      targetPath: parsed.targetPath,
-      plannerPackage: parsed.plannerPackage ?? process.env.INVOKER_PLANNER_PACKAGE,
-    });
-    io.print(`Experimental planner MCP installed into ${plannerState.targetPath}.`);
-    io.print(`experimentalPlanner flag: ${plannerState.experimentalPlanner ? 'on' : 'off'}`);
+    installSetupBundledSkills(io, options);
     io.print('');
-
-    if (!wantSlack && !fromEnv && await promptYes(io, 'Enable the experimental planner now? [y/N] ', parsed.assumeYes)) {
-      await maybeInstallPlanner(parsed, io);
-      io.print('');
-    }
 
     let doSlack = wantSlack || fromEnv;
-    if (!wantSlack && !fromEnv) {
+    if (!wantSlack && !wantMachines && !fromEnv) {
       doSlack = parsed.assumeYes ? false : await promptYes(io, 'Set up the Slack integration now? [y/N] ');
     }
-    if (!doSlack) {
-      io.print('\nYou are good to go for CLI and UI workflows. Run `invoker-cli setup planner` later to enable the experimental planner. Run `invoker-cli setup slack` later to add Slack.');
-      return core.ok ? 0 : 1;
-    }
 
-    if (fromEnv) {
+    if (doSlack && fromEnv) {
       loadInvokerEnv();
       const creds = slackCredsFromEnv();
-      const checks = await validateSlackCredentials(creds);
-      const report = buildReport(checks);
+      const slackChecks = await validateSlackCredentials(creds);
+      checks.push(...slackChecks);
+      const report = buildReport(slackChecks);
       io.print(`\n${formatReport(report, { json: parsed.json })}`);
       if (!creds.botToken || !creds.appToken || !creds.signingSecret || !creds.channelId || !report.ok) {
-        io.print('Nothing written. Fix the items above and re-run setup.');
-        return 1;
+        io.print('Nothing written.');
+        checks.push(...await collectGithubAndSmokeChecks(options));
+        return printSetupEnding(io, checks);
       }
       const envPath = writeSlackEnv({
         botToken: creds.botToken,
@@ -683,34 +1252,53 @@ export async function runSetup(argv: string[], io: SetupIO = defaultIO()): Promi
         channelId: creds.channelId,
       });
       io.print(`\nWrote Slack credentials to ${envPath}. Restart Invoker (or it picks them up on next launch).`);
-      return 0;
-    }
+    } else if (doSlack) {
+      const manifestPath = manifestFilePath();
+      mkdirSync(invokerHomeDir(), { recursive: true });
+      writeFileSync(manifestPath, `${JSON.stringify(generateSlackManifest(), null, 2)}\n`);
+      io.print(`\n${manifestSteps(manifestPath)}\n`);
 
-    const manifestPath = manifestFilePath();
-    mkdirSync(invokerHomeDir(), { recursive: true });
-    writeFileSync(manifestPath, `${JSON.stringify(generateSlackManifest(), null, 2)}\n`);
-    io.print(`\n${manifestSteps(manifestPath)}\n`);
+      const botToken = await askLine(io, 'Bot User OAuth Token (xoxb-...): ');
+      const appToken = await askLine(io, 'App-Level Token (xapp-...): ');
+      const signingSecret = await askLine(io, 'Signing Secret: ');
+      const channelId = await askLine(io, 'Lobby channel ID (C...): ');
 
-    const botToken = await askLine(io, 'Bot User OAuth Token (xoxb-...): ');
-    const appToken = await askLine(io, 'App-Level Token (xapp-...): ');
-    const signingSecret = await askLine(io, 'Signing Secret: ');
-    const channelId = await askLine(io, 'Lobby channel ID (C...): ');
+      const slackChecks = await validateSlackCredentials({ botToken, appToken, signingSecret, channelId });
+      checks.push(...slackChecks);
+      const report = buildReport(slackChecks);
+      io.print(`\n${formatReport(report)}`);
 
-    const checks = await validateSlackCredentials({ botToken, appToken, signingSecret, channelId });
-    const report = buildReport(checks);
-    io.print(`\n${formatReport(report)}`);
-
-    if (!report.ok) {
-      const proceed = await promptYes(io, '\nSome checks failed. Save these values anyway? [y/N] ', parsed.assumeYes);
-      if (!proceed) {
-        io.print('Nothing written. Fix the items above and re-run `invoker-cli setup slack`.');
-        return 1;
+      if (!report.ok) {
+        const proceed = await promptYes(io, '\nSome checks failed. Save these values anyway? [y/N] ', parsed.assumeYes);
+        if (!proceed) {
+          io.print('Nothing written.');
+          checks.push(...await collectGithubAndSmokeChecks(options));
+          return printSetupEnding(io, checks);
+        }
       }
+
+      const envPath = writeSlackEnv({ botToken, appToken, signingSecret, channelId });
+      io.print(`\nWrote Slack credentials to ${envPath}. Restart Invoker (or it picks them up on next launch).`);
     }
 
-    const envPath = writeSlackEnv({ botToken, appToken, signingSecret, channelId });
-    io.print(`\nWrote Slack credentials to ${envPath}. Restart Invoker (or it picks them up on next launch).`);
-    return report.ok ? 0 : 1;
+    let doMachines = wantMachines;
+    if (!wantSlack && !wantMachines && !fromEnv) {
+      doMachines = parsed.assumeYes ? false : await promptYes(io, 'Set up remote machines now? [y/N] ');
+    }
+    if (doMachines) {
+      await runMachinesSetupInteractive(io, options);
+    }
+
+    if (!wantSlack && !wantMachines && !fromEnv) {
+      await runWorkerTogglesInteractive(io, parsed.assumeYes);
+    }
+
+    const extras = await collectGithubAndSmokeChecks(options);
+    checks.push(...extras);
+    io.print('');
+    io.print(formatReport(buildReport(extras)));
+
+    return printSetupEnding(io, checks);
   } catch (error) {
     if (!(error instanceof NonInteractiveSetupError)) throw error;
     io.print(error.message);

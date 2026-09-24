@@ -1,5 +1,6 @@
 ---
 name: make-pr
+category: core
 description: >
   Create or update a pull request in this repo using the preferred PR schema,
   upstream-first branch workflow, and repo-specific publication rules. Trigger
@@ -64,11 +65,16 @@ Choose exactly one: `behavior`, `refactor`, `proof`, `cleanup`, `policy`, or `do
 
 ## Review Unit
 
-Choose the matching review unit, such as `tooling-policy`, `routing`, or `docs`.
+Choose exactly one matching review unit: `contract`, `ownership-refactor`, `read-path`, `validation-policy`, `write-path`, `routing`, `activation-surface`, `tooling-policy`, `proof`, `docs`, or `cleanup`.
+
+The unit must match the changed files. The CI validator rejects a declared unit that ships files assigned to another unit.
 
 ## Safety Invariant
 
 Explain why this slice is safe to review locally.
+If the source plan or slice does not contain a user-confirmed safety invariant,
+propose one and ask the user to confirm or correct it before publishing this PR
+body.
 
 ## Slice Rationale
 
@@ -78,11 +84,15 @@ Explain why this work is split here instead of bundled elsewhere.
 
 List what this slice explicitly does not change.
 
+For a `refactor` lane, include one of these exact claims: `no behavior change`, `behavior unchanged`, `unchanged behavior`, or `pass unchanged`.
+
 ## Architecture
 
 Only include this section when the change modifies component interactions, control flow, state flow, or data flow.
 
 Quote Mermaid labels when they contain prose, punctuation, or code-ish text. Safe:
+
+### Before
 
 ```mermaid
 graph TD
@@ -94,6 +104,13 @@ Unsafe:
 ```mermaid
 graph TD
     A[reviewGate.artifacts[] is pending]
+```
+
+### After
+
+```mermaid
+graph TD
+    A["reviewGate.artifacts[] is published"]
 ```
 
 ## Test Plan
@@ -109,6 +126,8 @@ graph TD
 ## Visual Proof
 
 Required when the diff changes UI-impacting files. Include before/after screenshots or a video link.
+
+Manually inspected: state exactly what you saw when you opened the image or video yourself, not just that it was captured.
 
 ## Revert Plan
 
@@ -127,11 +146,18 @@ If the change is small and has no architectural impact, omit `## Architecture` r
 
 If the change is UI-impacting, use `skills/visual-proof/SKILL.md` first and include its screenshot/video markdown in `## Visual Proof`. UI-impacting means the user-visible experience changes, even when no file under `packages/ui/**` changes. This includes `packages/ui/**`, Electron window lifecycle files, preload, main process window wiring, app menu changes, task status changes, task error or output text shown in panels, approval/reject behavior, workflow state shown in the DAG or inspector, and web-surface output.
 
+For Invoker UI/live-path claims, also use `skills/verify/SKILL.md` to pick the prove command
+(`control-invoker prove <feature>` / `doctor` / `owner query`) before writing done/shipped claims.
+
 Use visible markdown sections for review metadata. Do not hide `Review Claim`, `Review Lane`, `Review Unit`, `Safety Invariant`, or `Slice Rationale` inside `<details>` or other HTML disclosure blocks. Review metadata must render directly in the PR body.
 
 Test Plan and Revert Plan are the opposite: keep their `## Test Plan` / `## Revert Plan` headings visible, but their content must sit inside a collapsed `<details>` block with `<summary>Test Plan</summary>` / `<summary>Revert Plan</summary>`. `scripts/validate-pr-body.mjs` rejects a plan section whose content is not collapsed, and rejects the `open` attribute.
 
+CI validates the declared Review Lane and Review Unit against the actual changed files. Keep `behavior`, `refactor`, and `cleanup` slices separate from docs, policy, and proof files. Keep `proof` separate from product, docs, and policy files. Keep `policy` separate from product and proof files. Keep `docs` separate from product, policy, proof, and product-test files. The exact classification and review-unit boundaries live in `scripts/validate-pr-body.mjs` and `scripts/review-unit-rules.mjs`; split the PR when the local validator reports a mismatch.
+
 When an existing PR changes after its body or proof was written, rerun this skill from the current diff before updating the PR. If the new diff touches UI-impacting files, rerun `skills/visual-proof/SKILL.md` and replace old screenshot or video links with fresh proof for the current code. Do not reuse earlier proof media after UI behavior changes.
+Before writing any "Fixed"/"resolves"/"no longer happens" claim backed by a screenshot or video, actually open that exact media yourself — Read the image, or extract and Read video frames — in the same turn you write the claim. Do not trust an automated DOM/test assertion as a substitute for looking; a test passing proves the test's assertion, not that you looked at what the media shows. State precisely what you saw on a `Manually inspected:` line inside `## Visual Proof`. `scripts/validate-pr-body.mjs` rejects a Visual Proof section that has media but no `Manually inspected:` line. See `skills/prove-it/SKILL.md` for the full rule, including the same standard applied to live-system status claims.
+
 Visual proof must show the changed behavior itself, not just the changed screen area. Before creating or updating the PR, open every screenshot or video and verify the user-visible target is present and identifiable. For conditional or event-driven UI, drive the exact condition that triggers the new state and capture that state. A generic task panel, unchanged sidebar, unrelated graph, or stale screenshot is not proof, even when the right file changed.
 
 If the changed behavior spans multiple states or a state transition — for example restart persistence, before/after workflow transitions, progress animations, opening then dismissing overlays, or any proof labeled “before” and “after” — use animated proof. A gif, mp4, webm, or walkthrough video is required; static screenshots alone are not enough.
@@ -158,6 +184,10 @@ For Invoker stacked PRs, diff atomicity blockers are hard failures. Readability 
 
 If one branch mixes behavior, refactor, cleanup, or test-harness/proof work, split the work into separate PRs. Do not relabel the lane or weaken the checker to make a mixed branch pass.
 
+## Comment policy gate
+
+Before publishing, run `pnpm run check:comments` (`scripts/check-added-comments.mjs`). It covers `.cjs`/`.js`/`.jsx`/`.mjs`/`.py`/`.pyi`/`.sh`/`.ts`/`.tsx` and rejects any newly-added explanatory comment against this repo's Comment Policy (see root `CLAUDE.md`), including comments picked up from a cherry-picked or auto-generated commit. It also covers fenced code blocks (```js, ```ts, ```sh, ```py, and aliases) inside `skills/**/*.md`, so a skill's own example snippets follow the same policy — untagged or non-code fences (yaml, json, prose) are not scanned. It runs in CI as `quality / Added Comment Policy`, so a failure here after publishing still blocks the PR — check it locally first rather than discovering it from a red check.
+
 ## Command surface
 
 Preferred repo-local flow:
@@ -170,7 +200,7 @@ Preferred repo-local flow:
 ```bash
 cp scripts/pr-body-template.md /tmp/my-pr.md
 $EDITOR /tmp/my-pr.md
-node scripts/validate-pr-body.mjs --body-file /tmp/my-pr.md
+node scripts/validate-pr-body-local.mjs --body-file /tmp/my-pr.md --base master
 ```
 
 4. Create or update the PR with:
@@ -198,7 +228,7 @@ No custom payload parsing is required here. The check is simple: verify the rend
 1. Read each live PR (`gh pr view` or `pr://`) for title, body, base, and head.
 2. If any PR is missing the preferred body sections or the aligned stack title prefix, repair it before yielding.
 3. Prefer `node scripts/create-pr.mjs --update-existing ...` when the current local branch matches the published PR branch.
-4. If Mergify generated a remote-only head branch name that `create-pr` cannot map from the local branch, use `gh pr edit --title ... --body-file ...` immediately rather than leaving placeholder metadata live.
+4. If Mergify generated a remote-only head branch name that `create-pr` cannot map from the local branch, first run `node scripts/validate-pr-body-local.mjs --body-file <file> --base <actual-base-branch>`, then use `gh pr edit --title ... --body-file ...` immediately rather than leaving placeholder metadata live.
 
 Do not stop after `mergify stack push` until the GitHub-side metadata matches the intended titles and bodies.
 
@@ -236,6 +266,8 @@ Do not generalize this to unrelated repos.
 Never run `mergify stack push` (including the `-k` update variant) while checked out on a Mergify-generated stack branch (`stack/<user>/<working-branch>/<slug>--<change-id>`). The real push does not fail safe there: instead of refusing, it can auto-switch to a stale leftover branch and publish an unrelated stack. This happened once — PR #3407 published accidental PRs #3408–#3411 from a leftover `tmp-rebase-fixsessions` branch.
 
 - Push only from the working branch (for example `pr/<name>`), where the stack resolves as `<trunk>..HEAD`.
+- Mergify stack bases must be the trunk branch or a live `stack/` branch. Never publish a Mergify stack with a `plan/` base: a separately landed stack PR does not retarget PRs based on that integration branch.
+- This rule applies to Invoker dogfood and target repositories that independently use Mergify Stacks. It does not prohibit non-Mergify Invoker workflows from using `plan/` integration branches.
 - Always preview with `mergify stack push --dry-run` first and confirm the plan pushes ONLY your intended commits. `--dry-run` refuses on a generated branch; the real push does not, so the dry-run is your safety check.
 - To update ONE already-published branch, prefer `git push --force-with-lease origin HEAD` — it is deterministic and does no stack resolution.
 - Use the guard `node scripts/safe-stack-push.mjs` (add `--execute` to push). It refuses on a generated branch and forces the dry-run preview before any real push.
@@ -267,7 +299,8 @@ Manual `gh pr edit` is the escape hatch when `create-pr --update-existing` canno
 - ensure revert guidance is honest
 - keep Test Plan and Revert Plan content inside their collapsed `<details><summary>Test Plan</summary>` / `<summary>Revert Plan</summary>` blocks
 - do not create, update, or Mergify-publish a PR when the branch has no file changes against its selected base or contains an empty commit slice; fix the branch history before using `node scripts/create-pr.mjs`, `node scripts/create-pr.mjs --update-existing ...`, or `mergify stack push`
-- validate the body with `node scripts/validate-pr-body.mjs --body-file <file>`
+- validate the body against the current branch diff with `node scripts/validate-pr-body-local.mjs --body-file <file> --base <base-branch>`
+- run `pnpm run check:comments` and remove any newly-added comment it flags, including one carried in from a cherry-pick
 - for stacked PRs, treat diff-atomicity blockers as fatal, even when readability-only warnings still print
 - for stacked PRs, after any split or restack, re-audit the full rebuilt stack before publishing or updating PRs
 - for stacked PRs, auto-fold conflict-only, import-only, or other no-new-claim fixup slices into the previous slice before publication

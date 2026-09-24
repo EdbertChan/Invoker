@@ -5,9 +5,13 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-vi.mock('node:child_process', () => ({
-  spawn: vi.fn(),
-}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: vi.fn(),
+  };
+});
 
 function createMockProcess(): ChildProcess & EventEmitter {
   const proc = new EventEmitter() as ChildProcess & EventEmitter;
@@ -121,6 +125,53 @@ describe('process-utils shell environment resolution', () => {
     expect(mockedSpawn).toHaveBeenCalledTimes(1);
   });
 
+  it('strips INVOKER_HEADLESS_STANDALONE from the cleaned child env', async () => {
+    const originalHeadlessStandalone = process.env.INVOKER_HEADLESS_STANDALONE;
+    const originalMarker = process.env.INVOKER_TEST_UNRELATED_MARKER;
+    try {
+      process.env.INVOKER_HEADLESS_STANDALONE = '1';
+      process.env.INVOKER_TEST_UNRELATED_MARKER = 'keep-me';
+
+      const { processUtils } = await loadProcessUtils();
+      const clean = processUtils.cleanElectronEnv();
+
+      expect(clean).not.toHaveProperty('INVOKER_HEADLESS_STANDALONE');
+      expect(clean.INVOKER_TEST_UNRELATED_MARKER).toBe('keep-me');
+      expect(process.env.INVOKER_HEADLESS_STANDALONE).toBe('1');
+    } finally {
+      if (originalHeadlessStandalone === undefined) delete process.env.INVOKER_HEADLESS_STANDALONE;
+      else process.env.INVOKER_HEADLESS_STANDALONE = originalHeadlessStandalone;
+      if (originalMarker === undefined) delete process.env.INVOKER_TEST_UNRELATED_MARKER;
+      else process.env.INVOKER_TEST_UNRELATED_MARKER = originalMarker;
+    }
+  });
+
+  it('removes Git repository-scoping variables while preserving transport env', async () => {
+    const { processUtils } = await loadProcessUtils();
+
+    const clean = processUtils.cleanGitRepositoryEnv({
+      PATH: '/usr/bin',
+      GIT_DIR: '/tmp/source/.git',
+      GIT_WORK_TREE: '/tmp/source',
+      GIT_INDEX_FILE: '/tmp/source/.git/index',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'core.bare',
+      GIT_CONFIG_VALUE_0: 'true',
+      GIT_SSH_COMMAND: 'ssh -i /tmp/key',
+    });
+
+    expect(clean).toMatchObject({
+      PATH: '/usr/bin',
+      GIT_SSH_COMMAND: 'ssh -i /tmp/key',
+    });
+    expect(clean).not.toHaveProperty('GIT_DIR');
+    expect(clean).not.toHaveProperty('GIT_WORK_TREE');
+    expect(clean).not.toHaveProperty('GIT_INDEX_FILE');
+    expect(clean).not.toHaveProperty('GIT_CONFIG_COUNT');
+    expect(clean).not.toHaveProperty('GIT_CONFIG_KEY_0');
+    expect(clean).not.toHaveProperty('GIT_CONFIG_VALUE_0');
+  });
+
   it('falls back cleanly when shell resolution times out', async () => {
     setPlatform('darwin');
     process.env.PATH = '/usr/bin:/bin';
@@ -224,6 +275,85 @@ describe('terminateChildProcessGroup', () => {
   });
 });
 
+describe('killProcessGroup leader guard', () => {
+  // Production killProcessGroup must match e2e killOwnedProcessGroup: only
+  // process.kill(-pid) when the child leads its own group. A recycled or
+  // non-leader pid must not SIGTERM a foreign group (including the owner).
+
+  const liveChildren: ChildProcess[] = [];
+
+  async function spawnSleeper(opts: { detached: boolean }): Promise<ChildProcess> {
+    const { spawn: realSpawn } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    const child = realSpawn('sleep', ['30'], { detached: opts.detached, stdio: 'ignore' });
+    liveChildren.push(child);
+    return await new Promise((resolve, reject) => {
+      child.once('spawn', () => resolve(child));
+      child.once('error', reject);
+    });
+  }
+
+  afterEach(() => {
+    for (const child of liveChildren.splice(0)) {
+      try {
+        if (child.pid) {
+          try { process.kill(-child.pid, 'SIGKILL'); } catch { /* not a leader */ }
+          child.kill('SIGKILL');
+        }
+      } catch { /* already gone */ }
+    }
+  });
+
+  it('reads the real pgid: detached child leads its own group, non-detached child does not', async () => {
+    const { processUtils } = await loadProcessUtils();
+    const leader = await spawnSleeper({ detached: true });
+    const follower = await spawnSleeper({ detached: false });
+    expect(processUtils.readProcessGroupId(leader.pid!)).toBe(leader.pid);
+    expect(processUtils.readProcessGroupId(follower.pid!)).not.toBe(follower.pid);
+  });
+
+  it('group-kills a verified leader via negative pid', async () => {
+    const { processUtils } = await loadProcessUtils();
+    const leader = await spawnSleeper({ detached: true });
+    const exited = new Promise<NodeJS.Signals | number | null>((resolve) => {
+      leader.once('exit', (code, signal) => resolve(signal ?? code));
+    });
+    const killSpy = vi.spyOn(process, 'kill');
+    expect(processUtils.killProcessGroup(leader, 'SIGTERM')).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(-leader.pid!, 'SIGTERM');
+    expect(await exited).toBe('SIGTERM');
+    killSpy.mockRestore();
+  });
+
+  it('refuses group-kill for a non-leader and only signals the child', async () => {
+    const { processUtils } = await loadProcessUtils();
+    const victim = await spawnSleeper({ detached: true });
+    const nonLeader = await spawnSleeper({ detached: false });
+    const killSpy = vi.spyOn(process, 'kill');
+
+    expect(processUtils.killProcessGroup(nonLeader, 'SIGTERM')).toBe(true);
+
+    expect(killSpy).not.toHaveBeenCalledWith(-nonLeader.pid!, 'SIGTERM');
+    expect(killSpy).not.toHaveBeenCalledWith(-victim.pid!, 'SIGTERM');
+    expect(nonLeader.killed || nonLeader.signalCode === 'SIGTERM' || nonLeader.exitCode != null).toBe(true);
+    expect(victim.exitCode).toBeNull();
+    expect(victim.signalCode).toBeNull();
+    killSpy.mockRestore();
+  });
+
+  it('falls back to child.kill when pgid cannot be read', async () => {
+    const { processUtils } = await loadProcessUtils();
+    const child = createMockProcess();
+    const pgidSpy = vi.spyOn(processUtils, 'readProcessGroupId').mockReturnValue(null);
+    const killSpy = vi.spyOn(process, 'kill');
+
+    expect(processUtils.killProcessGroup(child, 'SIGTERM')).toBe(true);
+    expect(killSpy).not.toHaveBeenCalledWith(-child.pid!, 'SIGTERM');
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    killSpy.mockRestore();
+    pgidSpy.mockRestore();
+  });
+});
+
 describe('buildAgentExitFailureDetail', () => {
   it('surfaces the codex --json stdout error instead of the benign stdin noise', async () => {
     const { processUtils } = await loadProcessUtils();
@@ -300,5 +430,25 @@ describe('buildAgentExitFailureDetail', () => {
     const detail = processUtils.buildAgentExitFailureDetail(huge, '', huge);
     expect(detail.length).toBe(2000);
     expect(detail).toBe(huge.slice(-2000));
+  });
+
+  it('surfaces failure lines and drops surrounding build/progress noise', async () => {
+    const { processUtils } = await loadProcessUtils();
+    const noisyLog = [
+      'ERROR codex_core::session::session: failed to load skill /home/u/.codex/skills/x/SKILL.md: missing YAML frontmatter delimited by ---',
+      'vite v6.4.1 building for production...',
+      '✓ 2326 modules transformed.',
+      'dist/assets/index-Bza8qXJb.js 340.96 kB │ gzip: 91.85 kB',
+      'CLI ⚡️ Build success in 190ms',
+      "No workflow named 'In-App Planning Chat Draft Gate Step 3' found.",
+      '[worktree] Process exited: actionId=wf-123/discover-delete-scope exitCode=1',
+    ].join('\n');
+    const detail = processUtils.buildAgentExitFailureDetail(noisyLog, '', undefined);
+    expect(detail).toContain('missing YAML frontmatter delimited by ---');
+    expect(detail).toContain("No workflow named 'In-App Planning Chat Draft Gate Step 3' found.");
+    expect(detail).toContain('exitCode=1');
+    expect(detail).not.toContain('modules transformed');
+    expect(detail).not.toContain('Build success');
+    expect(detail).not.toContain('gzip');
   });
 });

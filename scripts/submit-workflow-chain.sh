@@ -10,29 +10,18 @@
 # For every plan after the first, include "__UPSTREAM_WORKFLOW_ID__" where the
 # previous workflow ID should be injected.
 #
-# Example snippet in each template:
+# Example snippet in each template (matches skills/plan-to-invoker):
 #   externalDependencies:
 #     - workflowId: "__UPSTREAM_WORKFLOW_ID__"
+#       taskId: "__merge__"
 #       requiredStatus: completed
-#       gatePolicy: completed
+#       gatePolicy: review_ready
+#
+# A gatePolicy already present in the template is preserved unless
+# --gate-policy is passed explicitly; missing dependency fields are injected
+# (gatePolicy defaults to completed).
 #
 set -euo pipefail
-
-GATE_POLICY="completed"
-if [[ "${1:-}" == "--gate-policy" ]]; then
-  GATE_POLICY="${2:-}"
-  shift 2
-fi
-
-if [[ "$GATE_POLICY" != "completed" && "$GATE_POLICY" != "review_ready" ]]; then
-  echo "Invalid --gate-policy '$GATE_POLICY' (expected completed|review_ready)" >&2
-  exit 1
-fi
-
-if [[ $# -lt 2 ]]; then
-  echo "Usage: $0 [--gate-policy completed|review_ready] <workflow1.yaml> <workflow2.template.yaml> [workflow3.template.yaml ...]" >&2
-  exit 1
-fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if ! command -v jq >/dev/null 2>&1; then
@@ -50,6 +39,46 @@ PY
 log_chain() {
   local msg="$1"
   echo "[submit-workflow-chain] ${msg}"
+}
+
+BACKEND=""
+
+chain_backend_query_workflows() {
+  if [[ "$BACKEND" == "live" ]]; then
+    invoker-cli query workflows --output json 2>/dev/null
+  else
+    ./run.sh --headless query workflows --output json 2>/dev/null
+  fi
+}
+
+chain_backend_query_tasks() {
+  if [[ "$BACKEND" == "live" ]]; then
+    invoker-cli query tasks --output json 2>/dev/null
+  else
+    ./run.sh --headless query tasks --output json 2>/dev/null
+  fi
+}
+
+chain_backend_submit() {
+  local plan="$1"
+  local out_file="$2"
+  if [[ "$BACKEND" == "live" ]]; then
+    invoker-cli run "$plan" --live --json >"$out_file" 2>/dev/null || true
+  else
+    ./run.sh --headless run "$plan" --no-track >"$out_file" 2>&1 || true
+  fi
+}
+
+chain_backend_parse_submit_id() {
+  local out_file="$1"
+  if [[ "$BACKEND" == "live" ]]; then
+    jq -r '.workflow.id // empty' "$out_file" 2>/dev/null || true
+  else
+    local printed_id delegated_id
+    printed_id="$(awk '/Workflow ID:/{print $3}' "$out_file" | tail -1)"
+    delegated_id="$(sed -n 's/.*workflow: \(wf-[0-9]\+-[0-9]\+\).*/\1/p' "$out_file" | tail -1)"
+    printf '%s' "${printed_id:-$delegated_id}"
+  fi
 }
 
 resolve_abs() {
@@ -86,6 +115,12 @@ parse_plan_name() {
   ' "$p"
 }
 
+parse_top_level_field() {
+  local plan="$1"
+  local field="$2"
+  awk -v field="$field" '$0 ~ ("^" field ":[[:space:]]*") { sub("^" field ":[[:space:]]*", ""); gsub(/^"|"$/, ""); print; exit }' "$plan"
+}
+
 matches_pattern() {
   local pattern="$1"
   local file="$2"
@@ -120,6 +155,7 @@ validate_upstream_dependency_fields() {
       dep_taskId=""
       dep_requiredStatus=""
       dep_gatePolicy=""
+      dep_gp_count=0
       found_upstream=0
       invalid_upstream=0
     }
@@ -145,6 +181,7 @@ validate_upstream_dependency_fields() {
         dep_taskId=""
         dep_requiredStatus=""
         dep_gatePolicy=""
+        dep_gp_count=0
         split(line, parts, "workflowId:")
         dep_is_upstream=(normalize(parts[2]) == upid)
         next
@@ -160,6 +197,8 @@ validate_upstream_dependency_fields() {
         next
       }
       if (in_ext && in_dep && dep_is_upstream && line ~ /^[[:space:]]*gatePolicy:[[:space:]]*/) {
+        dep_gp_count++
+        if (dep_gp_count > 1) invalid_upstream=1
         split(line, parts, "gatePolicy:")
         dep_gatePolicy=parts[2]
         next
@@ -174,17 +213,26 @@ validate_upstream_dependency_fields() {
 
 resolve_persisted_workflow_id() {
   local workflow_name="$1"
+  local started_at="$2"
+  local same_name_workflows
+  local new_same_name_count
   local wf_id=""
   local start_ms
   start_ms="$(now_ms)"
   local attempt=0
   for _ in $(seq 1 30); do
     attempt=$((attempt + 1))
-    wf_id="$(
-      ./run.sh --headless query workflows --output json 2>/dev/null \
+    same_name_workflows="$(
+      chain_backend_query_workflows \
         | extract_json_stream \
-        | jq -r --arg n "$workflow_name" '[.[] | select(.name == $n)] | sort_by(.createdAt) | last | .id // empty'
+        | jq -c --arg n "$workflow_name" '[.[] | select(.name == $n)]'
     )"
+    new_same_name_count="$(jq --arg started "$started_at" '[.[] | select(.createdAt > $started)] | length' <<<"$same_name_workflows")"
+    if [[ "$new_same_name_count" -gt 1 ]]; then
+      echo "Multiple workflows named '$workflow_name' were created after chain step start; cannot resolve a unique workflow id." >&2
+      return 1
+    fi
+    wf_id="$(jq -r 'sort_by(.createdAt) | last | .id // empty' <<<"$same_name_workflows")"
     if [[ -n "$wf_id" ]]; then
       log_chain "resolve_persisted_workflow_id name=\"$workflow_name\" found=\"$wf_id\" attempt=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))" >&2
       printf '%s' "$wf_id"
@@ -205,7 +253,7 @@ resolve_workflow_feature_branch() {
   for _ in $(seq 1 30); do
     attempt=$((attempt + 1))
     feature_branch="$(
-      ./run.sh --headless query workflows --output json 2>/dev/null \
+      chain_backend_query_workflows \
         | extract_json_stream \
         | jq -r --arg id "$workflow_id" '.[] | select(.id == $id) | .featureBranch // empty' \
         | head -1
@@ -221,6 +269,48 @@ resolve_workflow_feature_branch() {
   return 1
 }
 
+extract_concrete_ext_dep_workflow_ids() {
+  local file="$1"
+  awk '
+    function normalize(v) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      gsub(/^"|"$/, "", v)
+      return v
+    }
+    BEGIN { in_ext=0 }
+    {
+      line=$0
+      if (line ~ /^[^[:space:]]/ && line !~ /^externalDependencies:[[:space:]]*$/) {
+        in_ext=0
+      }
+      if (line ~ /^[[:space:]]*externalDependencies:[[:space:]]*$/) {
+        in_ext=1
+        next
+      }
+      if (in_ext && line ~ /^[[:space:]]*-[[:space:]]*workflowId:[[:space:]]*/) {
+        split(line, parts, "workflowId:")
+        id=normalize(parts[2])
+        if (id != "" && id != "__UPSTREAM_WORKFLOW_ID__") print id
+      }
+    }
+  ' "$file" | awk 'NF && !seen[$0]++'
+}
+
+rewrite_plan_base_branch() {
+  local src="$1"
+  local base_branch="$2"
+  local out="$3"
+  if ! matches_pattern "^baseBranch:" "$src"; then
+    echo "Plan is missing top-level baseBranch: $src" >&2
+    return 1
+  fi
+  sed -E "s|^baseBranch:.*$|baseBranch: ${base_branch}|" "$src" > "$out"
+  if ! matches_pattern "^baseBranch:[[:space:]]*${base_branch}$" "$out"; then
+    echo "Plan baseBranch did not update to '${base_branch}': $out" >&2
+    return 1
+  fi
+}
+
 wait_for_external_merge_gate() {
   local workflow_id="$1"
   local merge_id="__merge__${workflow_id}"
@@ -229,7 +319,7 @@ wait_for_external_merge_gate() {
   local attempt=0
   for _ in $(seq 1 60); do
     attempt=$((attempt + 1))
-    if ./run.sh --headless query tasks --output json 2>/dev/null | extract_json_stream | jq -e --arg id "$merge_id" '.[] | select(.id == $id)' >/dev/null; then
+    if chain_backend_query_tasks | extract_json_stream | jq -e --arg id "$merge_id" '.[] | select(.id == $id)' >/dev/null; then
       log_chain "wait_for_external_merge_gate mergeTaskId=\"$merge_id\" found attempt=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))"
       return 0
     fi
@@ -238,6 +328,225 @@ wait_for_external_merge_gate() {
   log_chain "wait_for_external_merge_gate mergeTaskId=\"$merge_id\" timeout attempts=${attempt} elapsedMs=$(( $(now_ms) - start_ms ))"
   return 1
 }
+
+# Extract the gatePolicy value the template itself provides for the upstream
+# dependency block (empty when the template has none).
+extract_upstream_gate_policy() {
+  local file="$1"
+  local upstream_id="$2"
+  awk -v upid="$upstream_id" '
+    function normalize(v) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      gsub(/^"|"$/, "", v)
+      return v
+    }
+    BEGIN {
+      in_ext=0
+      dep_is_upstream=0
+    }
+    {
+      line=$0
+      if (line ~ /^[^[:space:]]/ && line !~ /^externalDependencies:[[:space:]]*$/) {
+        in_ext=0
+        dep_is_upstream=0
+        next
+      }
+      if (line ~ /^[[:space:]]*externalDependencies:[[:space:]]*$/) {
+        in_ext=1
+        dep_is_upstream=0
+        next
+      }
+      if (in_ext && line ~ /^[[:space:]]*-[[:space:]]*workflowId:[[:space:]]*/) {
+        split(line, parts, "workflowId:")
+        dep_is_upstream=(normalize(parts[2]) == upid)
+        next
+      }
+      if (in_ext && dep_is_upstream && line ~ /^[[:space:]]*gatePolicy:[[:space:]]*/) {
+        split(line, parts, "gatePolicy:")
+        print normalize(parts[2])
+        exit
+      }
+    }
+  ' "$file"
+}
+
+# Render one chain-step template: substitute the upstream workflow id, enforce
+# merge-gate dependency fields, validate them, and rewrite baseBranch to the
+# upstream feature branch. A gatePolicy already present in the template is
+# preserved unless --gate-policy was passed explicitly; missing fields are
+# injected (gatePolicy falls back to GATE_POLICY).
+render_chain_step_template() {
+  local template="$1"
+  local upstream_id="$2"
+  local upstream_feature_branch="$3"
+  local out="$4"
+
+  sed "s/__UPSTREAM_WORKFLOW_ID__/$upstream_id/g" "$template" > "$out"
+  if ! matches_pattern "$upstream_id" "$out"; then
+    echo "Rendered plan did not include upstream id '$upstream_id': $out" >&2
+    return 1
+  fi
+
+  local expected_gate="$GATE_POLICY"
+  if [[ "$GATE_POLICY_EXPLICIT" -ne 1 ]]; then
+    local template_gate
+    template_gate="$(extract_upstream_gate_policy "$out" "$upstream_id")"
+    if [[ -n "$template_gate" ]]; then
+      if [[ "$template_gate" != "completed" && "$template_gate" != "review_ready" ]]; then
+        echo "Template gatePolicy '$template_gate' is invalid (expected completed|review_ready): $template" >&2
+        return 1
+      fi
+      expected_gate="$template_gate"
+    fi
+  fi
+
+  # Enforce merge-gate dependency and policy for the upstream workflow entry.
+  awk -v upid="$upstream_id" -v gate_policy="$GATE_POLICY" -v gate_explicit="$GATE_POLICY_EXPLICIT" '
+    BEGIN {
+      in_ext=0
+      dep_is_upstream=0
+      dep_had_taskid=0
+      dep_had_required=0
+      dep_had_gatepolicy=0
+      dep_indent=""
+    }
+    function flush_dep() {
+      if (!in_ext || !dep_is_upstream) return
+      if (!dep_had_taskid) print dep_indent "  taskId: \"__merge__\""
+      if (!dep_had_required) print dep_indent "  requiredStatus: completed"
+      if (!dep_had_gatepolicy) print dep_indent "  gatePolicy: " gate_policy
+    }
+    {
+      line=$0
+      if (line ~ /^[^[:space:]]/ && line !~ /^externalDependencies:[[:space:]]*$/) {
+        flush_dep()
+        in_ext=0
+        dep_is_upstream=0
+        dep_had_taskid=0
+        dep_had_required=0
+        dep_had_gatepolicy=0
+        dep_indent=""
+        print line
+        next
+      }
+      if (line ~ /^[[:space:]]*externalDependencies:[[:space:]]*$/) {
+        flush_dep()
+        in_ext=1
+        dep_is_upstream=0
+        dep_had_taskid=0
+        dep_had_required=0
+        dep_had_gatepolicy=0
+        dep_indent=""
+        print line
+        next
+      }
+      if (in_ext && line ~ /^[[:space:]]*-[[:space:]]*workflowId:[[:space:]]*/) {
+        flush_dep()
+        dep_indent=substr(line, 1, index(line, "-")-1)
+        dep_is_upstream=(line ~ ("workflowId:[[:space:]]*\"" upid "\"([[:space:]]|$)"))
+        dep_had_taskid=0
+        dep_had_required=0
+        dep_had_gatepolicy=0
+        print line
+        next
+      }
+      if (in_ext && dep_is_upstream && line ~ /^[[:space:]]*taskId:[[:space:]]*/) {
+        print dep_indent "  taskId: \"__merge__\""
+        dep_had_taskid=1
+        next
+      }
+      if (in_ext && dep_is_upstream && line ~ /^[[:space:]]*requiredStatus:[[:space:]]*/) {
+        print dep_indent "  requiredStatus: completed"
+        dep_had_required=1
+        next
+      }
+      if (in_ext && dep_is_upstream && line ~ /^[[:space:]]*gatePolicy:[[:space:]]*/) {
+        if (gate_explicit == 1) {
+          print dep_indent "  gatePolicy: " gate_policy
+        } else {
+          print line
+        }
+        dep_had_gatepolicy=1
+        next
+      }
+      print line
+    }
+    END {
+      flush_dep()
+    }
+  ' "$out" > "${out}.tmp"
+  mv "${out}.tmp" "$out"
+
+  if ! matches_pattern "workflowId:[[:space:]]*\"${upstream_id}\"([[:space:]]|$)" "$out"; then
+    echo "Rendered plan missing upstream workflow dependency '${upstream_id}': $out" >&2
+    return 1
+  fi
+  if ! validate_upstream_dependency_fields "$out" "$upstream_id" "$expected_gate"; then
+    echo "Rendered plan did not enforce strict upstream merge dependency fields for '${upstream_id}' (taskId=__merge__, requiredStatus=completed, gatePolicy=${expected_gate}, no duplicates): $out" >&2
+    return 1
+  fi
+
+  # Avoid sed -i (BSD vs GNU differs); write via temp file.
+  sed -E "s|^baseBranch:.*$|baseBranch: ${upstream_feature_branch}|" "$out" > "${out}.tmp"
+  mv "${out}.tmp" "$out"
+  if ! matches_pattern "^baseBranch:[[:space:]]*${upstream_feature_branch}$" "$out"; then
+    echo "Rendered plan baseBranch did not update to upstream feature branch '${upstream_feature_branch}': $out" >&2
+    return 1
+  fi
+}
+
+# When sourced (e.g. by render tests), expose the functions above without
+# running the submission flow below.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
+GATE_POLICY="completed"
+GATE_POLICY_EXPLICIT=0
+ONTO_WORKFLOW_ID=""
+ONTO_WORKFLOW_EXPLICIT=0
+
+while true; do
+  case "${1:-}" in
+    --gate-policy)
+      GATE_POLICY="${2:-}"
+      GATE_POLICY_EXPLICIT=1
+      shift 2
+      ;;
+    --onto-workflow)
+      ONTO_WORKFLOW_ID="${2:-}"
+      ONTO_WORKFLOW_EXPLICIT=1
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      echo "Usage: $0 [--gate-policy completed|review_ready] [--onto-workflow <id>] <workflow1.yaml> <workflow2.template.yaml> [workflow3.template.yaml ...]" >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ "$GATE_POLICY" != "completed" && "$GATE_POLICY" != "review_ready" ]]; then
+  echo "Invalid --gate-policy '$GATE_POLICY' (expected completed|review_ready)" >&2
+  exit 1
+fi
+
+if [[ "$ONTO_WORKFLOW_EXPLICIT" -eq 1 && -z "$ONTO_WORKFLOW_ID" ]]; then
+  echo "--onto-workflow requires a workflow id" >&2
+  exit 1
+fi
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: $0 [--gate-policy completed|review_ready] [--onto-workflow <id>] <workflow1.yaml> <workflow2.template.yaml> [workflow3.template.yaml ...]" >&2
+  exit 1
+fi
 
 cd "$REPO_ROOT"
 
@@ -267,7 +576,40 @@ for i in "${!INPUT_PLANS[@]}"; do
   fi
 
   submit_plan="$plan"
-  if [[ "$i" -gt 0 ]]; then
+  if [[ "$i" -eq 0 ]]; then
+    onto_id="$ONTO_WORKFLOW_ID"
+    if [[ -z "$onto_id" ]]; then
+      concrete_ids=()
+      while IFS= read -r cid; do
+        [[ -n "$cid" ]] && concrete_ids+=("$cid")
+      done < <(extract_concrete_ext_dep_workflow_ids "$plan")
+      if [[ "${#concrete_ids[@]}" -eq 1 ]]; then
+        onto_id="${concrete_ids[0]}"
+        log_chain "auto-detected --onto-workflow from plan[0] concrete externalDependency: $onto_id"
+      elif [[ "${#concrete_ids[@]}" -gt 1 ]]; then
+        log_chain "plan[0] has ${#concrete_ids[@]} concrete externalDependencies; skipping auto --onto-workflow (fan-in keeps trunk baseBranch)"
+      fi
+    fi
+    if [[ -n "$onto_id" ]]; then
+      BACKEND="live"
+    else
+      BACKEND="local"
+    fi
+    log_chain "backend=${BACKEND}"
+    if [[ -n "$onto_id" ]]; then
+      onto_feature="$(resolve_workflow_feature_branch "$onto_id" || true)"
+      if [[ -z "${onto_feature:-}" ]]; then
+        echo "Failed to resolve featureBranch for --onto-workflow: $onto_id" >&2
+        exit 1
+      fi
+      _onto_tmp="$(mktemp "${TMPDIR:-/tmp}/invoker-chain-onto.XXXXXX")"
+      submit_plan="${_onto_tmp}.yaml"
+      rm -f "$_onto_tmp"
+      rewrite_plan_base_branch "$plan" "$onto_feature" "$submit_plan"
+      RENDERED_PLANS+=("$submit_plan")
+      log_chain "rewrote plan[0] baseBranch -> $onto_feature (onto-workflow=$onto_id)"
+    fi
+  elif [[ "$i" -gt 0 ]]; then
     if [[ -z "$prev_wf_id" ]]; then
       echo "Internal error: missing previous workflow id before rendering chain step $((i+1))." >&2
       exit 1
@@ -293,111 +635,30 @@ for i in "${!INPUT_PLANS[@]}"; do
     _chain_tmp="$(mktemp "${TMPDIR:-/tmp}/invoker-chain-step$((i+1)).XXXXXX")"
     submit_plan="${_chain_tmp}.yaml"
     rm -f "$_chain_tmp"
-    sed "s/__UPSTREAM_WORKFLOW_ID__/$prev_wf_id/g" "$plan" > "$submit_plan"
-    if ! matches_pattern "$prev_wf_id" "$submit_plan"; then
-      echo "Rendered plan did not include upstream id '$prev_wf_id': $submit_plan" >&2
-      exit 1
-    fi
-
-    # Enforce merge-gate dependency and policy for the upstream workflow entry.
-    awk -v upid="$prev_wf_id" -v gate_policy="$GATE_POLICY" '
-      BEGIN {
-        in_ext=0
-        dep_is_upstream=0
-        dep_had_taskid=0
-        dep_had_required=0
-        dep_indent=""
-      }
-      function flush_dep() {
-        if (!in_ext || !dep_is_upstream) return
-        if (!dep_had_taskid) print dep_indent "  taskId: \"__merge__\""
-        if (!dep_had_required) print dep_indent "  requiredStatus: completed"
-      }
-      {
-        line=$0
-        if (line ~ /^[^[:space:]]/ && line !~ /^externalDependencies:[[:space:]]*$/) {
-          flush_dep()
-          in_ext=0
-          dep_is_upstream=0
-          dep_had_taskid=0
-          dep_had_required=0
-          dep_indent=""
-          print line
-          next
-        }
-        if (line ~ /^[[:space:]]*externalDependencies:[[:space:]]*$/) {
-          flush_dep()
-          in_ext=1
-          dep_is_upstream=0
-          dep_had_taskid=0
-          dep_had_required=0
-          dep_indent=""
-          print line
-          next
-        }
-        if (in_ext && line ~ /^[[:space:]]*-[[:space:]]*workflowId:[[:space:]]*/) {
-          flush_dep()
-          dep_indent=substr(line, 1, index(line, "-")-1)
-          dep_is_upstream=(line ~ ("workflowId:[[:space:]]*\"" upid "\"([[:space:]]|$)"))
-          dep_had_taskid=0
-          dep_had_required=0
-          print line
-          next
-        }
-        if (in_ext && dep_is_upstream && line ~ /^[[:space:]]*taskId:[[:space:]]*/) {
-          print dep_indent "  taskId: \"__merge__\""
-          dep_had_taskid=1
-          next
-        }
-        if (in_ext && dep_is_upstream && line ~ /^[[:space:]]*requiredStatus:[[:space:]]*/) {
-          print dep_indent "  requiredStatus: completed"
-          print dep_indent "  gatePolicy: " gate_policy
-          dep_had_required=1
-          next
-        }
-        print line
-      }
-      END {
-        flush_dep()
-      }
-    ' "$submit_plan" > "${submit_plan}.tmp"
-    mv "${submit_plan}.tmp" "$submit_plan"
-
-    if ! matches_pattern "workflowId:[[:space:]]*\"${prev_wf_id}\"([[:space:]]|$)" "$submit_plan"; then
-      echo "Rendered plan missing upstream workflow dependency '${prev_wf_id}': $submit_plan" >&2
-      exit 1
-    fi
-    if ! validate_upstream_dependency_fields "$submit_plan" "$prev_wf_id" "$GATE_POLICY"; then
-      echo "Rendered plan did not enforce strict upstream merge dependency fields for '${prev_wf_id}' (taskId=__merge__, requiredStatus=completed, gatePolicy=${GATE_POLICY}): $submit_plan" >&2
-      exit 1
-    fi
-
-    # Avoid sed -i (BSD vs GNU differs); write via temp file.
-    sed -E "s|^baseBranch:.*$|baseBranch: ${prev_wf_feature_branch}|" "$submit_plan" > "${submit_plan}.tmp"
-    mv "${submit_plan}.tmp" "$submit_plan"
-    if ! matches_pattern "^baseBranch:[[:space:]]*${prev_wf_feature_branch}$" "$submit_plan"; then
-      echo "Rendered plan baseBranch did not update to upstream feature branch '${prev_wf_feature_branch}': $submit_plan" >&2
-      exit 1
-    fi
+    render_chain_step_template "$plan" "$prev_wf_id" "$prev_wf_feature_branch" "$submit_plan"
     RENDERED_PLANS+=("$submit_plan")
   fi
 
-  echo "Submitting workflow $((i+1)) (no track): $submit_plan"
+  echo "Submitting workflow $((i+1)) (backend=${BACKEND}): $submit_plan"
   run_start_ms="$(now_ms)"
-  log_chain "headless-run begin step=$((i+1)) plan=\"$submit_plan\" noTrack=true"
+  run_started_at="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+  log_chain "headless-run begin step=$((i+1)) plan=\"$submit_plan\" backend=${BACKEND}"
   _chain_out="$(mktemp "${TMPDIR:-/tmp}/invoker-chain-out$((i+1)).XXXXXX")"
   out_file="${_chain_out}.log"
   rm -f "$_chain_out"
-  ./run.sh --headless run "$submit_plan" --no-track >"$out_file" 2>&1 || true
+  chain_backend_submit "$submit_plan" "$out_file"
   log_chain "headless-run end step=$((i+1)) elapsedMs=$(( $(now_ms) - run_start_ms )) out=\"$out_file\""
 
-  printed_id="$(awk '/Workflow ID:/{print $3}' "$out_file" | tail -1)"
-  delegated_id="$(sed -n 's/.*workflow: \(wf-[0-9]\+-[0-9]\+\).*/\1/p' "$out_file" | tail -1)"
-  if [[ -n "${printed_id:-}" || -n "${delegated_id:-}" ]]; then
-    echo "  printed_id=${printed_id:-<none>} delegated_id=${delegated_id:-<none>}"
+  printed_id="$(chain_backend_parse_submit_id "$out_file")"
+  if [[ -n "${printed_id:-}" ]]; then
+    echo "  printed_id=${printed_id:-<none>}"
   fi
 
-  persisted_id="$(resolve_persisted_workflow_id "$plan_name" || true)"
+  if [[ -n "${printed_id:-}" ]]; then
+    persisted_id="$printed_id"
+  else
+    persisted_id="$(resolve_persisted_workflow_id "$plan_name" "$run_started_at" || true)"
+  fi
   if [[ -z "${persisted_id:-}" ]]; then
     echo "Failed to resolve persisted workflow id for name: $plan_name" >&2
     echo "Headless output tail:" >&2
@@ -406,17 +667,16 @@ for i in "${!INPUT_PLANS[@]}"; do
   fi
 
   CHAIN_WORKFLOW_IDS+=("$persisted_id")
-  wf_base_branch="$(
-    ./run.sh --headless query workflows --output json 2>/dev/null \
-      | extract_json_stream \
-      | jq -r --arg id "$persisted_id" '.[] | select(.id == $id) | .baseBranch // empty' | head -1
-  )"
+  wf_base_branch="$(parse_top_level_field "$submit_plan" baseBranch)"
   CHAIN_BASE_BRANCHES+=("${wf_base_branch:-<unset>}")
 
-  wf_feature_branch="$(resolve_workflow_feature_branch "$persisted_id" || true)"
-  if [[ -z "${wf_feature_branch:-}" ]]; then
-    echo "Failed to resolve featureBranch for workflow: $persisted_id (name: $plan_name)" >&2
-    exit 1
+  wf_feature_branch=""
+  if [[ "$i" -lt $((${#INPUT_PLANS[@]} - 1)) ]]; then
+    wf_feature_branch="$(resolve_workflow_feature_branch "$persisted_id" || true)"
+    if [[ -z "${wf_feature_branch:-}" ]]; then
+      echo "Failed to resolve featureBranch for workflow: $persisted_id (name: $plan_name)" >&2
+      exit 1
+    fi
   fi
   CHAIN_FEATURE_BRANCHES+=("$wf_feature_branch")
   prev_wf_feature_branch="$wf_feature_branch"
@@ -426,6 +686,7 @@ done
 echo
 echo "Workflow chain submitted."
 echo "GATE_POLICY=${GATE_POLICY}"
+echo "BACKEND=${BACKEND}"
 for i in "${!CHAIN_WORKFLOW_IDS[@]}"; do
   echo "WF$((i+1))=${CHAIN_WORKFLOW_IDS[$i]} base=${CHAIN_BASE_BRANCHES[$i]} feature=${CHAIN_FEATURE_BRANCHES[$i]}"
 done

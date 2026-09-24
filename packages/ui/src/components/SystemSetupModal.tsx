@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type {
   InvokerSetupRequest,
   InvokerSetupResult,
@@ -50,6 +50,7 @@ interface SystemSetupModalProps {
   onRunSetup?: (request: InvokerSetupRequest) => void;
   updateCliError?: string | null;
   onUpdateInvokerCli?: () => void;
+  onAddMachine?: (fields: MachineSetupFields) => Promise<MachineCheckOutcome>;
   onClose: () => void;
 }
 
@@ -61,6 +62,59 @@ const setupStepLabels: Record<'choose' | 'review' | 'finish', string> = {
 };
 
 type SlackFieldId = 'botToken' | 'appToken' | 'signingSecret' | 'channelId';
+
+const firstAgentWorkflowTutorialUrl = 'https://github.com/Neko-Catpital-Labs/Invoker/blob/main/docs/tutorial-first-agent-workflow.md';
+
+type MachineFieldId = 'host' | 'user' | 'sshKeyPath' | 'port' | 'maxConcurrentTasks' | 'provisionCommand';
+
+export interface MachineSetupFields {
+  host: string;
+  user: string;
+  sshKeyPath: string;
+  port?: number;
+  maxConcurrentTasks?: number;
+  provisionCommand?: string;
+}
+
+export interface MachineCheckOutcome {
+  ok: boolean;
+  message?: string;
+}
+
+interface AddedMachine {
+  fields: MachineSetupFields;
+  message?: string;
+}
+
+const machineSetupFields: Array<{ id: MachineFieldId; label: string; placeholder: string; required: boolean }> = [
+  { id: 'host', label: 'Host', placeholder: 'e.g. 10.0.0.5 or box.example.com', required: true },
+  { id: 'user', label: 'User', placeholder: 'e.g. ubuntu', required: true },
+  { id: 'sshKeyPath', label: 'SSH key path', placeholder: '~/.ssh/id_ed25519', required: true },
+  { id: 'port', label: 'Port', placeholder: '22', required: false },
+  { id: 'maxConcurrentTasks', label: 'Max concurrent tasks', placeholder: '1', required: false },
+  { id: 'provisionCommand', label: 'Provision command', placeholder: 'optional', required: false },
+];
+
+const emptyMachineFormFields: Record<MachineFieldId, string> = {
+  host: '',
+  user: '',
+  sshKeyPath: '',
+  port: '',
+  maxConcurrentTasks: '',
+  provisionCommand: '',
+};
+
+function buildMachineSetupFields(raw: Record<MachineFieldId, string>): MachineSetupFields {
+  const fields: MachineSetupFields = {
+    host: raw.host.trim(),
+    user: raw.user.trim(),
+    sshKeyPath: raw.sshKeyPath.trim(),
+  };
+  if (raw.port.trim() !== '') fields.port = Number(raw.port);
+  if (raw.maxConcurrentTasks.trim() !== '') fields.maxConcurrentTasks = Number(raw.maxConcurrentTasks);
+  if (raw.provisionCommand.trim() !== '') fields.provisionCommand = raw.provisionCommand.trim();
+  return fields;
+}
 
 const slackSetupFields: Array<{
   id: SlackFieldId;
@@ -116,13 +170,14 @@ export function SystemSetupModal({
   updateCliError = null,
   onRunSetup,
   onUpdateInvokerCli,
+  onAddMachine,
   onClose,
 }: SystemSetupModalProps) {
   const [setupChecks, setSetupChecks] = useState<Record<SetupCheckId, boolean>>({
     updateCli: true,
     installHelpers: true,
     fixTools: true,
-    slack: true,
+    slack: false,
   });
   const [slackFields, setSlackFields] = useState<Record<SlackFieldId, string>>({
     botToken: '',
@@ -132,6 +187,48 @@ export function SystemSetupModal({
   });
   const [reviewOpen, setReviewOpen] = useState(false);
   const [systemDetailsOpen, setSystemDetailsOpen] = useState(false);
+  const [machineFormFields, setMachineFormFields] = useState<Record<MachineFieldId, string>>(emptyMachineFormFields);
+  const [machineFormOpen, setMachineFormOpen] = useState(true);
+  const [machineCheckPending, setMachineCheckPending] = useState(false);
+  const [machineCheckError, setMachineCheckError] = useState<string | null>(null);
+  const [addedMachines, setAddedMachines] = useState<AddedMachine[]>([]);
+  const [machinesStepDone, setMachinesStepDone] = useState(false);
+  const [machineCloseConfirmOpen, setMachineCloseConfirmOpen] = useState(false);
+  const machineSubmitInFlightRef = useRef(false);
+  const machineRequiredFieldsComplete = machineSetupFields
+    .filter((field) => field.required)
+    .every((field) => machineFormFields[field.id].trim() !== '');
+  const machineFormHasValues = machineSetupFields.some((field) => machineFormFields[field.id].trim() !== '');
+  const hasUnconfirmedMachineFields = machineFormOpen && machineFormHasValues;
+  const submitMachineForm = async (): Promise<void> => {
+    if (!onAddMachine || machineSubmitInFlightRef.current || !machineRequiredFieldsComplete) return;
+    machineSubmitInFlightRef.current = true;
+    setMachineCheckPending(true);
+    setMachineCheckError(null);
+    const fields = buildMachineSetupFields(machineFormFields);
+    try {
+      const outcome = await onAddMachine(fields);
+      if (outcome.ok) {
+        setAddedMachines((prev) => [...prev, { fields, message: outcome.message }]);
+        setMachineFormFields(emptyMachineFormFields);
+        setMachineFormOpen(false);
+      } else {
+        setMachineCheckError(outcome.message ?? 'Could not add this machine.');
+      }
+    } catch (err) {
+      setMachineCheckError(err instanceof Error ? err.message : String(err));
+    } finally {
+      machineSubmitInFlightRef.current = false;
+      setMachineCheckPending(false);
+    }
+  };
+  const requestCloseModal = (): void => {
+    if (hasUnconfirmedMachineFields) {
+      setMachineCloseConfirmOpen(true);
+      return;
+    }
+    onClose();
+  };
   const anySetupSelected = setupChecks.updateCli || setupChecks.installHelpers || setupChecks.fixTools || setupChecks.slack;
   const slackFieldsComplete = slackSetupFields.every((field) => slackFields[field.id] !== '');
   const firstMissingSlackField = setupChecks.slack
@@ -188,7 +285,7 @@ export function SystemSetupModal({
           : cliInstaller.installedVersion
             ? `Update ${cliInstaller.installedVersion} to ${cliInstaller.bundledVersion}`
             : `Install ${cliInstaller.bundledVersion} on PATH`
-        : 'Not needed in this app mode',
+        : 'Managed externally',
       status: cliInstaller?.supported && !cliInstaller.upToDate ? 'Needs setup' : 'Ready',
     },
     {
@@ -216,7 +313,7 @@ export function SystemSetupModal({
     {
       checkId: 'slack',
       title: 'Set up Slack integration',
-      detail: 'Add Slack app values here; Slack is on by default.',
+      detail: 'Slack is optional; turn it on to add app values.',
       status: slackFieldsComplete ? 'Ready to run' : 'Needs fields',
     },
   ];
@@ -226,13 +323,13 @@ export function SystemSetupModal({
 
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog open onOpenChange={(open) => { if (!open) requestCloseModal(); }}>
       <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden" hideCloseButton>
         <DialogHeader className="p-6 pb-3 shrink-0">
           <DialogTitle>System Setup</DialogTitle>
           <p className="text-sm text-muted-foreground mt-1">
             {diagnostics
-              ? `Invoker ${diagnostics.appVersion} on ${diagnostics.platform}/${diagnostics.arch}${diagnostics.isPackaged ? ' (packaged app)' : ' (repo/dev mode)'}`
+              ? `Invoker ${diagnostics.appVersion} on ${diagnostics.platform}/${diagnostics.arch}`
               : 'Loading system diagnostics...'}
           </p>
         </DialogHeader>
@@ -359,7 +456,19 @@ export function SystemSetupModal({
               )}
               {setupResult && (
                 <div className={`rounded border px-3 py-2 text-sm ${setupResult.ok ? 'border-green-700/50 bg-green-950/30 text-green-100' : 'border-red-700/50 bg-red-950/30 text-red-100'}`}>
-                  <div className="font-medium">{setupResult.ok ? 'Setup completed' : 'Setup completed with failures'}</div>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="font-medium">{setupResult.ok ? 'Setup completed' : 'Setup completed with failures'}</div>
+                    {currentSetupStep === 'finish' && (
+                      <a
+                        href={firstAgentWorkflowTutorialUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded bg-green-800/70 px-3 py-1.5 text-xs font-medium text-green-50 hover:bg-green-700"
+                      >
+                        Open the First Agent Workflow Tutorial
+                      </a>
+                    )}
+                  </div>
                   <div className="mt-2 space-y-2">
                     {setupResult.steps.map((step) => (
                       <div key={step.id} className="rounded bg-card/50 px-2 py-2">
@@ -368,6 +477,103 @@ export function SystemSetupModal({
                         {step.output && <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-xs text-foreground">{step.output}</pre>}
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {onAddMachine && (
+            <div className="rounded border border-border-strong/60 bg-secondary/70 px-4 py-4 space-y-4">
+              <div>
+                <div className="text-sm font-medium text-foreground">Add remote machines</div>
+                <div className="text-sm text-muted-foreground/80 mt-1">
+                  Add machines Invoker can run tasks on over SSH. Each machine is checked before it&apos;s added.
+                </div>
+              </div>
+
+              {addedMachines.length > 0 && (
+                <div className="rounded border border-border-strong/70 bg-card/40 divide-y divide-border">
+                  {addedMachines.map((machine, index) => (
+                    <div key={`${machine.fields.host}-${index}`} className="px-3 py-2 text-sm text-foreground">
+                      <span className="font-medium">{machine.fields.user}@{machine.fields.host}</span>
+                      {machine.message && <span className="ml-2 text-xs text-muted-foreground">{machine.message}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {machineFormOpen && (
+                <div className="space-y-3">
+                  {machineSetupFields.map((field) => (
+                    <label key={field.id} className="block text-xs text-foreground">
+                      {field.label} {!field.required && <span className="text-muted-foreground/70">(optional)</span>}
+                      <input
+                        value={machineFormFields[field.id]}
+                        onChange={(event) => {
+                          const { value } = event.target;
+                          setMachineFormFields((prev) => ({ ...prev, [field.id]: value }));
+                          setMachineCheckError(null);
+                        }}
+                        type={field.id === 'port' || field.id === 'maxConcurrentTasks' ? 'number' : 'text'}
+                        placeholder={field.placeholder}
+                        className="mt-1 w-full rounded border border-border-strong bg-card px-2 py-1.5 text-sm text-foreground"
+                      />
+                    </label>
+                  ))}
+
+                  {machineCheckError && (
+                    <div className="rounded border border-red-700/50 bg-red-950/30 px-3 py-2 text-sm text-red-200">
+                      {machineCheckError}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={submitMachineForm}
+                    disabled={machineCheckPending || !machineRequiredFieldsComplete}
+                    className="px-4 py-2 bg-primary hover:bg-primary/90 disabled:bg-secondary disabled:text-muted-foreground text-white rounded text-sm font-medium transition-colors"
+                  >
+                    {machineCheckPending ? 'Checking machine…' : 'Check and add machine'}
+                  </button>
+                </div>
+              )}
+
+              {!machineFormOpen && !machinesStepDone && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => setMachineFormOpen(true)}
+                    className="px-3 py-2 bg-muted hover:bg-accent text-white rounded text-sm transition-colors"
+                  >
+                    Add another machine
+                  </button>
+                  <button
+                    onClick={() => setMachinesStepDone(true)}
+                    className="px-3 py-2 bg-primary hover:bg-primary/90 text-white rounded text-sm font-medium transition-colors"
+                  >
+                    Done adding machines
+                  </button>
+                </div>
+              )}
+
+              {machineCloseConfirmOpen && (
+                <div className="rounded border border-amber-600/50 bg-amber-950/40 px-3 py-3 text-sm text-amber-100">
+                  <div className="font-medium">Discard machine details?</div>
+                  <div className="mt-1 text-amber-100/90">
+                    You entered machine fields that haven&apos;t been added yet. Closing now will discard them.
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      onClick={onClose}
+                      className="px-3 py-2 bg-red-700 hover:bg-red-600 text-white rounded text-sm font-medium transition-colors"
+                    >
+                      Discard and close
+                    </button>
+                    <button
+                      onClick={() => setMachineCloseConfirmOpen(false)}
+                      className="px-3 py-2 bg-muted hover:bg-accent text-white rounded text-sm transition-colors"
+                    >
+                      Keep editing
+                    </button>
                   </div>
                 </div>
               )}
@@ -651,7 +857,7 @@ export function SystemSetupModal({
         </div>
 
         <DialogFooter className="px-6 py-4 border-t border-border sm:justify-end">
-          <Button type="button" onClick={onClose}>
+          <Button type="button" onClick={requestCloseModal}>
             Close
           </Button>
         </DialogFooter>

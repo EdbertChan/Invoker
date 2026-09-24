@@ -6,19 +6,20 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, readdirSync, copyFileSync, rmSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, readdirSync, copyFileSync, rmSync, mkdtempSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 
-import { scopePlanTaskId } from '@invoker/workflow-core';
-import type { Orchestrator, TaskState, ExperimentVariant } from '@invoker/workflow-core';
+import { BUILT_IN_LOCAL_EXECUTION_POOL_ID, FailureClassifier, scopePlanTaskId } from '@invoker/workflow-core';
+import type { Orchestrator, TaskState, ExperimentVariant, Attempt, FailureClass } from '@invoker/workflow-core';
+import { CodexSpendGateTrippedError } from './codex-spend-gate.js';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import type { WorkRequest, WorkResponse, ActionType, Logger } from '@invoker/contracts';
 import type { Executor, ExecutorHandle } from './executor.js';
 import type { TaskRunnerCallbacks } from './task-runner-callbacks.js';
 
-import { BaseExecutor } from './base-executor.js';
+import { BaseExecutor, normalizeRepoUrlForProvisionLookup } from './base-executor.js';
 import { RESTART_TO_BRANCH_TRACE, traceExecution } from './exec-trace.js';
 import { createExecutionBench } from './execution-bench.js';
 import { ResourceLimitError, type RepoPoolTiming } from './repo-pool.js';
@@ -48,15 +49,20 @@ import {
 } from './conflict-resolver.js';
 import { DEFAULT_EXECUTION_AGENT } from './agent.js';
 import {
-  buildCanonicalPrBody,
+  buildValidatedFallbackPrBody,
   isInvokerRepoUrl,
   buildMakePrStackPublishPrompt,
   buildMakePrPrompt,
+  extractAgentReportedError,
   parseMakePrStackPublishResult,
+  repoLocalPrBodyCheckerPath,
   resolveSkillPathViaAgent,
+  runRepoLocalPrBodyChecker,
   spawnAgentPrAuthorViaRegistry,
   validateCanonicalPrBody,
   validateReviewStackPrBody,
+  validateReviewStackPrBodyAgainstLocalDiff,
+  type MakePrStackArtifactOutput,
   type PrAuthoringContext,
 } from './pr-authoring.js';
 import { ensureRemoteUrl } from './git-config-mutation.js';
@@ -93,7 +99,34 @@ import type {
   RemoteTargetDisplay,
   ResolvedExecutionSelection,
   SelectedExecutor,
+  WorktreeTargetDisplay,
 } from './task-runner-pool.js';
+
+function failureClassFromThrownError(err: unknown): FailureClass | undefined {
+  if (err && typeof err === 'object' && 'failureClass' in err) {
+    const failureClass = err.failureClass;
+    if (FailureClassifier.isUsageLimit(failureClass as FailureClass | undefined)) {
+      return failureClass as FailureClass;
+    }
+  }
+  if (isCausedByCodexSpendGate(err)) return 'agent-spend-gate';
+  return undefined;
+}
+
+function isCausedByCodexSpendGate(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof CodexSpendGateTrippedError) return true;
+    seen.add(current);
+    current = current.cause;
+  }
+  return false;
+}
+
+function errorWithFailureClass(message: string, failureClass: FailureClass | undefined): Error {
+  return Object.assign(new Error(message), failureClass ? { failureClass } : {});
+}
 
 export type { TaskHeartbeatEvent, TaskRunnerCallbacks } from './task-runner-callbacks.js';
 type ReviewGateState = NonNullable<TaskState['execution']['reviewGate']>;
@@ -141,6 +174,15 @@ const NOOP_LOGGER: Logger = {
  * it as a benign race.
  */
 export interface LaunchOutboxAck {
+  /**
+   * Mark that the executor is confirmed live (markTaskRunningAfterLaunch
+   * accepted the launch). This is distinct from completeDispatch: it
+   * signals the LAUNCH HANDOFF succeeded, not that the task's work is done.
+   * Stops the stuck-launch age check (LAUNCH_STUCK_ABANDON_MS) from firing
+   * on this row -- that check exists to catch launches that never start,
+   * not tasks that legitimately run long after starting successfully.
+   */
+  acceptDispatch(dispatchId: number): boolean;
   completeDispatch(dispatchId: number): boolean;
   failDispatch(dispatchId: number, error: unknown): boolean;
 }
@@ -184,6 +226,11 @@ export interface TaskRunnerConfig {
     remoteHeartbeatIntervalSeconds?: number;
     maxConcurrentTasks?: number;
   }>;
+  worktreeTargetsProvider?: () => Record<string, {
+    provisionCommand?: string;
+    maxConcurrentTasks?: number;
+  }>;
+  repoProvisionCommandsProvider?: () => Record<string, string>;
   executionPoolsProvider?: () => Record<string, {
     members: Array<
       | { type: 'ssh'; id: string; maxConcurrentTasks?: number }
@@ -206,6 +253,33 @@ export interface TaskRunnerConfig {
   logger?: Logger;
 }
 
+/**
+ * Gathers the set of invoker-managed branches referenced by the given tasks'
+ * current execution and their historical attempts, deduplicated and trimmed.
+ */
+export function collectManagedWorkflowBranchesFromDb(
+  tasks: readonly TaskState[],
+  loadAttempts: ((taskId: string) => Attempt[] | undefined) | undefined,
+): string[] {
+  const branches: string[] = [];
+  const seen = new Set<string>();
+  const addBranch = (branch: string | undefined): void => {
+    const trimmed = branch?.trim();
+    if (!trimmed || !isInvokerManagedPoolBranch(trimmed) || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    branches.push(trimmed);
+  };
+
+  for (const task of tasks) {
+    addBranch(task.execution.branch);
+    for (const attempt of loadAttempts?.(task.id) ?? []) {
+      addBranch(attempt.branch);
+    }
+  }
+
+  return branches;
+}
+
 // ── TaskRunner ──────────────────────────────────────────
 
 export class TaskRunner {
@@ -225,6 +299,8 @@ export class TaskRunner {
   /** @internal */ reviewGateMergeConflictInFlight = new Set<string>();
 
   /** @internal */ getRemoteTargets: () => Record<string, RemoteTargetDisplay>;
+  /** @internal */ getWorktreeTargets: () => Record<string, WorktreeTargetDisplay>;
+  /** @internal */ getRepoProvisionCommands: () => Record<string, string>;
   /** @internal */ getExecutionPools: () => Record<string, ExecutionPoolConfig>;
   private getExecutionDefaults: () => { executionAgent?: string; executionModel?: string };
   /** @internal */ dockerConfig: { imageName?: string; secretsFile?: string };
@@ -233,6 +309,8 @@ export class TaskRunner {
   /** @internal */ readonly runnerInstanceId = randomUUID();
   /** Cache for SSH executors, keyed by poolMemberId. One instance per target for correct git locking. */
   /** @internal */ sshExecutorCache = new Map<string, SshExecutor>();
+  /** Cache for worktree executors keyed by local provisioning config fingerprint. */
+  /** @internal */ worktreeExecutorCache = new Map<string, WorktreeExecutor>();
   /** @internal */ poolRoundRobinCursor = new Map<string, number>();
   poolMemberHealth = new Map<string, PoolMemberHealth>();
   /** @internal */ readonly pendingPoolSelections = new Map<string, PoolSelection>();
@@ -308,24 +386,10 @@ export class TaskRunner {
   }
 
   private collectManagedWorkflowBranches(workflowId: string): string[] {
-    const branches: string[] = [];
-    const seen = new Set<string>();
-    const addBranch = (branch: string | undefined): void => {
-      const trimmed = branch?.trim();
-      if (!trimmed || !isInvokerManagedPoolBranch(trimmed) || seen.has(trimmed)) return;
-      seen.add(trimmed);
-      branches.push(trimmed);
-    };
-
-    for (const task of this.orchestrator.getAllTasks()) {
-      if (task.config.workflowId !== workflowId || task.config.isMergeNode) continue;
-      addBranch(task.execution.branch);
-      for (const attempt of this.persistence.loadAttempts?.(task.id) ?? []) {
-        addBranch(attempt.branch);
-      }
-    }
-
-    return branches;
+    const tasks = this.orchestrator
+      .getAllTasks()
+      .filter((task) => task.config.workflowId === workflowId && !task.config.isMergeNode);
+    return collectManagedWorkflowBranchesFromDb(tasks, this.persistence.loadAttempts?.bind(this.persistence));
   }
 
   constructor(config: TaskRunnerConfig) {
@@ -341,7 +405,19 @@ export class TaskRunner {
     this.reviewGateCiFailurePublisher = config.reviewGateCiFailurePublisher;
     this.reviewGateMergeConflictPublisher = config.reviewGateMergeConflictPublisher;
     this.getRemoteTargets = config.remoteTargetsProvider ?? (() => ({}));
-    this.getExecutionPools = config.executionPoolsProvider ?? (() => ({}));
+    const configuredWorktreeTargets = config.worktreeTargetsProvider ?? (() => ({}));
+    this.getWorktreeTargets = () => ({
+      [BUILT_IN_LOCAL_EXECUTION_POOL_ID]: {},
+      ...configuredWorktreeTargets(),
+    });
+    this.getRepoProvisionCommands = config.repoProvisionCommandsProvider ?? (() => ({}));
+    const configuredExecutionPools = config.executionPoolsProvider ?? (() => ({}));
+    this.getExecutionPools = () => ({
+      [BUILT_IN_LOCAL_EXECUTION_POOL_ID]: {
+        members: [{ type: 'worktree', id: BUILT_IN_LOCAL_EXECUTION_POOL_ID }],
+      },
+      ...configuredExecutionPools(),
+    });
     this.getExecutionDefaults = config.executionDefaultsProvider ?? (() => ({}));
     this.dockerConfig = config.dockerConfig ?? {};
     this.executionAgentRegistry = config.executionAgentRegistry;
@@ -363,19 +439,35 @@ export class TaskRunner {
   }
 
   /**
+   * True when some active execution's resource lease holder id matches
+   * `holderId`. Scoped by lease holder (not task id alone) so a stale
+   * lease from an abandoned attempt isn't mistaken for still-alive just
+   * because the task has since started a new attempt with a new lease.
+   */
+  hasActiveExecutionForLeaseHolder(holderId: string): boolean {
+    for (const entry of this.activeExecutions.values()) {
+      if (entry.leaseHolderId === holderId) return true;
+    }
+    return false;
+  }
+
+  /**
    * Stop the executor child for a task that is currently in-flight (after orchestrator.cancelTask).
    */
   async killActiveExecution(taskId: string): Promise<boolean> {
     const resolved = this.resolveActiveExecution(taskId);
     if (!resolved) return false;
-    this.activeExecutions.delete(resolved.attemptId);
-    if (resolved.entry.leaseResourceKey && resolved.entry.leaseHolderId) {
-      this.persistence.releaseExecutionResourceLease?.(resolved.entry.leaseResourceKey, resolved.entry.leaseHolderId);
-    }
+    // Kill first, release the lease only after: executor.kill() can take
+    // up to SIGKILL_TIMEOUT_MS before the process exits.
     try {
       await resolved.entry.executor.kill(resolved.entry.handle);
     } catch (killErr) {
       this.logger.warn(`[TaskRunner] killActiveExecution failed for task=${taskId}`, { err: killErr });
+    } finally {
+      this.activeExecutions.delete(resolved.attemptId);
+      if (resolved.entry.leaseResourceKey && resolved.entry.leaseHolderId) {
+        this.persistence.releaseExecutionResourceLease?.(resolved.entry.leaseResourceKey, resolved.entry.leaseHolderId);
+      }
     }
     return true;
   }
@@ -610,6 +702,7 @@ export class TaskRunner {
         outputs: {
           exitCode: 1,
           error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          failureClass: failureClassFromThrownError(err),
         },
       };
       const newlyStarted = this.orchestrator.handleWorkerResponse(response) ?? [];
@@ -1130,7 +1223,17 @@ export class TaskRunner {
       cwd: this.cwd,
       logger: this.logger,
       ensureRepoMirrorPath: (url) => this.ensureRepoMirrorPath(url),
+      provisionCommandFor: (url) => this.resolveMergeCloneProvisionCommand(url),
     });
+  }
+
+  private resolveMergeCloneProvisionCommand(repoUrl: string | undefined): string {
+    const poolDefault = this.getWorktreeTargets()[BUILT_IN_LOCAL_EXECUTION_POOL_ID]?.provisionCommand?.trim() ?? '';
+    if (!repoUrl) return poolDefault;
+    const wanted = normalizeRepoUrlForProvisionLookup(repoUrl);
+    const override = Object.entries(this.getRepoProvisionCommands())
+      .find(([url]) => normalizeRepoUrlForProvisionLookup(url) === wanted)?.[1];
+    return override !== undefined ? override : poolDefault;
   }
 
   /** @internal */ cloneMergeWorktree(cloneSource: string, clonePath: string): Promise<void> {
@@ -1390,6 +1493,7 @@ export class TaskRunner {
     repoUrl?: string;
   }): Promise<{ body: string; sessionId: string; agentName: string }> {
     const strictReviewStack = isInvokerRepoUrl(args.repoUrl);
+    const hasRepoChecker = !strictReviewStack && existsSync(repoLocalPrBodyCheckerPath(args.cwd));
     if (!this.executionAgentRegistry) {
       if (strictReviewStack) {
         throw new Error(
@@ -1400,22 +1504,20 @@ export class TaskRunner {
       this.logger.warn(
         '[pr-authoring] executionAgentRegistry missing, using canonical fallback PR body.',
       );
-      const canonicalBody = buildCanonicalPrBody({
-        title: args.title,
-        workflowSummary: args.workflowSummary,
-        structuredContext: args.structuredContext,
-      });
-      return { body: canonicalBody, sessionId: 'canonical-fallback', agentName: 'canonical' };
     }
 
     // Build the ordered agent fallback chain:
     // 1. Preferred agent from workflow tasks
     // 2. Remaining PR-capable agents in stable registry order
-    const preferredName = this.resolvePrAuthoringAgentName(args.workflowId, args.mergeNodeTaskId);
-    const prCapableAgents = this.executionAgentRegistry.listWithCapability('make-pr');
-    const orderedAgents = this.buildAgentFallbackOrder(preferredName, prCapableAgents);
+    const orderedAgents = this.executionAgentRegistry
+      ? this.buildAgentFallbackOrder(
+        this.resolvePrAuthoringAgentName(args.workflowId, args.mergeNodeTaskId),
+        this.executionAgentRegistry.listWithCapability('make-pr'),
+      )
+      : [];
 
     const errors: string[] = [];
+    let failureClass: FailureClass | undefined;
     for (const agent of orderedAgents) {
       const skillPath = resolveSkillPathViaAgent(agent, 'make-pr');
       if (!skillPath) {
@@ -1423,7 +1525,7 @@ export class TaskRunner {
         continue;
       }
 
-      const driver = this.executionAgentRegistry.getSessionDriver(agent.name);
+      const driver = this.executionAgentRegistry?.getSessionDriver(agent.name);
       const prompt = buildMakePrPrompt({
         skillPath,
         title: args.title,
@@ -1442,8 +1544,21 @@ export class TaskRunner {
         );
         const result = await spawnAgentPrAuthorViaRegistry(prompt, args.cwd, agent, driver);
         const validationErrors = strictReviewStack
-          ? validateReviewStackPrBody(result.body)
-          : validateCanonicalPrBody(result.body);
+          ? await validateReviewStackPrBodyAgainstLocalDiff({
+            body: result.body,
+            cwd: args.cwd,
+            baseBranch: args.baseBranch,
+          })
+          : hasRepoChecker
+            ? [
+              ...validateCanonicalPrBody(result.body),
+              ...(await runRepoLocalPrBodyChecker({
+                body: result.body,
+                cwd: args.cwd,
+                baseBranch: args.baseBranch,
+              })),
+            ]
+            : validateCanonicalPrBody(result.body);
         if (validationErrors.length > 0) {
           this.logger.warn(
             `[pr-authoring] body validation failed agent=${agent.name} `
@@ -1457,6 +1572,7 @@ export class TaskRunner {
         this.logger.info(`[pr-authoring] body authored agent=${agent.name} validated`);
         return { body: result.body, sessionId: result.sessionId, agentName: agent.name };
       } catch (err) {
+        failureClass ??= failureClassFromThrownError(err);
         errors.push(
           `${agent.name}: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -1464,22 +1580,26 @@ export class TaskRunner {
     }
 
     if (strictReviewStack) {
-      throw new Error(
+      throw errorWithFailureClass(
         '[pr-authoring] All AI agents failed to author a review-stack PR body for the Invoker repo; '
           + `refusing canonical fallback (it cannot pass scripts/validate-pr-body.mjs). Errors: ${errors.join(' | ')}`,
+        failureClass,
       );
     }
 
-    // No AI agent succeeded — emit deterministic canonical PR body
-    this.logger.warn(
-      `[pr-authoring] All AI agents failed for PR authoring, using canonical fallback. Errors: ${errors.join(' | ')}`,
-    );
-    const canonicalBody = buildCanonicalPrBody({
-      title: args.title,
-      workflowSummary: args.workflowSummary,
-      structuredContext: args.structuredContext,
-    });
-    return { body: canonicalBody, sessionId: 'canonical-fallback', agentName: 'canonical' };
+    try {
+      const canonicalBody = await buildValidatedFallbackPrBody(args);
+      this.logger.warn(
+        `[pr-authoring] All AI agents failed for PR authoring; using validated canonical fallback. `
+          + `Errors: ${errors.join(' | ')}`,
+      );
+      return { body: canonicalBody, sessionId: 'canonical-fallback', agentName: 'canonical' };
+    } catch (error) {
+      throw errorWithFailureClass(
+        `${error instanceof Error ? error.message : String(error)} Author errors: ${errors.join(' | ')}`,
+        failureClass,
+      );
+    }
   }
 
   async publishReviewStackWithMakePrSkill(args: {
@@ -1492,14 +1612,15 @@ export class TaskRunner {
     cwd: string;
     expectedGeneration: number;
     reviewGate?: ReviewGateState;
+    recordedFixCommit?: string;
   }): Promise<{ artifacts: ReviewGateArtifact[]; sessionId: string; agentName: string }> {
     if (!this.executionAgentRegistry) {
       throw new Error('make-pr skill is required to publish Invoker review stacks');
     }
 
-    const preferredName = this.resolvePrAuthoringAgentName(args.workflowId, args.mergeNodeTaskId);
-    const prCapableAgents = this.executionAgentRegistry.listWithCapability('make-pr');
-    const orderedAgents = this.buildAgentFallbackOrder(preferredName, prCapableAgents);
+    const preferredAgentName = this.resolvePrAuthoringAgentName(args.workflowId, args.mergeNodeTaskId);
+    const preferredAgent = this.executionAgentRegistry.get(preferredAgentName);
+    const orderedAgents = preferredAgent ? [preferredAgent] : [];
     const logProgress = (
       level: 'debug' | 'info' | 'warn' | 'error',
       message: string,
@@ -1527,7 +1648,53 @@ export class TaskRunner {
       agentCount: orderedAgents.length,
     });
 
+    const reviewGateState = args.reviewGate;
+    const existingArtifacts = reviewGateState
+      ? reviewGateState.artifacts.filter((artifact) => this.isCurrentReviewGateArtifact(reviewGateState, artifact))
+      : [];
+    if (existingArtifacts.length > 0 && this.mergeGateProvider?.getReviewBody) {
+      const bodyErrors: string[] = [];
+      const reusableArtifacts: ReviewGateArtifact[] = [];
+      for (const artifact of existingArtifacts) {
+        if (!artifact.providerId) {
+          bodyErrors.push(`${artifact.id}: missing providerId`);
+          continue;
+        }
+        try {
+          const body = await this.mergeGateProvider.getReviewBody({
+            identifier: artifact.providerId,
+            cwd: args.cwd,
+          });
+          const errors = validateReviewStackPrBody(body);
+          if (errors.length > 0) {
+            bodyErrors.push(`${artifact.id}: ${errors.join('; ')}`);
+            continue;
+          }
+          reusableArtifacts.push({
+            ...artifact,
+            generation: args.expectedGeneration,
+          });
+        } catch (error) {
+          bodyErrors.push(`${artifact.id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (bodyErrors.length === 0 && reusableArtifacts.length === existingArtifacts.length) {
+        logProgress('info', 'Reusing existing review stack with validated bodies', {
+          artifactCount: reusableArtifacts.length,
+        });
+        this.logger.info(
+          `[pr-authoring] review-stack reused existing artifacts=${reusableArtifacts.length} `
+            + 'bodies validated against make-pr schema',
+        );
+        return { artifacts: reusableArtifacts, sessionId: 'existing-review-stack', agentName: 'deterministic' };
+      }
+      logProgress('info', 'Existing review stack requires make-pr repair', {
+        errors: bodyErrors,
+      });
+    }
+
     const errors: string[] = [];
+    let failureClass: FailureClass | undefined;
 
     for (const agent of orderedAgents) {
       const skillPath = resolveSkillPathViaAgent(agent, 'make-pr');
@@ -1552,16 +1719,50 @@ export class TaskRunner {
           agentName: agent.name,
           cwd: args.cwd,
         });
-        this.logger.info(
+        const skillLine =
           `[pr-authoring] review-stack publish starting agent=${agent.name} `
-            + `workflow=${args.workflowId ?? 'unknown'} skill=invoker-make-pr cwd=${args.cwd}`,
-        );
-        const result = await spawnAgentPrAuthorViaRegistry(prompt, args.cwd, agent, driver);
+            + `workflow=${args.workflowId ?? 'unknown'} skill=invoker-make-pr cwd=${args.cwd}`;
+        this.logger.info(skillLine);
+        if (args.mergeNodeTaskId) {
+          const outputLine = `${skillLine}\n`;
+          try {
+            this.callbacks.onOutput?.(args.mergeNodeTaskId, outputLine);
+            this.persistence.appendTaskOutput?.(args.mergeNodeTaskId, outputLine);
+          } catch (error) {
+            this.logger.warn('[pr-authoring] failed to persist task output', {
+              taskId: args.mergeNodeTaskId,
+              error,
+            });
+          }
+        }
+        const repairPublicationEnv = args.recordedFixCommit
+          ? {
+            INVOKER_REPAIR_PUBLICATION: '1',
+            INVOKER_REPAIR_TASK_CHAIN_ID: args.workflowId ?? args.mergeNodeTaskId ?? '',
+            INVOKER_REPAIR_SESSION_COMMIT: args.recordedFixCommit,
+          }
+          : {};
+        const result = await spawnAgentPrAuthorViaRegistry(prompt, args.cwd, agent, driver, repairPublicationEnv);
         logProgress('info', `${agent.name} make-pr agent finished; validating output`, {
           agentName: agent.name,
           sessionId: result.sessionId,
         });
-        const parsedArtifacts = parseMakePrStackPublishResult(result.body);
+        let parsedArtifacts: MakePrStackArtifactOutput[];
+        try {
+          parsedArtifacts = parseMakePrStackPublishResult(result.body);
+        } catch (parseError) {
+          const reportedError = extractAgentReportedError(result.stdout);
+          logProgress('error', `${agent.name} make-pr agent produced no usable output`, {
+            agentName: agent.name,
+            sessionId: result.sessionId,
+            reportedError: reportedError ?? null,
+            bodyLength: result.body?.length ?? 0,
+          });
+          if (reportedError) {
+            throw new Error(`${agent.name} could not author the PR: ${reportedError}`);
+          }
+          throw parseError;
+        }
 
         // Enforce the make-pr review-stack schema on every published body. Prefer
         // the body actually published on the provider: a lazy agent could report a
@@ -1626,6 +1827,7 @@ export class TaskRunner {
         );
         return { artifacts, sessionId: result.sessionId, agentName: agent.name };
       } catch (err) {
+        failureClass ??= failureClassFromThrownError(err);
         const message = err instanceof Error ? err.message : String(err);
         logProgress('warn', `${agent.name} make-pr agent failed`, {
           agentName: agent.name,
@@ -1635,8 +1837,9 @@ export class TaskRunner {
       }
     }
 
-    throw new Error(
+    throw errorWithFailureClass(
       `make-pr skill is required to publish Invoker review stacks${errors.length > 0 ? `: ${errors.join(' | ')}` : ''}`,
+      failureClass,
     );
   }
 
@@ -1671,6 +1874,13 @@ export class TaskRunner {
 
   private resolvePrAuthoringAgentName(workflowId?: string, mergeNodeTaskId?: string): string {
     const allTasks = this.orchestrator.getAllTasks();
+    if (mergeNodeTaskId) {
+      const ownMergeTask = allTasks.find((task) => task.id === mergeNodeTaskId && task.config.isMergeNode);
+      const ownAgent = ownMergeTask?.config.executionAgent?.trim();
+      if (ownAgent) {
+        return ownAgent;
+      }
+    }
     let candidateTasks = allTasks.filter((task) => !task.config.isMergeNode);
     if (workflowId) {
       candidateTasks = candidateTasks.filter((task) => task.config.workflowId === workflowId);
@@ -1804,6 +2014,28 @@ export class TaskRunner {
     }
 
     return branches;
+  }
+  /** @internal */ collectUpstreamBase(task: TaskState): { branch: string; commitHash: string } | undefined {
+    const resolveUpstreamBase = (dep: TaskState | undefined): { branch: string; commitHash: string } | undefined => {
+      if (dep?.status !== 'completed') return undefined;
+      const branch = dep.execution.branch?.trim();
+      const commitHash = dep.execution.commit?.trim();
+      if (!branch || !commitHash) return undefined;
+      return { branch, commitHash };
+    };
+
+    for (const depId of task.dependencies) {
+      const upstreamBase = resolveUpstreamBase(this.orchestrator.getTask(depId));
+      if (upstreamBase) return upstreamBase;
+    }
+    for (const depRef of task.config.externalDependencies ?? []) {
+      const upstreamBase = resolveUpstreamBase(
+        this.resolveExternalDependencyTask(depRef.workflowId, depRef.taskId),
+      );
+      if (upstreamBase) return upstreamBase;
+    }
+
+    return undefined;
   }
 
   /** @internal */ buildAlternatives(

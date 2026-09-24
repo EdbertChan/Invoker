@@ -84,17 +84,21 @@ describe('main-process read hot-path cost guards', () => {
       }
     });
 
+    const countEventsByTypes = vi.spyOn(adapter, 'countEventsByTypes');
+    const getEventsByTypes = vi.spyOn(adapter, 'getEventsByTypes');
+    const listWorkflows = vi.spyOn(adapter, 'listWorkflows');
+    const loadTasks = vi.spyOn(adapter, 'loadTasks');
     const getEvents = vi.spyOn(adapter, 'getEvents');
-    const started = Date.now();
     const status = collectRecoveryWorkerStatus(adapter);
-    const elapsedMs = Date.now() - started;
 
+    expect(countEventsByTypes).toHaveBeenCalledTimes(1);
+    expect(getEventsByTypes).toHaveBeenCalledTimes(1);
+    expect(listWorkflows).not.toHaveBeenCalled();
+    expect(loadTasks).not.toHaveBeenCalled();
     expect(getEvents).not.toHaveBeenCalled();
     expect(status.wakeups + status.scans + status.submissions + status.skips).toBe(taskCount * eventsPerTask);
     expect(status.recent.length).toBeGreaterThan(0);
     expect(status.recent.length).toBeLessThanOrEqual(10);
-    // Per-type indexed LIMIT+merge must stay well under a 2s UI poll budget.
-    expect(elapsedMs).toBeLessThan(50);
   });
 
   it('projects a stale-pointer task without scanning every attempt under large error blobs', async () => {
@@ -147,7 +151,7 @@ describe('main-process read hot-path cost guards', () => {
     queryAll.mockRestore();
   });
 
-  it('builds worker-status via indexed actions and recovery aggregates on every snapshot', () => {
+  it('reuses worker-status action and recovery reads during poll bursts', () => {
     const registry = createWorkerRegistry<WorkerRuntimeDependencies>();
     registry.register({
       kind: AUTO_FIX_WORKER_KIND,
@@ -191,9 +195,9 @@ describe('main-process read hot-path cost guards', () => {
 
     const first = controller.snapshot();
     const second = controller.snapshot();
-    expect(second).not.toBe(first);
-    expect(listWorkerActions).toHaveBeenCalledTimes(2);
-    expect(countEventsByTypes).toHaveBeenCalledTimes(2);
+    expect(second).toBe(first);
+    expect(listWorkerActions).toHaveBeenCalledTimes(1);
+    expect(countEventsByTypes).toHaveBeenCalledTimes(1);
     expect(listWorkerActions).toHaveBeenCalledWith({ workerKind: AUTO_FIX_WORKER_KIND, limit: 5 });
   });
 });

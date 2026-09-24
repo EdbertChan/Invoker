@@ -21,7 +21,7 @@ These properties define the registered model:
 
 - **Built-in default auto-fix.** The built-in auto-fix worker is registered as kind `autofix`; its underlying runtime reports recovery ownership as `recovery` and submits normal `fix-with-agent` recovery intents.
 - **Scan on start.** Starting the auto-fix worker runs a full scan immediately (`tickOnStart`), so tasks that are already failed are reconciled when the worker comes up, not one poll interval later.
-- **Manual one-shot scan.** `./run.sh --headless worker autofix` drives the same registered auto-fix worker for an explicit operator scan.
+- **Manual one-shot scan.** `invoker-cli worker autofix` drives the same registered auto-fix worker for an explicit operator scan.
 - **External extension point.** `externalWorkers` config entries add more registry kinds without changing producer code; each entry supplies a supervised process launch boundary.
 
 A **sweep-and-assert guard** pattern fails the build if a recovery channel is triggered from any code path outside its registered worker engine and sanctioned command/dispatcher routes. This locks the single-owner invariant in against future drift, so a new direct auto-fix or requeue call cannot reintroduce a second recovery path.
@@ -79,6 +79,29 @@ Registered worker kinds are the operator-facing control surface:
 
 The built-in set includes `autofix` as the default recovery worker for failed-task fixes. Operator-declared `externalWorkers` append additional kinds by config, so external automation is selected through the same registry and lifecycle controls as built-ins.
 
+## Auto-Started Workers
+
+On owner boot `startAutoStartedWorkers()` starts `pr-status`
+unconditionally. Every other built-in worker is opt-in through its own config
+field, and those fields all default to off:
+
+- `disk-headroom` auto-starts when `diskHeadroom.cleanupEnabled` is true.
+- `autoapprove` auto-starts when `autoApproveAIFixes` is true.
+- `pr-admin-bypass-land`, `pr-orphan-repair`, `pr-duplicate-close`, and
+  `pr-auto-label` auto-start when the shared `prMaintenance.enabled` field
+  is true.
+- `e2e-autofix` auto-starts when `e2eAutoFixEnabled` is true.
+- `infra-repair` auto-starts when `infraRepair.enabled` is true.
+- `autofix` auto-starts when `autofix.enabled` is true.
+- `reaper` auto-starts when `reaper.enabled` is true.
+- `workflow-resume` auto-starts when `workflowResume.enabled` is true.
+- `requeue` auto-starts when `requeueEnabled` is true.
+
+Saved per-worker desired state (Workers tab / `worker start|stop`) overrides
+the auto-start default in both directions.
+
+Only `pr-status` auto-starts unconditionally; every other built-in worker requires its own config field set to enable auto-start.
+
 ## Worker Wakeups
 
 A lifecycle event should carry enough context to make wakeups efficient, such as workflow ID, task ID, transition type, and generation where available. That context is an optimization, not authority.
@@ -95,7 +118,7 @@ Registered workers may subscribe to the same lifecycle event stream. Contention 
 
 ## Auto-Fix Worker
 
-Automatic fix attempts are owned by the built-in auto-fix worker registered as kind `autofix` in `@invoker/execution-engine`. The worker's underlying runtime identity remains `recovery` for existing recovery audit events. It subscribes to lifecycle wakeups, scans persisted state, keys consumed attempts in worker runtime memory by task lineage, and decides whether an auto-fix command should be submitted. `./run.sh --headless worker autofix` is only a manual one-shot scan through the same registered definition.
+Automatic fix attempts are owned by the built-in auto-fix worker registered as kind `autofix` in `@invoker/execution-engine`. The worker's underlying runtime identity remains `recovery` for existing recovery audit events. It subscribes to lifecycle wakeups, scans persisted state, keys consumed attempts in worker runtime memory by task lineage, and decides whether an auto-fix command should be submitted. `invoker-cli worker autofix` is only a manual one-shot scan through the same registered definition.
 
 Lifetime and concurrency are constrained so the registered worker stays single for each explicit start path:
 
@@ -157,8 +180,8 @@ place.
 Operators can inspect recovery ownership and recent decisions with:
 
 ```bash
-./run.sh --headless worker status --output text
-./run.sh --headless worker status --output json
+invoker-ui --headless worker status --output text
+invoker-ui --headless worker status --output json
 ```
 
 The status view is audit-backed and read-only. It reports the recovery worker id, owner, last wakeup, last scan, last submitted recovery command, and the latest skip reason. Status reporting must not change recovery eligibility or command submission ordering.
@@ -188,8 +211,8 @@ with `attemptCount` and timestamps carrying the history.
 Query decisions read-only:
 
 ```bash
-./run.sh --headless query worker-decisions --workflow <id> --output json
-./run.sh --headless query worker-decisions --decision skip --reason budget
+invoker-ui --headless query worker-decisions --workflow <id> --output json
+invoker-ui --headless query worker-decisions --decision skip --reason budget
 ```
 
 The desktop Workers tab surfaces the same feed: selecting a worker shows a

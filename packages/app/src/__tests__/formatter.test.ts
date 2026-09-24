@@ -72,6 +72,14 @@ describe('formatTaskStatus', () => {
     expect(output).not.toContain('[failed]');
   });
 
+  it('shows correct label, icon, and color for skipped status', () => {
+    const task = makeTask({ status: 'skipped' });
+    const output = formatTaskStatus(task);
+    expect(output).toContain(DIM);
+    expect(output).toContain('⏭');
+    expect(output).toContain('[skipped]');
+  });
+
   it('shows correct color for running status', () => {
     const task = makeTask({ status: 'running' });
     const output = formatTaskStatus(task);
@@ -318,6 +326,7 @@ describe('serializeWorkflow', () => {
       baseBranch: 'master',
       featureBranch: 'feature/test',
       generation: 2,
+      staged: true,
     };
     const result = serializeWorkflow(wf);
     expect(result.description).toBe('A test workflow');
@@ -326,6 +335,7 @@ describe('serializeWorkflow', () => {
     expect(result.baseBranch).toBe('master');
     expect(result.featureBranch).toBe('feature/test');
     expect(result.generation).toBe(2);
+    expect(result.staged).toBe(true);
   });
 
   it('omits undefined optional fields', () => {
@@ -422,6 +432,46 @@ describe('serializeTask', () => {
     const json = JSON.stringify(serializeTask(task));
     expect(() => JSON.parse(json)).not.toThrow();
     expect(json).not.toContain('\x1b');
+  });
+
+  it('reports the stored input prompt', () => {
+    const task = makeTask({
+      status: 'waiting_for_input',
+      execution: {
+        inputPrompt: 'Stale task specification blocked before agent execution: absent existing/do-not-create anchors',
+      } as TaskState['execution'],
+    });
+    const execution = serializeTask(task).execution as Record<string, unknown>;
+    expect(execution.inputPrompt).toBe(
+      'Stale task specification blocked before agent execution: absent existing/do-not-create anchors',
+    );
+  });
+
+  it('omits inputPrompt when no prompt is stored', () => {
+    const task = makeTask({
+      status: 'waiting_for_input',
+      execution: { branch: 'feature/test' } as TaskState['execution'],
+    });
+    const execution = serializeTask(task).execution as Record<string, unknown>;
+    expect(execution).not.toHaveProperty('inputPrompt');
+  });
+
+  it('leaves the serialized keys of a task without an input prompt unchanged', () => {
+    const task = makeTask({
+      id: 'wf-1/task-a',
+      execution: {
+        branch: 'feature/test',
+        commit: 'abc123',
+        exitCode: 0,
+      } as TaskState['execution'],
+    });
+    const result = serializeTask(task);
+    expect(Object.keys(result).sort()).toEqual(
+      ['config', 'createdAt', 'dependencies', 'description', 'execution', 'id', 'status'],
+    );
+    expect(Object.keys(result.execution as Record<string, unknown>).sort()).toEqual(
+      ['branch', 'commit', 'exitCode'],
+    );
   });
 });
 

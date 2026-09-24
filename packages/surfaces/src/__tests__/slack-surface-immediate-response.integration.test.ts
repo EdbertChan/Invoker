@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SlackSurface } from '../slack/slack-surface.js';
 import { redactAbsolutePaths, sanitizeSlashCommands, sanitizeSlackOutbound, splitForSlack } from '../slack/slack-message-helpers.js';
 import type { SurfaceCommand } from '../surface.js';
+import { SQLiteAdapter, SlackPlanDraftRepository, SlackSessionRepository } from '@invoker/data-store';
 
 // ── Mock @slack/bolt ────────────────────────────────────────
 
@@ -95,6 +96,9 @@ vi.mock('@slack/bolt', () => {
           return { ok: true };
         }),
       },
+      files: {
+        uploadV2: vi.fn().mockResolvedValue({ ok: true, files: [{ ok: true, files: [{ id: 'F1' }] }] }),
+      },
     };
   }
 
@@ -103,13 +107,19 @@ vi.mock('@slack/bolt', () => {
 
 // Mock PlanConversation to control response timing
 const mockSendMessage = vi.fn();
+const mockRunPlanConversion = vi.fn();
 let mockDraftedPlan: string | null = null;
+let mockLastTurnDraftPlanText: string | null = null;
 const mockPlanConversation = {
   sendMessage: mockSendMessage,
   getDraftedPlan: () => mockDraftedPlan,
+  runPlanConversion: mockRunPlanConversion,
+  get lastTurnDraftPlanText() {
+    return mockLastTurnDraftPlanText;
+  },
   submittedPlanText: null as any,
   planSubmitted: false,
-  conversationMode: 'plan' as const,
+  conversationMode: 'agent' as const,
   init: vi.fn().mockResolvedValue(undefined),
 };
 
@@ -128,9 +138,11 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
     receivedCommands = [];
     apiCalls.length = 0; // Clear API call history
     mockSendMessage.mockReset();
+    mockRunPlanConversion.mockReset();
     mockPlanConversation.submittedPlanText = null;
     mockPlanConversation.planSubmitted = false;
     mockDraftedPlan = null;
+    mockLastTurnDraftPlanText = null;
   });
 
   afterEach(async () => {
@@ -143,6 +155,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
     it('sends immediate ack, processes request, then replaces ack with actual response', async () => {
       // Setup: Create surface with immediate ack enabled (default)
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -200,18 +213,26 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
       expect(actualCall).toBe('help me debug this issue');
     });
 
-    it('handles the explicit plan submission flow correctly', async () => {
+    it('handles the explicit /plan draft-and-approve flow correctly', async () => {
+      const adapter = await SQLiteAdapter.create(':memory:');
+      const slackPlanDraftRepo = new SlackPlanDraftRepository(adapter);
+      const slackSessionRepo = new SlackSessionRepository(adapter);
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
+        workingDir: '/tmp/repo',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
         channelId: 'C-test',
         anthropicApiKey: 'test-anthropic-key',
+        slackPlanDraftRepo,
+        slackSessionRepo,
       });
 
       const planText = 'name: "Debug Issue"\ntasks:\n  - id: t1\n    description: "Run the debugger"\n    dependencies: []\n';
-      mockSendMessage.mockResolvedValue('Plan ready. Say `submit` to run it.');
-      mockDraftedPlan = planText;
+      mockSendMessage.mockResolvedValue('Sure, let me look into it.');
+      mockRunPlanConversion.mockResolvedValue('Here is the plan.');
+      mockLastTurnDraftPlanText = planText;
 
       await surface.start(async (cmd) => {
         receivedCommands.push(cmd);
@@ -219,7 +240,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
       const app = surface.getApp() as any;
       const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
-      const messageHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'message')?.handler;
+      const approveHandler = app._actionHandlers.find((h: MockHandler) => h.pattern === 'plan_draft_approve')?.handler;
 
       const say = vi.fn().mockImplementation(async ({ text }) => {
         const ts = `${Date.now()}.${Math.random().toString(36).substr(2, 6)}`;
@@ -227,41 +248,201 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
         return { ts, ok: true };
       });
 
-      // Build request → immediate ack, replaced with the drafted-plan reply. No submission.
+      // Build request → normal agent thread with immediate ack replaced by the reply. No submission.
       await mentionHandler({
         event: { text: '<@UBOT123456> create a plan for me', ts: '1111.001', thread_ts: undefined, user: 'U123' },
         say,
       });
       expect(apiCalls[0].text).toBe('Processing your request...');
-      expect(apiCalls[1].method).toBe('update');
-      expect(apiCalls[1].text).toBe('Plan ready. Say `submit` to run it.');
       expect(receivedCommands).toHaveLength(0);
 
-      // Explicit submit → summary + confirmation, still no start_plan.
+      // Explicit `/plan` converts the thread's scope into a PlanDraft review card.
       await mentionHandler({
-        event: { text: '<@UBOT123456> submit', ts: '1111.5', thread_ts: '1111.001', user: 'U123' },
+        event: { text: '<@UBOT123456> /plan', ts: '1111.5', thread_ts: '1111.001', user: 'U123' },
         say,
       });
+      const draft = slackPlanDraftRepo.getReady('C-test', '1111.001');
+      expect(draft).toBeTruthy();
       expect(receivedCommands).toHaveLength(0);
 
-      // Confirm → start_plan with the raw plan text.
-      await messageHandler({
-        event: { text: 'yes', ts: '1111.6', thread_ts: '1111.001', user: 'U123' },
-        say,
+      // Approving the PlanDraft card emits start_plan with the drafted YAML, normalized to carry the pinned repoUrl.
+      await approveHandler({
+        action: { type: 'button', value: `${draft!.draftId}:${draft!.version}` },
+        body: { channel: { id: 'C-test' }, message: { thread_ts: '1111.001' }, user: { id: 'U123' } },
+        ack: vi.fn().mockResolvedValue(undefined),
+        respond: vi.fn().mockResolvedValue(undefined),
       });
-      expect(receivedCommands).toEqual([
-        expect.objectContaining({ type: 'start_plan', planText }),
-      ]);
+      expect(receivedCommands).toHaveLength(1);
+      expect(receivedCommands[0]).toEqual(expect.objectContaining({
+        type: 'start_plan',
+        repoUrl: 'https://github.com/example/repo.git',
+        planText: expect.stringContaining('repoUrl: https://github.com/example/repo.git'),
+      }));
+
+      await adapter.close();
     });
 
-    it('clears a leftover Processing ack when plan: is empty', async () => {
+    it('surfaces a visible error and fires a lobby alert when the YAML upload fails during auto-stage', async () => {
+      const adapter = await SQLiteAdapter.create(':memory:');
+      const slackPlanDraftRepo = new SlackPlanDraftRepository(adapter);
+      const slackSessionRepo = new SlackSessionRepository(adapter);
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
+        workingDir: '/tmp/repo',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        anthropicApiKey: 'test-anthropic-key',
+        slackPlanDraftRepo,
+        slackSessionRepo,
+        conversationalPlanning: true,
+      });
+
+      const planText = 'name: "Debug Issue"\ntasks:\n  - id: t1\n    description: "Run the debugger"\n    dependencies: []\n';
+      mockSendMessage.mockResolvedValue('Here is the drafted plan.');
+      mockLastTurnDraftPlanText = planText;
+      mockPlanConversation.conversationMode = 'plan';
+
+      const app = surface.getApp() as any;
+      app.client.files.uploadV2.mockRejectedValueOnce(new Error('missing_scope'));
+
+      await surface.start(async (cmd) => {
+        receivedCommands.push(cmd);
+      });
+
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+      const say = vi.fn().mockImplementation(async ({ text }) => {
+        const ts = `${Date.now()}.${Math.random().toString(36).substr(2, 6)}`;
+        apiCalls.push({ method: 'postMessage', channel: 'C-test', text, ts });
+        return { ts, ok: true };
+      });
+
+      await mentionHandler({
+        event: { text: '<@UBOT123456> create a plan for me', ts: '2222.001', thread_ts: undefined, user: 'U123' },
+        say,
+      });
+
+      const errorReply = apiCalls.find((c) => c.text?.includes('I hit an error trying to prepare the plan review card'));
+      expect(errorReply).toBeTruthy();
+      expect(errorReply?.text).toContain('missing_scope');
+
+      const alertPost = apiCalls.find((c) => c.text?.includes('Plan review card failed to post'));
+      expect(alertPost).toBeTruthy();
+
+      mockPlanConversation.conversationMode = 'agent';
+      await adapter.close();
+    });
+
+    it('stays silent during auto-stage when the turn is not draft-ready yet', async () => {
+      const adapter = await SQLiteAdapter.create(':memory:');
+      const slackPlanDraftRepo = new SlackPlanDraftRepository(adapter);
+      const slackSessionRepo = new SlackSessionRepository(adapter);
+      surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
+        workingDir: '/tmp/repo',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        anthropicApiKey: 'test-anthropic-key',
+        slackPlanDraftRepo,
+        slackSessionRepo,
+        conversationalPlanning: true,
+      });
+
+      mockSendMessage.mockResolvedValue('Still thinking about your request.');
+      mockLastTurnDraftPlanText = 'not a real yaml plan';
+      mockPlanConversation.conversationMode = 'plan';
+
+      await surface.start(async (cmd) => {
+        receivedCommands.push(cmd);
+      });
+
+      const app = surface.getApp() as any;
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+      const say = vi.fn().mockImplementation(async ({ text }) => {
+        const ts = `${Date.now()}.${Math.random().toString(36).substr(2, 6)}`;
+        apiCalls.push({ method: 'postMessage', channel: 'C-test', text, ts });
+        return { ts, ok: true };
+      });
+
+      await mentionHandler({
+        event: { text: '<@UBOT123456> create a plan for me', ts: '3333.001', thread_ts: undefined, user: 'U123' },
+        say,
+      });
+
+      expect(apiCalls.some((c) => c.text?.includes('error trying to prepare'))).toBe(false);
+      expect(apiCalls.some((c) => c.text?.includes('Plan review card failed to post'))).toBe(false);
+      expect(slackPlanDraftRepo.getReady('C-test', '3333.001')).toBeFalsy();
+
+      mockPlanConversation.conversationMode = 'agent';
+      await adapter.close();
+    });
+
+    it('surfaces a visible error on the explicit /plan path when the YAML upload fails', async () => {
+      const adapter = await SQLiteAdapter.create(':memory:');
+      const slackPlanDraftRepo = new SlackPlanDraftRepository(adapter);
+      const slackSessionRepo = new SlackSessionRepository(adapter);
+      surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
+        workingDir: '/tmp/repo',
+        botToken: 'xoxb-test',
+        appToken: 'xapp-test',
+        signingSecret: 'test-secret',
+        channelId: 'C-test',
+        anthropicApiKey: 'test-anthropic-key',
+        slackPlanDraftRepo,
+        slackSessionRepo,
+      });
+
+      const planText = 'name: "Debug Issue"\ntasks:\n  - id: t1\n    description: "Run the debugger"\n    dependencies: []\n';
+      mockSendMessage.mockResolvedValue('Sure, let me look into it.');
+      mockRunPlanConversion.mockResolvedValue('Here is the plan.');
+      mockLastTurnDraftPlanText = planText;
+
+      const app = surface.getApp() as any;
+      app.client.files.uploadV2.mockRejectedValueOnce(new Error('missing_scope'));
+
+      await surface.start(async (cmd) => {
+        receivedCommands.push(cmd);
+      });
+
+      const mentionHandler = app._eventHandlers.find((h: MockHandler) => h.pattern === 'app_mention')?.handler;
+      const say = vi.fn().mockImplementation(async ({ text }) => {
+        const ts = `${Date.now()}.${Math.random().toString(36).substr(2, 6)}`;
+        apiCalls.push({ method: 'postMessage', channel: 'C-test', text, ts });
+        return { ts, ok: true };
+      });
+
+      await mentionHandler({
+        event: { text: '<@UBOT123456> create a plan for me', ts: '4444.001', thread_ts: undefined, user: 'U123' },
+        say,
+      });
+
+      await mentionHandler({
+        event: { text: '<@UBOT123456> /plan', ts: '4444.5', thread_ts: '4444.001', user: 'U123' },
+        say,
+      });
+
+      const errorReply = apiCalls.find((c) => c.text?.includes('I hit an error trying to prepare the plan review card'));
+      expect(errorReply).toBeTruthy();
+      expect(errorReply?.text).toContain('missing_scope');
+      expect(errorReply?.text).toContain('An operator needs to look at draft');
+
+      await adapter.close();
+    });
+
+    it('replies to a literal `plan:` mention as normal agent text and clears the Processing ack', async () => {
+      surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
         channelId: 'C-test',
         anthropicApiKey: 'test-anthropic-key',
       });
+      mockSendMessage.mockResolvedValue('What would you like me to plan?');
       await surface.start(async () => {});
 
       const app = surface.getApp() as any;
@@ -281,12 +462,14 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
         method: 'postMessage',
         text: 'Processing your request...',
       }));
-      expect(apiCalls.some((c) => c.method === 'delete' && c.ts === apiCalls[0].ts)).toBe(true);
-      expect(mockSendMessage).not.toHaveBeenCalled();
+      // `plan:` is literal agent text now — the real reply replaces the ack in place.
+      expect(mockSendMessage).toHaveBeenCalledWith('plan:');
+      expect(apiCalls.some((c) => c.method === 'update' && c.ts === apiCalls[0].ts && c.text === 'What would you like me to plan?')).toBe(true);
     });
 
     it('clears a leftover Processing ack when the planner throws', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -319,6 +502,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
   describe('Configuration Options', () => {
     it('disables immediate ack when enableImmediateAck is false', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -366,6 +550,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
       const customMessage = 'Hold on, thinking...';
 
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -407,6 +592,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
   describe('Typing Indicator Integration', () => {
     it('adds reaction before processing, removes after response', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -469,6 +655,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('does not add reactions when useTypingIndicator is false', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -511,6 +698,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('removes reaction even when message processing fails', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -557,6 +745,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
   describe('Edge Cases and Error Handling', () => {
     it('handles ack posting failure gracefully', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -606,6 +795,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('falls back to new message when chat.update fails (msg_too_long)', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',
@@ -664,6 +854,7 @@ describe('SlackSurface Immediate Response - Integration Tests', () => {
 
     it('maintains correct message sequence in threaded conversation', async () => {
       surface = new SlackSurface({
+        defaultRepoUrl: 'https://github.com/example/repo.git',
         botToken: 'xoxb-test',
         appToken: 'xapp-test',
         signingSecret: 'test-secret',

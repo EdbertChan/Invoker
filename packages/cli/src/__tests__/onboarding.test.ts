@@ -6,21 +6,70 @@ import { join } from 'node:path';
 import { DEFAULT_DRAFTER_MCP_PACKAGE_SPEC, EXTERNAL_DEPENDENCIES } from '@invoker/contracts';
 
 import {
+  assertNoConfigWriteOnAllDeclined,
+  assertNoSecretPrinted,
+  assertOptionalToolPromptedBeforeInstall,
+  assertRemoteTargetOnlyPersistedAfterAllChecksPass,
+} from '../onboarding-invariants.js';
+
+import {
+  checkGithubAuth,
   defaultExperimentalPlannerMcpPath,
   ensureExperimentalPlannerMcp,
   buildDoctorChecks,
+  firstSetupFailure,
+  formatSetupEnding,
   generateSlackManifest,
   installExperimentalPlannerMcp,
   loadInvokerEnv,
   readExperimentalPlannerSetup,
   REQUIRED_BOT_SCOPES,
+  runPlanValidationSmoke,
   slackCredsFromEnv,
   runSetup,
   setExperimentalPlannerFlag,
   upsertEnvLines,
   validateSlackCredentials,
   type CliConfigState,
+  type SetupDeps,
 } from '../onboarding.js';
+
+import type { PrerequisiteCheck } from '@invoker/contracts';
+
+type Check = PrerequisiteCheck;
+
+function okCheck(id: string, name: string, detail = 'ok'): Check {
+  return { id, name, status: 'ok', detail };
+}
+
+function errorCheck(id: string, name: string, detail: string, remediation?: string): Check {
+  return { id, name, status: 'error', detail, remediation };
+}
+
+/** Keep setup oneshot tests offline and independent of the host PATH / gh login. */
+const NOOP_BUNDLED_SKILLS_STATUS = {
+  available: false,
+  promptRecommended: false,
+  managedPrefix: 'invoker-',
+  bundledSkillNames: [],
+  targets: [],
+  commandTargets: [],
+  mcpTargets: [],
+};
+
+function readySetupDeps(overrides: SetupDeps = {}): SetupDeps {
+  return {
+    isInstalled: () => true,
+    githubAuthCheck: async () => okCheck('github-auth', 'GitHub auth', 'gh is authenticated'),
+    smokePlanValidation: async () => okCheck('smoke-plan', 'smoke: plan validation', 'Parsed 1 task(s)'),
+    // Real skill install does real commandExists probing + filesystem work —
+    // stub it by default so unrelated tests stay fast and deterministic.
+    resolveSkillsRepoRoot: () => '/fake-repo-root',
+    resolveStandaloneSkillsRoot: () => null,
+    bundledSkillsInstall: () => NOOP_BUNDLED_SKILLS_STATUS,
+    ...overrides,
+  };
+}
 
 describe('generateSlackManifest', () => {
   it('requests the required bot scopes, socket mode, and app_mention events', () => {
@@ -127,7 +176,7 @@ describe('buildDoctorChecks', () => {
   });
 });
 describe('runSetup', () => {
-  it('installs the public planner MCP by default without enabling planner behavior', async () => {
+  it('does not install the Drafter planner MCP by default', async () => {
     const home = mkdtempSync(join(tmpdir(), 'invoker-setup-home-'));
     const saved = {
       HOME: process.env.HOME,
@@ -138,27 +187,160 @@ describe('runSetup', () => {
       process.env.HOME = home;
       delete process.env.INVOKER_MCP_CONFIG_PATH;
 
+      const answers = ['n', 'n', 'n', 'n', 'n', 'y'];
       const code = await runSetup([], {
         print: (line) => lines.push(line),
-        prompt: async () => 'n',
-      });
+        prompt: async () => answers.shift() ?? 'n',
+      }, readySetupDeps());
 
       const mcpPath = join(home, '.invoker', 'mcp.json');
       const invokerConfigPath = join(home, '.invoker', 'config.json');
-      expect(lines.join('\n')).toContain('Invoker setup');
-      expect(lines.join('\n')).toContain(`Experimental planner MCP installed into ${mcpPath}`);
-      expect(lines.join('\n')).toContain('experimentalPlanner flag: off');
-      expect(lines.join('\n')).toContain('Run `invoker-cli setup slack` later');
-      expect(JSON.parse(readFileSync(mcpPath, 'utf8')).mcpServers['experimental-planner']).toEqual({
-        type: 'stdio',
-        command: 'uvx',
-        args: ['--from', DEFAULT_DRAFTER_MCP_PACKAGE_SPEC, EXTERNAL_DEPENDENCIES.drafterMcp.commandName],
-      });
+      const output = lines.join('\n');
+      expect(output).toContain('Invoker setup');
+      expect(output).not.toContain('planner');
+      expect(output).toContain("You're ready.");
+      expect(existsSync(mcpPath)).toBe(false);
       expect(existsSync(invokerConfigPath)).toBe(false);
-      expect(typeof code).toBe('number');
+      expect(code).toBe(0);
+
+      expect(() => assertOptionalToolPromptedBeforeInstall(lines, 'Drafter')).not.toThrow();
+      const writtenPaths = [mcpPath, invokerConfigPath].filter((path) => existsSync(path));
+      expect(() => assertNoConfigWriteOnAllDeclined(writtenPaths, true)).not.toThrow();
     } finally {
       restoreEnv('HOME', saved.HOME);
       restoreEnv('INVOKER_MCP_CONFIG_PATH', saved.target);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('installs bundled skills as part of setup and reports the result', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'invoker-setup-skills-'));
+    const saved = { HOME: process.env.HOME };
+    const lines: string[] = [];
+    const fakeStatus = {
+      available: true,
+      promptRecommended: false,
+      managedPrefix: 'invoker-',
+      bundledSkillNames: ['plan-to-invoker', 'make-pr'],
+      targets: [{ id: 'claude', name: 'Claude', path: '/x', available: true, installed: true, upToDate: true, installedSkillNames: [] }],
+      commandTargets: [],
+      mcpTargets: [{ id: 'claude', name: 'Claude', path: '/x/.claude.json', available: true, installed: true, upToDate: true, serverName: 'invoker' }],
+    };
+    try {
+      process.env.HOME = home;
+
+      const code = await runSetup([], {
+        print: (line) => lines.push(line),
+        prompt: async () => 'n',
+      }, readySetupDeps({
+        resolveSkillsRepoRoot: () => '/fake/repo',
+        bundledSkillsInstall: () => fakeStatus,
+      }));
+
+      expect(code).toBe(0);
+      const output = lines.join('\n');
+      expect(output).toContain('Skills: installed 2 bundled skill(s) for Claude.');
+      expect(output).toContain('Skills MCP: registered invoker-cli mcp for Claude.');
+    } finally {
+      restoreEnv('HOME', saved.HOME);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to skills bundled next to the running binary when not in a checkout', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'invoker-setup-skills-standalone-'));
+    const saved = { HOME: process.env.HOME };
+    const lines: string[] = [];
+    const fakeStatus = {
+      available: true,
+      promptRecommended: false,
+      managedPrefix: 'invoker-',
+      bundledSkillNames: ['plan-to-invoker'],
+      targets: [{ id: 'claude', name: 'Claude', path: '/x', available: true, installed: true, upToDate: true, installedSkillNames: [] }],
+      commandTargets: [],
+      mcpTargets: [{ id: 'claude', name: 'Claude', path: '/x/.claude.json', available: true, installed: true, upToDate: true, serverName: 'invoker' }],
+    };
+    try {
+      process.env.HOME = home;
+
+      const code = await runSetup([], {
+        print: (line) => lines.push(line),
+        prompt: async () => 'n',
+      }, readySetupDeps({
+        resolveSkillsRepoRoot: () => { throw new Error('Could not resolve repo root'); },
+        resolveStandaloneSkillsRoot: () => '/fake/vendor',
+        bundledSkillsInstall: () => fakeStatus,
+      }));
+
+      expect(code).toBe(0);
+      expect(lines.join('\n')).toContain('Skills: installed 1 bundled skill(s) for Claude.');
+    } finally {
+      restoreEnv('HOME', saved.HOME);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('skips skill installation gracefully when not running from an Invoker checkout and no bundled skills are found', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'invoker-setup-skills-none-'));
+    const saved = { HOME: process.env.HOME };
+    const lines: string[] = [];
+    try {
+      process.env.HOME = home;
+
+      const code = await runSetup([], {
+        print: (line) => lines.push(line),
+        prompt: async () => 'n',
+      }, readySetupDeps({
+        resolveSkillsRepoRoot: () => { throw new Error('Could not resolve repo root'); },
+        resolveStandaloneSkillsRoot: () => null,
+      }));
+
+      expect(code).toBe(0);
+      expect(lines.join('\n')).toContain('Skills: skipped (not running from an Invoker checkout, and no bundled skills next to this binary).');
+    } finally {
+      restoreEnv('HOME', saved.HOME);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('writes start toggles to desired state and policy toggles to config', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'invoker-setup-toggles-'));
+    const saved = { HOME: process.env.HOME };
+    const lines: string[] = [];
+    try {
+      process.env.HOME = home;
+
+      // Prompt order: Slack, machines, then ONBOARDING_WORKER_TOGGLES
+      // (PR maintenance, e2e auto-fix, auto-approve, disk-headroom cleanup,
+      // idle-task cleanup).
+      const answers = ['n', 'n', 'n', 'y', 'y', 'y', 'n'];
+      const code = await runSetup([], {
+        print: (line) => lines.push(line),
+        prompt: async () => answers.shift() ?? 'n',
+      }, readySetupDeps());
+
+      expect(code).toBe(0);
+      const configPath = join(home, '.invoker', 'config.json');
+      const writtenOnboardingConfig = JSON.parse(readFileSync(configPath, 'utf8'));
+      expect(writtenOnboardingConfig).toEqual({ autoApproveAIFixes: true });
+      expect(writtenOnboardingConfig).not.toHaveProperty('e2eAutoFixEnabled');
+      expect(writtenOnboardingConfig).not.toHaveProperty('prMaintenance');
+
+      const { SQLiteAdapter } = await import('@invoker/data-store');
+      const db = await SQLiteAdapter.create(join(home, '.invoker', 'invoker.db'), {
+        outputDir: join(home, '.invoker', 'outputs'),
+        ownerCapability: true,
+      });
+      try {
+        expect(db.getWorkerDesiredState('e2e-autofix')?.desiredEnabled).toBe(true);
+        expect(db.getWorkerDesiredState('pr-admin-bypass-land')).toBeUndefined();
+        expect(db.getWorkerDesiredState('idle-task-cleanup')).toBeUndefined();
+      } finally {
+        db.close();
+      }
+      expect(lines.join('\n')).toContain('Worker toggles');
+    } finally {
+      restoreEnv('HOME', saved.HOME);
       rmSync(home, { recursive: true, force: true });
     }
   });
@@ -184,17 +366,19 @@ describe('runSetup', () => {
       process.env.SLACK_SIGNING_SECRET = 'secret-env';
       process.env.SLACK_CHANNEL_ID = 'C123';
       const prompts: string[] = [];
+      const lines: string[] = [];
 
       const code = await runSetup(['slack', '--from-env'], {
-        print: () => {},
+        print: (line) => lines.push(line),
         prompt: async (question) => {
           prompts.push(question);
           return '';
         },
-      });
+      }, readySetupDeps());
 
       expect(code).toBe(0);
       expect(prompts).toEqual([]);
+      expect(() => assertNoSecretPrinted(lines, ['xoxb-env', 'xapp-env', 'secret-env'])).not.toThrow();
     } finally {
       fetchSpy.mockRestore();
       restoreEnv('HOME', saved.HOME);
@@ -203,6 +387,301 @@ describe('runSetup', () => {
       restoreEnv('SLACK_SIGNING_SECRET', saved.sign);
       restoreEnv('SLACK_CHANNEL_ID', saved.chan);
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  function setupMachineTestEnv() {
+    const home = mkdtempSync(join(tmpdir(), 'invoker-setup-machines-'));
+    const saved = {
+      config: process.env.INVOKER_REPO_CONFIG_PATH,
+      mcp: process.env.INVOKER_MCP_CONFIG_PATH,
+    };
+    process.env.INVOKER_REPO_CONFIG_PATH = join(home, 'config.json');
+    process.env.INVOKER_MCP_CONFIG_PATH = join(home, 'mcp.json');
+    return {
+      home,
+      configPath: process.env.INVOKER_REPO_CONFIG_PATH,
+      restore: () => {
+        restoreEnv('INVOKER_REPO_CONFIG_PATH', saved.config);
+        restoreEnv('INVOKER_MCP_CONFIG_PATH', saved.mcp);
+        rmSync(home, { recursive: true, force: true });
+      },
+    };
+  }
+
+  function passingDoctorChecks(): PrerequisiteCheck[] {
+    return [
+      { id: 'git', name: 'Git (remote)', status: 'ok', detail: 'git found on remote box' },
+      { id: 'node', name: 'Node (remote)', status: 'ok', detail: 'node found on remote box' },
+      { id: 'pnpm', name: 'pnpm (remote)', status: 'ok', detail: 'pnpm found on remote box' },
+      { id: 'disk-space', name: 'Disk space (remote)', status: 'ok', detail: '10240 MiB free on the remote box' },
+      { id: 'push-auth', name: 'GitHub push credentials (remote)', status: 'ok', detail: 'reachable' },
+    ];
+  }
+
+  function machineSetupDeps(overrides: SetupDeps = {}): SetupDeps {
+    return readySetupDeps({
+      remoteTargetConnectivity: async (target) => ({
+        reachable: true,
+        message: `ssh probe to ${target.user}@${target.host} succeeded`,
+      }),
+      remoteDoctorChecks: async () => passingDoctorChecks(),
+      ...overrides,
+    });
+  }
+
+  it('adds one machine through the interactive setup path', async () => {
+    const env = setupMachineTestEnv();
+    const prompts: string[] = [];
+    const answers = [
+      'build-a',
+      'build-a.example.test',
+      'deploy',
+      '/home/deploy/.ssh/id_ed25519',
+      'https://github.com/example/build-a.git',
+      '2222',
+      '3',
+      'pnpm install --frozen-lockfile',
+      'y',
+      'n',
+    ];
+    try {
+      const code = await runSetup(['machines'], {
+        print: () => {},
+        prompt: async (question) => {
+          prompts.push(question);
+          return answers.shift() ?? '';
+        },
+      }, machineSetupDeps());
+
+      expect(code).toBe(0);
+      expect(prompts).toContain('Machine name: ');
+      expect(JSON.parse(readFileSync(env.configPath, 'utf8')).remoteTargets).toEqual({
+        'build-a': {
+          host: 'build-a.example.test',
+          user: 'deploy',
+          sshKeyPath: '/home/deploy/.ssh/id_ed25519',
+          port: 2222,
+          maxConcurrentTasks: 3,
+          provisionCommand: 'pnpm install --frozen-lockfile',
+        },
+      });
+
+      expect(() => assertRemoteTargetOnlyPersistedAfterAllChecksPass(passingDoctorChecks(), true)).not.toThrow();
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('leaves config unchanged when the user declines to keep a passing machine', async () => {
+    const env = setupMachineTestEnv();
+    const originalConfig = { maxConcurrency: 4 };
+    writeFileSync(env.configPath, JSON.stringify(originalConfig));
+    const answers = [
+      'build-a',
+      'build-a.example.test',
+      'deploy',
+      '/home/deploy/.ssh/id_ed25519',
+      'https://github.com/example/build-a.git',
+      '22',
+      '1',
+      '',
+      'n',
+      'n',
+      'n',
+    ];
+    try {
+      const code = await runSetup(['machines'], {
+        print: () => {},
+        prompt: async () => answers.shift() ?? '',
+      }, machineSetupDeps());
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(env.configPath, 'utf8'))).toEqual(originalConfig);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('loops to add another machine and writes both entries', async () => {
+    const env = setupMachineTestEnv();
+    const answers = [
+      'build-a',
+      'build-a.example.test',
+      'deploy',
+      '/home/deploy/.ssh/id_a',
+      'https://github.com/example/build-a.git',
+      '22',
+      '2',
+      '',
+      'y',
+      'y',
+      'build-b',
+      'build-b.example.test',
+      'deploy',
+      '/home/deploy/.ssh/id_b',
+      'https://github.com/example/build-b.git',
+      '2223',
+      '4',
+      'bash scripts/provision.sh',
+      'y',
+      'n',
+    ];
+    try {
+      const code = await runSetup(['machines'], {
+        print: () => {},
+        prompt: async () => answers.shift() ?? '',
+      }, machineSetupDeps());
+
+      expect(code).toBe(0);
+      expect(JSON.parse(readFileSync(env.configPath, 'utf8')).remoteTargets).toEqual({
+        'build-a': {
+          host: 'build-a.example.test',
+          user: 'deploy',
+          sshKeyPath: '/home/deploy/.ssh/id_a',
+          port: 22,
+          maxConcurrentTasks: 2,
+        },
+        'build-b': {
+          host: 'build-b.example.test',
+          user: 'deploy',
+          sshKeyPath: '/home/deploy/.ssh/id_b',
+          port: 2223,
+          maxConcurrentTasks: 4,
+          provisionCommand: 'bash scripts/provision.sh',
+        },
+      });
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('reads machines from stdin and prints one JSON result per input machine under --json', async () => {
+    const env = setupMachineTestEnv();
+    const lines: string[] = [];
+    const input = [
+      {
+        name: 'build-a',
+        host: 'build-a.example.test',
+        user: 'deploy',
+        sshKeyPath: '/home/deploy/.ssh/id_a',
+        repoUrl: 'https://github.com/example/build-a.git',
+        port: 22,
+        maxConcurrentTasks: 2,
+      },
+      {
+        name: 'build-b',
+        host: 'build-b.example.test',
+        user: 'ci',
+        sshKeyPath: '/home/ci/.ssh/id_b',
+        repoUrl: 'https://github.com/example/build-b.git',
+        port: 2222,
+        maxConcurrentTasks: 1,
+        provisionCommand: 'pnpm install --frozen-lockfile',
+      },
+    ];
+    try {
+      const code = await runSetup(['machines', '--json'], {
+        print: (line) => lines.push(line),
+        prompt: async () => { throw new Error('should not prompt in json mode'); },
+        readStdin: async () => JSON.stringify(input),
+        interactive: false,
+      }, machineSetupDeps());
+
+      expect(code).toBe(0);
+      expect(lines).toHaveLength(1);
+      const results = JSON.parse(lines[0]);
+      expect(results).toHaveLength(input.length);
+      expect(results.map((result: { name: string; written: boolean }) => [result.name, result.written])).toEqual([
+        ['build-a', true],
+        ['build-b', true],
+      ]);
+      expect(Object.keys(JSON.parse(readFileSync(env.configPath, 'utf8')).remoteTargets)).toEqual(['build-a', 'build-b']);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('never writes a machine whose remote doctor checks fail, even though connectivity passed', async () => {
+    const env = setupMachineTestEnv();
+    const originalConfig = { maxConcurrency: 4 };
+    writeFileSync(env.configPath, JSON.stringify(originalConfig));
+    const answers = [
+      'build-a',
+      'build-a.example.test',
+      'deploy',
+      '/home/deploy/.ssh/id_ed25519',
+      'https://github.com/example/build-a.git',
+      '22',
+      '1',
+      '',
+      'n', // "Try this machine again?" — no
+    ];
+    const lines: string[] = [];
+    const doctorChecks = [
+      { id: 'git', name: 'Git (remote)', status: 'ok' as const, detail: 'git found on remote box' },
+      {
+        id: 'push-auth',
+        name: 'GitHub push credentials (remote)',
+        status: 'error' as const,
+        detail: 'Remote box could not reach https://github.com/example/build-a.git with its own git credentials',
+      },
+    ];
+    try {
+      const code = await runSetup(['machines'], {
+        print: (line) => lines.push(line),
+        prompt: async () => answers.shift() ?? '',
+      }, machineSetupDeps({
+        remoteDoctorChecks: async () => doctorChecks,
+      }));
+
+      const finalConfig = JSON.parse(readFileSync(env.configPath, 'utf8'));
+      expect(code).toBe(0);
+      expect(finalConfig).toEqual(originalConfig);
+      expect(lines.join('\n')).toContain('Remote readiness check failed');
+      expect(lines.join('\n')).not.toContain('Keep this machine?');
+
+      const wasWritten = Boolean(finalConfig.remoteTargets?.['build-a']);
+      expect(() => assertRemoteTargetOnlyPersistedAfterAllChecksPass(doctorChecks, wasWritten)).not.toThrow();
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('surfaces a doctor-check failure as an error result under --json without writing the machine', async () => {
+    const env = setupMachineTestEnv();
+    const input = [{
+      name: 'build-a',
+      host: 'build-a.example.test',
+      user: 'deploy',
+      sshKeyPath: '/home/deploy/.ssh/id_a',
+      repoUrl: 'https://github.com/example/build-a.git',
+    }];
+    const lines: string[] = [];
+    try {
+      const code = await runSetup(['machines', '--json'], {
+        print: (line) => lines.push(line),
+        prompt: async () => { throw new Error('should not prompt in json mode'); },
+        readStdin: async () => JSON.stringify(input),
+        interactive: false,
+      }, machineSetupDeps({
+        remoteDoctorChecks: async () => [
+          {
+            id: 'disk-space',
+            name: 'Disk space (remote)',
+            status: 'error',
+            detail: 'out of disk space',
+          },
+        ],
+      }));
+
+      expect(code).toBe(1);
+      const results = JSON.parse(lines[0]);
+      expect(results[0].written).toBe(false);
+      expect(results[0].error.code).toBe('doctor-check-failed');
+      expect(existsSync(env.configPath)).toBe(false);
+    } finally {
+      env.restore();
     }
   });
 });
@@ -452,7 +931,7 @@ describe('runSetup in a non-interactive shell', () => {
 
   it('fails loudly instead of silently answering no to every prompt', async () => {
     const { lines, io } = collectingIO();
-    const code = await runSetup([], io);
+    const code = await runSetup([], io, readySetupDeps());
 
     expect(code).toBe(1);
     expect(lines.join('\n')).toContain('stdin is not a TTY');
@@ -460,22 +939,36 @@ describe('runSetup in a non-interactive shell', () => {
 
   it('names the non-interactive escape hatches in the failure message', async () => {
     const { lines, io } = collectingIO();
-    await runSetup([], io);
+    await runSetup([], io, readySetupDeps());
 
     const output = lines.join('\n');
     expect(output).toContain('--yes');
     expect(output).toContain('--from-env');
   });
 
-  it('accepts the planner prompt under --yes without reading stdin', async () => {
+  it('does not prompt about the planner under --yes', async () => {
     const { lines, io } = collectingIO({
       prompt: async () => { throw new Error('should not prompt under --yes'); },
     });
 
-    const code = await runSetup(['--yes'], io);
+    const code = await runSetup(['--yes'], io, readySetupDeps());
 
-    expect(code).not.toBe(1);
-    expect(lines.join('\n')).toContain('Enable the experimental planner now?');
+    expect(code).toBe(0);
+    expect(lines.join('\n')).not.toContain('planner');
+    expect(lines.join('\n')).toContain("You're ready.");
+  });
+
+  it('leaves every worker toggle unset under --yes without prompting', async () => {
+    const { lines, io } = collectingIO({
+      prompt: async () => { throw new Error('should not prompt under --yes'); },
+    });
+
+    const code = await runSetup(['--yes'], io, readySetupDeps());
+
+    expect(code).toBe(0);
+    expect(lines.join('\n')).toContain('Worker toggles');
+    expect(lines.join('\n')).toContain('PR maintenance: off');
+    expect(lines.join('\n')).toMatch(/Worker toggles — .*PR maintenance: off/);
   });
 
   it('skips Slack under --yes rather than starting a flow it cannot finish', async () => {
@@ -483,20 +976,127 @@ describe('runSetup in a non-interactive shell', () => {
       prompt: async () => { throw new Error('should not prompt under --yes'); },
     });
 
-    await runSetup(['--yes'], io);
+    await runSetup(['--yes'], io, readySetupDeps());
 
     const output = lines.join('\n');
     expect(output).not.toContain('Bot User OAuth Token');
-    expect(output).toContain('invoker-cli setup slack');
+    expect(output).toContain("You're ready.");
   });
 
-  it('writes only inside the configured Invoker home', async () => {
+  it('writes nothing under --yes since planner, Slack, and machines all stay opt-in', async () => {
     const { io } = collectingIO({
       prompt: async () => { throw new Error('should not prompt under --yes'); },
     });
 
-    await runSetup(['--yes'], io);
+    await runSetup(['--yes'], io, readySetupDeps());
 
-    expect(existsSync(join(home, 'mcp.json'))).toBe(true);
+    expect(existsSync(join(home, 'mcp.json'))).toBe(false);
+  });
+});
+
+describe('GitHub auth check', () => {
+  it('passes when gh auth status exits 0', () => {
+    const check = checkGithubAuth(() => ({ status: 0, stdout: 'Logged in', stderr: '' }));
+    expect(check).toMatchObject({ id: 'github-auth', status: 'ok' });
+  });
+
+  it('fails when gh auth status exits non-zero', () => {
+    const check = checkGithubAuth(() => ({ status: 1, stdout: '', stderr: 'not logged in to any GitHub hosts' }));
+    expect(check.status).toBe('error');
+    expect(check.detail).toContain('not logged in');
+    expect(check.remediation).toContain('gh auth login');
+  });
+
+  it('warns and skips when the injected runner cannot spawn gh', () => {
+    const missing = Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' });
+    const check = checkGithubAuth(() => {
+      throw missing;
+    });
+    expect(check).toMatchObject({ id: 'github-auth', status: 'warn' });
+    expect(check.remediation).toContain('gh auth login');
+  });
+
+  it('warns and skips when the injected runner reports gh is missing', () => {
+    const check = checkGithubAuth(() => ({
+      status: 127,
+      stdout: '',
+      stderr: 'sh: gh: command not found',
+    }));
+    expect(check).toMatchObject({ id: 'github-auth', status: 'warn' });
+    expect(check.remediation).toContain('gh auth login');
+  });
+});
+
+describe('setup oneshot ending', () => {
+  it('selects the first error for Fix this first', () => {
+    const checks: Check[] = [
+      okCheck('a', 'A'),
+      errorCheck('github-auth', 'GitHub auth', 'not logged in', 'Run `gh auth login`'),
+      errorCheck('smoke-plan', 'smoke: plan validation', 'boom'),
+    ];
+    expect(firstSetupFailure(checks)?.id).toBe('github-auth');
+    expect(formatSetupEnding(checks)).toContain('Fix this first: GitHub auth: not logged in.');
+    expect(formatSetupEnding(checks)).toContain('gh auth login');
+    expect(formatSetupEnding([okCheck('a', 'A')])).toBe("You're ready.");
+  });
+
+  it('returns exit code 1 when smoke validation fails', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'invoker-setup-smoke-fail-'));
+    const lines: string[] = [];
+    const savedHome = process.env.HOME;
+    try {
+      process.env.HOME = home;
+      const code = await runSetup([], {
+        print: (line) => lines.push(line),
+        prompt: async () => 'n',
+      }, readySetupDeps({
+        smokePlanValidation: async () => errorCheck(
+          'smoke-plan',
+          'smoke: plan validation',
+          'parse failed',
+          'Reinstall invoker-cli',
+        ),
+      }));
+
+      expect(code).toBe(1);
+      expect(lines.join('\n')).toContain('Fix this first: smoke: plan validation: parse failed.');
+      expect(lines.join('\n')).not.toContain("You're ready.");
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('skips GitHub auth with a warning when gh is not installed', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'invoker-setup-no-gh-'));
+    const lines: string[] = [];
+    const savedHome = process.env.HOME;
+    try {
+      process.env.HOME = home;
+      const code = await runSetup([], {
+        print: (line) => lines.push(line),
+        prompt: async () => 'n',
+      }, readySetupDeps({
+        isInstalled: (command) => command !== 'gh',
+        githubAuthCheck: async () => {
+          throw new Error('should not probe gh auth when gh is missing');
+        },
+      }));
+
+      expect(code).toBe(0);
+      expect(lines.join('\n')).toContain('gh not installed; skipped auth check');
+      expect(lines.join('\n')).toContain("You're ready.");
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('runs the real offline smoke parser successfully', async () => {
+    const check = await runPlanValidationSmoke();
+    expect(check.status).toBe('ok');
+    expect(check.detail).toMatch(/Parsed 1 task/);
   });
 });

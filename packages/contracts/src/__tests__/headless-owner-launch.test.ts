@@ -26,7 +26,7 @@ describe('buildElectronHeadlessArgs', () => {
 });
 
 describe('resolveHeadlessOwnerLaunchSpec', () => {
-  it('prefers INVOKER_GUI_COMMAND when set and appends headless owner args', () => {
+  it('prefers INVOKER_GUI_COMMAND when set', () => {
     expect(resolveHeadlessOwnerLaunchSpec({
       repoRoot: '/repo',
       platform: 'linux',
@@ -39,23 +39,23 @@ describe('resolveHeadlessOwnerLaunchSpec', () => {
     });
   });
 
-  it('does not duplicate --headless owner-serve when already present in INVOKER_GUI_COMMAND', () => {
+  it('gives the packaged invoker-ui wrapper the same Linux stability flags as the repo path', () => {
     expect(resolveHeadlessOwnerLaunchSpec({
       repoRoot: '/repo',
       platform: 'linux',
-      env: { INVOKER_GUI_COMMAND: '/usr/local/bin/custom-owner --headless owner-serve --flag' },
-      which: () => undefined,
+      env: {},
+      which: (command) => (command === 'invoker-ui' ? '/usr/local/bin/invoker-ui' : undefined),
       existsSync: () => false,
     })).toEqual({
-      command: '/usr/local/bin/custom-owner',
-      args: ['--headless', 'owner-serve', '--flag'],
+      command: '/usr/local/bin/invoker-ui',
+      args: [...LINUX_HEADLESS_ELECTRON_FLAGS, '--headless', 'owner-serve'],
     });
   });
 
-  it('uses the packaged invoker-ui wrapper when present', () => {
+  it('keeps the packaged invoker-ui wrapper free of Linux-only switches on macOS', () => {
     expect(resolveHeadlessOwnerLaunchSpec({
       repoRoot: '/repo',
-      platform: 'linux',
+      platform: 'darwin',
       env: {},
       which: (command) => (command === 'invoker-ui' ? '/usr/local/bin/invoker-ui' : undefined),
       existsSync: () => false,
@@ -73,10 +73,8 @@ describe('resolveHeadlessOwnerLaunchSpec', () => {
       which: () => undefined,
       existsSync: (path) => path === '/repo/scripts/electron.cjs' || path === '/repo/packages/app/dist/main.js',
     })).toEqual({
-      command: 'xvfb-run',
+      command: './scripts/electron.cjs',
       args: [
-        '--auto-servernum',
-        './scripts/electron.cjs',
         ...LINUX_HEADLESS_ELECTRON_FLAGS,
         'packages/app/dist/main.js',
         '--headless',

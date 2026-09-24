@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { getPrAtomicityBlockers, getPrBodyWarnings, getReviewMetadata, validatePrBody, validatePrScope } from './validate-pr-body.mjs';
+import { getPrAtomicityBlockers, getPrBodyWarnings, getReviewMetadata, scopeKindsForChangedFiles, validateGuardedBehaviorMarkers, validatePrBody, validatePrScope, visualProofNeedsAnimation } from './validate-pr-body.mjs';
 
 function assert(condition, message) {
   if (!condition) {
@@ -15,6 +16,8 @@ function assert(condition, message) {
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
+const require = createRequire(import.meta.url);
+const runtimeNodeModules = require.resolve('jsdom/package.json').split('/node_modules/')[0] + '/node_modules';
 
 function runValidatorCli(bodyFile) {
   return spawnSync(process.execPath, ['scripts/validate-pr-body.mjs', '--body-file', bodyFile], {
@@ -179,6 +182,49 @@ assert((await validatePrBody(validMinimal)).length === 0, 'valid minimal body sh
 assert((await validatePrBody(validArchitecture)).length === 0, 'valid architecture body should pass');
 assert(getPrBodyWarnings(validMinimal).length === 0, 'short summary should produce no warnings');
 
+const noChangedFilesError = 'PR has no file changes; close it instead of merging it.';
+const emptyChangedFilesErrors = await validatePrBody(validMinimal, { changedFiles: [] });
+assert(
+  emptyChangedFilesErrors.includes(noChangedFilesError),
+  'explicit empty changed-file array should fail validation',
+);
+
+const changedFilesErrors = await validatePrBody(validMinimal, { changedFiles: ['packages/workflow-core/src/router.ts'] });
+assert(
+  !changedFilesErrors.includes(noChangedFilesError),
+  'non-empty changed-file array should not report the no-file-changes error',
+);
+
+const dependencyLiteTmp = mkdtempSync(join(tmpdir(), 'pr-body-validator-lite-'));
+try {
+  const bodyPath = join(dependencyLiteTmp, 'body.md');
+  const scriptsDir = join(dependencyLiteTmp, 'scripts');
+  mkdirSync(scriptsDir, { recursive: true });
+  for (const scriptName of [
+    'lint-pr-diff-atomicity.mjs',
+    'review-unit-rules.mjs',
+    'validate-pr-body.mjs',
+  ]) {
+    cpSync(join(repoRoot, 'scripts', scriptName), join(scriptsDir, scriptName));
+  }
+  writeFileSync(bodyPath, validMinimal);
+  const liteCli = spawnSync(
+    process.execPath,
+    ['scripts/validate-pr-body.mjs', '--body-file', bodyPath],
+    { cwd: dependencyLiteTmp, encoding: 'utf8' },
+  );
+  assert(
+    liteCli.status === 0,
+    `CLI validator should not require Mermaid render dependencies for a body without Mermaid blocks: ${liteCli.stderr}`,
+  );
+  assert(
+    liteCli.stdout.includes('PR body validation passed.'),
+    'dependency-light CLI validator should report success for a non-Mermaid body',
+  );
+} finally {
+  rmSync(dependencyLiteTmp, { recursive: true, force: true });
+}
+
 const hiddenMetadataErrors = await validatePrBody(`## Summary
 
 Small fix.
@@ -296,6 +342,8 @@ const restartAnimatedProofErrors = await validatePrBody(`${validMinimal}
 Animated restart proof showing the drafted chat, app relaunch, and restored chat.
 
 ![Restart walkthrough](proof-restart.gif)
+
+Manually inspected: watched proof-restart.gif frame by frame and confirmed the drafted chat survives the relaunch.
 `, { requiresVisualProof: true });
 assert(
   restartAnimatedProofErrors.length === 0,
@@ -333,6 +381,69 @@ assert(
 assert(
   getPrAtomicityBlockers({}).length === 0,
   'missing diff context should not invent atomicity blockers',
+);
+
+const deadSymbolDiff = `diff --git a/scripts/repair_body.py b/scripts/repair_body.py
+--- a/scripts/repair_body.py
++++ b/scripts/repair_body.py
+@@ -0,0 +1,2 @@
++def helper_thing(x):
++    return x
+`;
+const deadSymbolBlockers = getPrAtomicityBlockers({ diffText: deadSymbolDiff, reviewLane: 'refactor' });
+assert(
+  deadSymbolBlockers.some((warning) => warning.includes('refactor-dead-symbol')),
+  'a refactor-lane PR that adds a symbol with no other reference in the diff should warn',
+);
+
+const deadSymbolBehaviorLaneBlockers = getPrAtomicityBlockers({ diffText: deadSymbolDiff, reviewLane: 'behavior' });
+assert(
+  !deadSymbolBehaviorLaneBlockers.some((warning) => warning.includes('refactor-dead-symbol')),
+  'the same unreferenced-symbol diff outside refactor lane should not warn -- a new capability with no caller yet is normal for behavior lane',
+);
+
+const reworkedExtractionDiff = `diff --git a/scripts/repair_body.py b/scripts/repair_body.py
+--- a/scripts/repair_body.py
++++ b/scripts/repair_body.py
+@@ -0,0 +1,2 @@
++def helper_thing(x):
++    return x
+diff --git a/scripts/repairer.py b/scripts/repairer.py
+--- a/scripts/repairer.py
++++ b/scripts/repairer.py
+@@ -10,1 +10,1 @@
+-    return old_local_helper(x)
++    return helper_thing(x)
+`;
+const reworkedExtractionBlockers = getPrAtomicityBlockers({ diffText: reworkedExtractionDiff, reviewLane: 'refactor' });
+assert(
+  !reworkedExtractionBlockers.some((warning) => warning.includes('refactor-dead-symbol')),
+  'a .py extraction whose call site is re-pointed in the same diff should not warn',
+);
+
+const multipleSymbolsDiff = `diff --git a/scripts/repair_body.py b/scripts/repair_body.py
+--- a/scripts/repair_body.py
++++ b/scripts/repair_body.py
+@@ -0,0 +1,4 @@
++def helper_one(x):
++    return x
++
++def helper_two(y):
++    return y
+`;
+const multipleSymbolsBlockers = getPrAtomicityBlockers({ diffText: multipleSymbolsDiff, reviewLane: 'refactor' });
+assert(
+  multipleSymbolsBlockers.filter((warning) => warning.includes('refactor-multiple-symbols')).length === 2,
+  'a refactor-lane PR adding two unrelated top-level symbols should warn once per symbol',
+);
+const multipleSymbolsBehaviorLaneBlockers = getPrAtomicityBlockers({ diffText: multipleSymbolsDiff, reviewLane: 'behavior' });
+assert(
+  !multipleSymbolsBehaviorLaneBlockers.some((warning) => warning.includes('refactor-multiple-symbols')),
+  'the same multi-symbol diff outside refactor lane should not warn',
+);
+assert(
+  !reworkedExtractionBlockers.some((warning) => warning.includes('refactor-multiple-symbols')),
+  'a refactor-lane diff with exactly one top-level definition should not warn about multiple symbols',
 );
 
 const lightweightErrors = await validatePrBody(lightweight);
@@ -542,10 +653,20 @@ Durable-state scan behavior is reviewable separately from lifecycle wakeup routi
 
 </details>
 `;
-const broad1574Errors = await validatePrBody(broad1574Body);
+const spanningChangedFiles = [
+  'packages/app/src/autofix-policy.ts',
+  'packages/execution-engine/src/task-runner.ts',
+  'packages/ui/src/App.tsx',
+];
+const broad1574ProseOnlyErrors = await validatePrBody(broad1574Body);
 assert(
-  broad1574Errors.some((error) => error.includes('mentions multiple review units')),
-  'broad #1574-shaped PR body should fail review-unit focus',
+  !broad1574ProseOnlyErrors.some((error) => error.includes('review unit')),
+  'broad #1574-shaped PR body with no changed files must not fail on its wording',
+);
+const broad1574Errors = await validatePrBody(broad1574Body, { changedFiles: spanningChangedFiles });
+assert(
+  broad1574Errors.some((error) => error.includes('cannot ship with')),
+  'broad #1574-shaped PR whose changed files span review units should fail',
 );
 
 const originalAllInOneBody = `## Summary
@@ -599,10 +720,10 @@ The complete auto-fix recovery path lands together for one rollout.
 
 </details>
 `;
-const originalAllInOneErrors = await validatePrBody(originalAllInOneBody);
+const originalAllInOneErrors = await validatePrBody(originalAllInOneBody, { changedFiles: spanningChangedFiles });
 assert(
-  originalAllInOneErrors.some((error) => error.includes('mentions multiple review units')),
-  'original all-in-one auto-fix PR body should fail review-unit focus',
+  originalAllInOneErrors.some((error) => error.includes('cannot ship with')),
+  'original all-in-one auto-fix PR whose changed files span review units should fail',
 );
 
 const longSummary = `## Summary
@@ -672,10 +793,12 @@ const validVisualProof = `${validMinimal}
 Restored chat with the draft-ready bar visible.
 
 ![restored chat](restored-chat.png)
+
+Manually inspected: opened restored-chat.png and confirmed the draft-ready bar renders above the input box.
 `;
 assert(
   (await validatePrBody(validVisualProof, { requiresVisualProof: true })).length === 0,
-  'single-state screenshot proof should satisfy UI proof requirement',
+  'single-state screenshot proof with a Manually inspected line should satisfy UI proof requirement',
 );
 
 const warningOnlyVisualProofErrors = await validatePrBody(`${validMinimal}
@@ -687,6 +810,34 @@ const warningOnlyVisualProofErrors = await validatePrBody(`${validMinimal}
 assert(
   warningOnlyVisualProofErrors.some((error) => error.includes('UI-impacting changes require a ## Visual Proof section')),
   'warning-only visual proof should not satisfy UI proof requirement',
+);
+
+const missingManualInspectionErrors = await validatePrBody(`${validMinimal}
+
+## Visual Proof
+
+Restored chat with the draft-ready bar visible.
+
+![restored chat](restored-chat.png)
+`, { requiresVisualProof: true });
+assert(
+  missingManualInspectionErrors.some((error) => error.includes('"Manually inspected:" line')),
+  'screenshot proof without a Manually inspected line should fail validation',
+);
+
+const manualInspectionCaseInsensitiveBody = `${validMinimal}
+
+## Visual Proof
+
+Restored chat with the draft-ready bar visible.
+
+![restored chat](restored-chat.png)
+
+**MANUALLY INSPECTED:** opened restored-chat.png and confirmed the draft-ready bar renders above the input box.
+`;
+assert(
+  (await validatePrBody(manualInspectionCaseInsensitiveBody, { requiresVisualProof: true })).length === 0,
+  'Manually inspected line should match case-insensitively and inside bold markdown',
 );
 
 const prAuthoringPolicyErrors = await validatePrBody(validMinimal.replace('- behavior', '- policy').replace('- routing', '- tooling-policy'), {
@@ -742,6 +893,60 @@ const docsScopeErrors = await validatePrBody(validMinimal.replace('- behavior', 
 assert(
   docsScopeErrors.some((error) => error.includes('Review lane docs cannot ship with policy files')),
   'docs lane should reject policy/tooling files in the same PR',
+);
+const proofToolingPolicyBody = validMinimal.replace('- behavior', '- proof').replace('- routing', '- proof');
+const proofToolingPolicyFiles = [
+  '.github/workflows/ci.yml',
+  'scripts/test-suites/required/guardrails.sh',
+];
+const proofToolingPolicyErrors = await validatePrBody(proofToolingPolicyBody, {
+  changedFiles: proofToolingPolicyFiles,
+});
+assert(
+  proofToolingPolicyErrors.includes('Review lane proof cannot ship with policy files in the same PR. Keep benchmarks, repros, and regression proof separate from behavior or policy changes.'),
+  'proof lane should reject tooling-policy repairs via the policy lane mismatch',
+);
+assert(
+  proofToolingPolicyErrors.includes('PR body Review Unit "proof" cannot ship with tooling-policy files in the same PR. Split this into one Review Unit per PR.'),
+  'proof review unit should reject tooling-policy-only changed files',
+);
+assert(
+  JSON.stringify(scopeKindsForChangedFiles(proofToolingPolicyFiles)) === JSON.stringify(['policy']),
+  'scopeKindsForChangedFiles should drop other files and keep sorted unique policy kinds',
+);
+assert(
+  JSON.stringify(scopeKindsForChangedFiles(['.github/workflows/ci.yml'])) === JSON.stringify(['policy']),
+  'a .github/ file alone must map to scope kind "policy", matching its tooling-policy review unit -- '
+  + 'otherwise the repair-normalize auto-split gate (which requires "policy" in scopeKinds) silently '
+  + 'refuses to split a proof-lane PR whose only tooling-policy file lives under .github/',
+);
+assert(
+  JSON.stringify(scopeKindsForChangedFiles([
+    'tools/bazel/workflow-graph-tools/package.json',
+    'tools/bazel/workflow-graph-tools/tsconfig.bazel.json',
+    'tools/bazel/workflow-graph-tools/vitest.bazel.config.ts',
+  ])) === JSON.stringify(['policy']),
+  'Bazel tools lock and the bazel-only tsup/vitest configs under tools/bazel/ classify as policy',
+);
+
+const ciRepairFiles = ['.github/workflows/ci.yml'];
+const ciRepairBehaviorErrors = await validatePrBody(validMinimal, { changedFiles: ciRepairFiles });
+assert(
+  ciRepairBehaviorErrors.includes('Review lane behavior cannot ship with policy files in the same PR. Split behavior or cleanup from docs, policy, repro, and benchmark slices.'),
+  'behavior lane should reject a CI-repair PR whose only changed file is a .github/ workflow',
+);
+assert(
+  ciRepairBehaviorErrors.includes('PR body Review Unit "routing" cannot ship with tooling-policy files in the same PR. Split this into one Review Unit per PR.'),
+  'routing review unit should reject a CI-repair PR whose only changed file is a .github/ workflow',
+);
+
+const ciRepairPolicyErrors = await validatePrBody(
+  validMinimal.replace('- behavior', '- policy').replace('- routing', '- tooling-policy'),
+  { changedFiles: ciRepairFiles },
+);
+assert(
+  ciRepairPolicyErrors.length === 0,
+  `policy lane with the tooling-policy review unit must accept a .github/-only CI repair, got: ${ciRepairPolicyErrors.join('; ')}`,
 );
 
 const refactorBody = `## Summary
@@ -1028,5 +1233,231 @@ try {
 } finally {
   rmSync(diffTmp, { recursive: true, force: true });
 }
+
+const localWrapperTmp = mkdtempSync(join(tmpdir(), 'pr-body-validator-local-'));
+try {
+  const runGit = (args) => {
+    const result = spawnSync('git', args, { cwd: localWrapperTmp, encoding: 'utf8' });
+    assert(result.status === 0, `git ${args.join(' ')} should succeed: ${result.stderr}`);
+  };
+  const sourceFile = join(localWrapperTmp, 'packages', 'app', 'src', 'refresh-route.ts');
+  const bodyPath = join(localWrapperTmp, 'body.md');
+  const reviewUnitRulesPath = join(localWrapperTmp, 'scripts', 'review-unit-rules.mjs');
+
+  runGit(['init', '--initial-branch=master']);
+  runGit(['config', 'user.email', 'pr-body-test@example.test']);
+  runGit(['config', 'user.name', 'PR Body Test']);
+  cpSync(join(repoRoot, 'scripts'), join(localWrapperTmp, 'scripts'), { recursive: true });
+  symlinkSync(runtimeNodeModules, join(localWrapperTmp, 'node_modules'), 'dir');
+  mkdirSync(dirname(sourceFile), { recursive: true });
+  writeFileSync(sourceFile, 'export const refreshRoute = 1;\n');
+  runGit(['add', '.']);
+  runGit(['commit', '-m', 'baseline']);
+  runGit(['remote', 'add', 'origin', '.']);
+  runGit(['update-ref', 'refs/remotes/origin/master', 'HEAD']);
+  runGit(['switch', '-c', 'feature']);
+  writeFileSync(sourceFile, 'export const refreshRoute = 2;\n');
+  runGit(['add', '.']);
+  runGit(['commit', '-m', 'routing change']);
+
+  writeFileSync(bodyPath, validMinimal);
+  const validLocalWrapper = spawnSync(
+    process.execPath,
+    [join(repoRoot, 'scripts', 'validate-pr-body-local.mjs'), '--body-file', bodyPath, '--base', 'master'],
+    { cwd: localWrapperTmp, encoding: 'utf8' },
+  );
+  assert(validLocalWrapper.status === 0, `local wrapper should pass a matching body: ${validLocalWrapper.stderr}`);
+
+  writeFileSync(bodyPath, validMinimal.replace('- behavior', '- refactor'));
+  const refactorNonGoalLocalWrapper = spawnSync(
+    process.execPath,
+    [join(repoRoot, 'scripts', 'validate-pr-body-local.mjs'), '--body-file', bodyPath, '--base', 'master'],
+    { cwd: localWrapperTmp, encoding: 'utf8' },
+  );
+  assert(refactorNonGoalLocalWrapper.status === 1, 'local wrapper should reject a refactor body without an unchanged-behavior non-goal');
+  assert(
+    refactorNonGoalLocalWrapper.stderr.includes('Review lane refactor must state in ## Non-goals that behavior stays unchanged'),
+    'local wrapper should report the CI refactor non-goal error',
+  );
+
+  writeFileSync(bodyPath, validMinimal.replace('- routing', '- contract'));
+  const reviewUnitLocalWrapper = spawnSync(
+    process.execPath,
+    [join(repoRoot, 'scripts', 'validate-pr-body-local.mjs'), '--body-file', bodyPath, '--base', 'master'],
+    { cwd: localWrapperTmp, encoding: 'utf8' },
+  );
+  assert(reviewUnitLocalWrapper.status === 1, 'local wrapper should reject a review unit that does not match changed files');
+  assert(
+    reviewUnitLocalWrapper.stderr.includes('Review Unit "contract" cannot ship with routing files'),
+    'local wrapper should report the CI review-unit file mismatch',
+  );
+
+  runGit(['switch', '-c', 'trusted-base-classifier', 'master']);
+  const sentinelPath = join(localWrapperTmp, 'scripts', 'sentinel.mjs');
+  writeFileSync(bodyPath, validMinimal.replace('- behavior', '- policy').replace('- routing', '- tooling-policy'));
+  writeFileSync(sentinelPath, 'export const sentinel = true;\n');
+  const headReviewRules = readFileSync(reviewUnitRulesPath, 'utf8').replace(
+    "if (path.startsWith('scripts/')) return ['tooling-policy'];",
+    "if (path === 'scripts/sentinel.mjs') return ['docs'];\n  if (path.startsWith('scripts/')) return ['tooling-policy'];",
+  );
+  assert(headReviewRules.includes("if (path === 'scripts/sentinel.mjs') return ['docs'];"), 'test must change the head-only classifier');
+  writeFileSync(
+    reviewUnitRulesPath,
+    headReviewRules,
+  );
+  runGit(['add', 'scripts/review-unit-rules.mjs', 'scripts/sentinel.mjs']);
+  runGit(['commit', '-m', 'change head-only review classification']);
+  const trustedBaseLocalWrapper = spawnSync(
+    process.execPath,
+    [join(repoRoot, 'scripts', 'validate-pr-body-local.mjs'), '--body-file', bodyPath, '--base', 'master'],
+    { cwd: localWrapperTmp, encoding: 'utf8' },
+  );
+  assert(
+    trustedBaseLocalWrapper.status === 0,
+    `local wrapper should use the trusted base classifier, not the head classifier: ${trustedBaseLocalWrapper.stderr}`,
+  );
+  runGit(['switch', '-c', 'proof-policy-json', 'master']);
+  writeFileSync(bodyPath, proofToolingPolicyBody);
+  mkdirSync(join(localWrapperTmp, '.github', 'workflows'), { recursive: true });
+  mkdirSync(join(localWrapperTmp, 'scripts', 'test-suites', 'required'), { recursive: true });
+  writeFileSync(join(localWrapperTmp, '.github', 'workflows', 'ci.yml'), 'name: ci\n');
+  writeFileSync(join(localWrapperTmp, 'scripts', 'test-suites', 'required', 'guardrails.sh'), '#!/usr/bin/env bash\n');
+  runGit(['add', '.github/workflows/ci.yml', 'scripts/test-suites/required/guardrails.sh']);
+  runGit(['commit', '-m', 'tooling policy repair']);
+  const jsonLocalWrapper = spawnSync(
+    process.execPath,
+    [join(repoRoot, 'scripts', 'validate-pr-body-local.mjs'), '--body-file', bodyPath, '--base', 'master', '--json'],
+    { cwd: localWrapperTmp, encoding: 'utf8' },
+  );
+  assert(jsonLocalWrapper.status === 1, 'local wrapper JSON mode should fail the proof/tooling-policy mismatch');
+  const jsonPayload = JSON.parse(jsonLocalWrapper.stdout);
+  assert(jsonPayload.valid === false, 'local wrapper JSON mode should mark the proof/tooling-policy mismatch invalid');
+  assert(
+    JSON.stringify(jsonPayload.errors) === JSON.stringify([
+      'Review lane proof cannot ship with policy files in the same PR. Keep benchmarks, repros, and regression proof separate from behavior or policy changes.',
+      'PR body Review Unit "proof" cannot ship with tooling-policy files in the same PR. Split this into one Review Unit per PR.',
+    ]),
+    'local wrapper JSON mode should preserve the trusted-base proof/tooling-policy errors',
+  );
+  assert(
+    JSON.stringify(jsonPayload.changedFiles) === JSON.stringify(proofToolingPolicyFiles),
+    'local wrapper JSON mode should report changed files from the trusted-base diff',
+  );
+  assert(jsonPayload.reviewLane === 'proof', 'local wrapper JSON mode should report the proof review lane');
+  assert(jsonPayload.reviewUnit === 'proof', 'local wrapper JSON mode should report the proof review unit');
+  assert(
+    JSON.stringify(jsonPayload.reviewUnits) === JSON.stringify(['tooling-policy']),
+    'local wrapper JSON mode should report tooling-policy review units from changed files',
+  );
+  assert(
+    JSON.stringify(jsonPayload.scopeKinds) === JSON.stringify(['policy']),
+    'local wrapper JSON mode should report sorted non-other scope kinds',
+  );
+} finally {
+  rmSync(localWrapperTmp, { recursive: true, force: true });
+}
+
+assert(
+  !visualProofNeedsAnimation('## Visual Proof\n\nThe preload script is unaffected.\n'),
+  'the word "preload" alone should not trigger the animation requirement (word-boundary regression)',
+);
+assert(
+  visualProofNeedsAnimation('## Visual Proof\n\nThe app will restart after this change.\n'),
+  'a standalone "restart" should still trigger the animation requirement',
+);
+assert(
+  visualProofNeedsAnimation('## Visual Proof\n\nSaved state survives after a reload.\n'),
+  'a standalone "reload" should still trigger the animation requirement',
+);
+assert(
+  visualProofNeedsAnimation('## Visual Proof\n\nUsers relaunch the app to see the fix.\n'),
+  'a standalone "relaunch" should still trigger the animation requirement',
+);
+assert(
+  visualProofNeedsAnimation('## Visual Proof\n\nThis view has a smooth transition between panels.\n'),
+  'a standalone "transition" should still trigger the animation requirement',
+);
+assert(
+  visualProofNeedsAnimation('## Visual Proof\n\nThere is a visible state change after saving.\n'),
+  'the phrase "state change" should still trigger the animation requirement',
+);
+assert(
+  !visualProofNeedsAnimation('## Visual Proof\n\nWe describe an understate change in copy only.\n'),
+  '"understate change" should not trigger the animation requirement (word-boundary regression)',
+);
+
+const preloadRegressionBody = `${validMinimal}
+
+## Visual Proof
+
+The preload script is unaffected.
+
+![screenshot](proof.png)
+
+Manually inspected: opened proof.png and confirmed the preload-adjacent UI is unchanged.
+`;
+const preloadRegressionErrors = await validatePrBody(preloadRegressionBody, { requiresVisualProof: true });
+assert(
+  preloadRegressionErrors.length === 0,
+  `a PR body whose Visual Proof section merely mentions "preload" should pass with a static screenshot: ${preloadRegressionErrors.join('; ')}`,
+);
+
+const guardedBehaviorTouchingDiff = `diff --git a/packages/ui/src/App.tsx b/packages/ui/src/App.tsx
+--- a/packages/ui/src/App.tsx
++++ b/packages/ui/src/App.tsx
+@@ -10,7 +10,7 @@
+   // guarded-behavior: dag-surface-background-click-noop — see #4982
+   const handleDagSurfaceClick = useCallback(() => {
+-    if (contextMenu || workflowContextMenu) {
++    if (contextMenu) {
+       setContextMenu(null);
+       setWorkflowContextMenu(null);
+     }
+   }, [contextMenu, workflowContextMenu]);
+`;
+
+const guardedBehaviorNonTouchingDiff = `diff --git a/packages/ui/src/Other.tsx b/packages/ui/src/Other.tsx
+--- a/packages/ui/src/Other.tsx
++++ b/packages/ui/src/Other.tsx
+@@ -1,3 +1,3 @@
+   const label = 'sidebar';
+-  const count = 1;
++  const count = 2;
+   return label;
+`;
+
+const guardedBehaviorOmittedIdErrors = await validatePrBody(validMinimal, { diffText: guardedBehaviorTouchingDiff });
+assert(
+  guardedBehaviorOmittedIdErrors.some((error) => error.includes('Guarded behavior "dag-surface-background-click-noop"') && error.includes('not mentioned in ## Safety Invariant or ## Non-goals')),
+  'a diff touching a guarded-behavior marker line should fail when the PR body omits the marker id',
+);
+
+const guardedBehaviorClaimedBody = validMinimal.replace(
+  'Only the refresh path changes.',
+  'Only the refresh path changes. dag-surface-background-click-noop stays a no-op.',
+);
+const guardedBehaviorClaimedErrors = await validatePrBody(guardedBehaviorClaimedBody, { diffText: guardedBehaviorTouchingDiff });
+assert(
+  !guardedBehaviorClaimedErrors.some((error) => error.includes('Guarded behavior "dag-surface-background-click-noop"')),
+  'a diff touching a guarded-behavior marker line should pass when the PR body names the marker id in Safety Invariant or Non-goals',
+);
+
+const guardedBehaviorSubstringClaimErrors = validateGuardedBehaviorMarkers({
+  diffText: guardedBehaviorTouchingDiff,
+  body: validMinimal.replace(
+    'Only the refresh path changes.',
+    'Only not-dag-surface-background-click-noop-suffix changes.',
+  ),
+});
+assert(
+  guardedBehaviorSubstringClaimErrors.some((error) => error.includes('Guarded behavior "dag-surface-background-click-noop"')),
+  'a longer body token must not claim a guarded-behavior marker id by substring',
+);
+
+const guardedBehaviorNonTouchingErrors = await validatePrBody(validMinimal, { diffText: guardedBehaviorNonTouchingDiff });
+assert(
+  !guardedBehaviorNonTouchingErrors.some((error) => error.includes('Guarded behavior')),
+  'a diff that does not touch any guarded-behavior marker line should have no effect regardless of PR body content',
+);
 
 console.log('OK: PR body validator checks passed');

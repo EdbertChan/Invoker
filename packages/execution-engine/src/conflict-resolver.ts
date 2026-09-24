@@ -7,12 +7,10 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 
 import type { Orchestrator } from '@invoker/workflow-core';
-import { OrchestratorError, OrchestratorErrorCode, parseMergeConflictError } from '@invoker/workflow-core';
+import { FailureClassifier, OrchestratorError, OrchestratorErrorCode, parseMergeConflictError } from '@invoker/workflow-core';
 import type { SQLiteAdapter } from '@invoker/data-store';
 import { buildAgentExitFailureDetail, cleanElectronEnv, resolveExecutableOnCurrentPath } from './process-utils.js';
 import { assertExecutionModelSupported, DEFAULT_EXECUTION_AGENT, type ExecutionAgent } from './agent.js';
@@ -22,6 +20,12 @@ import { buildWorktreeListScript, createSshRemoteScriptError } from './ssh-git-e
 import { buildSshConnectionArgs } from './ssh-transport-options.js';
 import { findManagedWorktreeForBranch } from './worktree-discovery.js';
 import { buildRemoteAgentEnvExports } from './remote-agent-env.js';
+import { buildPortableBase64DecodeFunction, buildSourceInvokerEnvScript } from './remote-shell-fragments.js';
+import {
+  buildAgentPromptFileBootstrap,
+  materializeLocalAgentPrompt,
+  shouldInlineAgentPrompt,
+} from './agent-prompt-transport.js';
 
 // ── Host interface ───────────────────────────────────────
 
@@ -54,13 +58,6 @@ export interface ConflictResolverHost {
   getRemoteTargetConfig?(targetId: string): RemoteTargetConfig | undefined;
 }
 
-const DEFAULT_MAX_INLINE_PROMPT_BYTES = 64 * 1024;
-const MAX_INLINE_PROMPT_BYTES = (() => {
-  const raw = process.env.INVOKER_MAX_INLINE_AGENT_PROMPT_BYTES;
-  if (!raw) return DEFAULT_MAX_INLINE_PROMPT_BYTES;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_INLINE_PROMPT_BYTES;
-})();
 const DEBUG_IO_TAIL_CHARS = 2000;
 
 function tailText(value: unknown, maxChars: number = DEBUG_IO_TAIL_CHARS): string | undefined {
@@ -69,44 +66,13 @@ function tailText(value: unknown, maxChars: number = DEBUG_IO_TAIL_CHARS): strin
   return value.slice(-maxChars);
 }
 
-function promptByteLength(prompt: string): number {
-  return Buffer.byteLength(prompt, 'utf8');
-}
-
-function buildPromptFileBootstrap(promptPath: string): string {
-  return [
-    `The full task instructions are in this file: ${promptPath}`,
-    `Read the file completely, then execute those instructions in this workspace.`,
-    `Do not ask for the file contents.`,
-  ].join('\n');
-}
-
-function materializeLocalPrompt(prompt: string): { effectivePrompt: string; cleanup: () => void } {
-  if (promptByteLength(prompt) <= MAX_INLINE_PROMPT_BYTES) {
-    return { effectivePrompt: prompt, cleanup: () => {} };
-  }
-  const dir = mkdtempSync(join(tmpdir(), 'invoker-agent-prompt-'));
-  const promptPath = join(dir, 'prompt.md');
-  writeFileSync(promptPath, prompt, 'utf8');
-  return {
-    effectivePrompt: buildPromptFileBootstrap(promptPath),
-    cleanup: () => {
-      try {
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* best effort */
-      }
-    },
-  };
-}
-
 function materializeRemotePrompt(prompt: string): { effectivePrompt: string; remotePromptFilePath?: string; promptB64?: string } {
-  if (promptByteLength(prompt) <= MAX_INLINE_PROMPT_BYTES) {
+  if (shouldInlineAgentPrompt(prompt)) {
     return { effectivePrompt: prompt };
   }
   const remotePromptFilePath = `/tmp/invoker-agent-prompt-${randomUUID()}.md`;
   return {
-    effectivePrompt: buildPromptFileBootstrap(remotePromptFilePath),
+    effectivePrompt: buildAgentPromptFileBootstrap(remotePromptFilePath),
     remotePromptFilePath,
     promptB64: Buffer.from(prompt, 'utf8').toString('base64'),
   };
@@ -121,23 +87,36 @@ function deriveRemoteManagedWorkspaceInfo(
     : workspacePath.endsWith('/')
     ? workspacePath.slice(0, -1)
     : workspacePath;
-  const match = normalized.match(/^(.*)\/worktrees\/([a-f0-9]{12})\/[^/]+$/);
-  if (match) {
-    return {
-      invokerHome: match[1] || target.remoteInvokerHome || `~/.invoker`,
-      repoHash: match[2],
-      managedPrefix: `${match[1]}/worktrees/${match[2]}`,
-    };
-  }
-
-  if (!target.remoteInvokerHome) return undefined;
   const hashMatch = normalized.match(/\/worktrees\/([a-f0-9]{12})\/[^/]+$/);
   if (!hashMatch) return undefined;
+  const repoHash = hashMatch[1];
+  // Prefer the selected SSH target's remoteInvokerHome over any owner-local
+  // prefix persisted on the task (e.g. /Users/... from a macOS orchestrator).
+  const configuredHome = target.remoteInvokerHome?.replace(/\/+$/, '');
+  const parsedHome = normalized.match(/^(.*)\/worktrees\//)?.[1]?.replace(/\/+$/, '');
+  const invokerHome = configuredHome || parsedHome || '~/.invoker';
   return {
-    invokerHome: target.remoteInvokerHome,
-    repoHash: hashMatch[1],
-    managedPrefix: `${target.remoteInvokerHome}/worktrees/${hashMatch[1]}`,
+    invokerHome,
+    repoHash,
+    managedPrefix: `${invokerHome}/worktrees/${repoHash}`,
   };
+}
+
+/**
+ * Rewrite a managed worktree path onto the selected remote target's invoker home
+ * while preserving repo hash and worktree leaf identity.
+ */
+export function canonicalizeRemoteManagedWorkspacePath(
+  workspacePath: string,
+  remoteInvokerHome: string | undefined,
+): string {
+  const normalized = workspacePath.endsWith('/')
+    ? workspacePath.slice(0, -1)
+    : workspacePath;
+  const match = normalized.match(/\/worktrees\/([a-f0-9]{12})\/([^/]+)$/);
+  if (!match) return workspacePath;
+  const home = (remoteInvokerHome || '~/.invoker').replace(/\/+$/, '');
+  return `${home}/worktrees/${match[1]}/${match[2]}`;
 }
 
 export async function resolveRemoteBranchOwnerPath(
@@ -148,15 +127,19 @@ export async function resolveRemoteBranchOwnerPath(
   if (!branch) return undefined;
   const info = deriveRemoteManagedWorkspaceInfo(workspacePath, target);
   if (!info) return undefined;
-  const porcelain = await execRemoteSsh(
-    target,
-    buildWorktreeListScript({
-      repoHash: info.repoHash,
-      invokerHome: info.invokerHome,
-    }),
-    'list_worktrees',
-  );
-  return findManagedWorktreeForBranch(porcelain, branch, [info.managedPrefix]);
+  try {
+    const porcelain = await execRemoteSsh(
+      target,
+      buildWorktreeListScript({
+        repoHash: info.repoHash,
+        invokerHome: info.invokerHome,
+      }),
+      'list_worktrees',
+    );
+    return findManagedWorktreeForBranch(porcelain, branch, [info.managedPrefix]);
+  } catch {
+    return undefined;
+  }
 }
 
 // ── Extracted functions ──────────────────────────────────
@@ -304,51 +287,57 @@ function shellQuote(s: string): string {
 }
 
 /**
- * Remote `bash -s` invocation for an agent command, forwarding the local PATH so
- * a bare agent binary (e.g. `codex`) resolves on the remote — mirroring how
- * ssh-executor runs task payloads. Without this the fix/resolve agent dies with
- * "command not found" even though normal task execution on the same host works.
+ * Remote shell for agent fix/resolve commands. Keep this non-login so remote
+ * dotfiles cannot trigger login-shell bash bugs or mutate execution semantics.
+ * Remote scripts source ~/.invoker/env.sh explicitly before running agents.
  */
-export function remoteAgentShellInvocation(remotePath: string = process.env.PATH ?? ''): string[] {
-  return remotePath ? ['env', `PATH=${remotePath}`, 'bash', '-s'] : ['bash', '-s'];
+export function remoteAgentShellInvocation(): string[] {
+  return ['bash', '-s'];
 }
 
 /**
- * Build the shell command to run an agent on a remote host.
- * Uses the agent registry when available; falls back to claude CLI.
+ * Build the shell command to run an agent on a remote host via the agent
+ * registry. Throws when the registry is missing or cannot resolve the
+ * requested agent, instead of substituting a different one.
  */
-function buildRemoteAgentCommand(
+export function buildRemoteAgentCommand(
   prompt: string,
   agentRegistry?: AgentRegistry,
   agentName?: string,
   executionModel?: string,
 ): { shellCommand: string; sessionId: string } {
   const name = agentName ?? DEFAULT_EXECUTION_AGENT;
-  if (agentRegistry) {
-    const agent = agentRegistry.get(name);
-    if (agent?.buildFixCommand) {
-      const spec = agent.buildFixCommand(prompt, { executionModel });
-      const sessionId = spec.sessionId ?? randomUUID();
-      const cmd = `${spec.cmd} ${spec.args.map(a => shellQuote(a)).join(' ')}`;
-      return { shellCommand: cmd, sessionId };
-    }
+  if (!agentRegistry) {
+    throw new Error(
+      `Cannot build remote command for requested execution agent "${name}": no configured agent set was available to resolve it`,
+    );
   }
-  // Fallback: claude-compatible CLI (for backwards compat without registry)
-  const sessionId = randomUUID();
-  return {
-    shellCommand: `claude --session-id ${shellQuote(sessionId)} -p ${shellQuote(prompt)} --dangerously-skip-permissions`,
-    sessionId,
-  };
+  const agent = agentRegistry.get(name);
+  if (!agent?.buildFixCommand) {
+    throw new Error(
+      `Cannot build remote command for requested execution agent "${name}": the configured agent set lacks that name or it does not support fix commands`,
+    );
+  }
+  const spec = agent.buildFixCommand(prompt, { executionModel });
+  const sessionId = spec.sessionId ?? randomUUID();
+  const cmd = `${spec.cmd} ${spec.args.map(a => shellQuote(a)).join(' ')}`;
+  return { shellCommand: cmd, sessionId };
 }
+
+/** How many recent `task.executor.selected` events to check for a usable poolMemberId before giving up. */
+const RECENT_EXECUTOR_SELECTED_EVENTS_TO_CHECK = 20;
 
 export function resolveSelectedRemoteTargetId(host: ConflictResolverHost, taskId: string, task: ReturnType<Orchestrator['getTask']> & {}): string | undefined {
   const direct = (task.config as { poolMemberId?: string }).poolMemberId;
   if (direct) return direct;
 
-  const events = host.persistence.getEvents?.(taskId) ?? [];
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i];
-    if (event?.eventType !== 'task.executor.selected' || !event.payload) continue;
+  const events = host.persistence.getRecentEventsOfType?.(
+    taskId,
+    'task.executor.selected',
+    RECENT_EXECUTOR_SELECTED_EVENTS_TO_CHECK,
+  ) ?? [];
+  for (const event of events) {
+    if (!event.payload) continue;
     try {
       const payload = JSON.parse(event.payload) as { poolMemberId?: unknown };
       if (typeof payload.poolMemberId === 'string' && payload.poolMemberId.trim()) {
@@ -413,17 +402,28 @@ async function resolveConflictRemote(
   const envExports = buildRemoteAgentEnvExports(target.secretsFile, target.use_api_key === true);
 
   const script = `set -euo pipefail
+${buildPortableBase64DecodeFunction()}
+${buildSourceInvokerEnvScript(target.remoteInvokerHome)}
 WT="${remoteCwd}"
 if [[ "$WT" == '~' ]]; then WT="$HOME"; elif [[ "\${WT:0:2}" == '~/' ]]; then WT="$HOME/\${WT:2}"; fi
 cd "$WT"
 ${envExports}
+AGENT_CMD_FILE=""
+cleanup_remote_agent() {
+  if [ -n "$AGENT_CMD_FILE" ]; then
+    rm -f "$AGENT_CMD_FILE"
+  fi
+}
+trap cleanup_remote_agent EXIT
 git checkout "${taskBranch}"
-MERGE_MSG=$(echo "${mergeMsgB64}" | base64 -d)
+MERGE_MSG=$(printf '%s' ${shellQuote(mergeMsgB64)} | invoker_base64_decode)
 if git merge --no-edit -m "$MERGE_MSG" "${conflictInfo.failedBranch}" 2>/dev/null; then
   echo "[resolveConflict] Merge succeeded without conflict on retry"
 else
   echo "[resolveConflict] Conflict reproduced, spawning agent to resolve..."
-  eval "$(echo "${agentCmdB64}" | base64 -d)"
+  AGENT_CMD_FILE=$(mktemp)
+  printf '%s' ${shellQuote(agentCmdB64)} | invoker_base64_decode > "$AGENT_CMD_FILE"
+  bash "$AGENT_CMD_FILE"
 fi
 `;
 
@@ -701,19 +701,32 @@ export function spawnRemoteAgentFixImpl(
   const promptWrite = promptTransport.remotePromptFilePath && promptTransport.promptB64
     ? [
         `PROMPT_FILE=${shellQuote(promptTransport.remotePromptFilePath)}`,
-        `printf '%s' ${shellQuote(promptTransport.promptB64)} | base64 -d > "$PROMPT_FILE"`,
-        `trap 'rm -f "$PROMPT_FILE"' EXIT`,
+        `printf '%s' ${shellQuote(promptTransport.promptB64)} | invoker_base64_decode > "$PROMPT_FILE"`,
       ].join('\n') + '\n'
     : '';
   const envExports = buildRemoteAgentEnvExports(target.secretsFile, target.use_api_key === true);
 
   const script = `set -euo pipefail
+${buildPortableBase64DecodeFunction()}
+${buildSourceInvokerEnvScript(target.remoteInvokerHome)}
 WT="${remoteCwd}"
 if [[ "$WT" == '~' ]]; then WT="$HOME"; elif [[ "\${WT:0:2}" == '~/' ]]; then WT="$HOME/\${WT:2}"; fi
 cd "$WT"
 ${envExports}
-${promptWrite}
-eval "$(echo "${agentCmdB64}" | base64 -d)"
+PROMPT_FILE=""
+AGENT_CMD_FILE=""
+cleanup_remote_fix() {
+  if [ -n "$PROMPT_FILE" ]; then
+    rm -f "$PROMPT_FILE"
+  fi
+  if [ -n "$AGENT_CMD_FILE" ]; then
+    rm -f "$AGENT_CMD_FILE"
+  fi
+}
+trap cleanup_remote_fix EXIT
+${promptWrite}AGENT_CMD_FILE=$(mktemp)
+printf '%s' ${shellQuote(agentCmdB64)} | invoker_base64_decode > "$AGENT_CMD_FILE"
+bash "$AGENT_CMD_FILE"
 `;
 
   const sshArgs = [
@@ -750,7 +763,11 @@ eval "$(echo "${agentCmdB64}" | base64 -d)"
         driver.processOutput(effectiveSessionId, stdout);
       }
       if (code === 0) resolve({ stdout, sessionId: effectiveSessionId });
-      else reject(createSshRemoteScriptError(code, stdout, stderr, 'remote_agent_fix'));
+      else {
+        const error = createSshRemoteScriptError(code, stdout, stderr, 'remote_agent_fix');
+        const failureClass = FailureClassifier.classifyAgentQuotaRefusal(`${stdout}\n${stderr}`);
+        reject(Object.assign(error, failureClass ? { failureClass } : {}));
+      }
     });
     child.on('error', (err) => reject(err));
   });
@@ -767,7 +784,7 @@ export function spawnAgentFixViaRegistry(
   executionModel?: string,
 ): Promise<{ stdout: string; sessionId: string }> {
   assertExecutionModelSupported(agent, executionModel);
-  const promptTransport = materializeLocalPrompt(prompt);
+  const promptTransport = materializeLocalAgentPrompt(prompt);
   const spec = agent.buildFixCommand?.(promptTransport.effectivePrompt, { executionModel });
   if (!spec) {
     promptTransport.cleanup();
@@ -796,8 +813,10 @@ export function spawnAgentFixViaRegistry(
         resolve({ stdout: displayStdout, sessionId: effectiveSessionId });
       } else {
         promptTransport.cleanup();
+        const failureDetail = buildAgentExitFailureDetail(stdout, stderr, displayStdout);
+        const failureClass = FailureClassifier.classifyAgentQuotaRefusal(failureDetail);
         reject(Object.assign(
-          new Error(`${agent.name} fix exited with code ${code}: ${buildAgentExitFailureDetail(stdout, stderr, displayStdout)}`),
+          new Error(`${agent.name} fix exited with code ${code}: ${failureDetail}`),
           {
             sessionId: effectiveSessionId,
             exitCode: code,
@@ -806,6 +825,7 @@ export function spawnAgentFixViaRegistry(
             stdoutTail: tailText(stdout),
             stderrTail: tailText(stderr),
             cwd,
+            ...(failureClass ? { failureClass } : {}),
           },
         ));
       }

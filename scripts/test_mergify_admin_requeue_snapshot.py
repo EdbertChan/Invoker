@@ -4,16 +4,17 @@ Documentation-by-test for the loader. This layer takes the *raw* shapes GitHub's
 `gh` CLI returns — issue comments, GraphQL PR detail, status-check rollups,
 review threads — and folds them into the typed ``PrSnapshot`` the planner reads.
 
-Each test feeds one realistic raw shape and pins what gets parsed out of it and
-why. The subprocess/`gh`-calling helpers are intentionally not exercised here;
-only the pure parse/transform functions are.
+Most tests feed one realistic raw shape and pin what gets parsed out of it and
+why. Subprocess coverage stays limited to GitHub CLI error classification.
 
 Run:  python3 scripts/test_mergify_admin_requeue_snapshot.py
 """
 
 from __future__ import annotations
 
+import ast
 import sys
+import subprocess
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -55,6 +56,40 @@ on draft #4242
 }
 
 
+# A real Mergify "waiting" status comment, posted after an `@mergifyio queue`
+# command while its queue conditions are still being evaluated. Note the
+# payload carries `"state": "waiting"` with a null queue_rule_name.
+MERGIFY_WAITING_COMMENT = {
+    "user": {"login": "mergify[bot]"},
+    "id": "c-9002",
+    "created_at": "2026-07-07T05:10:00Z",
+    "updated_at": "2026-07-07T05:10:00Z",
+    "html_url": "https://github.com/o/r/pull/4242#issuecomment-9002",
+    "body": """\
+<!---
+DO NOT EDIT
+-*- Mergify Payload -*-
+{"version": 1, "state": "waiting", "queue_rule_name": null, "queued_at": null}
+-*- Mergify Payload End -*-
+-->
+
+# Merge Queue Status
+
+- \U0001f7e0 **Waiting for queue conditions**
+- ⏳ Enter queue
+- ⏳ Run checks
+- ⏳ Merge
+
+<details>
+<summary><strong>Waiting for</strong></summary>
+
+- [ ] `-conflict` [\U0001f4cc queue requirement]
+
+</details>
+""",
+}
+
+
 class ParseMergifyQueueEvent(unittest.TestCase):
     def test_ignores_comments_not_from_mergify(self):
         # Only Mergify's own comments describe the queue; a human/bot comment
@@ -80,6 +115,118 @@ class ParseMergifyQueueEvent(unittest.TestCase):
         self.assertEqual(event.failing_checks, ("build (ubuntu-latest)",))
         self.assertEqual(event.comment_id, "c-9001")
         self.assertEqual(event.queued_at, "2026-07-07T05:00:00Z")
+
+    def test_parses_waiting_command_comment_into_event(self):
+        # Incident 2026-08-04 (PR #7420): a pending `queue` command reports
+        # `state: "waiting"` with no queue rule; it must not parse as
+        # "unknown" or the planner cannot tell a command is in flight.
+        event = s.parse_mergify_queue_event(MERGIFY_WAITING_COMMENT)
+        assert event is not None
+        self.assertEqual(event.state, "waiting")
+        self.assertEqual(event.queue_rule_name, "")
+        self.assertEqual(event.head_sha, "")
+
+    def test_parses_waiting_payload_head_sha_without_left_the_queue_prose(self):
+        comment = {
+            "user": {"login": "mergify[bot]"},
+            "id": "c-payload-sha",
+            "created_at": "2026-08-25T06:09:00Z",
+            "updated_at": "2026-08-25T06:09:00Z",
+            "html_url": "https://github.com/o/r/pull/10278#issuecomment-1",
+            "body": (
+                "<!---\n"
+                "DO NOT EDIT\n"
+                "-*- Mergify Payload -*-\n"
+                '{"version": 1, "state": "waiting", "queue_rule_name": null,'
+                f' "head_sha": "{HEAD}"}}\n'
+                "-*- Mergify Payload End -*-\n"
+                "-->\n\n"
+                "# Merge Queue Status\n\n"
+                "- Waiting for queue conditions\n"
+            ),
+        }
+        event = s.parse_mergify_queue_event(comment)
+        assert event is not None
+        self.assertEqual(event.state, "waiting")
+        self.assertEqual(event.head_sha, HEAD)
+
+    def test_edited_stale_dequeue_comment_does_not_outrank_newer_waiting_comment(self):
+        # Incident 2026-08-04 (PR #7420): Mergify edited the old "dequeued"
+        # status comment one second after posting the new "waiting" comment,
+        # so ordering by updated_at resurfaced the stale dequeue event and the
+        # planner kept requeueing into the retry cap. Creation order is the
+        # command order; in-place edits must not promote an old event.
+        stale_dequeue = dict(MERGIFY_DEQUEUE_COMMENT)
+        stale_dequeue["created_at"] = "2026-07-07T05:00:00Z"
+        stale_dequeue["updated_at"] = "2026-07-07T05:10:01Z"
+        detail = {"number": 4242, "headRefOid": HEAD, "state": "OPEN"}
+        snap = s.snapshot_from_detail(detail, [stale_dequeue, MERGIFY_WAITING_COMMENT], required_checks=[])
+        assert snap.latest_mergify is not None
+        self.assertEqual(snap.latest_mergify.state, "waiting")
+
+
+class GhCommandFailures(unittest.TestCase):
+    def test_graphql_rate_limit_becomes_controlled_runtime_error(self):
+        error = subprocess.CalledProcessError(
+            1,
+            ["gh", "api", "graphql"],
+            stderr='{"errors":[{"type":"RATE_LIMIT","code":"graphql_rate_limit","message":"API rate limit already exceeded"}]}',
+        )
+        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "GitHub API rate limit exceeded"):
+                s.run_logged(["gh", "api", "graphql"])
+
+
+class GhCommandTransientRetry(unittest.TestCase):
+    # Incident 2026-08-12: gh's GraphQL calls intermittently fail with 502/504
+    # gateway errors and stream resets; run_logged previously raised on the
+    # first failure, killing the whole babysitting cycle for a blip that
+    # would have succeeded on the very next attempt.
+    def test_retries_transient_gateway_error_then_succeeds(self):
+        transient = subprocess.CalledProcessError(
+            1, ["gh", "pr", "list"], stderr="HTTP 502: 502 Bad Gateway (https://api.github.com/graphql)",
+        )
+        success = subprocess.CompletedProcess(["gh", "pr", "list"], 0, stdout="[]", stderr="")
+        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run", side_effect=[transient, success]) as run_mock:
+            with mock.patch("mergify_admin_requeue_snapshot.time.sleep"):
+                out = s.run_logged(["gh", "pr", "list"])
+        self.assertEqual(out, "[]")
+        self.assertEqual(run_mock.call_count, 2)
+
+    def test_retries_stream_reset_then_succeeds(self):
+        transient = subprocess.CalledProcessError(
+            1, ["gh", "pr", "list"], stderr="stream error: stream ID 1; CANCEL; received from peer",
+        )
+        success = subprocess.CompletedProcess(["gh", "pr", "list"], 0, stdout="[]", stderr="")
+        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run", side_effect=[transient, success]):
+            with mock.patch("mergify_admin_requeue_snapshot.time.sleep"):
+                out = s.run_logged(["gh", "pr", "list"])
+        self.assertEqual(out, "[]")
+
+    def test_exhausts_retries_and_raises_last_error(self):
+        transient = subprocess.CalledProcessError(
+            1, ["gh", "pr", "list"], stderr="HTTP 504: gateway timeout",
+        )
+        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run", side_effect=transient) as run_mock:
+            with mock.patch("mergify_admin_requeue_snapshot.time.sleep"):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    s.run_logged(["gh", "pr", "list"])
+        self.assertEqual(run_mock.call_count, 3)
+
+    def test_non_transient_error_does_not_retry(self):
+        hard_error = subprocess.CalledProcessError(1, ["gh", "pr", "list"], stderr="HTTP 404: Not Found")
+        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run", side_effect=hard_error) as run_mock:
+            with self.assertRaises(subprocess.CalledProcessError):
+                s.run_logged(["gh", "pr", "list"])
+        self.assertEqual(run_mock.call_count, 1)
+
+    def test_hang_times_out_and_is_retried(self):
+        timeout_exc = subprocess.TimeoutExpired(["gh", "pr", "list"], 90)
+        success = subprocess.CompletedProcess(["gh", "pr", "list"], 0, stdout="[]", stderr="")
+        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run", side_effect=[timeout_exc, success]):
+            with mock.patch("mergify_admin_requeue_snapshot.time.sleep"):
+                out = s.run_logged(["gh", "pr", "list"])
+        self.assertEqual(out, "[]")
 
 
 class ParseStackMetadata(unittest.TestCase):
@@ -115,13 +262,14 @@ class ReviewThreadsParsing(unittest.TestCase):
             "pageInfo": {"hasNextPage": False},
             "nodes": [
                 {"id": "t1", "isResolved": False,
+                 "isOutdated": True,
                  "comments": {"nodes": [{"author": {"login": "coderabbitai[bot]"}}]}},
                 {"id": "t2", "isResolved": True, "comments": {"nodes": []}},
             ],
         }
         self.assertEqual(
             s.review_threads(value),
-            (m.ReviewThread("t1", False, ("coderabbitai[bot]",)),
+            (m.ReviewThread("t1", False, ("coderabbitai[bot]",), True),
              m.ReviewThread("t2", True, ())),
         )
 
@@ -145,7 +293,7 @@ class RawContexts(unittest.TestCase):
 class GroupStackPrs(unittest.TestCase):
     def _pr(self, number, base, head, state="OPEN"):
         return m.PrSnapshot(
-            number=number, title="t", url="u", state=state, is_draft=False,
+            number=number, title="t", body="", url="u", state=state, is_draft=False,
             base_ref_name=base, head_ref_name=head, head_ref_oid=HEAD,
             merge_state_status="BLOCKED", mergeable="MERGEABLE",
             labels=frozenset(), checks={}, review_threads=(), latest_mergify=None,
@@ -173,7 +321,7 @@ class SnapshotFromDetail(unittest.TestCase):
 
     def test_builds_full_snapshot(self):
         detail = {
-            "number": 3221, "title": "Add model", "url": "https://x/3221",
+            "number": 3221, "title": "Add model", "body": "## Summary\n\nBody.\n", "url": "https://x/3221",
             "state": "OPEN", "isDraft": False,
             "baseRefName": "master", "headRefName": "stack/x", "headRefOid": HEAD,
             "mergeStateStatus": "BLOCKED", "mergeable": "MERGEABLE",
@@ -251,9 +399,53 @@ class GhClientCandidateDiscovery(unittest.TestCase):
 
 
 class GhClientLabelEdit(unittest.TestCase):
+    def test_candidate_scan_omits_author_by_default(self):
+        client = s.GhClient()
+        with mock.patch.object(client, "_run_json", return_value=[]) as run_json:
+            client.list_candidate_prs("Neko-Catpital-Labs/Invoker", None, [])
+
+        args = run_json.call_args.args[0]
+        self.assertIn("--label", args)
+        self.assertNotIn("--author", args)
+
+    def test_candidate_scan_includes_explicit_author(self):
+        client = s.GhClient()
+        with mock.patch.object(client, "_run_json", return_value=[]) as run_json:
+            client.list_candidate_prs("Neko-Catpital-Labs/Invoker", "EdbertChan", [])
+
+        args = run_json.call_args.args[0]
+        self.assertEqual(args[args.index("--author") + 1], "EdbertChan")
+
+    def test_list_open_prs_has_no_label_filter(self):
+        client = s.GhClient()
+        with mock.patch.object(client, "_run_json", return_value=[]) as run_json:
+            client.list_open_prs("Neko-Catpital-Labs/Invoker")
+
+        args = run_json.call_args.args[0]
+        self.assertNotIn("--label", args)
+        fields = args[args.index("--json") + 1]
+        self.assertNotIn("statusCheckRollup", fields)
+        self.assertIn("headRefName", fields)
+
+    def test_list_open_prs_omits_author_by_default(self):
+        client = s.GhClient()
+        with mock.patch.object(client, "_run_json", return_value=[]) as run_json:
+            client.list_open_prs("Neko-Catpital-Labs/Invoker")
+
+        args = run_json.call_args.args[0]
+        self.assertNotIn("--author", args)
+
+    def test_list_open_prs_includes_explicit_author(self):
+        client = s.GhClient()
+        with mock.patch.object(client, "_run_json", return_value=[]) as run_json:
+            client.list_open_prs("Neko-Catpital-Labs/Invoker", "EdbertChan")
+
+        args = run_json.call_args.args[0]
+        self.assertEqual(args[args.index("--author") + 1], "EdbertChan")
+
     def test_add_label_uses_rest_issue_labels_endpoint(self):
         client = s.GhClient()
-        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run") as run:
+        with mock.patch("mergify_admin_requeue_snapshot.run_logged") as run:
             client.edit_label("Neko-Catpital-Labs/Invoker", 4157, add="admin-bypass")
 
         run.assert_called_once_with(
@@ -265,15 +457,12 @@ class GhClientLabelEdit(unittest.TestCase):
                 "repos/Neko-Catpital-Labs/Invoker/issues/4157/labels",
                 "-f",
                 "labels[]=admin-bypass",
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
+            ]
         )
 
     def test_remove_label_uses_rest_issue_labels_endpoint(self):
         client = s.GhClient()
-        with mock.patch("mergify_admin_requeue_snapshot.subprocess.run") as run:
+        with mock.patch("mergify_admin_requeue_snapshot.run_logged") as run:
             client.edit_label("Neko-Catpital-Labs/Invoker", 4157, remove="merge-hold")
 
         run.assert_called_once_with(
@@ -283,11 +472,117 @@ class GhClientLabelEdit(unittest.TestCase):
                 "--method",
                 "DELETE",
                 "repos/Neko-Catpital-Labs/Invoker/issues/4157/labels/merge-hold",
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
+            ]
         )
+
+    def test_merge_squash_never_passes_admin_override(self):
+        client = s.GhClient()
+        with mock.patch("mergify_admin_requeue_snapshot.run_logged") as run:
+            client.merge_squash("EdbertChan/catstack", 9007)
+
+        run.assert_called_once_with(
+            ["gh", "pr", "merge", "9007", "--repo", "EdbertChan/catstack", "--squash"]
+        )
+        self.assertNotIn("--admin", run.call_args.args[0])
+
+
+class GhClientRepoRuleDiscovery(unittest.TestCase):
+    def test_default_branch_reads_repo_metadata(self):
+        client = s.GhClient()
+        with mock.patch.object(client, "_run", return_value='{"default_branch": "main"}') as run:
+            result = client.default_branch("some-org/catstack")
+        run.assert_called_once_with(["gh", "api", "repos/some-org/catstack"])
+        self.assertEqual(result, "main")
+
+    def test_file_text_decodes_base64_content(self):
+        import base64
+
+        client = s.GhClient()
+        encoded = base64.b64encode(b"pull_request_rules:\n").decode("ascii")
+        with mock.patch.object(client, "_run", return_value=encoded) as run:
+            result = client.file_text("some-org/catstack", ".mergify.yml")
+        run.assert_called_once_with(
+            ["gh", "api", "repos/some-org/catstack/contents/.mergify.yml", "--jq", ".content"]
+        )
+        self.assertEqual(result, "pull_request_rules:\n")
+
+    def test_file_text_returns_none_on_missing_file(self):
+        client = s.GhClient()
+        with mock.patch.object(
+            client, "_run", side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="404 Not Found")
+        ):
+            result = client.file_text("some-org/catstack", ".mergify.yml")
+        self.assertIsNone(result)
+
+
+class GhRetryBudgetRespectsWorkerTickTimeout(unittest.TestCase):
+    # The pr-admin-bypass-land worker (packages/execution-engine/src/workers/
+    # pr-maintenance-workers.ts) force-kills the whole script if a tick runs
+    # past its 240s timeout. A run makes 100+ gh calls for ~50 admin-bypass
+    # PRs. If run_logged's own per-call retry budget were allowed to approach
+    # that 240s ceiling, a single stuck call could alone burn the worker's
+    # entire tick budget -- worse than having no retries at all, since the
+    # old behavior at least failed fast. This keeps the two budgets honest
+    # relative to each other without needing a cross-language test harness.
+    WORKER_TICK_TIMEOUT_SECONDS = 240  # pr-maintenance-workers.ts DEFAULT_PR_MAINTENANCE_WORKER_TICK_TIMEOUT_MS
+    MAX_SAFE_FRACTION = 1 / 3  # leave headroom for the other 100+ calls in one tick
+
+    def test_worst_case_single_call_retry_budget_leaves_room_for_the_rest_of_the_tick(self):
+        budget = s.GH_CALL_WORST_CASE_SECONDS
+        ceiling = self.WORKER_TICK_TIMEOUT_SECONDS * self.MAX_SAFE_FRACTION
+        self.assertLess(
+            budget, ceiling,
+            f"one stuck gh call could burn {budget}s, more than {self.MAX_SAFE_FRACTION:.0%} of the worker's "
+            f"{self.WORKER_TICK_TIMEOUT_SECONDS}s tick timeout -- tighten GH_COMMAND_TIMEOUT_SECONDS, "
+            "GH_RETRY_MAX_ATTEMPTS, or GH_RETRY_BACKOFF_SECONDS",
+        )
+
+
+class GhCallsGoThroughRunLogged(unittest.TestCase):
+    # Incident 2026-08-12: multiple `gh` CLI call sites across this script
+    # family bypassed run_logged and had zero retry/timeout protection, so
+    # any transient GitHub API 5xx or hang crashed the whole babysitting
+    # cycle. Five prior PRs (#3224, #5127, #5721, #5483, #5866) fixed
+    # planner/babysitting *logic* but never noticed this gap. This guard
+    # keeps any future `gh` call in this file family routed through
+    # run_logged, so it inherits retry protection automatically instead of
+    # needing a human to remember.
+    def test_no_gh_subprocess_call_bypasses_run_logged(self):
+        root = Path(__file__).resolve().parent
+        offenders: list[str] = []
+        for path in sorted(root.glob("mergify_admin_requeue*.py")):
+            if path.name.startswith("test_"):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            offenders.extend(self._raw_gh_subprocess_calls(tree, path.name))
+        self.assertEqual(
+            offenders, [],
+            "raw subprocess.run(['gh', ...]) call(s) bypassing run_logged (add via run_logged() instead): "
+            + ", ".join(offenders),
+        )
+
+    @staticmethod
+    def _raw_gh_subprocess_calls(tree: ast.AST, filename: str) -> list[str]:
+        found: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name == "run_logged":
+                continue
+            for call in ast.walk(node):
+                if not (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "run"
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "subprocess"
+                ):
+                    continue
+                if not call.args or not isinstance(call.args[0], ast.List) or not call.args[0].elts:
+                    continue
+                first = call.args[0].elts[0]
+                if isinstance(first, ast.Constant) and first.value == "gh":
+                    found.append(f"{filename}:{node.name}:{call.lineno}")
+        return found
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

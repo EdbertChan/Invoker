@@ -10,12 +10,19 @@
 import type { SQLiteAdapter, TaskLaunchDispatch } from '@invoker/data-store';
 import type { LaunchOutboxAck } from '@invoker/execution-engine';
 import type { TaskLaunchReadiness, TaskState } from '@invoker/workflow-core';
-import { DISPATCH_MAX_ATTEMPTS, LAUNCH_STUCK_ABANDON_MS, type Logger } from '@invoker/contracts';
+import {
+  DISPATCH_MAX_ATTEMPTS,
+  LAUNCH_STUCK_ABANDON_MS,
+  MAX_STUCK_LEASE_RETRIES,
+  type Logger,
+} from '@invoker/contracts';
+import { resolveLaunchDispatchLeaseMsOverride } from './launch-dispatch-defaults.js';
 
 
 export type LaunchDispatcherPersistence = Pick<
   SQLiteAdapter,
   | 'loadLaunchDispatchById'
+  | 'markLaunchDispatchAccepted'
   | 'markLaunchDispatchCompleted'
   | 'markLaunchDispatchFailed'
   | 'markLaunchDispatchAbandoned'
@@ -24,9 +31,17 @@ export type LaunchDispatcherPersistence = Pick<
   | 'claimLaunchDispatchAtomic'
   | 'listExecutionResourceLeasesByTask'
   | 'releaseExecutionResourceLease'
+  | 'countAbandonedLaunchDispatchesForTask'
   | 'logEvent'
 > & {
   releaseExpiredExecutionResourceLeases?(nowIso?: string): number;
+  listExpiredExecutionResourceLeases?(nowIso?: string): Array<{
+    resourceKey: string;
+    holderId: string;
+    taskId?: string;
+    metadata?: unknown;
+  }>;
+  renewExecutionResourceLease?(resourceKey: string, holderId: string): boolean;
 };
 
 /**
@@ -38,6 +53,7 @@ export type LaunchDispatcherPersistence = Pick<
  */
 export interface LaunchDispatcherOrchestrator {
   prepareTaskForNewAttempt(taskId: string, reason: string): unknown;
+  failTask?(taskId: string, reason: string): unknown;
   syncFromDb?(workflowId: string): void;
   getTask?(taskId: string): TaskState | undefined;
   getTaskLaunchReadiness?(taskId: string): TaskLaunchReadiness;
@@ -45,10 +61,10 @@ export interface LaunchDispatcherOrchestrator {
    * Optional: when startExecution leaves free slots idle with ready work that
    * has no launching phase (lost outbox after cancel/recreate), mint attempts.
    */
-  getExecutableReadyTasks?(): TaskState[];
-  getQueueStatus?(): { runningCount: number; maxConcurrency: number };
+  getExecutableReadyTasks?(opts?: { alreadyRefreshed?: boolean }): TaskState[];
+  getQueueStatus?(opts?: { refresh?: boolean }): { runningCount: number; maxConcurrency: number };
   isLaunchParked?(taskId: string, now?: number): boolean;
-  startExecution?(): TaskState[];
+  startExecution?(opts?: { limit?: number }): TaskState[];
 }
 
 /**
@@ -62,6 +78,14 @@ export interface LaunchDispatcherTaskRunner {
     task: TaskState,
     dispatchOpts?: { dispatchId: number; launchOutbox: LaunchOutboxAck },
   ): Promise<void>;
+  /**
+   * Optional: lets the resource-lease sweep tell a stalled heartbeat on a
+   * live process apart from a true orphan. Checked by lease holder id (not
+   * task id alone) so a stale lease from an abandoned attempt isn't kept
+   * alive just because the task has since started a new attempt.
+   */
+  readonly runnerInstanceId?: string;
+  hasActiveExecutionForLeaseHolder?(holderId: string): boolean;
 }
 
 export interface LaunchDispatcherOptions {
@@ -79,8 +103,97 @@ export interface LaunchDispatcherOptions {
   logger?: Logger;
   maxAttempts?: number;
   maxLeasesPerPoll?: number;
+  topUpReadyLaunchesEnabled?: () => boolean;
+  /**
+   * Overrides for DISPATCH_LEASE_MS / LAUNCH_STUCK_ABANDON_MS (both default
+   * to 12 minutes in production). Test-only knob so e2e tests can exercise
+   * the stuck-launch reaper in seconds instead of real minutes.
+   */
+  leaseMs?: number;
+  maxLaunchAgeMs?: number;
 }
 
+/**
+ * The single gate between a poll iteration and a launch: a dispatch
+ * only proceeds if the durable outbox actually leased a row.
+ */
+export function dispatchThroughOutboxOnly(
+  leased: TaskLaunchDispatch | null | undefined,
+): leased is TaskLaunchDispatch {
+  return leased != null;
+}
+
+/**
+ * Release every execution-resource lease (SSH pool slot, worktree
+ * pool member, ...) held on behalf of a task whose launch dispatch
+ * was just abandoned. Best-effort: each release runs in its own
+ * try/catch so a single stuck row cannot prevent the others from
+ * being released, and any I/O failure is logged but does not
+ * propagate (abandonStuckLeases must remain idempotent under
+ * repeated polls).
+ */
+export function releaseTaskResourceLeases(
+  deps: { persistence: LaunchDispatcherPersistence; logger?: Logger; ownerId: string },
+  taskId: string,
+  dispatchId: number,
+  reason = 'launch-dispatch-abandoned',
+): void {
+  const { persistence, logger, ownerId } = deps;
+  let leases: ReadonlyArray<{ resourceKey: string; holderId: string; resourceType: string }> = [];
+  try {
+    leases = persistence.listExecutionResourceLeasesByTask(taskId);
+  } catch (err) {
+    logger?.warn?.(
+      '[launch-dispatcher] listExecutionResourceLeasesByTask failed',
+      {
+        ownerId,
+        taskId,
+        dispatchId,
+        error: err instanceof Error ? err.message : String(err),
+        module: 'launch-dispatcher',
+      },
+    );
+    return;
+  }
+  if (leases.length === 0) return;
+  let released = 0;
+  for (const lease of leases) {
+    try {
+      persistence.releaseExecutionResourceLease(lease.resourceKey, lease.holderId);
+      released += 1;
+      persistence.logEvent?.(taskId, 'task.launch_dispatch_lease_released', {
+        dispatchId,
+        resourceKey: lease.resourceKey,
+        resourceType: lease.resourceType,
+        holderId: lease.holderId,
+        reason,
+      });
+    } catch (err) {
+      logger?.warn?.(
+        '[launch-dispatcher] releaseExecutionResourceLease failed',
+        {
+          ownerId,
+          taskId,
+          dispatchId,
+          resourceKey: lease.resourceKey,
+          holderId: lease.holderId,
+          error: err instanceof Error ? err.message : String(err),
+          module: 'launch-dispatcher',
+        },
+      );
+    }
+  }
+  if (released > 0) {
+    logger?.info?.('[launch-dispatcher] released resource leases', {
+      ownerId,
+      taskId,
+      dispatchId,
+      released,
+      total: leases.length,
+      module: 'launch-dispatcher',
+    });
+  }
+}
 
 export class LaunchDispatcher {
   private readonly persistence: LaunchDispatcherPersistence;
@@ -90,6 +203,9 @@ export class LaunchDispatcher {
   private readonly logger?: Logger;
   private readonly maxAttempts: number;
   private readonly maxLeasesPerPoll: number;
+  private readonly topUpReadyLaunchesEnabled?: () => boolean;
+  private readonly leaseMs?: number;
+  private readonly maxLaunchAgeMs: number;
 
   constructor(options: LaunchDispatcherOptions) {
     this.persistence = options.persistence;
@@ -98,6 +214,9 @@ export class LaunchDispatcher {
     this.ownerId = options.ownerId;
     this.logger = options.logger;
     this.maxAttempts = options.maxAttempts ?? DISPATCH_MAX_ATTEMPTS;
+    this.topUpReadyLaunchesEnabled = options.topUpReadyLaunchesEnabled;
+    this.leaseMs = options.leaseMs ?? resolveLaunchDispatchLeaseMsOverride();
+    this.maxLaunchAgeMs = options.maxLaunchAgeMs ?? resolveLaunchDispatchLeaseMsOverride() ?? LAUNCH_STUCK_ABANDON_MS;
     // Bound a single poll's work so the dispatcher cannot starve other
     // owner-loop ticks; the leftover rows are picked up on the next tick.
     this.maxLeasesPerPoll = options.maxLeasesPerPoll ?? 32;
@@ -122,11 +241,85 @@ export class LaunchDispatcher {
     this.sweepExpiredResourceLeases();
     this.abandonStuckLeases();
     this.reapExpiredLeases();
-    this.topUpReadyLaunches();
+    if (this.shouldTopUpReadyLaunches()) {
+      this.topUpReadyLaunches();
+    }
     this.dispatchActive();
   }
 
+  private shouldTopUpReadyLaunches(): boolean {
+    if (!this.topUpReadyLaunchesEnabled) return true;
+    try {
+      return this.topUpReadyLaunchesEnabled();
+    } catch (err) {
+      this.logger?.warn?.('[launch-dispatcher] ready launch top-up predicate failed', {
+        ownerId: this.ownerId,
+        error: err instanceof Error ? err.message : String(err),
+        module: 'launch-dispatcher',
+      });
+      return false;
+    }
+  }
+
+  /**
+   * A resource lease expires on a heartbeat clock independent of
+   * task_launch_dispatch. A same-owner, still-alive lease is healed
+   * (renewed) instead of released; true orphans are still released.
+   */
   private sweepExpiredResourceLeases(): void {
+    const list = this.persistence.listExpiredExecutionResourceLeases;
+    const renew = this.persistence.renewExecutionResourceLease;
+    const runner = this.taskRunnerProvider?.();
+    if (
+      typeof list !== 'function'
+      || typeof renew !== 'function'
+      || !runner?.runnerInstanceId
+      || typeof runner.hasActiveExecutionForLeaseHolder !== 'function'
+    ) {
+      this.sweepExpiredResourceLeasesUnconditionally();
+      return;
+    }
+    try {
+      const expired = list.call(this.persistence);
+      let released = 0;
+      let healed = 0;
+      for (const row of expired) {
+        const sameOwner = (row.metadata as { runnerInstanceId?: string } | undefined)?.runnerInstanceId === runner.runnerInstanceId;
+        const stillAlive = sameOwner && runner.hasActiveExecutionForLeaseHolder!(row.holderId);
+        if (stillAlive) {
+          renew.call(this.persistence, row.resourceKey, row.holderId);
+          healed += 1;
+        } else {
+          this.persistence.releaseExecutionResourceLease(row.resourceKey, row.holderId);
+          released += 1;
+        }
+      }
+      if (healed > 0 || released > 0) {
+        this.logger?.info?.('[launch-dispatcher] swept expired execution resource leases', {
+          ownerId: this.ownerId,
+          released,
+          healed,
+          module: 'launch-dispatcher',
+        });
+      }
+    } catch (err) {
+      this.logger?.warn?.('[launch-dispatcher] expired execution resource lease sweep failed', {
+        ownerId: this.ownerId,
+        error: err instanceof Error ? err.message : String(err),
+        module: 'launch-dispatcher',
+      });
+    }
+  }
+
+  /**
+   * Fallback when the liveness-aware sweep isn't wired: old, blunt behavior.
+   *
+   * Safety invariant: this delegates to the global (unscoped) sweep and must
+   * run on every dispatcher poll, matching the boot-time sweep in main.ts —
+   * narrowing this to the current resource key would leave orphaned leases
+   * on keys nothing else touches.
+   */
+  private sweepExpiredResourceLeasesUnconditionally(): void {
     const sweep = this.persistence.releaseExpiredExecutionResourceLeases;
     if (typeof sweep !== 'function') return;
     try {
@@ -149,7 +342,7 @@ export class LaunchDispatcher {
 
   private topUpReadyLaunches(): void {
     try {
-      let started = this.orchestrator?.startExecution?.() ?? [];
+      let started = this.orchestrator?.startExecution?.({ limit: this.maxLeasesPerPoll }) ?? [];
       // Ready pending roots can lose their outbox row after cancel/recreate while
       // free scheduler slots remain. Mint a fresh attempt only for non-parked
       // ready work, then drain again.
@@ -158,13 +351,13 @@ export class LaunchDispatcher {
         && typeof this.orchestrator?.getExecutableReadyTasks === 'function'
         && typeof this.orchestrator.prepareTaskForNewAttempt === 'function'
       ) {
-        const queue = this.orchestrator.getQueueStatus?.();
+        const queue = this.orchestrator.getQueueStatus?.({ refresh: false });
         const freeSlots = queue
           ? Math.max(0, queue.maxConcurrency - queue.runningCount)
           : 0;
         if (freeSlots > 0) {
           const now = Date.now();
-          const stranded = this.orchestrator.getExecutableReadyTasks().filter((task) => {
+          const stranded = this.orchestrator.getExecutableReadyTasks?.({ alreadyRefreshed: true })?.filter((task) => {
             if (task.status !== 'pending' || task.execution.phase === 'launching') return false;
             if (this.orchestrator?.isLaunchParked?.(task.id, now)) return false;
             return true;
@@ -174,7 +367,7 @@ export class LaunchDispatcher {
             this.orchestrator.prepareTaskForNewAttempt(task.id, 'launch-dispatcher-ready-topup');
           }
           if (toRecover.length > 0) {
-            started = this.orchestrator.startExecution?.() ?? [];
+            started = this.orchestrator.startExecution?.({ limit: this.maxLeasesPerPoll }) ?? [];
             this.logger?.info?.('[launch-dispatcher] re-topped ready launches after stranded pending', {
               ownerId: this.ownerId,
               stranded: toRecover.length,
@@ -223,8 +416,9 @@ export class LaunchDispatcher {
     while (dispatched < this.maxLeasesPerPoll) {
       const leased = this.persistence.claimLaunchDispatchAtomic({
         ownerId: this.ownerId,
+        ...(this.leaseMs !== undefined ? { leaseMs: this.leaseMs } : {}),
       });
-      if (!leased) break;
+      if (!dispatchThroughOutboxOnly(leased)) break;
       dispatched += 1;
       let task = this.resolveTaskForDispatch(leased);
       if (!task) {
@@ -232,6 +426,14 @@ export class LaunchDispatcher {
           leased,
           `Task ${leased.taskId} missing from orchestrator state at dispatch time`,
           'task_missing',
+        );
+        continue;
+      }
+      if (this.orchestrator && typeof this.orchestrator.getTaskLaunchReadiness !== 'function') {
+        this.abandonInvalidDispatch(
+          leased,
+          `Task ${leased.taskId} launch readiness could not be verified: orchestrator does not implement getTaskLaunchReadiness`,
+          'readiness_unverifiable',
         );
         continue;
       }
@@ -310,9 +512,14 @@ export class LaunchDispatcher {
     reason: string,
     details: Record<string, unknown> = {},
   ): void {
-    const accepted = this.persistence.markLaunchDispatchAbandoned(dispatch.id, message);
+    const accepted = this.persistence.markLaunchDispatchAbandoned(dispatch.id, message, undefined, reason);
     if (accepted) {
-      this.releaseTaskResourceLeases(dispatch.taskId, dispatch.id, reason);
+      releaseTaskResourceLeases(
+        { persistence: this.persistence, logger: this.logger, ownerId: this.ownerId },
+        dispatch.taskId,
+        dispatch.id,
+        reason,
+      );
     }
     this.persistence.logEvent?.(dispatch.taskId, 'task.launch_dispatch_invalidated', {
       dispatchId: dispatch.id,
@@ -377,7 +584,7 @@ export class LaunchDispatcher {
     const candidates = this.persistence.listAbandonableLaunchDispatchLeases({
       nowIso,
       maxAttempts: this.maxAttempts,
-      maxLaunchAgeMs: LAUNCH_STUCK_ABANDON_MS,
+      maxLaunchAgeMs: this.maxLaunchAgeMs,
     });
     if (candidates.length === 0) return 0;
     let abandoned = 0;
@@ -386,7 +593,7 @@ export class LaunchDispatcher {
         row,
         row.lastError ?? 'no concrete error recorded',
       );
-      if (!this.abandonDispatch(row, message, nowIso)) continue;
+      if (!this.abandonDispatch(row, message, nowIso, 'stuck-lease')) continue;
       abandoned += 1;
       this.recordAbandonedStuckLease(row, message);
     }
@@ -414,11 +621,20 @@ export class LaunchDispatcher {
     return `Launch dispatch abandoned after ${row.attemptsCount} attempt(s); last error: ${lastError}`;
   }
 
-  private abandonDispatch(row: TaskLaunchDispatch, message: string, nowIso?: string): boolean {
-    const accepted = this.persistence.markLaunchDispatchAbandoned(row.id, message, nowIso);
+  private abandonDispatch(
+    row: TaskLaunchDispatch,
+    message: string,
+    nowIso?: string,
+    abandonReason?: string,
+  ): boolean {
+    const accepted = this.persistence.markLaunchDispatchAbandoned(row.id, message, nowIso, abandonReason);
     if (!accepted) return false;
 
-    this.releaseTaskResourceLeases(row.taskId, row.id);
+    releaseTaskResourceLeases(
+      { persistence: this.persistence, logger: this.logger, ownerId: this.ownerId },
+      row.taskId,
+      row.id,
+    );
     return true;
   }
 
@@ -430,6 +646,34 @@ export class LaunchDispatcher {
       attemptsCount: row.attemptsCount,
       error: message,
     });
+
+    // Durable, per-task stopper: each prepareTaskForNewAttempt() mints a
+    // fresh task_launch_dispatch row starting at attempts_count 0, so
+    // DISPATCH_MAX_ATTEMPTS never accumulates across stuck-lease cycles on
+    // its own. Count abandons directly from the durable table (survives
+    // restarts and generation bumps) so a task whose real work legitimately
+    // outlives LAUNCH_STUCK_ABANDON_MS eventually stops being relaunched
+    // instead of retrying forever.
+    const abandonedSoFar = this.persistence.countAbandonedLaunchDispatchesForTask(row.taskId);
+    if (abandonedSoFar > MAX_STUCK_LEASE_RETRIES) {
+      this.persistence.logEvent?.(row.taskId, 'task.launch_dispatch_retry_budget_exhausted', {
+        dispatchId: row.id,
+        attemptId: row.attemptId,
+        abandonedCount: abandonedSoFar,
+        maxStuckLeaseRetries: MAX_STUCK_LEASE_RETRIES,
+      });
+      this.logger?.error?.('[launch-dispatcher] stuck-lease retry budget exhausted; not preparing another attempt', {
+        ownerId: this.ownerId,
+        taskId: row.taskId,
+        dispatchId: row.id,
+        abandonedCount: abandonedSoFar,
+        maxStuckLeaseRetries: MAX_STUCK_LEASE_RETRIES,
+        module: 'launch-dispatcher',
+      });
+      this.orchestrator?.failTask?.(row.taskId, message);
+      return;
+    }
+
     this.prepareTaskForNewAttempt(row.taskId, row.id);
   }
 
@@ -448,80 +692,29 @@ export class LaunchDispatcher {
   }
 
   /**
-   * Release every execution-resource lease (SSH pool slot, worktree
-   * pool member, ...) held on behalf of a task whose launch dispatch
-   * was just abandoned. Best-effort: each release runs in its own
-   * try/catch so a single stuck row cannot prevent the others from
-   * being released, and any I/O failure is logged but does not
-   * propagate (abandonStuckLeases must remain idempotent under
-   * repeated polls).
+   * Record that the launch handoff succeeded. Called by the TaskRunner
+   * once {@link markTaskRunningAfterLaunch} has succeeded (the executor
+   * handle is live and the task is in the executing phase). This stops
+   * `abandonStuckLeases`'s age check from treating the row as stuck in
+   * launch -- it does NOT complete the row, since headless run/resume
+   * polls dispatch completion to mean the task's work is actually done.
+   * Returns false when the row is no longer leased (already terminal).
    */
-  private releaseTaskResourceLeases(
-    taskId: string,
-    dispatchId: number,
-    reason = 'launch-dispatch-abandoned',
-  ): void {
-    let leases: ReadonlyArray<{ resourceKey: string; holderId: string; resourceType: string }> = [];
-    try {
-      leases = this.persistence.listExecutionResourceLeasesByTask(taskId);
-    } catch (err) {
-      this.logger?.warn?.(
-        '[launch-dispatcher] listExecutionResourceLeasesByTask failed',
-        {
-          ownerId: this.ownerId,
-          taskId,
-          dispatchId,
-          error: err instanceof Error ? err.message : String(err),
-          module: 'launch-dispatcher',
-        },
-      );
-      return;
-    }
-    if (leases.length === 0) return;
-    let released = 0;
-    for (const lease of leases) {
-      try {
-        this.persistence.releaseExecutionResourceLease(lease.resourceKey, lease.holderId);
-        released += 1;
-        this.persistence.logEvent?.(taskId, 'task.launch_dispatch_lease_released', {
-          dispatchId,
-          resourceKey: lease.resourceKey,
-          resourceType: lease.resourceType,
-          holderId: lease.holderId,
-          reason,
-        });
-      } catch (err) {
-        this.logger?.warn?.(
-          '[launch-dispatcher] releaseExecutionResourceLease failed',
-          {
-            ownerId: this.ownerId,
-            taskId,
-            dispatchId,
-            resourceKey: lease.resourceKey,
-            holderId: lease.holderId,
-            error: err instanceof Error ? err.message : String(err),
-            module: 'launch-dispatcher',
-          },
-        );
-      }
-    }
-    if (released > 0) {
-      this.logger?.info?.('[launch-dispatcher] released resource leases', {
-        ownerId: this.ownerId,
-        taskId,
-        dispatchId,
-        released,
-        total: leases.length,
-        module: 'launch-dispatcher',
-      });
-    }
+  acceptDispatch(dispatchId: number): boolean {
+    const ok = this.persistence.markLaunchDispatchAccepted(dispatchId);
+    this.logger?.info?.('[launch-dispatcher] accepted', {
+      ownerId: this.ownerId,
+      dispatchId,
+      accepted: ok,
+      module: 'launch-dispatcher',
+    });
+    return ok;
   }
 
   /**
-   * Transition a live dispatch row to completed. Called by the
-   * TaskRunner once {@link markTaskRunningAfterLaunch} has succeeded
-   * (the executor handle is live and the task is in the executing
-   * phase). Returns false when the row is already terminal.
+   * Transition a live dispatch row to completed once the task's whole
+   * run finishes (called from TaskRunner's onComplete finalization).
+   * Returns false when the row is already terminal.
    */
   completeDispatch(dispatchId: number): boolean {
     const ok = this.persistence.markLaunchDispatchCompleted(dispatchId);
@@ -535,9 +728,10 @@ export class LaunchDispatcher {
   }
 
   /**
-   * Record a launch failure. Normal failures are retried by re-enqueuing
-   * the row. A row that has already used its retry budget is abandoned
-   * instead. The TaskRunner still owns the task failure response, so this
+   * Record a launch failure. Re-enqueues the row unless it already used its
+   * retry budget or already reached `acceptDispatch` -- an accepted row is
+   * abandoned instead, since re-enqueuing it would look like it never
+   * launched. The TaskRunner still owns the task failure response, so this
    * path must not prepare a fresh attempt here.
    */
   failDispatch(dispatchId: number, error: unknown): boolean {
@@ -545,19 +739,26 @@ export class LaunchDispatcher {
       error instanceof Error ? error.message : String(error ?? 'unknown launch error');
     const row = this.persistence.loadLaunchDispatchById(dispatchId);
 
-    if (row && this.shouldAbandonAfterFastFailure(row)) {
-      const accepted = this.abandonDispatch(
-        row,
-        this.launchDispatchAbandonedMessage(row, message),
+    if (row && (this.shouldAbandonAfterFastFailure(row) || row.acknowledgedAt)) {
+      const detail = row.acknowledgedAt
+        ? `Post-accept launch failure (dispatch already running): ${message}`
+        : this.launchDispatchAbandonedMessage(row, message);
+      const abandonReason = row.acknowledgedAt ? 'post-accept-failure' : 'fast-failure';
+      const accepted = this.abandonDispatch(row, detail, undefined, abandonReason);
+      this.logger?.warn?.(
+        row.acknowledgedAt
+          ? '[launch-dispatcher] abandoned a post-accept failure instead of re-enqueuing'
+          : '[launch-dispatcher] abandoned after fast failures',
+        {
+          ownerId: this.ownerId,
+          dispatchId,
+          attemptsCount: row.attemptsCount,
+          acknowledged: Boolean(row.acknowledgedAt),
+          error: message,
+          accepted,
+          module: 'launch-dispatcher',
+        },
       );
-      this.logger?.warn?.('[launch-dispatcher] abandoned after fast failures', {
-        ownerId: this.ownerId,
-        dispatchId,
-        attemptsCount: row.attemptsCount,
-        error: message,
-        accepted,
-        module: 'launch-dispatcher',
-      });
       return accepted;
     }
 
@@ -572,4 +773,3 @@ export class LaunchDispatcher {
     return accepted;
   }
 }
-
