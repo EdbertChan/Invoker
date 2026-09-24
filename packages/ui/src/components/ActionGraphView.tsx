@@ -161,15 +161,15 @@ function layoutGraph(graph: ActionGraphResponse | null, selectedNodeId: string |
       source: edge.source,
       target: edge.target,
       type: 'bundled',
-      markerEnd: { type: MarkerType.ArrowClosed, color: 'rgba(203, 213, 225, 0.9)' },
-      style: { stroke: 'rgba(203, 213, 225, 0.9)', strokeWidth: 2 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: 'rgba(61,20,40,0.55)' },
+      style: { stroke: 'rgba(61,20,40,0.55)', strokeWidth: 2 },
       data: {
         sourceOffset,
         targetOffset,
         sourceStatus,
         targetStatus,
         label: edge.label,
-        hoverStroke: '#f8fafc',
+        hoverStroke: '#3d1428',
         hoverWidth: 3,
       },
     };

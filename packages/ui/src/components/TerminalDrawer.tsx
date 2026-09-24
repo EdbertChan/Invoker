@@ -210,7 +210,7 @@ function TerminalSessionPane({ session, isActive, drawerState, hasHeader }: Term
         cursorBlink: true,
         convertEol: false,
         scrollback: 5000,
-        theme: { background: '#0b0f1a', foreground: '#e5e7eb' },
+        theme: { background: '#ffe0f1', foreground: '#3d1428' },
       });
       fit = new FitAddon();
       term.loadAddon(fit);

@@ -81,7 +81,7 @@ export function BundledEdge({
   const onMouseEnter = useCallback(() => setHovered(true), []);
   const onMouseLeave = useCallback(() => setHovered(false), []);
 
-  const baseStroke = style?.stroke as string ?? '#9ca3af';
+  const baseStroke = style?.stroke as string ?? '#8a4a6a';
   const baseWidth = (style?.strokeWidth as number) ?? 2;
   const hoverStroke = data?.hoverStroke ?? baseStroke;
   const hoverWidth = data?.hoverWidth ?? baseWidth + 1;
@@ -146,7 +146,7 @@ export function BundledEdge({
           <text
             textAnchor="middle"
             dominantBaseline="central"
-            fill="#e5e7eb"
+            fill="#3d1428"
             fontSize={11}
             fontFamily="ui-monospace, monospace"
           >
