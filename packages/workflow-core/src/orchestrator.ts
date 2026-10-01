@@ -170,6 +170,7 @@ import {
 } from './invalidation-plan.js';
 import {
   MUTATION_POLICIES,
+  planExperimentReselectionInvalidation,
   type InvalidationAction,
 } from './invalidation-policy.js';
 import {
@@ -2406,26 +2407,17 @@ export class Orchestrator {
       ?? (task.execution.selectedExperiment !== undefined
         ? [task.execution.selectedExperiment]
         : undefined);
-    const canonicalize = (ids: readonly string[]) =>
-      Array.from(new Set(ids)).slice().sort();
-    const newCanon = canonicalize([winnerId]);
-    const prevCanon = previousSet ? canonicalize(previousSet) : undefined;
-    const sameAsPrev =
-      prevCanon !== undefined &&
-      prevCanon.length === newCanon.length &&
-      prevCanon.every((id, i) => id === newCanon[i]);
-    const isReSelection = previousSet !== undefined && !sameAsPrev;
     const allTasksBefore = this.stateMachine.getAllTasks();
-    if (isReSelection) {
-      const taskMapBefore = new Map(allTasksBefore.map((t) => [t.id, t]));
-      const downstreamIds = getTransitiveDependents(reconId, taskMapBefore, () => false);
-      for (const dsId of downstreamIds) {
-        const dt = this.stateGetTask(dsId);
-        if (!dt) continue;
-        if (isActiveForInvalidation(dt.status)) {
-          this.cancelTask(dsId);
-        }
-      }
+    const invalidationPlan = planExperimentReselectionInvalidation({
+      reconciliationTaskId: reconId,
+      mutationKey: 'selectedExperiment',
+      previousSelection: previousSet,
+      nextSelection: [winnerId],
+      tasks: allTasksBefore,
+      isActiveForInvalidation,
+    });
+    for (const dsId of invalidationPlan.activeDownstreamIds) {
+      this.cancelTask(dsId);
     }
 
     const changes: TaskStateChanges = {
@@ -2448,13 +2440,11 @@ export class Orchestrator {
     this.persistence.logEvent?.(reconId, 'task.completed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
-    if (isReSelection) {
-      const directDownstream = allTasksBefore
-        .filter((t) => t.dependencies.includes(reconId))
-        .map((t) => t.id);
-      const reselectionAction = MUTATION_POLICIES.selectedExperiment.action;
-      for (const dsId of directDownstream) {
-        this.dispatchPostMutation(reselectionAction, dsId);
+    if (invalidationPlan.isReSelection) {
+      for (const dsId of invalidationPlan.directDownstreamIds) {
+        if (this.stateGetTask(dsId)) {
+          this.dispatchPostMutation(invalidationPlan.action, dsId);
+        }
       }
     }
     const readyTaskIds = this.stateMachine.findNewlyReadyTasks(reconId);
@@ -2502,28 +2492,17 @@ export class Orchestrator {
       ?? (task.execution.selectedExperiment !== undefined
           ? [task.execution.selectedExperiment]
           : undefined);
-    const canonicalize = (ids: readonly string[]) =>
-      Array.from(new Set(ids)).slice().sort();
-    const newCanon = canonicalize(resolvedIds);
-    const prevCanon = previousSet ? canonicalize(previousSet) : undefined;
-    const sameAsPrev =
-      prevCanon !== undefined &&
-      prevCanon.length === newCanon.length &&
-      prevCanon.every((id, i) => id === newCanon[i]);
-    const isReSelection = previousSet !== undefined && !sameAsPrev;
-
     const allTasksBefore = this.stateMachine.getAllTasks();
-
-    if (isReSelection) {
-      const taskMapBefore = new Map(allTasksBefore.map((t) => [t.id, t]));
-      const downstreamIds = getTransitiveDependents(reconId, taskMapBefore, () => false);
-      for (const dsId of downstreamIds) {
-        const dt = this.stateGetTask(dsId);
-        if (!dt) continue;
-        if (isActiveForInvalidation(dt.status)) {
-          this.cancelTask(dsId);
-        }
-      }
+    const invalidationPlan = planExperimentReselectionInvalidation({
+      reconciliationTaskId: reconId,
+      mutationKey: 'selectedExperimentSet',
+      previousSelection: previousSet,
+      nextSelection: resolvedIds,
+      tasks: allTasksBefore,
+      isActiveForInvalidation,
+    });
+    for (const dsId of invalidationPlan.activeDownstreamIds) {
+      this.cancelTask(dsId);
     }
 
     const changes: TaskStateChanges = {
@@ -2547,15 +2526,10 @@ export class Orchestrator {
     this.persistence.logEvent?.(reconId, 'task.completed', changes);
     this.messageBus.publish(TASK_DELTA_CHANNEL, delta);
 
-    if (isReSelection) {
-      const directDownstreamAfter = this.stateMachine
-        .getAllTasks()
-        .filter((t) => t.dependencies.includes(reconId))
-        .map((t) => t.id);
-      const reselectionAction = MUTATION_POLICIES.selectedExperimentSet.action;
-      for (const dsId of directDownstreamAfter) {
+    if (invalidationPlan.isReSelection) {
+      for (const dsId of invalidationPlan.directDownstreamIds) {
         if (this.stateGetTask(dsId)) {
-          this.dispatchPostMutation(reselectionAction, dsId);
+          this.dispatchPostMutation(invalidationPlan.action, dsId);
         }
       }
     }

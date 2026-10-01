@@ -6,6 +6,10 @@ import type { PlanDefinition, OrchestratorPersistence, OrchestratorMessageBus } 
 import { applyTaskConfigPatch, BUILT_IN_LOCAL_EXECUTION_POOL_ID, computeWorkflowRollup, resolveTaskConfig } from '../task-types.js';
 import type { TaskState, TaskDelta, TaskStateChanges, Attempt, ExternalDependency, ExternalDependencyChange } from '../task-types.js';
 import type { Logger, WorkResponse } from '@invoker/contracts';
+import {
+  MUTATION_POLICIES,
+  planExperimentReselectionInvalidation,
+} from '../invalidation-policy.js';
 
 // ── In-Memory Persistence Mock ──────────────────────────────
 
@@ -7781,6 +7785,32 @@ describe('Orchestrator', () => {
       recreateSpy.mockRestore();
     });
 
+    it('plans changed single selection from the selectedExperiment mutation policy', () => {
+      const { reconId, exp1Id, exp2Id, downstreamId } = setupReconciliationWithDownstream();
+
+      orchestrator.selectExperiment(reconId, exp1Id);
+
+      const plan = planExperimentReselectionInvalidation({
+        reconciliationTaskId: reconId,
+        mutationKey: 'selectedExperiment',
+        previousSelection: [exp1Id],
+        nextSelection: [exp2Id],
+        tasks: orchestrator.getAllTasks(),
+        isActiveForInvalidation: (status) =>
+          status === 'running' ||
+          status === 'fixing_with_ai' ||
+          status === 'awaiting_approval' ||
+          status === 'review_ready',
+      });
+
+      expect(plan).toMatchObject({
+        isReSelection: true,
+        action: MUTATION_POLICIES.selectedExperiment.action,
+      });
+      expect(plan.directDownstreamIds).toContain(downstreamId);
+      expect(plan.activeDownstreamIds).toContain(downstreamId);
+    });
+
     it('re-selecting an INACTIVE downstream skips cancel but still recreates downstream', () => {
       const { reconId, exp1Id, exp2Id, downstreamId } = setupReconciliationWithDownstream();
 
@@ -8107,6 +8137,39 @@ describe('Orchestrator', () => {
 
       cancelSpy.mockRestore();
       recreateSpy.mockRestore();
+    });
+
+    it('plans changed merged selection from the selectedExperimentSet mutation policy', () => {
+      const { reconId, exp1Id, exp2Id, exp3Id, directDownstream } =
+        setupMergedReconciliationWithDownstream();
+
+      orchestrator.selectExperiments(
+        reconId,
+        [exp1Id, exp2Id],
+        'reconciliation/merged-12',
+        'merged12',
+      );
+      const dsId = directDownstream()[0];
+
+      const plan = planExperimentReselectionInvalidation({
+        reconciliationTaskId: reconId,
+        mutationKey: 'selectedExperimentSet',
+        previousSelection: [exp1Id, exp2Id],
+        nextSelection: [exp1Id, exp3Id],
+        tasks: orchestrator.getAllTasks(),
+        isActiveForInvalidation: (status) =>
+          status === 'running' ||
+          status === 'fixing_with_ai' ||
+          status === 'awaiting_approval' ||
+          status === 'review_ready',
+      });
+
+      expect(plan).toMatchObject({
+        isReSelection: true,
+        action: MUTATION_POLICIES.selectedExperimentSet.action,
+      });
+      expect(plan.directDownstreamIds).toContain(dsId);
+      expect(plan.activeDownstreamIds).toContain(dsId);
     });
   });
 

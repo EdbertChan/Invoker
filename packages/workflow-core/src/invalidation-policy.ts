@@ -126,6 +126,17 @@ export interface InvalidationPlanningContext {
   retryStatuses?: ReadonlySet<TaskState['status']>;
 }
 
+export type ExperimentSelectionMutationKey =
+  | 'selectedExperiment'
+  | 'selectedExperimentSet';
+
+export interface ExperimentReselectionInvalidationPlan {
+  readonly isReSelection: boolean;
+  readonly action: InvalidationAction;
+  readonly directDownstreamIds: readonly string[];
+  readonly activeDownstreamIds: readonly string[];
+}
+
 export interface ActionSpec {
   /** Required `scope` for this action. */
   readonly scope: InvalidationScope;
@@ -169,6 +180,89 @@ const INVALIDATING_STAGES: readonly InvalidationStage[] = [
 
 function taskMap(tasks: readonly TaskState[]): Map<string, TaskState> {
   return new Map(tasks.map((task) => [task.id, task]));
+}
+
+export function canonicalizeExperimentSelection(ids: readonly string[]): string[] {
+  return Array.from(new Set(ids)).sort();
+}
+
+export function sameExperimentSelection(
+  previousSelection: readonly string[] | undefined,
+  nextSelection: readonly string[],
+): boolean {
+  if (!previousSelection) return false;
+  const previousCanon = canonicalizeExperimentSelection(previousSelection);
+  const nextCanon = canonicalizeExperimentSelection(nextSelection);
+  return (
+    previousCanon.length === nextCanon.length &&
+    previousCanon.every((id, index) => id === nextCanon[index])
+  );
+}
+
+function assertExperimentPolicyConsumesInv90Thresholds(
+  mutationKey: ExperimentSelectionMutationKey,
+): InvalidationAction {
+  const policy = MUTATION_POLICIES[mutationKey];
+  const spec = ACTION_SPECS[policy.action];
+  const cancelIndex = spec.stages.indexOf('cancelInFlight');
+  const primitiveIndex = spec.stages.indexOf('applyPrimitive');
+
+  if (
+    !policy.invalidatesExecutionSpec ||
+    !policy.invalidateIfActive ||
+    cancelIndex === -1 ||
+    primitiveIndex === -1 ||
+    primitiveIndex < cancelIndex
+  ) {
+    throw new Error(
+      `Experiment selection mutation '${mutationKey}' must remain an invalidating cancel-first policy`,
+    );
+  }
+
+  return policy.action;
+}
+
+export function planExperimentReselectionInvalidation(args: {
+  reconciliationTaskId: string;
+  mutationKey: ExperimentSelectionMutationKey;
+  previousSelection: readonly string[] | undefined;
+  nextSelection: readonly string[];
+  tasks: readonly TaskState[];
+  isActiveForInvalidation: (status: TaskState['status']) => boolean;
+}): ExperimentReselectionInvalidationPlan {
+  const action = assertExperimentPolicyConsumesInv90Thresholds(args.mutationKey);
+  const isReSelection =
+    args.previousSelection !== undefined &&
+    !sameExperimentSelection(args.previousSelection, args.nextSelection);
+
+  if (!isReSelection) {
+    return {
+      isReSelection: false,
+      action,
+      directDownstreamIds: [],
+      activeDownstreamIds: [],
+    };
+  }
+
+  const tasksById = taskMap(args.tasks);
+  const directDownstreamIds = args.tasks
+    .filter((task) => task.dependencies.includes(args.reconciliationTaskId))
+    .map((task) => task.id);
+  const activeDownstreamIds = getTransitiveDependents(
+    args.reconciliationTaskId,
+    tasksById,
+    () => false,
+  ).filter((id) => {
+    const task = tasksById.get(id);
+    return task ? args.isActiveForInvalidation(task.status) : false;
+  });
+
+  return {
+    isReSelection: true,
+    action,
+    directDownstreamIds,
+    activeDownstreamIds,
+  };
 }
 
 function descendantsOf(
