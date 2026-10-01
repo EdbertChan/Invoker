@@ -1277,11 +1277,20 @@ export class TaskRunner {
     reconTaskId: string,
     experimentIds: string[],
   ): Promise<{ branch: string; commit: string }> {
+    // INV-113 selected deterministic local proof as the architecture gate:
+    // normalize selected experiment merge order before touching git state.
+    const selectedExperiments = experimentIds
+      .map((experimentId) => {
+        const task = this.orchestrator.getTask(experimentId);
+        if (!task?.execution.branch) {
+          throw new Error(`Experiment ${experimentId} has no branch`);
+        }
+        return { id: experimentId, task, branch: task.execution.branch };
+      })
+      .sort((a, b) => a.branch.localeCompare(b.branch) || a.id.localeCompare(b.id));
+
     if (experimentIds.length === 1) {
-      const task = this.orchestrator.getTask(experimentIds[0]);
-      if (!task?.execution.branch) {
-        throw new Error(`Experiment ${experimentIds[0]} has no branch`);
-      }
+      const { task } = selectedExperiments[0];
       return { branch: task.execution.branch, commit: task.execution.commit ?? '' };
     }
 
@@ -1311,12 +1320,7 @@ export class TaskRunner {
         await this.execGitIn(['checkout', '-b', branchName, baseBranch], worktreeDir);
       }
 
-      for (const expId of experimentIds) {
-        const expTask = this.orchestrator.getTask(expId);
-        if (!expTask?.execution.branch) {
-          throw new Error(`Experiment ${expId} has no branch`);
-        }
-        const b = expTask.execution.branch;
+      for (const { branch: b, task: expTask } of selectedExperiments) {
         await ensureLocalBranchForMerge(this, worktreeDir, b, reconRepoUrl, reconBranchRepoUrl);
         const expMergeMsg = `Merge ${b} — ${expTask.description}`;
         await this.execGitIn(['merge', '--no-ff', '-m', expMergeMsg, b], worktreeDir);

@@ -6859,7 +6859,7 @@ console.log(JSON.stringify(out));
       (executor as any).createMergeWorktree = async () => '/tmp/mock-wt';
       (executor as any).removeMergeWorktree = async () => {};
 
-      const result = await executor.mergeExperimentBranches('pivot-reconciliation', ['pivot-exp-v1', 'pivot-exp-v2']);
+      const result = await executor.mergeExperimentBranches('pivot-reconciliation', ['pivot-exp-v2', 'pivot-exp-v1']);
 
       expect(result.branch).toBe('reconciliation/pivot-reconciliation');
       expect(result.commit).toBe('merged-commit-hash');
@@ -6868,6 +6868,13 @@ console.log(JSON.stringify(out));
       expect(gitCalls).toContainEqual(['checkout', '-b', 'reconciliation/pivot-reconciliation', 'experiment/pivot-base']);
       expect(gitCalls).toContainEqual(expect.arrayContaining(['merge', '--no-ff', '-m', expect.stringContaining('experiment/pivot-exp-v1-hash1')]));
       expect(gitCalls).toContainEqual(expect.arrayContaining(['merge', '--no-ff', '-m', expect.stringContaining('experiment/pivot-exp-v2-hash2')]));
+      const experimentMergeOrder = gitCalls
+        .filter((args) => args[0] === 'merge' && args[1] === '--no-ff')
+        .map((args) => args[args.length - 1]);
+      expect(experimentMergeOrder).toEqual([
+        'experiment/pivot-exp-v1-hash1',
+        'experiment/pivot-exp-v2-hash2',
+      ]);
     });
 
     it('merge conflict aborts and throws', async () => {
