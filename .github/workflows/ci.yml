@@ -367,9 +367,10 @@ jobs:
           git update-ref refs/heads/main refs/remotes/origin/master || true
           git update-ref refs/remotes/origin/main refs/remotes/origin/master || true
 
-      - name: Run e2e proof shard
+      - name: Run INV-117 experiment-selected e2e proof shard
         env:
           INVOKER_TEST_ALL_PROOF: '1'
+          INVOKER_TEST_ALL_PROOF_BRIEF: docs/context/inv-117/experiment-brief.md
           INVOKER_TEST_ALL_SHARD_INDEX: ${{ matrix.shard }}
           INVOKER_TEST_ALL_SHARD_TOTAL: '4'
           INVOKER_TEST_ALL_STATE_FILE: ${{ github.workspace }}/proof-state.tsv
@@ -410,9 +411,10 @@ jobs:
           pattern: proof-state-*
           path: /tmp/shard-states
 
-      - name: Merge shard state and validate e2e proof contract
+      - name: Merge shard state and validate INV-117 experiment-selected proof contract
         env:
           INVOKER_TEST_ALL_PROOF: '1'
+          INVOKER_TEST_ALL_PROOF_BRIEF: docs/context/inv-117/experiment-brief.md
           INVOKER_TEST_ALL_AGGREGATE: '1'
           INVOKER_TEST_ALL_STATE_FILE: ${{ github.workspace }}/merged-proof-state.tsv
         run: |

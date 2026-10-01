@@ -14,6 +14,8 @@ JOBS="${INVOKER_TEST_ALL_JOBS:-1}"
 PROOF="${INVOKER_TEST_ALL_PROOF:-0}"
 EXCLUDE_RAW="${INVOKER_TEST_ALL_EXCLUDE:-}"
 PROOF_CONTRACT="INV-117"
+PROOF_BRIEF="${INVOKER_TEST_ALL_PROOF_BRIEF:-$ROOT/docs/context/inv-117/experiment-brief.md}"
+PROOF_EXPECTED_MANIFEST_COUNT=15
 PROOF_MANIFEST="${INVOKER_TEST_ALL_PROOF_MANIFEST:-$ROOT/scripts/test-suites/proof-e2e.manifest}"
 SHARD_INDEX="${INVOKER_TEST_ALL_SHARD_INDEX:-}"
 SHARD_TOTAL="${INVOKER_TEST_ALL_SHARD_TOTAL:-1}"
@@ -168,7 +170,7 @@ proof_manifest_available() {
 
 expected_executed_for_mode() {
   if proof_manifest_available; then
-    manifest_count
+    printf '%s' "$PROOF_EXPECTED_MANIFEST_COUNT"
     return
   fi
   printf '%s' "${#SUITES[@]}"
@@ -176,7 +178,7 @@ expected_executed_for_mode() {
 
 expected_discovered_for_mode() {
   if proof_manifest_available; then
-    manifest_count
+    printf '%s' "$PROOF_EXPECTED_MANIFEST_COUNT"
     return
   fi
   case "$MODE_KEY" in
@@ -581,11 +583,88 @@ validate_proof_inventory() {
   fi
 }
 
+validate_proof_artifacts() {
+  [ "$PROOF" = "1" ] || return 0
+
+  if [ ! -f "$PROOF_BRIEF" ]; then
+    echo "ERROR: $PROOF_CONTRACT proof requires experiment brief: $PROOF_BRIEF" >&2
+    return 1
+  fi
+  if [ ! -f "$PROOF_MANIFEST" ]; then
+    echo "ERROR: $PROOF_CONTRACT proof requires manifest: $PROOF_MANIFEST" >&2
+    return 1
+  fi
+
+  local actual_manifest_count
+  actual_manifest_count="$(manifest_count)"
+  if [ "$actual_manifest_count" -ne "$PROOF_EXPECTED_MANIFEST_COUNT" ]; then
+    echo "ERROR: $PROOF_CONTRACT proof expected manifest inventory=$PROOF_EXPECTED_MANIFEST_COUNT, got $actual_manifest_count" >&2
+    return 1
+  fi
+}
+
+validate_aggregate_state() {
+  [ "$PROOF" = "1" ] || return 0
+  [ "$AGGREGATE" = "1" ] || return 0
+
+  local -A expected_suites=()
+  local -A seen_suites=()
+  local suite
+  for suite in "${SUITES[@]}"; do
+    expected_suites["$suite"]=1
+  done
+
+  local line_number=0
+  local line mode status extra
+  local invalid=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    [ -n "$line" ] || continue
+
+    IFS=$'\t' read -r mode suite status extra <<<"$line"
+    if [ -n "${extra:-}" ] || [ -z "${mode:-}" ] || [ -z "${suite:-}" ] || [ -z "${status:-}" ]; then
+      echo "ERROR: $PROOF_CONTRACT aggregate state has malformed row $line_number" >&2
+      invalid=1
+      continue
+    fi
+    if [ "$mode" != "$MODE_KEY" ]; then
+      echo "ERROR: $PROOF_CONTRACT aggregate state row $line_number has mode=$mode, expected $MODE_KEY" >&2
+      invalid=1
+    fi
+    case "$status" in
+      passed|failed|skipped-unavailable) ;;
+      *)
+        echo "ERROR: $PROOF_CONTRACT aggregate state row $line_number has invalid status=$status" >&2
+        invalid=1
+        ;;
+    esac
+    if [ -z "${expected_suites[$suite]:-}" ]; then
+      echo "ERROR: $PROOF_CONTRACT aggregate state row $line_number references unknown suite: $suite" >&2
+      invalid=1
+    fi
+    if [ -n "${seen_suites[$suite]:-}" ]; then
+      echo "ERROR: $PROOF_CONTRACT aggregate state row $line_number duplicates suite: $(suite_relpath "$suite")" >&2
+      invalid=1
+    fi
+    seen_suites["$suite"]=1
+  done < "$STATE_FILE"
+
+  [ "$invalid" -eq 0 ]
+}
+
+if ! validate_proof_artifacts; then
+  exit 1
+fi
+
 load_state
 parse_exclusions
 collect_suites
 
 if ! validate_proof_inventory; then
+  exit 1
+fi
+
+if ! validate_aggregate_state; then
   exit 1
 fi
 
