@@ -56,5 +56,19 @@ describe('WorkflowMutationCoordinator', () => {
 
     expect(order).toEqual(['running-normal', 'queued-high', 'queued-normal']);
   });
-});
 
+  it('passes workflow cancellation context to running jobs', async () => {
+    const c = new WorkflowMutationCoordinator();
+    const wf = 'wf-context';
+    let captured: { signal: AbortSignal; workflowId: string } | undefined;
+
+    await c.enqueue(wf, 'normal', async (context) => {
+      captured = context;
+      expect(context.signal.aborted).toBe(false);
+    });
+
+    expect(captured?.workflowId).toBe(wf);
+    expect(typeof captured?.signal.addEventListener).toBe('function');
+    expect(captured?.signal.aborted).toBe(false);
+  });
+});

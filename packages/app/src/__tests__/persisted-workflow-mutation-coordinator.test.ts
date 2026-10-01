@@ -15,6 +15,13 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+}
+
 async function waitFor(condition: () => boolean, attempts: number = 20): Promise<void> {
   for (let i = 0; i < attempts; i += 1) {
     if (condition()) return;
@@ -892,7 +899,8 @@ describe('PersistedWorkflowMutationCoordinator', () => {
       },
     );
 
-    void owner1.enqueue<void>('wf-1', 'normal', 'mut', ['first']);
+    const owner1Running = owner1.enqueue<void>('wf-1', 'normal', 'mut', ['first']);
+    void owner1Running.catch(() => {});
     await Promise.resolve();
     const queuedSecond = adapter.enqueueWorkflowMutationIntent('wf-1', 'mut', ['second'], 'normal');
     expect(adapter.listWorkflowMutationIntents('wf-1').map((intent) => intent.id)).toContain(queuedSecond);
@@ -913,6 +921,9 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(owner2Order).toEqual(['first', 'second']);
     expect(adapter.listWorkflowMutationIntents('wf-1', ['queued', 'running'])).toEqual([]);
     expect(adapter.listWorkflowMutationIntents('wf-1', ['completed'])).toHaveLength(2);
+
+    firstGate.resolve();
+    await owner1Running;
   });
 
   it('requeues interrupted fix-with-agent workflow mutations on restart', async () => {
@@ -933,7 +944,8 @@ describe('PersistedWorkflowMutationCoordinator', () => {
       },
     );
 
-    void owner1.enqueue<void>('wf-1', 'normal', 'invoker:fix-with-agent', ['wf-1/task-fail', 'claude']);
+    const owner1Running = owner1.enqueue<void>('wf-1', 'normal', 'invoker:fix-with-agent', ['wf-1/task-fail', 'claude']);
+    void owner1Running.catch(() => {});
     await waitFor(() => adapter.listWorkflowMutationIntents('wf-1', ['running']).length === 1);
 
     const owner2Order: string[] = [];
@@ -952,6 +964,9 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(owner2Order).toEqual(['invoker:fix-with-agent:wf-1/task-fail']);
     expect(adapter.listWorkflowMutationIntents('wf-1', ['queued', 'running'])).toEqual([]);
     expect(adapter.listWorkflowMutationIntents('wf-1', ['completed'])).toHaveLength(1);
+
+    firstGate.resolve();
+    await owner1Running;
   });
 
   it('does not let another owner steal a live workflow lease', async () => {
@@ -1584,15 +1599,16 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     name: 'wf-1', createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), });
 
-    const gate = deferred();
     let capturedContext: WorkflowMutationContext | undefined;
+    let fixStopped = false;
     const coordinator = new PersistedWorkflowMutationCoordinator(
       adapter,
       'owner-1',
       async (channel, _args, context) => {
         if (channel === 'invoker:fix-with-agent') {
           capturedContext = context;
-          await gate.promise;
+          await waitForAbort(context.signal);
+          fixStopped = true;
         }
       },
     );
@@ -1610,6 +1626,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(capturedContext!.signal.aborted).toBe(false);
     expect(capturedContext!.workflowId).toBe('wf-1');
     expect(capturedContext!.intentId).toBe(1);
+    expect(capturedContext!.channel).toBe('invoker:fix-with-agent');
 
     const recreateTask = coordinator.enqueue<void>(
       'wf-1',
@@ -1620,6 +1637,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     await recreateTask;
 
     expect(capturedContext!.signal.aborted).toBe(true);
+    await waitFor(() => fixStopped);
     await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
   });
 
@@ -1630,15 +1648,16 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     name: 'wf-1', createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), });
 
-    const gate = deferred();
     let capturedContext: WorkflowMutationContext | undefined;
+    let fixStopped = false;
     const coordinator = new PersistedWorkflowMutationCoordinator(
       adapter,
       'owner-1',
       async (channel, _args, context) => {
         if (channel === 'invoker:fix-with-agent') {
           capturedContext = context;
-          await gate.promise;
+          await waitForAbort(context.signal);
+          fixStopped = true;
         }
       },
     );
@@ -1663,6 +1682,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     await deleteWf;
 
     expect(capturedContext!.signal.aborted).toBe(true);
+    await waitFor(() => fixStopped);
     await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
   });
 
@@ -1673,15 +1693,16 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     name: 'wf-1', createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), });
 
-    const gate = deferred();
     let capturedContext: WorkflowMutationContext | undefined;
+    let fixStopped = false;
     const coordinator = new PersistedWorkflowMutationCoordinator(
       adapter,
       'owner-1',
       async (channel, _args, context) => {
         if (channel === 'invoker:fix-with-agent') {
           capturedContext = context;
-          await gate.promise;
+          await waitForAbort(context.signal);
+          fixStopped = true;
         }
       },
     );
@@ -1706,6 +1727,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     await recreateRebase;
 
     expect(capturedContext!.signal.aborted).toBe(true);
+    await waitFor(() => fixStopped);
     await expect(olderRunning).rejects.toThrow(/superseded by recreate intent/i);
   });
 
@@ -1744,7 +1766,6 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     name: 'wf-1', createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), });
 
-    const gate = deferred();
     let capturedContext: WorkflowMutationContext | undefined;
     const coordinator = new PersistedWorkflowMutationCoordinator(
       adapter,
@@ -1752,7 +1773,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
       async (channel, _args, context) => {
         if (channel === 'invoker:fix-with-agent') {
           capturedContext = context;
-          await gate.promise;
+          await waitForAbort(context.signal);
         }
       },
     );
@@ -1766,7 +1787,7 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     void olderRunning.catch(() => {});
     await waitFor(() => capturedContext !== undefined);
 
-    coordinator.enqueue<void>(
+    const deleteAll = coordinator.enqueue<void>(
       'wf-1',
       'high',
       'invoker:delete-all-workflows-bulk',
@@ -1778,6 +1799,8 @@ describe('PersistedWorkflowMutationCoordinator', () => {
     expect(reason).toBeInstanceOf(Error);
     expect((reason as Error).name).toBe('WorkflowMutationInvalidatedError');
     expect((reason as Error).message).toContain('Superseded by delete');
+    await deleteAll;
+    await expect(olderRunning).rejects.toThrow(/superseded by delete intent/i);
   });
 
   it('dispatch handler can observe abort during long-running work and stop early', async () => {

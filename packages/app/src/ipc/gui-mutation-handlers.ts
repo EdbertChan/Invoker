@@ -1993,6 +1993,7 @@ export async function registerGuiMutationIpcHandlers(context: RegisterGuiMutatio
         preemptWorkflowExecution,
         logger,
         context: 'ipc.cancel-workflow',
+        signal: activeMutationContext?.signal,
         mutationTiming: activeMutationContext?.mutationTiming,
       });
       await finalizeMutationWithGlobalTopup({
